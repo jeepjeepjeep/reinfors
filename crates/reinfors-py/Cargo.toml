@@ -1,0 +1,15 @@
+[package]
+name = "reinfors-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "_reinfors"
+crate-type = ["cdylib"]
+
+[dependencies]
+reinfors-core = { path = "../reinfors-core" }
+pyo3 = { version = "0.25", features = ["extension-module"] }
+numpy = "0.25"
