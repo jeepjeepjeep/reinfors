@@ -1,3 +1,7 @@
+# Hooks default to commit-time; the push guard below opts into the pre-push stage explicitly, so a
+# `git push` runs only the guard (not the full ruff/cargo suite).
+default_stages: [pre-commit]
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
@@ -31,3 +35,10 @@ repos:
         language: system
         types: [rust]
         pass_filenames: false
+      - id: no-direct-push-to-main
+        name: block direct pushes to main
+        entry: scripts/block-main-push.sh
+        language: script
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true
