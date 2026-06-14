@@ -9,8 +9,8 @@ description = "General-purpose gym-style simulation + batching engine (Rust core
 requires-python = ">=3.10"
 dependencies = ["numpy"]
 
-[project.optional-dependencies]
-dev = ["ruff>=0.5", "mypy>=1.8", "pytest>=8"]
+# Dev tooling isn't declared as project deps: the Python surface is light, so CI and local runs
+# invoke pinned tools via `uvx <tool>@<version>` (no lockfile / project-management layer).
 
 [tool.maturin]
 python-source = "python"
