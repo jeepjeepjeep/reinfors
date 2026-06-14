@@ -85,6 +85,27 @@ impl SnakeEnv {
         }
     }
 
+    /// Build an env from an explicit (snakes, food) state, bypassing initial placement — used by the
+    /// search to simulate a tick from an arbitrary node.
+    pub fn from_parts(
+        grid_size: i32,
+        initial_length: usize,
+        play_to_last: bool,
+        win_food_lead: Option<usize>,
+        snakes: [Snake; 2],
+        food: HashSet<Cell>,
+    ) -> Self {
+        SnakeEnv {
+            grid_size,
+            initial_length,
+            play_to_last,
+            win_food_lead,
+            snakes,
+            food,
+            done: false,
+        }
+    }
+
     /// Heads at one-third / two-thirds along the middle row, bodies trailing to the nearer wall and
     /// wrapping (matches `_initial_snakes` / `_trace_body`).
     fn initial_snakes(grid_size: i32, length: usize) -> [Snake; 2] {

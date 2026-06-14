@@ -6,10 +6,14 @@
 
 pub mod action;
 pub mod obs;
+pub mod reward;
+pub mod search;
 pub mod snake;
 
-pub use action::Action;
+pub use action::{Action, RelativeAction};
 pub use obs::egocentric;
+pub use reward::Reward;
+pub use search::{selective_search, SearchParams, SearchStats};
 pub use snake::{Cell, DeathCause, Snake, SnakeEnv, StepEvent};
 
 pub fn version() -> &'static str {

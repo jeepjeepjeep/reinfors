@@ -38,4 +38,48 @@ impl Action {
             Action::Left => 3,
         }
     }
+
+    /// Clockwise quarter-turn of this heading (matches `_CW`).
+    fn cw(self) -> Action {
+        match self {
+            Action::Up => Action::Right,
+            Action::Right => Action::Down,
+            Action::Down => Action::Left,
+            Action::Left => Action::Up,
+        }
+    }
+
+    /// Counter-clockwise quarter-turn (matches `_CCW`).
+    fn ccw(self) -> Action {
+        match self {
+            Action::Up => Action::Left,
+            Action::Left => Action::Down,
+            Action::Down => Action::Right,
+            Action::Right => Action::Up,
+        }
+    }
+}
+
+/// Heading-relative action (matches `snake_RL`'s `RelativeAction`); never produces the reverse.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RelativeAction {
+    Forward,
+    Left,
+    Right,
+}
+
+/// Same order as `snake_RL`'s `RELATIVE_ACTIONS` (Forward, Left, Right).
+pub const RELATIVE_ACTIONS: [RelativeAction; 3] = [
+    RelativeAction::Forward,
+    RelativeAction::Left,
+    RelativeAction::Right,
+];
+
+/// Resolve a relative action to an absolute heading (matches `relative_to_absolute`).
+pub fn relative_to_absolute(heading: Action, rel: RelativeAction) -> Action {
+    match rel {
+        RelativeAction::Forward => heading,
+        RelativeAction::Left => heading.ccw(),
+        RelativeAction::Right => heading.cw(),
+    }
 }

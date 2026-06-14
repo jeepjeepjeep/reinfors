@@ -5,11 +5,14 @@
 //! agreed Option B — food placement is an injected input, not reproduced from numpy's RNG), and
 //! read back state, per-snake events, and the egocentric observation.
 
-use numpy::{IntoPyArray, PyArray1};
+use std::collections::VecDeque;
+
+use numpy::ndarray::Array2;
+use numpy::{IntoPyArray, PyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 
-use reinfors_core::snake::{Cell, DeathCause, SnakeEnv as CoreEnv};
-use reinfors_core::Action;
+use reinfors_core::snake::{Cell, DeathCause, Snake, SnakeEnv as CoreEnv};
+use reinfors_core::{Action, Reward, SearchParams};
 
 fn action_from_u8(v: u8) -> PyResult<Action> {
     Ok(match v {
@@ -45,6 +48,10 @@ fn cause_str(c: DeathCause) -> &'static str {
 
 /// Per-snake tick outcome, mirroring `snake_RL`'s `StepEvent` fields.
 type EventTuple = (bool, bool, Option<String>, bool, bool, bool, bool);
+/// (max_depth, expansions, leaves, rounds).
+type StatsTuple = (i32, usize, usize, usize);
+/// (root action values, search stats).
+type SearchOutput = (Vec<f64>, StatsTuple);
 
 #[pyclass]
 struct SnakeEnv {
@@ -128,6 +135,113 @@ impl SnakeEnv {
     /// Egocentric observation for `agent` (0 = A, 1 = B) as a flat [5 * g * g] f32 array.
     fn obs<'py>(&self, py: Python<'py>, agent: usize) -> Bound<'py, PyArray1<f32>> {
         reinfors_core::egocentric(&self.inner, agent).into_pyarray(py)
+    }
+
+    /// Overwrite both snakes' full state (body head-first, direction 0..=3, alive) — lets the parity
+    /// test mirror an arbitrary oracle WorldState into reinfors before searching.
+    fn set_snakes(
+        &mut self,
+        a_body: Vec<Cell>,
+        a_dir: u8,
+        a_alive: bool,
+        b_body: Vec<Cell>,
+        b_dir: u8,
+        b_alive: bool,
+    ) -> PyResult<()> {
+        self.inner.snakes[0] = Snake {
+            body: VecDeque::from(a_body),
+            direction: action_from_u8(a_dir)?,
+            alive: a_alive,
+        };
+        self.inner.snakes[1] = Snake {
+            body: VecDeque::from(b_body),
+            direction: action_from_u8(b_dir)?,
+            alive: b_alive,
+        };
+        Ok(())
+    }
+
+    /// Run a best-first selective-expectimax search from the current state for `agent` (0 or 1).
+    /// `reward` is (step, food, loss, draw, kill, win, survival). `infer` is a callable mapping an
+    /// (N, 5*g*g) float32 batch to an (N, 3) float64 array of action values. Returns
+    /// (action_values[3], (max_depth, expansions, leaves, rounds)).
+    #[allow(clippy::too_many_arguments)]
+    fn selective_search(
+        &self,
+        py: Python<'_>,
+        agent: usize,
+        gamma: f64,
+        beta: f64,
+        expansion_budget: usize,
+        top_k: usize,
+        max_depth: i32,
+        reward: (f64, f64, f64, f64, f64, f64, f64),
+        infer: Bound<'_, PyAny>,
+    ) -> PyResult<SearchOutput> {
+        let g = self.inner.grid_size;
+        let dim = 5 * (g as usize) * (g as usize);
+        let params = SearchParams {
+            grid_size: g,
+            initial_length: self.inner.initial_length,
+            play_to_last: self.inner.play_to_last,
+            win_food_lead: self.inner.win_food_lead,
+            gamma,
+            beta,
+            expansion_budget,
+            top_k,
+            max_depth,
+            reward: Reward {
+                step: reward.0,
+                food: reward.1,
+                loss: reward.2,
+                draw: reward.3,
+                kill: reward.4,
+                win: reward.5,
+                survival: reward.6,
+            },
+        };
+        let snakes = self.inner.snakes.clone();
+        let food = self.inner.food.clone();
+
+        let mut callback_err: Option<PyErr> = None;
+        let mut infer_fn = |obs_batch: &[Vec<f32>]| -> Vec<Vec<f64>> {
+            let n = obs_batch.len();
+            if callback_err.is_some() {
+                return vec![vec![0.0; 3]; n];
+            }
+            let flat: Vec<f32> = obs_batch.iter().flatten().copied().collect();
+            let arr = Array2::from_shape_vec((n, dim), flat)
+                .expect("obs batch shape")
+                .into_pyarray(py);
+            match infer
+                .call1((arr,))
+                .and_then(|r| r.extract::<PyReadonlyArray2<f64>>())
+            {
+                Ok(out) => out
+                    .as_array()
+                    .outer_iter()
+                    .map(|row| row.to_vec())
+                    .collect(),
+                Err(e) => {
+                    callback_err = Some(e);
+                    vec![vec![0.0; 3]; n]
+                }
+            }
+        };
+        let (values, stats) =
+            reinfors_core::selective_search(&params, snakes, food, agent, &mut infer_fn);
+        if let Some(e) = callback_err {
+            return Err(e);
+        }
+        Ok((
+            values,
+            (
+                stats.max_depth,
+                stats.expansions,
+                stats.leaves,
+                stats.rounds,
+            ),
+        ))
     }
 }
 
