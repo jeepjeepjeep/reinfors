@@ -19,11 +19,19 @@ The concrete snake slice is in place, differential-tested against `snake_RL` (th
 
 - **env + egocentric observation** — bit-identical to `CleanSnakeEnv`.
 - **selective expectimax search** — per-head ensemble (σ-VOI priority), uniform and distributional
-  deferred opponents, and pooled cross-game `search_many` (one batched `infer` per round across all
-  games). Leaf values come from a Python inference callback.
-- **rollout `Engine`** (this stage) — drives N parallel games through the pooled search,
-  Thompson-samples a head per game, and `collect`s `(observation, searched per-head target)` records
-  for training. Food-free for now; in-tree spawning and trainer integration come next.
+  deferred opponents, in-tree apple spawning (deterministic first-empty belief), and pooled
+  cross-game `search_many` (one batched `infer` per round across all games). Leaf values come from a
+  Python inference callback.
+- **rollout `Engine`** — drives N parallel games (apples spawned uniformly per game) through the
+  pooled search, Thompson-samples a head per game, and `collect`s training records with the full
+  `EnsembleTreeStrapRunner` semantics: episode-end **z-mixing** of the realized return into the
+  executed action, optional **interior** MAX-node targets (true TreeStrap), and a per-head
+  **bootstrap mask** on every record.
+- **trainer** (`reinfors.training`, this stage) — the end-to-end actor-learner loop: an ensemble
+  Q-network (a faithful port of the oracle's, so checkpoints are interchangeable) whose forward is
+  the search's `infer` callback, regressed onto `collect`'s records with the per-head masked-Huber
+  loss. Because `infer` reads the live network, each `collect` searches with the current weights —
+  the weight sync is implicit. Optional `torch` dependency (`pip install reinfors[train]`).
 
 Generic game abstractions and the declarative builder come later, once the concrete slice is proven.
 

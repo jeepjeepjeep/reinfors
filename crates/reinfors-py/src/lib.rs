@@ -50,8 +50,10 @@ fn cause_str(c: DeathCause) -> &'static str {
 type EventTuple = (bool, bool, Option<String>, bool, bool, bool, bool);
 /// (max_depth, expansions, leaves, rounds).
 type StatsTuple = (i32, usize, usize, usize);
-/// (root action values as [K][A], search stats).
-type SearchOutput = (Vec<Vec<f64>>, StatsTuple);
+/// One interior TreeStrap target returned to Python: (observation [5*g*g], per-head values [K][A]).
+type InteriorOut = (Vec<f32>, Vec<Vec<f64>>);
+/// (root action values [K][A], interior TreeStrap targets, search stats).
+type SearchOutput = (Vec<Vec<f64>>, Vec<InteriorOut>, StatsTuple);
 
 /// Reject search hyperparameters the core would mishandle (it does not validate them itself).
 fn validate_search_params(
@@ -190,6 +192,7 @@ impl SnakeEnv {
     /// mapping an (N, 5*g*g) float32 batch to an (N, K, 3) float64 array of per-head action values.
     /// Returns (action_values[K][3], (max_depth, expansions, leaves, rounds)).
     #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (agent, gamma, beta, expansion_budget, top_k, max_depth, reward, opponent, opp_temperature, opp_floor, infer, collect_interior=false))]
     fn selective_search(
         &self,
         py: Python<'_>,
@@ -204,6 +207,7 @@ impl SnakeEnv {
         opp_temperature: f64,
         opp_floor: f64,
         infer: Bound<'_, PyAny>,
+        collect_interior: bool,
     ) -> PyResult<SearchOutput> {
         validate_search_params(expansion_budget, top_k, max_depth, beta)?;
         let g = self.inner.grid_size;
@@ -269,13 +273,20 @@ impl SnakeEnv {
                 }
             }
         };
-        let (values, stats) =
-            reinfors_core::selective_search(&params, snakes, food, agent, &mut infer_fn);
+        let (values, interior, stats) = reinfors_core::selective_search(
+            &params,
+            snakes,
+            food,
+            agent,
+            collect_interior,
+            &mut infer_fn,
+        );
         if let Some(e) = callback_err {
             return Err(e);
         }
         Ok((
             values,
+            interior,
             (
                 stats.max_depth,
                 stats.expansions,
@@ -292,6 +303,7 @@ impl SnakeEnv {
 /// list of (action_values[K][3], (max_depth, expansions, leaves, rounds)), in input order.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (envs, agents, gamma, beta, expansion_budget, top_k, max_depth, reward, opponent, opp_temperature, opp_floor, infer, collect_interior=false))]
 fn selective_search_many(
     py: Python<'_>,
     envs: Vec<Py<SnakeEnv>>,
@@ -306,6 +318,7 @@ fn selective_search_many(
     opp_temperature: f64,
     opp_floor: f64,
     infer: Bound<'_, PyAny>,
+    collect_interior: bool,
 ) -> PyResult<Vec<SearchOutput>> {
     if envs.len() != agents.len() {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -406,21 +419,27 @@ fn selective_search_many(
             }
         }
     };
-    let results = reinfors_core::selective_search_many(&params, requests, &mut infer_fn);
+    let results =
+        reinfors_core::selective_search_many(&params, requests, collect_interior, &mut infer_fn);
     if let Some(e) = callback_err {
         return Err(e);
     }
     Ok(results
         .into_iter()
-        .map(|(v, s)| (v, (s.max_depth, s.expansions, s.leaves, s.rounds)))
+        .map(|(v, interior, s)| (v, interior, (s.max_depth, s.expansions, s.leaves, s.rounds)))
         .collect())
 }
 
-/// (observations [M, 5*g*g] f32, per-head searched targets [M, K, A] f64).
-type CollectOutput<'py> = (Bound<'py, PyArray2<f32>>, Bound<'py, PyArray3<f64>>);
+/// (observations [M, 5*g*g] f32, per-head targets [M, K, A] f64, per-head bootstrap masks [M, K] f32).
+type CollectOutput<'py> = (
+    Bound<'py, PyArray2<f32>>,
+    Bound<'py, PyArray3<f64>>,
+    Bound<'py, PyArray2<f32>>,
+);
 
 /// Parallel rollout collector: drives N games via the pooled selective search and yields TreeStrap
-/// records. Per-game Thompson-head + epsilon give the games diversity. Food-free this milestone.
+/// records (z-mixed roots + interior targets), each with a per-head bootstrap mask. Per-game
+/// Thompson-head, epsilon, and RNG apple spawns give the games diversity.
 #[pyclass]
 struct Engine {
     inner: CoreEngine,
@@ -437,6 +456,7 @@ impl Engine {
         initial_length: usize,
         play_to_last: bool,
         win_food_lead: Option<usize>,
+        initial_food_count: usize,
         gamma: f64,
         beta: f64,
         expansion_budget: usize,
@@ -449,6 +469,9 @@ impl Engine {
         epsilon: f64,
         max_ticks: usize,
         n_heads: usize,
+        outcome_weight: f64,
+        interior_targets: bool,
+        bootstrap_p: f64,
         seed: u64,
     ) -> PyResult<Self> {
         validate_search_params(expansion_budget, top_k, max_depth, beta)?;
@@ -491,9 +514,13 @@ impl Engine {
             initial_length,
             play_to_last,
             win_food_lead,
+            initial_food_count,
             max_ticks,
             epsilon,
             n_heads,
+            outcome_weight,
+            interior_targets,
+            bootstrap_p,
             seed,
             search,
         };
@@ -504,9 +531,10 @@ impl Engine {
         })
     }
 
-    /// Roll forward until at least `n_records` decisions are gathered. `infer` maps an (N, 5*g*g)
+    /// Roll forward until at least `n_records` records are gathered. `infer` maps an (N, 5*g*g)
     /// float32 batch to (N, K, 3) float64 per-head action values. Returns the records as a flat
-    /// (M, 5*g*g) observation array and an (M, K, 3) per-head target array.
+    /// (M, 5*g*g) observation array, an (M, K, 3) per-head target array, and an (M, K) per-head
+    /// bootstrap-mask array.
     fn collect<'py>(
         &mut self,
         py: Python<'py>,
@@ -539,25 +567,34 @@ impl Engine {
                 }
             }
         };
-        let (obs, tgt) = self.inner.collect(n_records, &mut infer_fn);
+        let records = self.inner.collect(n_records, &mut infer_fn);
         if let Some(e) = callback_err {
             return Err(e);
         }
-        let m = obs.len();
+        let m = records.len();
         let (k, a) = if m > 0 {
-            (tgt[0].len(), tgt[0][0].len())
+            (records[0].1.len(), records[0].1[0].len())
         } else {
             (0, 0)
         };
-        let obs_flat: Vec<f32> = obs.into_iter().flatten().collect();
-        let tgt_flat: Vec<f64> = tgt.into_iter().flatten().flatten().collect();
+        let mut obs_flat: Vec<f32> = Vec::with_capacity(m * dim);
+        let mut tgt_flat: Vec<f64> = Vec::with_capacity(m * k * a);
+        let mut mask_flat: Vec<f32> = Vec::with_capacity(m * k);
+        for (obs, tgt, mask) in records {
+            obs_flat.extend(obs);
+            tgt_flat.extend(tgt.into_iter().flatten());
+            mask_flat.extend(mask);
+        }
         let obs_arr = Array2::from_shape_vec((m, dim), obs_flat)
             .expect("obs shape")
             .into_pyarray(py);
         let tgt_arr = Array3::from_shape_vec((m, k, a), tgt_flat)
             .expect("target shape")
             .into_pyarray(py);
-        Ok((obs_arr, tgt_arr))
+        let mask_arr = Array2::from_shape_vec((m, k), mask_flat)
+            .expect("mask shape")
+            .into_pyarray(py);
+        Ok((obs_arr, tgt_arr, mask_arr))
     }
 }
 
@@ -566,10 +603,51 @@ fn core_version() -> &'static str {
     reinfors_core::version()
 }
 
+/// AlphaGo-style z-mixing applied to a single trajectory: blend the realized discounted return into
+/// each step's executed-action entry of every head. `search_values` is (T, K, A); `actions`/`rewards`
+/// are length T; `tail` is (K,) — z's seed past the last step. Returns the blended (T, K, A) targets.
+/// Exposed so the differential test can pin this against `EnsembleTreeStrapRunner._blend_outcome_targets`.
+#[pyfunction]
+fn blend_outcome_targets<'py>(
+    py: Python<'py>,
+    search_values: PyReadonlyArray3<f64>,
+    actions: Vec<usize>,
+    rewards: Vec<f64>,
+    gamma: f64,
+    outcome_weight: f64,
+    tail: Vec<f64>,
+) -> PyResult<Bound<'py, PyArray3<f64>>> {
+    use pyo3::exceptions::PyValueError;
+    let sv = search_values.as_array();
+    let (t, k, a) = (sv.shape()[0], sv.shape()[1], sv.shape()[2]);
+    if actions.len() != t || rewards.len() != t {
+        return Err(PyValueError::new_err(
+            "actions and rewards must have length T",
+        ));
+    }
+    if tail.len() != k {
+        return Err(PyValueError::new_err("tail must have length K"));
+    }
+    let trajectory: Vec<(Vec<Vec<f64>>, usize, f64)> = (0..t)
+        .map(|i| {
+            let values = (0..k)
+                .map(|h| (0..a).map(|j| sv[[i, h, j]]).collect())
+                .collect();
+            (values, actions[i], rewards[i])
+        })
+        .collect();
+    let blended = reinfors_core::blend_outcome_targets(&trajectory, gamma, outcome_weight, &tail);
+    let flat: Vec<f64> = blended.into_iter().flatten().flatten().collect();
+    Ok(Array3::from_shape_vec((t, k, a), flat)
+        .expect("blend shape")
+        .into_pyarray(py))
+}
+
 #[pymodule]
 fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
     m.add_function(wrap_pyfunction!(selective_search_many, m)?)?;
+    m.add_function(wrap_pyfunction!(blend_outcome_targets, m)?)?;
     m.add_class::<SnakeEnv>()?;
     m.add_class::<Engine>()?;
     Ok(())

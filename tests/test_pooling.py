@@ -51,9 +51,9 @@ def test_pooled_matches_solo_and_issues_fewer_forwards() -> None:
     solo1 = e1.selective_search(1, *args)
     solo_calls, solo_batch = calls["n"], calls["max_batch"]
 
-    # Pooling must not change any individual result.
-    assert np.allclose(pooled[0][0], solo0[0]) and pooled[0][1] == solo0[1]
-    assert np.allclose(pooled[1][0], solo1[0]) and pooled[1][1] == solo1[1]
+    # Pooling must not change any individual result (values at [0], search stats at [2]).
+    assert np.allclose(pooled[0][0], solo0[0]) and pooled[0][2] == solo0[2]
+    assert np.allclose(pooled[1][0], solo1[0]) and pooled[1][2] == solo1[2]
     # ...but it batches: fewer, larger forwards.
     assert pooled_calls < solo_calls, f"pooled forwards {pooled_calls} vs solo {solo_calls}"
     assert pooled_batch > solo_batch, f"pooled batch {pooled_batch} vs solo {solo_batch}"
