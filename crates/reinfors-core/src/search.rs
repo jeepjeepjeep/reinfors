@@ -81,76 +81,177 @@ enum BranchWeight {
     Deferred(usize, usize),
 }
 
-/// Run a best-first selective-expectimax search from `(snakes, food)` for `agent` (0 or 1). Returns
-/// the root action values as `[K][A]` (per head, per relative action Forward/Left/Right) plus
-/// diagnostics. `infer` maps a batch of flat observations to per-observation `[K][A]` action values.
+/// Per-request search state, advanced one round at a time so several searches can run in lockstep
+/// and pool their per-round observations into a single `infer` call.
+struct Search {
+    arena: Vec<Node>,
+    frontier: Vec<usize>,
+    agent: usize,
+    opp: usize,
+    n_heads: usize,
+    stats: SearchStats,
+    batch: Vec<usize>,
+    opp_obs: Vec<Vec<f32>>,
+    new_leaves: Vec<usize>,
+}
+
+impl Search {
+    fn new(snakes: [Snake; 2], food: HashSet<Cell>, agent: usize) -> Search {
+        let root = Node {
+            snakes,
+            food,
+            obs: Vec::new(),
+            depth: 0,
+            terminal: false,
+            edges: None,
+            bootstrap: Vec::new(),
+            value: Vec::new(),
+            sigma: 0.0,
+            path_weight: 1.0,
+        };
+        Search {
+            arena: vec![root],
+            frontier: vec![0],
+            agent,
+            opp: 1 - agent,
+            n_heads: 1,
+            stats: SearchStats::default(),
+            batch: Vec::new(),
+            opp_obs: Vec::new(),
+            new_leaves: Vec::new(),
+        }
+    }
+
+    fn active(&self, budget: usize) -> bool {
+        !self.frontier.is_empty() && self.stats.expansions < budget
+    }
+}
+
+/// One round's build phase for a single search: sort the frontier (after the root round), expand its
+/// top-k nodes one ply each, and stage the new leaves + opponent observations for the pooled forward.
+fn expand_round(s: &mut Search, p: &SearchParams, first: bool) {
+    if !first {
+        sort_frontier(&s.arena, &mut s.frontier, p);
+    }
+    let take = p
+        .top_k
+        .min(p.expansion_budget - s.stats.expansions)
+        .min(s.frontier.len());
+    s.batch = s.frontier.drain(..take).collect();
+    s.opp_obs.clear();
+    s.new_leaves.clear();
+    let (agent, opp) = (s.agent, s.opp);
+    for ni in s.batch.clone() {
+        expand_node(
+            &mut s.arena,
+            ni,
+            agent,
+            opp,
+            p,
+            &mut s.opp_obs,
+            &mut s.new_leaves,
+        );
+        s.stats.expansions += 1;
+        s.stats.max_depth = s.stats.max_depth.max(s.arena[ni].depth + 1);
+    }
+    s.stats.rounds += 1;
+}
+
+/// Run several best-first searches over (possibly different) states in lockstep, pooling each round's
+/// opponent + leaf observations across all active searches into ONE `infer` call. Pooling does not
+/// change any individual search's result — each reads only its own slice of the batched output — so
+/// it is a pure throughput win when `infer` is a GPU network. Returns per-request (values, stats).
+pub fn selective_search_many<F>(
+    p: &SearchParams,
+    requests: Vec<([Snake; 2], HashSet<Cell>, usize)>,
+    mut infer: F,
+) -> Vec<(Vec<Vec<f64>>, SearchStats)>
+where
+    F: FnMut(&[Vec<f32>]) -> Vec<Vec<Vec<f64>>>,
+{
+    let mut searches: Vec<Search> = requests
+        .into_iter()
+        .map(|(s, f, a)| Search::new(s, f, a))
+        .collect();
+    let mut first = true;
+    loop {
+        let active: Vec<usize> = (0..searches.len())
+            .filter(|&i| searches[i].active(p.expansion_budget))
+            .collect();
+        if active.is_empty() {
+            break;
+        }
+        for &si in &active {
+            expand_round(&mut searches[si], p, first);
+        }
+        first = false;
+
+        // Pool this round's observations across all active searches into a single batch; each search's
+        // rows are contiguous as [its opponent rows .. its leaf rows].
+        let mut big_obs: Vec<Vec<f32>> = Vec::new();
+        let mut spans: Vec<(usize, usize)> = Vec::new(); // per active search: (start, n_opp)
+        for &si in &active {
+            let s = &searches[si];
+            let start = big_obs.len();
+            big_obs.extend(s.opp_obs.iter().cloned());
+            big_obs.extend(s.new_leaves.iter().map(|&li| s.arena[li].obs.clone()));
+            spans.push((start, s.opp_obs.len()));
+        }
+        if !big_obs.is_empty() {
+            let q = infer(&big_obs);
+            let n_heads = q[0].len();
+            for (idx, &si) in active.iter().enumerate() {
+                let (start, n_opp) = spans[idx];
+                let s = &mut searches[si];
+                let end = start + n_opp + s.new_leaves.len();
+                s.n_heads = n_heads;
+                evaluate(
+                    &mut s.arena,
+                    &s.batch,
+                    &s.new_leaves,
+                    &q[start..end],
+                    n_opp,
+                    p,
+                    &mut s.stats,
+                );
+            }
+        }
+
+        for &si in &active {
+            let s = &mut searches[si];
+            for k in 0..s.new_leaves.len() {
+                let li = s.new_leaves[k];
+                if s.arena[li].depth < p.max_depth {
+                    s.frontier.push(li);
+                }
+            }
+        }
+    }
+
+    searches
+        .into_iter()
+        .map(|mut s| {
+            resolve(&mut s.arena, 0, p.gamma, s.n_heads);
+            let values = root_action_values(&s.arena, p.gamma, s.n_heads);
+            (values, s.stats)
+        })
+        .collect()
+}
+
+/// Single-request convenience wrapper over [`selective_search_many`].
 pub fn selective_search<F>(
     p: &SearchParams,
     snakes: [Snake; 2],
     food: HashSet<Cell>,
     agent: usize,
-    mut infer: F,
+    infer: F,
 ) -> (Vec<Vec<f64>>, SearchStats)
 where
     F: FnMut(&[Vec<f32>]) -> Vec<Vec<Vec<f64>>>,
 {
-    let opp = 1 - agent;
-    let mut arena: Vec<Node> = vec![Node {
-        snakes,
-        food,
-        obs: Vec::new(),
-        depth: 0,
-        terminal: false,
-        edges: None,
-        bootstrap: Vec::new(),
-        value: Vec::new(),
-        sigma: 0.0,
-        path_weight: 1.0,
-    }];
-    let mut frontier: Vec<usize> = vec![0];
-    let mut stats = SearchStats::default();
-    let mut n_heads = 1usize;
-    let mut first = true;
-
-    while !frontier.is_empty() && stats.expansions < p.expansion_budget {
-        if !first {
-            sort_frontier(&arena, &mut frontier, p);
-        }
-        first = false;
-        let take = p
-            .top_k
-            .min(p.expansion_budget - stats.expansions)
-            .min(frontier.len());
-        let batch: Vec<usize> = frontier.drain(..take).collect();
-
-        let mut opp_obs: Vec<Vec<f32>> = Vec::new();
-        let mut new_leaves: Vec<usize> = Vec::new();
-        for &ni in &batch {
-            expand_node(&mut arena, ni, agent, opp, p, &mut opp_obs, &mut new_leaves);
-            stats.expansions += 1;
-            stats.max_depth = stats.max_depth.max(arena[ni].depth + 1);
-        }
-        stats.rounds += 1;
-
-        let n_opp = opp_obs.len();
-        let mut obs_batch = opp_obs;
-        obs_batch.extend(new_leaves.iter().map(|&li| arena[li].obs.clone()));
-        if !obs_batch.is_empty() {
-            let q = infer(&obs_batch);
-            n_heads = q[0].len();
-            evaluate(&mut arena, &batch, &new_leaves, &q, n_opp, p, &mut stats);
-        }
-
-        for &li in &new_leaves {
-            if arena[li].depth < p.max_depth {
-                frontier.push(li);
-            }
-        }
-    }
-
-    resolve(&mut arena, 0, p.gamma, n_heads);
-    let values = root_action_values(&arena, p.gamma, n_heads);
-    (values, stats)
+    selective_search_many(p, vec![(snakes, food, agent)], infer)
+        .pop()
+        .unwrap()
 }
 
 /// Resolve a round's batched forward: opponent rows -> chance weights, leaf rows -> per-head
@@ -539,5 +640,122 @@ mod tests {
         assert_eq!(values.len(), 2); // two heads
         assert_eq!(values[0].len(), 3);
         assert!(stats.expansions > 0);
+    }
+
+    // Two disagreeing heads, sum-dependent — exercises sigma + the VOI priority under pooling.
+    fn two_head_infer(obs: &[Vec<f32>]) -> Vec<Vec<Vec<f64>>> {
+        obs.iter()
+            .map(|o| {
+                let s = o.iter().sum::<f32>() as f64;
+                vec![
+                    vec![s.sin(), s.cos(), (s * 0.5).sin()],
+                    vec![(s + 1.0).sin(), (s * 0.3).cos(), (s * 0.2).sin()],
+                ]
+            })
+            .collect()
+    }
+
+    type Request = ([Snake; 2], HashSet<Cell>, usize);
+
+    fn two_requests() -> (Request, Request) {
+        let a = (
+            [
+                snake(&[(6, 5), (6, 4), (6, 3)], Action::Right),
+                snake(&[(2, 8), (2, 9), (1, 9)], Action::Left),
+            ],
+            HashSet::new(),
+            0usize,
+        );
+        let b = (
+            [
+                snake(&[(3, 3), (3, 2), (3, 1)], Action::Right),
+                snake(&[(8, 8), (8, 9), (9, 9)], Action::Left),
+            ],
+            HashSet::new(),
+            1usize,
+        );
+        (a, b)
+    }
+
+    #[test]
+    fn pooling_matches_solo_searches_bit_for_bit() {
+        let (a, b) = two_requests();
+        let mut p = params();
+        p.expansion_budget = 24;
+        let many = selective_search_many(&p, vec![a.clone(), b.clone()], two_head_infer);
+        let solo_a = selective_search(&p, a.0.clone(), a.1.clone(), a.2, two_head_infer);
+        let solo_b = selective_search(&p, b.0.clone(), b.1.clone(), b.2, two_head_infer);
+        assert_eq!(
+            many[0].0, solo_a.0,
+            "pooled values must equal the solo search"
+        );
+        assert_eq!(many[1].0, solo_b.0);
+        assert_eq!(many[0].1.expansions, solo_a.1.expansions);
+        assert_eq!(many[1].1.expansions, solo_b.1.expansions);
+        assert_eq!(many[0].1.rounds, solo_a.1.rounds);
+    }
+
+    #[test]
+    fn pooling_issues_fewer_forwards_than_solo() {
+        use std::cell::Cell as Counter;
+        let (a, b) = two_requests();
+        let mut p = params();
+        p.expansion_budget = 24;
+
+        let pooled = Counter::new(0usize);
+        selective_search_many(&p, vec![a.clone(), b.clone()], |o| {
+            pooled.set(pooled.get() + 1);
+            two_head_infer(o)
+        });
+        let solo = Counter::new(0usize);
+        selective_search(&p, a.0.clone(), a.1.clone(), a.2, |o| {
+            solo.set(solo.get() + 1);
+            two_head_infer(o)
+        });
+        selective_search(&p, b.0.clone(), b.1.clone(), b.2, |o| {
+            solo.set(solo.get() + 1);
+            two_head_infer(o)
+        });
+        assert!(
+            pooled.get() < solo.get(),
+            "pooled forwards {} should be fewer than solo {}",
+            pooled.get(),
+            solo.get()
+        );
+    }
+
+    #[test]
+    fn all_terminal_root_returns_single_head_without_calling_infer() {
+        // Agent boxed in heading Left at the top-left: Forward (Left) and Right (Up) hit the wall, and
+        // Left (Down) moves onto its own neck (self-collision). Every root child is terminal, so the
+        // round produces no observations -> infer is never called and n_heads falls back to 1.
+        let snakes = [
+            snake(&[(0, 0), (1, 0), (2, 0)], Action::Left),
+            snake(&[(5, 5), (5, 6), (5, 7)], Action::Left),
+        ];
+        let p = params(); // uniform opponent, loss = -10
+        let mut calls = 0usize;
+        let results = selective_search_many(&p, vec![(snakes, HashSet::new(), 0)], |obs| {
+            calls += 1;
+            vec![vec![vec![0.0; 3]]; obs.len()]
+        });
+        let (values, stats) = &results[0];
+        assert_eq!(
+            calls, 0,
+            "no observations this round -> infer must not be called"
+        );
+        assert_eq!(
+            values.len(),
+            1,
+            "n_heads falls back to 1 when nothing was evaluated"
+        );
+        for v in &values[0] {
+            assert!(
+                (v - (-10.0)).abs() < 1e-9,
+                "every action is fatal -> the loss: {values:?}"
+            );
+        }
+        assert_eq!(stats.leaves, 0);
+        assert_eq!(stats.expansions, 1);
     }
 }

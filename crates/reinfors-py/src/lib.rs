@@ -53,6 +53,29 @@ type StatsTuple = (i32, usize, usize, usize);
 /// (root action values as [K][A], search stats).
 type SearchOutput = (Vec<Vec<f64>>, StatsTuple);
 
+/// Reject search hyperparameters the core would mishandle (it does not validate them itself).
+fn validate_search_params(
+    expansion_budget: usize,
+    top_k: usize,
+    max_depth: i32,
+    beta: f64,
+) -> PyResult<()> {
+    use pyo3::exceptions::PyValueError;
+    if expansion_budget < 1 {
+        return Err(PyValueError::new_err("expansion_budget must be >= 1"));
+    }
+    if top_k < 1 {
+        return Err(PyValueError::new_err("top_k must be >= 1"));
+    }
+    if max_depth < 1 {
+        return Err(PyValueError::new_err("max_depth must be >= 1"));
+    }
+    if !(0.0..=1.0).contains(&beta) {
+        return Err(PyValueError::new_err("beta must be in [0, 1]"));
+    }
+    Ok(())
+}
+
 #[pyclass]
 struct SnakeEnv {
     inner: CoreEnv,
@@ -182,6 +205,7 @@ impl SnakeEnv {
         opp_floor: f64,
         infer: Bound<'_, PyAny>,
     ) -> PyResult<SearchOutput> {
+        validate_search_params(expansion_budget, top_k, max_depth, beta)?;
         let g = self.inner.grid_size;
         let dim = 5 * (g as usize) * (g as usize);
         let opp_model = match opponent {
@@ -262,6 +286,136 @@ impl SnakeEnv {
     }
 }
 
+/// Pooled cross-game selective search: run a search for each `(env, agent)` in lockstep, batching
+/// every round's observations across all of them into a single `infer` call (the throughput win).
+/// Env config (grid/play_to_last/win_food_lead) is taken from the first env. Returns a per-request
+/// list of (action_values[K][3], (max_depth, expansions, leaves, rounds)), in input order.
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn selective_search_many(
+    py: Python<'_>,
+    envs: Vec<Py<SnakeEnv>>,
+    agents: Vec<usize>,
+    gamma: f64,
+    beta: f64,
+    expansion_budget: usize,
+    top_k: usize,
+    max_depth: i32,
+    reward: (f64, f64, f64, f64, f64, f64, f64),
+    opponent: &str,
+    opp_temperature: f64,
+    opp_floor: f64,
+    infer: Bound<'_, PyAny>,
+) -> PyResult<Vec<SearchOutput>> {
+    if envs.len() != agents.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "envs and agents must have equal length",
+        ));
+    }
+    if envs.is_empty() {
+        return Ok(Vec::new());
+    }
+    validate_search_params(expansion_budget, top_k, max_depth, beta)?;
+    let opp_model = match opponent {
+        "uniform" => Opponent::Uniform,
+        "distributional" => Opponent::Distributional {
+            temperature: opp_temperature,
+            floor: opp_floor,
+        },
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unknown opponent {other}"
+            )))
+        }
+    };
+    let (g, init_len, play_to_last, win_food_lead) = {
+        let e0 = envs[0].borrow(py);
+        (
+            e0.inner.grid_size,
+            e0.inner.initial_length,
+            e0.inner.play_to_last,
+            e0.inner.win_food_lead,
+        )
+    };
+    // The pooled search applies one shared config (taken from envs[0]) to all requests; a differing
+    // grid_size in particular would feed wrong-dimension observations into the search. Require them equal.
+    for e in &envs[1..] {
+        let r = e.borrow(py);
+        if (
+            r.inner.grid_size,
+            r.inner.initial_length,
+            r.inner.play_to_last,
+            r.inner.win_food_lead,
+        ) != (g, init_len, play_to_last, win_food_lead)
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "all envs must share grid_size/initial_length/play_to_last/win_food_lead for a pooled search",
+            ));
+        }
+    }
+    let dim = 5 * (g as usize) * (g as usize);
+    let params = SearchParams {
+        grid_size: g,
+        initial_length: init_len,
+        play_to_last,
+        win_food_lead,
+        gamma,
+        beta,
+        expansion_budget,
+        top_k,
+        max_depth,
+        reward: Reward {
+            step: reward.0,
+            food: reward.1,
+            loss: reward.2,
+            draw: reward.3,
+            kill: reward.4,
+            win: reward.5,
+            survival: reward.6,
+        },
+        opponent: opp_model,
+    };
+    let mut requests = Vec::with_capacity(envs.len());
+    for (e, &a) in envs.iter().zip(agents.iter()) {
+        let r = e.borrow(py);
+        requests.push((r.inner.snakes.clone(), r.inner.food.clone(), a));
+    }
+
+    let mut callback_err: Option<PyErr> = None;
+    let mut infer_fn = |obs_batch: &[Vec<f32>]| -> Vec<Vec<Vec<f64>>> {
+        let n = obs_batch.len();
+        if callback_err.is_some() {
+            return vec![vec![vec![0.0; 3]]; n];
+        }
+        let flat: Vec<f32> = obs_batch.iter().flatten().copied().collect();
+        let arr = Array2::from_shape_vec((n, dim), flat)
+            .expect("obs batch shape")
+            .into_pyarray(py);
+        match infer
+            .call1((arr,))
+            .and_then(|r| r.extract::<PyReadonlyArray3<f64>>())
+        {
+            Ok(out) => out
+                .as_array()
+                .outer_iter()
+                .map(|head_mat| head_mat.outer_iter().map(|row| row.to_vec()).collect())
+                .collect(),
+            Err(e) => {
+                callback_err = Some(e);
+                vec![vec![vec![0.0; 3]]; n]
+            }
+        }
+    };
+    let results = reinfors_core::selective_search_many(&params, requests, &mut infer_fn);
+    if let Some(e) = callback_err {
+        return Err(e);
+    }
+    Ok(results
+        .into_iter()
+        .map(|(v, s)| (v, (s.max_depth, s.expansions, s.leaves, s.rounds)))
+        .collect())
+}
+
 #[pyfunction]
 fn core_version() -> &'static str {
     reinfors_core::version()
@@ -270,6 +424,7 @@ fn core_version() -> &'static str {
 #[pymodule]
 fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
+    m.add_function(wrap_pyfunction!(selective_search_many, m)?)?;
     m.add_class::<SnakeEnv>()?;
     Ok(())
 }

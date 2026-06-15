@@ -178,3 +178,39 @@ def test_selective_search_matches_oracle(
 
     assert np.allclose(rein, oracle_values, atol=1e-9), f"values: {rein} vs {oracle_values}"
     assert tuple(rein_stats) == (stats.max_depth, stats.expansions, stats.leaves, stats.rounds), "search shape"
+
+
+@pytest.mark.parametrize("opponent", ["uniform", "distributional"])
+@pytest.mark.parametrize("k", [1, 4])
+def test_pooled_search_many_matches_oracle(opponent: str, k: int) -> None:
+    # The production path: one pooled call searching BOTH snakes of a single state, compared against
+    # the oracle's own search_many (its pooled path). This guards pooled-multi == oracle *directly*,
+    # rather than only transitively via (pooled == reinfors-solo) and (reinfors-solo == oracle-solo).
+    budget, top_k, max_depth, beta = 40, 4, 8, 1.0
+    state = _food_free_state()
+    planner = _oracle(opponent, k, budget, top_k, max_depth, beta)
+    oracle = planner.search_many(state, [(_A, False), (_B, False)])  # oracle's pooled search
+
+    env = _reinfors_env(state)
+    results = reinfors._reinfors.selective_search_many(
+        [env, env],  # same state, searched for both agents in one pooled call
+        [0, 1],
+        _GAMMA,
+        beta,
+        budget,
+        top_k,
+        max_depth,
+        _REWARD_TUPLE,
+        opponent,
+        _TEMP,
+        _FLOOR,
+        lambda arr: np.stack([_q_heads(row, k) for row in arr]),
+    )
+
+    for idx in range(2):
+        rein = np.asarray(results[idx][0])
+        rein = rein[0] if k == 1 else rein
+        oracle_values = np.asarray(oracle[idx][0])
+        assert np.allclose(rein, oracle_values, atol=1e-9), f"agent {idx}: {rein} vs {oracle_values}"
+        s = planner.last_stats[idx]
+        assert tuple(results[idx][1]) == (s.max_depth, s.expansions, s.leaves, s.rounds), f"agent {idx} search shape"
