@@ -7,12 +7,12 @@
 
 use std::collections::VecDeque;
 
-use numpy::ndarray::Array2;
-use numpy::{IntoPyArray, PyArray1, PyReadonlyArray3};
+use numpy::ndarray::{Array2, Array3};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArray3, PyReadonlyArray3};
 use pyo3::prelude::*;
 
 use reinfors_core::snake::{Cell, DeathCause, Snake, SnakeEnv as CoreEnv};
-use reinfors_core::{Action, Opponent, Reward, SearchParams};
+use reinfors_core::{Action, Engine as CoreEngine, EngineConfig, Opponent, Reward, SearchParams};
 
 fn action_from_u8(v: u8) -> PyResult<Action> {
     Ok(match v {
@@ -416,6 +416,151 @@ fn selective_search_many(
         .collect())
 }
 
+/// (observations [M, 5*g*g] f32, per-head searched targets [M, K, A] f64).
+type CollectOutput<'py> = (Bound<'py, PyArray2<f32>>, Bound<'py, PyArray3<f64>>);
+
+/// Parallel rollout collector: drives N games via the pooled selective search and yields TreeStrap
+/// records. Per-game Thompson-head + epsilon give the games diversity. Food-free this milestone.
+#[pyclass]
+struct Engine {
+    inner: CoreEngine,
+    dim: usize,
+}
+
+#[pymethods]
+impl Engine {
+    #[new]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        n_games: usize,
+        grid_size: i32,
+        initial_length: usize,
+        play_to_last: bool,
+        win_food_lead: Option<usize>,
+        gamma: f64,
+        beta: f64,
+        expansion_budget: usize,
+        top_k: usize,
+        max_depth: i32,
+        reward: (f64, f64, f64, f64, f64, f64, f64),
+        opponent: &str,
+        opp_temperature: f64,
+        opp_floor: f64,
+        epsilon: f64,
+        max_ticks: usize,
+        n_heads: usize,
+        seed: u64,
+    ) -> PyResult<Self> {
+        validate_search_params(expansion_budget, top_k, max_depth, beta)?;
+        let opponent = match opponent {
+            "uniform" => Opponent::Uniform,
+            "distributional" => Opponent::Distributional {
+                temperature: opp_temperature,
+                floor: opp_floor,
+            },
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown opponent {other}"
+                )))
+            }
+        };
+        let search = SearchParams {
+            grid_size,
+            initial_length,
+            play_to_last,
+            win_food_lead,
+            gamma,
+            beta,
+            expansion_budget,
+            top_k,
+            max_depth,
+            reward: Reward {
+                step: reward.0,
+                food: reward.1,
+                loss: reward.2,
+                draw: reward.3,
+                kill: reward.4,
+                win: reward.5,
+                survival: reward.6,
+            },
+            opponent,
+        };
+        let cfg = EngineConfig {
+            n_games,
+            grid_size,
+            initial_length,
+            play_to_last,
+            win_food_lead,
+            max_ticks,
+            epsilon,
+            n_heads,
+            seed,
+            search,
+        };
+        let dim = 5 * (grid_size as usize) * (grid_size as usize);
+        Ok(Engine {
+            inner: CoreEngine::new(cfg),
+            dim,
+        })
+    }
+
+    /// Roll forward until at least `n_records` decisions are gathered. `infer` maps an (N, 5*g*g)
+    /// float32 batch to (N, K, 3) float64 per-head action values. Returns the records as a flat
+    /// (M, 5*g*g) observation array and an (M, K, 3) per-head target array.
+    fn collect<'py>(
+        &mut self,
+        py: Python<'py>,
+        n_records: usize,
+        infer: Bound<'_, PyAny>,
+    ) -> PyResult<CollectOutput<'py>> {
+        let dim = self.dim;
+        let mut callback_err: Option<PyErr> = None;
+        let mut infer_fn = |obs_batch: &[Vec<f32>]| -> Vec<Vec<Vec<f64>>> {
+            let n = obs_batch.len();
+            if callback_err.is_some() {
+                return vec![vec![vec![0.0; 3]]; n];
+            }
+            let flat: Vec<f32> = obs_batch.iter().flatten().copied().collect();
+            let arr = Array2::from_shape_vec((n, dim), flat)
+                .expect("obs batch shape")
+                .into_pyarray(py);
+            match infer
+                .call1((arr,))
+                .and_then(|r| r.extract::<PyReadonlyArray3<f64>>())
+            {
+                Ok(out) => out
+                    .as_array()
+                    .outer_iter()
+                    .map(|head_mat| head_mat.outer_iter().map(|row| row.to_vec()).collect())
+                    .collect(),
+                Err(e) => {
+                    callback_err = Some(e);
+                    vec![vec![vec![0.0; 3]]; n]
+                }
+            }
+        };
+        let (obs, tgt) = self.inner.collect(n_records, &mut infer_fn);
+        if let Some(e) = callback_err {
+            return Err(e);
+        }
+        let m = obs.len();
+        let (k, a) = if m > 0 {
+            (tgt[0].len(), tgt[0][0].len())
+        } else {
+            (0, 0)
+        };
+        let obs_flat: Vec<f32> = obs.into_iter().flatten().collect();
+        let tgt_flat: Vec<f64> = tgt.into_iter().flatten().flatten().collect();
+        let obs_arr = Array2::from_shape_vec((m, dim), obs_flat)
+            .expect("obs shape")
+            .into_pyarray(py);
+        let tgt_arr = Array3::from_shape_vec((m, k, a), tgt_flat)
+            .expect("target shape")
+            .into_pyarray(py);
+        Ok((obs_arr, tgt_arr))
+    }
+}
+
 #[pyfunction]
 fn core_version() -> &'static str {
     reinfors_core::version()
@@ -426,5 +571,6 @@ fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
     m.add_function(wrap_pyfunction!(selective_search_many, m)?)?;
     m.add_class::<SnakeEnv>()?;
+    m.add_class::<Engine>()?;
     Ok(())
 }

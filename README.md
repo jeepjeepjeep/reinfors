@@ -13,11 +13,19 @@ crates/reinfors-py     PyO3 bindings -> compiled module `reinfors._reinfors`
 python/reinfors/       ergonomic Python API (the declarative game builder) — grows over time
 ```
 
-## Status: Phase 1
+## Status
 
-Porting `snake_RL`'s `CleanSnakeEnv` dynamics + egocentric observation into `reinfors-core`,
-differential-tested against the Python implementation (the oracle). Generic game abstractions and
-the declarative builder come later, once the concrete slice is proven and measured.
+The concrete snake slice is in place, differential-tested against `snake_RL` (the oracle):
+
+- **env + egocentric observation** — bit-identical to `CleanSnakeEnv`.
+- **selective expectimax search** — per-head ensemble (σ-VOI priority), uniform and distributional
+  deferred opponents, and pooled cross-game `search_many` (one batched `infer` per round across all
+  games). Leaf values come from a Python inference callback.
+- **rollout `Engine`** (this stage) — drives N parallel games through the pooled search,
+  Thompson-samples a head per game, and `collect`s `(observation, searched per-head target)` records
+  for training. Food-free for now; in-tree spawning and trainer integration come next.
+
+Generic game abstractions and the declarative builder come later, once the concrete slice is proven.
 
 ## Build
 
