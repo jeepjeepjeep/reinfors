@@ -57,8 +57,8 @@ jobs:
       - name: Ruff format check
         run: uvx ruff@0.15.15 format --check .
 
-      - name: Mypy
-        run: uvx mypy@2.1.0 python
+      - name: Mypy  # numpy ships types; torch (optional) is treated as Any via pyproject overrides
+        run: uvx --with numpy mypy@2.1.0 python
 
       - name: Build extension
         run: uvx maturin@1.14.0 build --out dist --interpreter python3.12

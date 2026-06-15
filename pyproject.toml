@@ -9,6 +9,11 @@ description = "General-purpose gym-style simulation + batching engine (Rust core
 requires-python = ">=3.10"
 dependencies = ["numpy"]
 
+# torch powers only the optional training layer (`reinfors.training`); the core/search/engine need
+# just numpy. Install with `pip install reinfors[train]`.
+[project.optional-dependencies]
+train = ["torch"]
+
 # Dev tooling isn't declared as project deps: the Python surface is light, so CI and local runs
 # invoke pinned tools via `uvx <tool>@<version>` (no lockfile / project-management layer).
 
@@ -42,3 +47,16 @@ indent-style = "space"
 python_version = "3.10"
 strict = true
 warn_unused_configs = true
+
+# torch is an optional dep not installed in the (uvx) type-check env, so it has no stubs here; treat
+# its symbols as Any and allow subclassing nn.Module. The training layer is exercised by the local
+# torch tests, not the type checker.
+[[tool.mypy.overrides]]
+module = "torch.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "reinfors.training"
+disallow_subclassing_any = false
+disallow_any_decorated = false
+warn_return_any = false
