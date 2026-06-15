@@ -60,6 +60,9 @@ pub struct SearchStats {
     pub expansions: usize,
     pub leaves: usize,
     pub rounds: usize,
+    /// Sum of per-leaf sigma (head-disagreement std) over all expanded leaves; `sigma_sum / leaves`
+    /// is the search's mean leaf epistemic uncertainty (matches snake_RL's `mean_sigma`).
+    pub sigma_sum: f64,
 }
 
 /// An interior MAX node's TreeStrap target: its observation and per-head backed-up action values
@@ -386,6 +389,7 @@ fn evaluate(
         arena[li].sigma = std(&boot);
         arena[li].bootstrap = boot;
         stats.leaves += 1;
+        stats.sigma_sum += arena[li].sigma;
     }
 
     // Resolve weights and child path-weights. Collected first, then applied, to avoid borrowing two

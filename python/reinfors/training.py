@@ -15,7 +15,9 @@ torch is an optional dependency (`pip install reinfors[train]`); importing this 
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -179,6 +181,28 @@ class ReplayBuffer:
         return torch.from_numpy(self._data[idx])
 
 
+@dataclass
+class StepMetrics:
+    """One gradient step's diagnostics, mirroring `snake_RL`'s `TrainStepMetrics`: the masked-Huber
+    `loss`, the mean predicted Q over the batch, and the mean searched target."""
+
+    loss: float
+    mean_q: float
+    mean_target_q: float
+
+
+@dataclass
+class CollectReport:
+    """One `collect` call's data-generation telemetry, for logging the self-play learning curve and
+    throughput: the `Engine.collect` telemetry dict (finished-episode summaries + per-decision search
+    aggregates), the number of `records` produced, and the wall-clock `seconds` the collect took."""
+
+    iteration: int
+    records: int
+    seconds: float
+    telemetry: dict[str, object]
+
+
 def train(
     engine: object,
     net: BootstrappedQNetwork,
@@ -193,7 +217,8 @@ def train(
     device: str | torch.device = "cpu",
     grad_clip: float = 10.0,
     seed: int = 0,
-    on_step: Callable[[int, float], None] | None = None,
+    on_step: Callable[[int, StepMetrics], None] | None = None,
+    on_collect: Callable[[int, CollectReport], None] | None = None,
 ) -> list[float]:
     """Off-policy actor-learner loop; returns the per-gradient-step losses.
 
@@ -206,6 +231,11 @@ def train(
     Reusing buffered records across steps amortises the search (the dominant cost): the reuse factor is
     roughly `grad_steps_per_collect * batch_size / collect_size`, and replay decorrelates updates —
     matching `EnsembleTreeStrapRunner`'s dynamics rather than the single-pass on-policy approximation.
+
+    Telemetry (optional, no logging dependency in the library): `on_step(step, StepMetrics)` fires per
+    gradient step, `on_collect(iteration, CollectReport)` per collect (including the warm-up collects
+    before the buffer fills, so the data-generation curve and throughput start at step 0). A caller
+    wires these to a TensorBoard `SummaryWriter`.
     """
     net.to(device)
     net.train()  # gradient steps run in train mode; `infer` is mode-neutral (saves/restores)
@@ -216,9 +246,13 @@ def train(
     infer = make_infer(net, device)
     c, h, w = net.obs_shape
     losses: list[float] = []
-    for _ in range(iterations):
-        obs, target, mask = engine.collect(collect_size, infer)  # type: ignore[attr-defined]
+    for it in range(iterations):
+        t0 = time.perf_counter()
+        obs, target, mask, telemetry = engine.collect(collect_size, infer)  # type: ignore[attr-defined]
+        collect_seconds = time.perf_counter() - t0
         buffer.push_batch(obs, target, mask)
+        if on_collect is not None:
+            on_collect(it, CollectReport(it, int(obs.shape[0]), collect_seconds, telemetry))
         if buffer.size < min_buffer:
             continue
         for _ in range(grad_steps_per_collect):
@@ -226,12 +260,16 @@ def train(
             obs_t = batch[:, :obs_dim].reshape(-1, c, h, w)
             target_t = batch[:, obs_dim : obs_dim + k * a].reshape(-1, k, a)
             mask_t = batch[:, obs_dim + k * a :]
-            loss = treestrap_loss(net(obs_t), target_t, mask_t)
+            q = net(obs_t)
+            loss = treestrap_loss(q, target_t, mask_t)
             optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(net.parameters(), max_norm=grad_clip)
             optimizer.step()
             losses.append(float(loss.item()))
             if on_step is not None:
-                on_step(len(losses), losses[-1])
+                on_step(
+                    len(losses),
+                    StepMetrics(losses[-1], float(q.mean().item()), float(target_t.mean().item())),
+                )
     return losses

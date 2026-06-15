@@ -12,7 +12,7 @@ pub mod search;
 pub mod snake;
 
 pub use action::{Action, RelativeAction};
-pub use engine::{blend_outcome_targets, Engine, EngineConfig};
+pub use engine::{blend_outcome_targets, CollectStats, Engine, EngineConfig, EpisodeSummary};
 pub use obs::egocentric;
 pub use reward::Reward;
 pub use search::{

@@ -41,6 +41,29 @@ struct TrajStep {
 /// A collected training record: observation, per-head target `[K][A]`, and per-head bootstrap mask.
 type Record = (Vec<f32>, Vec<Vec<f64>>, Vec<f32>);
 
+/// One finished episode's outcome, for logging: per-snake total realized reward and the episode
+/// length in ticks.
+#[derive(Clone, Copy)]
+pub struct EpisodeSummary {
+    pub reward: [f64; 2],
+    pub length: usize,
+}
+
+/// Telemetry for one `collect` call: finished-episode summaries and aggregated search diagnostics.
+/// Search fields are sums over the call's `decisions`; the caller divides to get means (mirroring the
+/// per-step scalars `snake_RL`'s `EnsembleTreeStrapRunner` logs).
+#[derive(Default, Clone)]
+pub struct CollectStats {
+    pub episodes: Vec<EpisodeSummary>,
+    pub decisions: usize,
+    pub max_depth: i32,
+    pub sum_leaves: f64,
+    pub sum_rounds: f64,
+    pub sum_expansions: f64,
+    pub sum_sigma: f64, // sum over decisions of the search's mean leaf sigma
+    pub sum_disagreement: f64, // sum over decisions of the root head-disagreement
+}
+
 /// One pooled-search request: a game state (snakes, food) and the agent searching it.
 type Request = ([Snake; 2], HashSet<Cell>, usize);
 
@@ -138,7 +161,7 @@ impl Engine {
     /// returning each record's observation (a flat `[5 * g * g]` buffer), per-head target `[K][A]`,
     /// and per-head bootstrap mask `[K]`. Executed decisions are z-mixed at episode end; interior MAX
     /// nodes (when enabled) are emitted immediately. `infer` is the value-network forward.
-    pub fn collect<F>(&mut self, n_records: usize, mut infer: F) -> Vec<Record>
+    pub fn collect<F>(&mut self, n_records: usize, mut infer: F) -> (Vec<Record>, CollectStats)
     where
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
@@ -146,6 +169,7 @@ impl Engine {
         // wrong-K output from the error fallback and surface a clean error; here we only consume the
         // values, with the per-game clamp handling the all-terminal single-head case.)
         let mut out: Vec<Record> = Vec::new();
+        let mut stats = CollectStats::default();
 
         while out.len() < n_records {
             // 1. Gather one search request per alive snake across all games.
@@ -173,7 +197,16 @@ impl Engine {
 
             // 3. Emit interior targets immediately, buffer each executed decision, choose its action.
             let mut actions = vec![[None, None]; self.games.len()];
-            for ((values, interior, _stats), &(gi, si)) in results.iter().zip(meta.iter()) {
+            for ((values, interior, search_stats), &(gi, si)) in results.iter().zip(meta.iter()) {
+                stats.decisions += 1;
+                stats.max_depth = stats.max_depth.max(search_stats.max_depth);
+                stats.sum_leaves += search_stats.leaves as f64;
+                stats.sum_rounds += search_stats.rounds as f64;
+                stats.sum_expansions += search_stats.expansions as f64;
+                if search_stats.leaves > 0 {
+                    stats.sum_sigma += search_stats.sigma_sum / search_stats.leaves as f64;
+                }
+                stats.sum_disagreement += root_disagreement(values);
                 let k = values.len();
                 for (iobs, ivalues) in interior {
                     let mask = sample_mask(&mut self.rngs[gi], k, self.cfg.bootstrap_p);
@@ -226,16 +259,21 @@ impl Engine {
                 }
             }
 
-            self.flush_finished(&finished, &mut out, &mut infer);
+            self.flush_finished(&finished, &mut out, &mut stats, &mut infer);
         }
-        out
+        (out, stats)
     }
 
     /// Flush each finished game's buffered trajectories: z-mix the executed-action targets with the
     /// realized return (tail-seeded by the net's value of the final state on truncation), emit the
     /// records, then reset the game and resample its head + initial food.
-    fn flush_finished<F>(&mut self, finished: &[usize], out: &mut Vec<Record>, infer: &mut F)
-    where
+    fn flush_finished<F>(
+        &mut self,
+        finished: &[usize],
+        out: &mut Vec<Record>,
+        stats: &mut CollectStats,
+        infer: &mut F,
+    ) where
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
         // On truncation (alive, not terminal) z is seeded by the net's per-head state value, so early
@@ -243,11 +281,13 @@ impl Engine {
         let tails = self.tail_values(finished, infer);
 
         for &gi in finished {
-            for si in 0..2 {
+            let mut ep_reward = [0.0; 2];
+            for (si, ep_slot) in ep_reward.iter_mut().enumerate() {
                 let steps = std::mem::take(&mut self.traj[gi][si]);
                 if steps.is_empty() {
                     continue;
                 }
+                *ep_slot = steps.iter().map(|s| s.reward).sum();
                 let k = steps[0].values.len();
                 let tail = tails
                     .get(&(gi, si))
@@ -268,6 +308,10 @@ impl Engine {
                     out.push((step.obs.clone(), target, mask));
                 }
             }
+            stats.episodes.push(EpisodeSummary {
+                reward: ep_reward,
+                length: self.ticks[gi],
+            });
             let mut game = SnakeEnv::new(
                 self.cfg.grid_size,
                 self.cfg.initial_length,
@@ -379,6 +423,25 @@ fn spawn_food(game: &mut SnakeEnv, rng: &mut SplitMix64, n: usize) {
     }
 }
 
+/// Root head-disagreement: the per-action population std across heads of the root values `[K][A]`,
+/// averaged over actions (`values.std(axis=0).mean()` in snake_RL). 0 with fewer than two heads.
+fn root_disagreement(values: &[Vec<f64>]) -> f64 {
+    let k = values.len();
+    if k < 2 || values[0].is_empty() {
+        return 0.0;
+    }
+    let a = values[0].len();
+    let inv_k = 1.0 / k as f64;
+    let total: f64 = (0..a)
+        .map(|ai| {
+            let mean = values.iter().map(|h| h[ai]).sum::<f64>() * inv_k;
+            let var = values.iter().map(|h| (h[ai] - mean).powi(2)).sum::<f64>() * inv_k;
+            var.sqrt()
+        })
+        .sum();
+    total / a as f64
+}
+
 fn argmax(values: &[f64]) -> usize {
     let mut best = 0;
     for (i, &v) in values.iter().enumerate() {
@@ -456,7 +519,7 @@ mod tests {
     #[test]
     fn collect_returns_well_formed_records() {
         let mut e = Engine::new(config(4, 2, 0));
-        let records = e.collect(50, infer);
+        let (records, _stats) = e.collect(50, infer);
         assert!(records.len() >= 50);
         for (obs, tgt, mask) in &records {
             assert_eq!(obs.len(), 5 * 12 * 12); // flat observation
@@ -469,15 +532,15 @@ mod tests {
 
     #[test]
     fn collect_is_deterministic_for_a_seed() {
-        let r1 = Engine::new(config(4, 2, 7)).collect(60, infer);
-        let r2 = Engine::new(config(4, 2, 7)).collect(60, infer);
+        let r1 = Engine::new(config(4, 2, 7)).collect(60, infer).0;
+        let r2 = Engine::new(config(4, 2, 7)).collect(60, infer).0;
         assert_eq!(r1, r2);
     }
 
     #[test]
     fn distinct_seeds_diverge() {
-        let r1 = Engine::new(config(4, 2, 1)).collect(80, infer);
-        let r2 = Engine::new(config(4, 2, 2)).collect(80, infer);
+        let r1 = Engine::new(config(4, 2, 1)).collect(80, infer).0;
+        let r2 = Engine::new(config(4, 2, 2)).collect(80, infer).0;
         assert_ne!(r1, r2, "different seeds should produce different rollouts");
     }
 
@@ -503,7 +566,7 @@ mod tests {
     fn bootstrap_p_extremes_set_all_or_no_heads() {
         let mut all = config(4, 2, 5); // n_heads matches `infer`'s 2 heads
         all.bootstrap_p = 1.0;
-        for (_, _, mask) in Engine::new(all).collect(40, infer) {
+        for (_, _, mask) in Engine::new(all).collect(40, infer).0 {
             assert!(
                 mask.iter().all(|&m| m == 1.0),
                 "p=1 must include every head"
@@ -511,7 +574,7 @@ mod tests {
         }
         let mut none = config(4, 2, 5);
         none.bootstrap_p = 0.0;
-        for (_, _, mask) in Engine::new(none).collect(40, infer) {
+        for (_, _, mask) in Engine::new(none).collect(40, infer).0 {
             assert!(mask.iter().all(|&m| m == 0.0), "p=0 must include no head");
         }
     }
@@ -527,8 +590,8 @@ mod tests {
         let mut w1 = config(4, 2, 9);
         w1.outcome_weight = 0.9;
         w1.interior_targets = false;
-        let r0 = Engine::new(w0).collect(60, infer);
-        let r1 = Engine::new(w1).collect(60, infer);
+        let r0 = Engine::new(w0).collect(60, infer).0;
+        let r1 = Engine::new(w1).collect(60, infer).0;
         let targets_differ = r0.iter().zip(&r1).any(|((_, t0, _), (_, t1, _))| t0 != t1);
         assert!(
             targets_differ,
@@ -567,8 +630,8 @@ mod tests {
             c.search.reward.survival = survival;
             c
         };
-        let base = Engine::new(mk(0.0)).collect(4, infer);
-        let surv = Engine::new(mk(bonus)).collect(4, infer);
+        let base = Engine::new(mk(0.0)).collect(4, infer).0;
+        let surv = Engine::new(mk(bonus)).collect(4, infer).0;
         assert_eq!(base.len(), surv.len());
         assert!(!base.is_empty());
         for ((_, tb, _), (_, ts, _)) in base.iter().zip(surv.iter()) {
@@ -584,5 +647,66 @@ mod tests {
                 assert!((rs[changed[0]] - rb[changed[0]] - bonus).abs() < 1e-9);
             }
         }
+    }
+
+    #[test]
+    fn collect_reports_episode_and_search_telemetry() {
+        // A long enough rollout finishes several episodes and runs many searches; the telemetry must
+        // be populated and internally consistent (means finite, lengths bounded by max_ticks).
+        // Interior off so the record floor tracks decisions (with it on, the floor is reached via
+        // interior targets before any episode completes).
+        let mut cfg = config(4, 2, 11);
+        cfg.interior_targets = false;
+        let max_ticks = cfg.max_ticks;
+        let mut e = Engine::new(cfg);
+        let mut episodes = 0usize;
+        let (mut decisions, mut max_depth, mut leaves, mut sigma, mut disagree) =
+            (0usize, 0i32, 0.0, 0.0, 0.0);
+        for _ in 0..4 {
+            let (_records, stats) = e.collect(400, infer);
+            for ep in &stats.episodes {
+                assert!(
+                    ep.length >= 1 && ep.length <= max_ticks,
+                    "length {}",
+                    ep.length
+                );
+                assert!(ep.reward.iter().all(|r| r.is_finite()));
+            }
+            episodes += stats.episodes.len();
+            decisions += stats.decisions;
+            max_depth = max_depth.max(stats.max_depth);
+            leaves += stats.sum_leaves;
+            sigma += stats.sum_sigma;
+            disagree += stats.sum_disagreement;
+        }
+        assert!(decisions > 0, "no searches counted");
+        assert!(max_depth > 0, "search reached no depth");
+        assert!(leaves > 0.0, "no leaves expanded");
+        assert!(episodes > 0, "no episodes finished");
+        let mean_sigma = sigma / decisions as f64;
+        let mean_disagreement = disagree / decisions as f64;
+        assert!(mean_sigma.is_finite() && mean_sigma >= 0.0);
+        assert!(mean_disagreement.is_finite() && mean_disagreement >= 0.0);
+    }
+
+    #[test]
+    fn telemetry_is_deterministic_for_a_seed() {
+        let stats1 = Engine::new(config(4, 2, 13)).collect(200, infer).1;
+        let stats2 = Engine::new(config(4, 2, 13)).collect(200, infer).1;
+        assert_eq!(stats1.decisions, stats2.decisions);
+        assert_eq!(stats1.episodes.len(), stats2.episodes.len());
+        for (a, b) in stats1.episodes.iter().zip(stats2.episodes.iter()) {
+            assert_eq!(a.reward, b.reward);
+            assert_eq!(a.length, b.length);
+        }
+    }
+
+    #[test]
+    fn root_disagreement_matches_population_std_definition() {
+        // Single action so the per-action std is the whole metric: heads [0, 2] -> mean 1, std 1.
+        assert!((root_disagreement(&[vec![0.0], vec![2.0]]) - 1.0).abs() < 1e-12);
+        // Identical heads disagree by zero; a single head has no spread.
+        assert_eq!(root_disagreement(&[vec![5.0, 5.0], vec![5.0, 5.0]]), 0.0);
+        assert_eq!(root_disagreement(&[vec![1.0, 2.0, 3.0]]), 0.0);
     }
 }
