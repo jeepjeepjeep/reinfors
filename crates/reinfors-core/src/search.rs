@@ -190,7 +190,11 @@ pub fn selective_search_many<F>(
     mut infer: F,
 ) -> Vec<SearchResult>
 where
-    F: FnMut(&[Vec<f32>]) -> Vec<Vec<Vec<f64>>>,
+    // `infer(obs_flat, n_rows) -> values_flat`: obs is one contiguous row-major `[n_rows, dim]` buffer
+    // (moved in, so the binding hands it to numpy with no copy); values come back as one contiguous
+    // row-major `[n_rows, K, A]` buffer (K inferred from its length). Flat on both sides avoids the
+    // per-row obs clones and the per-leaf nested-`Vec` allocations the boundary would otherwise incur.
+    F: FnMut(Vec<f32>, usize) -> Vec<f64>,
 {
     let mut searches: Vec<Search> = requests
         .into_iter()
@@ -215,31 +219,41 @@ where
         });
         first = false;
 
-        // Pool this round's observations across all active searches into a single batch (serial: order
-        // matters), recording each search's slice. `span_by_idx[si].is_some()` marks "active this round".
-        let mut big_obs: Vec<Vec<f32>> = Vec::new();
-        let mut span_by_idx: Vec<Option<(usize, usize)>> = vec![None; searches.len()]; // (start, n_opp)
+        // Pool this round's observations across all active searches into one contiguous row-major
+        // buffer (serial: order matters), recording each search's row span. `span_by_idx[si].is_some()`
+        // marks "active this round". `row_start` is a row index into the batch / the returned values.
+        let mut obs_flat: Vec<f32> = Vec::new();
+        let mut span_by_idx: Vec<Option<(usize, usize)>> = vec![None; searches.len()]; // (row_start, n_opp)
+        let mut n_rows = 0;
         for &si in &active {
             let s = &searches[si];
-            let start = big_obs.len();
-            big_obs.extend(s.opp_obs.iter().cloned());
-            big_obs.extend(s.new_leaves.iter().map(|&li| s.arena[li].obs.clone()));
-            span_by_idx[si] = Some((start, s.opp_obs.len()));
+            let row_start = n_rows;
+            for o in &s.opp_obs {
+                obs_flat.extend_from_slice(o);
+            }
+            for &li in &s.new_leaves {
+                obs_flat.extend_from_slice(&s.arena[li].obs);
+            }
+            n_rows += s.opp_obs.len() + s.new_leaves.len();
+            span_by_idx[si] = Some((row_start, s.opp_obs.len()));
         }
-        if !big_obs.is_empty() {
-            let q = infer(&big_obs); // serial: the (GPU/Python) network forward
-            let n_heads = q[0].len();
-            // Evaluate phase (parallel): each active search resolves its own slice of the batch.
+        if n_rows > 0 {
+            let a = RELATIVE_ACTIONS.len();
+            let q = infer(obs_flat, n_rows); // serial: the (GPU/Python) network forward, flat in/out
+            let n_heads = q.len() / (n_rows * a);
+            // Evaluate phase (parallel): each active search resolves its own row span of the batch.
             searches.par_iter_mut().enumerate().for_each(|(si, s)| {
-                if let Some((start, n_opp)) = span_by_idx[si] {
-                    let end = start + n_opp + s.new_leaves.len();
+                if let Some((row_start, n_opp)) = span_by_idx[si] {
+                    let rows = n_opp + s.new_leaves.len();
+                    let slice = &q[row_start * n_heads * a..(row_start + rows) * n_heads * a];
                     s.n_heads = n_heads;
                     evaluate(
                         &mut s.arena,
                         &s.batch,
                         &s.new_leaves,
-                        &q[start..end],
+                        slice,
                         n_opp,
+                        n_heads,
                         p,
                         &mut s.stats,
                     );
@@ -297,7 +311,7 @@ pub fn selective_search<F>(
     infer: F,
 ) -> SearchResult
 where
-    F: FnMut(&[Vec<f32>]) -> Vec<Vec<Vec<f64>>>,
+    F: FnMut(Vec<f32>, usize) -> Vec<f64>,
 {
     selective_search_many(p, vec![(snakes, food, agent)], collect_interior, infer)
         .pop()
@@ -305,32 +319,42 @@ where
 }
 
 /// Resolve a round's batched forward: opponent rows -> chance weights, leaf rows -> per-head
-/// bootstrap + sigma, then write branch weights and child path-weights.
+/// bootstrap + sigma, then write branch weights and child path-weights. `q` is this search's flat
+/// row-major slice `[rows, k, A]`; row `r`'s `[k, A]` block is `q[r*k*A .. (r+1)*k*A]`.
+#[allow(clippy::too_many_arguments)]
 fn evaluate(
     arena: &mut [Node],
     batch: &[usize],
     new_leaves: &[usize],
-    q: &[Vec<Vec<f64>>],
+    q: &[f64],
     n_opp: usize,
+    k: usize,
     p: &SearchParams,
     stats: &mut SearchStats,
 ) {
+    let a = RELATIVE_ACTIONS.len();
+    let row = |r: usize| -> &[f64] { &q[r * k * a..(r + 1) * k * a] }; // [k, A], head-major
+
     // Opponent move probabilities from the head-mean Q (shared across heads, so chance weights stay
     // scalar and sigma reflects only the agent's own value disagreement).
     let opp_probs: Vec<Vec<f64>> = (0..n_opp)
         .map(|i| match &p.opponent {
             Opponent::Distributional { temperature, floor } => {
-                softmax_floor(&head_mean(&q[i]), *temperature, *floor)
+                softmax_floor(&head_mean(row(i), k, a), *temperature, *floor)
             }
             Opponent::Uniform => Vec::new(), // uniform registers no opponent observations
         })
         .collect();
 
     for (j, &li) in new_leaves.iter().enumerate() {
-        let leaf_q = &q[n_opp + j]; // [K][A]
-        let boot: Vec<f64> = leaf_q
-            .iter()
-            .map(|row| row.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+        let leaf_q = row(n_opp + j); // [k, A]
+        let boot: Vec<f64> = (0..k)
+            .map(|h| {
+                leaf_q[h * a..(h + 1) * a]
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max)
+            })
             .collect();
         arena[li].sigma = std(&boot);
         arena[li].bootstrap = boot;
@@ -608,11 +632,10 @@ fn collect_interior_targets(
     }
 }
 
-fn head_mean(q: &[Vec<f64>]) -> Vec<f64> {
-    let k = q.len();
-    let a = q[0].len();
+/// Per-action mean over heads of one node's flat `[k, A]` (head-major) Q block.
+fn head_mean(row: &[f64], k: usize, a: usize) -> Vec<f64> {
     (0..a)
-        .map(|j| (0..k).map(|h| q[h][j]).sum::<f64>() / k as f64)
+        .map(|j| (0..k).map(|h| row[h * a + j]).sum::<f64>() / k as f64)
         .collect()
 }
 
@@ -684,8 +707,8 @@ mod tests {
         ];
         let p = params();
         let (values, _interior, stats) =
-            selective_search(&p, snakes, HashSet::new(), 0, false, |obs| {
-                vec![vec![vec![0.0; 3]]; obs.len()]
+            selective_search(&p, snakes, HashSet::new(), 0, false, |_obs, n| {
+                vec![0.0; n * 3]
             });
         let v = &values[0]; // single head
         assert!(
@@ -714,33 +737,29 @@ mod tests {
         let mut p = params();
         p.expansion_budget = 24;
         let (values, _interior, stats) =
-            selective_search(&p, snakes, HashSet::new(), 0, false, |obs| {
-                obs.iter()
-                    .map(|o| {
-                        let s = o.iter().sum::<f32>() as f64;
-                        vec![
-                            vec![s.sin(), s.cos(), (s * 0.5).sin()],
-                            vec![(s + 1.0).sin(), s.cos(), (s * 0.3).sin()],
-                        ]
-                    })
-                    .collect()
-            });
+            selective_search(&p, snakes, HashSet::new(), 0, false, two_head_infer);
         assert_eq!(values.len(), 2); // two heads
         assert_eq!(values[0].len(), 3);
         assert!(stats.expansions > 0);
     }
 
-    // Two disagreeing heads, sum-dependent — exercises sigma + the VOI priority under pooling.
-    fn two_head_infer(obs: &[Vec<f32>]) -> Vec<Vec<Vec<f64>>> {
-        obs.iter()
-            .map(|o| {
-                let s = o.iter().sum::<f32>() as f64;
-                vec![
-                    vec![s.sin(), s.cos(), (s * 0.5).sin()],
-                    vec![(s + 1.0).sin(), (s * 0.3).cos(), (s * 0.2).sin()],
-                ]
-            })
-            .collect()
+    // Two disagreeing heads, sum-dependent — exercises sigma + the VOI priority under pooling. Flat
+    // `(obs[n*dim], n) -> values[n*2*3]` (head-major rows), matching the new infer interface.
+    fn two_head_infer(obs: Vec<f32>, n: usize) -> Vec<f64> {
+        let dim = obs.len() / n;
+        let mut out = Vec::with_capacity(n * 2 * 3);
+        for i in 0..n {
+            let s = obs[i * dim..(i + 1) * dim].iter().sum::<f32>() as f64;
+            out.extend_from_slice(&[
+                s.sin(),
+                s.cos(),
+                (s * 0.5).sin(), // head 0
+                (s + 1.0).sin(),
+                (s * 0.3).cos(),
+                (s * 0.2).sin(), // head 1
+            ]);
+        }
+        out
     }
 
     type Request = ([Snake; 2], HashSet<Cell>, usize);
@@ -835,18 +854,18 @@ mod tests {
         p.expansion_budget = 24;
 
         let pooled = Counter::new(0usize);
-        selective_search_many(&p, vec![a.clone(), b.clone()], false, |o| {
+        selective_search_many(&p, vec![a.clone(), b.clone()], false, |o, n| {
             pooled.set(pooled.get() + 1);
-            two_head_infer(o)
+            two_head_infer(o, n)
         });
         let solo = Counter::new(0usize);
-        selective_search(&p, a.0.clone(), a.1.clone(), a.2, false, |o| {
+        selective_search(&p, a.0.clone(), a.1.clone(), a.2, false, |o, n| {
             solo.set(solo.get() + 1);
-            two_head_infer(o)
+            two_head_infer(o, n)
         });
-        selective_search(&p, b.0.clone(), b.1.clone(), b.2, false, |o| {
+        selective_search(&p, b.0.clone(), b.1.clone(), b.2, false, |o, n| {
             solo.set(solo.get() + 1);
-            two_head_infer(o)
+            two_head_infer(o, n)
         });
         assert!(
             pooled.get() < solo.get(),
@@ -867,10 +886,11 @@ mod tests {
         ];
         let p = params(); // uniform opponent, loss = -10
         let mut calls = 0usize;
-        let results = selective_search_many(&p, vec![(snakes, HashSet::new(), 0)], false, |obs| {
-            calls += 1;
-            vec![vec![vec![0.0; 3]]; obs.len()]
-        });
+        let results =
+            selective_search_many(&p, vec![(snakes, HashSet::new(), 0)], false, |_obs, n| {
+                calls += 1;
+                vec![0.0; n * 3]
+            });
         let (values, _interior, stats) = &results[0];
         assert_eq!(
             calls, 0,
