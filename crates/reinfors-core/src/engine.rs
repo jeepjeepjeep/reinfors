@@ -420,6 +420,7 @@ mod tests {
                 expansion_budget: 24,
                 top_k: 4,
                 max_depth: 6,
+                food_samples: 1,
                 reward: Reward {
                     step: 0.0,
                     food: 0.0,

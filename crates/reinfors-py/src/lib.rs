@@ -61,6 +61,7 @@ fn validate_search_params(
     top_k: usize,
     max_depth: i32,
     beta: f64,
+    food_samples: usize,
 ) -> PyResult<()> {
     use pyo3::exceptions::PyValueError;
     if expansion_budget < 1 {
@@ -71,6 +72,9 @@ fn validate_search_params(
     }
     if max_depth < 1 {
         return Err(PyValueError::new_err("max_depth must be >= 1"));
+    }
+    if food_samples < 1 {
+        return Err(PyValueError::new_err("food_samples must be >= 1"));
     }
     if !(0.0..=1.0).contains(&beta) {
         return Err(PyValueError::new_err("beta must be in [0, 1]"));
@@ -274,7 +278,7 @@ impl SnakeEnv {
     /// mapping an (N, 5*g*g) float32 batch to an (N, K, 3) float64 array of per-head action values.
     /// Returns (action_values[K][3], (max_depth, expansions, leaves, rounds)).
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (agent, gamma, beta, expansion_budget, top_k, max_depth, reward, opponent, opp_temperature, opp_floor, infer, collect_interior=false))]
+    #[pyo3(signature = (agent, gamma, beta, expansion_budget, top_k, max_depth, reward, opponent, opp_temperature, opp_floor, infer, collect_interior=false, food_samples=1))]
     fn selective_search(
         &self,
         py: Python<'_>,
@@ -290,8 +294,9 @@ impl SnakeEnv {
         opp_floor: f64,
         infer: Bound<'_, PyAny>,
         collect_interior: bool,
+        food_samples: usize,
     ) -> PyResult<SearchOutput> {
-        validate_search_params(expansion_budget, top_k, max_depth, beta)?;
+        validate_search_params(expansion_budget, top_k, max_depth, beta, food_samples)?;
         let g = self.inner.grid_size;
         let dim = 5 * (g as usize) * (g as usize);
         let opp_model = match opponent {
@@ -316,6 +321,7 @@ impl SnakeEnv {
             expansion_budget,
             top_k,
             max_depth,
+            food_samples,
             reward: Reward {
                 step: reward.0,
                 food: reward.1,
@@ -364,7 +370,7 @@ impl SnakeEnv {
 /// list of (action_values[K][3], (max_depth, expansions, leaves, rounds)), in input order.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (envs, agents, gamma, beta, expansion_budget, top_k, max_depth, reward, opponent, opp_temperature, opp_floor, infer, collect_interior=false))]
+#[pyo3(signature = (envs, agents, gamma, beta, expansion_budget, top_k, max_depth, reward, opponent, opp_temperature, opp_floor, infer, collect_interior=false, food_samples=1))]
 fn selective_search_many(
     py: Python<'_>,
     envs: Vec<Py<SnakeEnv>>,
@@ -380,6 +386,7 @@ fn selective_search_many(
     opp_floor: f64,
     infer: Bound<'_, PyAny>,
     collect_interior: bool,
+    food_samples: usize,
 ) -> PyResult<Vec<SearchOutput>> {
     if envs.len() != agents.len() {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -389,7 +396,7 @@ fn selective_search_many(
     if envs.is_empty() {
         return Ok(Vec::new());
     }
-    validate_search_params(expansion_budget, top_k, max_depth, beta)?;
+    validate_search_params(expansion_budget, top_k, max_depth, beta, food_samples)?;
     let opp_model = match opponent {
         "uniform" => Opponent::Uniform,
         "distributional" => Opponent::Distributional {
@@ -438,6 +445,7 @@ fn selective_search_many(
         expansion_budget,
         top_k,
         max_depth,
+        food_samples,
         reward: Reward {
             step: reward.0,
             food: reward.1,
@@ -490,6 +498,7 @@ struct Engine {
 impl Engine {
     #[new]
     #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (n_games, grid_size, initial_length, play_to_last, win_food_lead, initial_food_count, gamma, beta, expansion_budget, top_k, max_depth, reward, opponent, opp_temperature, opp_floor, epsilon, max_ticks, n_heads, outcome_weight, interior_targets, bootstrap_p, seed, food_samples=1))]
     fn new(
         n_games: usize,
         grid_size: i32,
@@ -513,8 +522,9 @@ impl Engine {
         interior_targets: bool,
         bootstrap_p: f64,
         seed: u64,
+        food_samples: usize,
     ) -> PyResult<Self> {
-        validate_search_params(expansion_budget, top_k, max_depth, beta)?;
+        validate_search_params(expansion_budget, top_k, max_depth, beta, food_samples)?;
         validate_engine_params(
             n_games,
             max_ticks,
@@ -545,6 +555,7 @@ impl Engine {
             expansion_budget,
             top_k,
             max_depth,
+            food_samples,
             reward: Reward {
                 step: reward.0,
                 food: reward.1,

@@ -13,8 +13,10 @@
 //! When a move eats an apple in-tree, a replacement is spawned at the first unoccupied cell
 //! (row-major). This deterministic spawn belief is bit-reproducible across Rust and Python, so the
 //! differential test injects the same rule into the oracle — unlike the env's true RNG spawn, which
-//! Option B treats as injected input. `food_samples` Monte-Carlo fan-out (only meaningful under a
-//! stochastic spawn belief) is not modelled; the production config uses a single sample.
+//! Option B treats as injected input. `food_samples > 1` fans each eating branch into that many
+//! equally-weighted sub-branches (the Monte-Carlo spawn structure, matching the oracle); under the
+//! deterministic spawn the sub-branches are identical, so it only adds value once the spawn belief is
+//! stochastic — the production config uses a single sample.
 
 use std::collections::HashSet;
 
@@ -44,6 +46,10 @@ pub struct SearchParams {
     pub expansion_budget: usize,
     pub top_k: usize,
     pub max_depth: i32,
+    /// Monte-Carlo apple-spawn samples per eaten-apple branch (>= 1). With the deterministic
+    /// first-empty spawn belief the samples are identical, so this is the fan-out structure a
+    /// stochastic spawn would populate; 1 disables it.
+    pub food_samples: usize,
     pub reward: Reward,
     pub opponent: Opponent,
 }
@@ -66,10 +72,12 @@ pub type SearchResult = (Vec<Vec<f64>>, Vec<InteriorTarget>, SearchStats);
 
 /// A committed agent action's chance branch. `weight` is the resolved chance probability; for a
 /// deferred (distributional) opponent it is filled in during evaluation from `deferred = (opp obs
-/// index this round, opponent action index)`.
+/// index this round, opponent action index)`. `scale` (1/food_samples on a fanned-out branch, else 1)
+/// multiplies the deferred weight at resolution; fixed weights are pre-scaled at construction.
 struct Branch {
     weight: f64,
     deferred: Option<(usize, usize)>,
+    scale: f64,
     reward: f64,
     child: usize,
 }
@@ -390,7 +398,7 @@ fn evaluate(
             for (ei, edge) in edges.iter().enumerate() {
                 for (bi, b) in edge.branches.iter().enumerate() {
                     let w = match b.deferred {
-                        Some((oi, si)) => opp_probs[oi][si],
+                        Some((oi, si)) => opp_probs[oi][si] * b.scale,
                         None => b.weight,
                     };
                     weight_updates.push((ni, ei, bi, w));
@@ -504,24 +512,67 @@ fn expand_node(
                 }
             }
 
-            let child = if sim.done || !sim.snakes[agent].alive {
-                push_node(arena, sim.snakes, sim.food, Vec::new(), depth + 1, true)
+            // food_samples Monte-Carlo fan-out: an eaten apple's replacement is a chance event, so an
+            // eating branch splits into `food_samples` equally-weighted sub-branches (matching the
+            // oracle). Under the deterministic first-empty spawn the sub-branches are identical (see
+            // module docs) — this is the structure a stochastic spawn belief would populate. The 1/k
+            // weight goes onto fixed branches directly; for deferred (distributional) ones it rides
+            // `scale`, applied to the resolved opponent probability during evaluation.
+            let terminal = sim.done || !sim.snakes[agent].alive;
+            let ate = events.iter().any(|e| e.ate_food);
+            let n = if ate && p.food_samples > 1 {
+                p.food_samples
             } else {
-                let obs = egocentric_parts(&sim.snakes, &sim.food, p.grid_size, agent);
-                let idx = push_node(arena, sim.snakes, sim.food, obs, depth + 1, false);
-                new_leaves.push(idx);
-                idx
+                1
             };
-            let (weight, deferred) = match *bw {
-                BranchWeight::Fixed(f) => (f, None),
-                BranchWeight::Deferred(oi, si) => (0.0, Some((oi, si))),
+            let (weight, deferred, scale) = match *bw {
+                BranchWeight::Fixed(f) => (f / n as f64, None, 1.0),
+                BranchWeight::Deferred(oi, si) => (0.0, Some((oi, si)), 1.0 / n as f64),
             };
-            branches.push(Branch {
-                weight,
-                deferred,
-                reward,
-                child,
-            });
+            if n == 1 {
+                // common path: move the single child's state in (no clone)
+                let child = if terminal {
+                    push_node(arena, sim.snakes, sim.food, Vec::new(), depth + 1, true)
+                } else {
+                    let obs = egocentric_parts(&sim.snakes, &sim.food, p.grid_size, agent);
+                    let idx = push_node(arena, sim.snakes, sim.food, obs, depth + 1, false);
+                    new_leaves.push(idx);
+                    idx
+                };
+                branches.push(Branch {
+                    weight,
+                    deferred,
+                    scale,
+                    reward,
+                    child,
+                });
+            } else {
+                let obs = if terminal {
+                    Vec::new()
+                } else {
+                    egocentric_parts(&sim.snakes, &sim.food, p.grid_size, agent)
+                };
+                for _ in 0..n {
+                    let child = push_node(
+                        arena,
+                        sim.snakes.clone(),
+                        sim.food.clone(),
+                        obs.clone(),
+                        depth + 1,
+                        terminal,
+                    );
+                    if !terminal {
+                        new_leaves.push(child);
+                    }
+                    branches.push(Branch {
+                        weight,
+                        deferred,
+                        scale,
+                        reward,
+                        child,
+                    });
+                }
+            }
         }
         edges.push(Edge { branches });
     }
@@ -703,6 +754,7 @@ mod tests {
             expansion_budget: 30,
             top_k: 4,
             max_depth: 6,
+            food_samples: 1,
             reward: Reward {
                 step: 0.0,
                 food: 0.0,
@@ -928,5 +980,36 @@ mod tests {
         }
         assert_eq!(stats.leaves, 0);
         assert_eq!(stats.expansions, 1);
+    }
+
+    #[test]
+    fn food_samples_fans_out_only_eating_branches() {
+        // Agent mid-grid heading Right with an apple directly ahead; opponent dead (one opp branch per
+        // edge). In a single root expansion only Forward eats, so food_samples=3 turns its one child
+        // into three while Left/Right keep one each: 3 leaves at k=1 -> 5 at k=3.
+        let snakes = [
+            snake(&[(6, 5), (6, 4), (6, 3)], Action::Right),
+            Snake {
+                body: [(0, 0), (1, 0)].into_iter().collect(),
+                direction: Action::Down,
+                alive: false,
+            },
+        ];
+        let food: HashSet<Cell> = [(6, 6)].into_iter().collect();
+        let infer = |_o: Vec<f32>, n: usize| vec![0.0; n * 3]; // single head, zero values
+        let leaves = |samples: usize| {
+            let mut p = params();
+            p.expansion_budget = 1; // one expansion: just the root
+            p.food_samples = samples;
+            selective_search(&p, snakes.clone(), food.clone(), 0, false, infer)
+                .2
+                .leaves
+        };
+        assert_eq!(leaves(1), 3);
+        assert_eq!(
+            leaves(3),
+            5,
+            "the eating (Forward) branch fans 1 -> 3; the others are unchanged"
+        );
     }
 }

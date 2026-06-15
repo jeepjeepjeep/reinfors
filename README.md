@@ -19,9 +19,9 @@ The concrete snake slice is in place, differential-tested against `snake_RL` (th
 
 - **env + egocentric observation** — bit-identical to `CleanSnakeEnv`.
 - **selective expectimax search** — per-head ensemble (σ-VOI priority), uniform and distributional
-  deferred opponents, in-tree apple spawning (deterministic first-empty belief), and pooled
-  cross-game `search_many` (one batched `infer` per round across all games). Leaf values come from a
-  Python inference callback.
+  deferred opponents, in-tree apple spawning (deterministic first-empty belief, with `food_samples`
+  Monte-Carlo fan-out of eating branches), and pooled cross-game `search_many` (one batched `infer`
+  per round across all games). Leaf values come from a Python inference callback.
 - **rollout `Engine`** — drives N parallel games (apples spawned uniformly per game) through the
   pooled search, Thompson-samples a head per game, and `collect`s training records with the full
   `EnsembleTreeStrapRunner` semantics: episode-end **z-mixing** of the realized return into the
