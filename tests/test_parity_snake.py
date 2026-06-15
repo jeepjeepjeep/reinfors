@@ -1,12 +1,15 @@
 """Differential parity test: reinfors' snake core vs snake_RL's CleanSnakeEnv (the oracle).
 
-Capture-replay (the agreed Option B): drive the Python env with random actions; each tick, capture
-the actions it took and the food cells it spawned, then replay the identical actions + spawns into
-reinfors and assert bit-identical bodies, directions, aliveness, food, per-snake events, and the
-egocentric observation. Food RNG is treated as an injected input, so we never reproduce numpy's PRNG.
+Capture-replay (Option B): drive the Python env with an action policy, capture the actions it took
+and the food it spawned each tick, replay the identical actions + spawns into reinfors, and assert
+bit-identical bodies, directions, aliveness, food, per-snake events, and the egocentric observation.
 
-This is a temporary cross-repo harness: it imports snake_RL from a sibling checkout and is skipped
-(via importorskip) wherever that isn't present — e.g. reinfors CI.
+Uniform-random snakes wall-die in ~30 ticks, before eating/growth/win-lead engage, so alongside the
+random rollouts we run a forward-biased policy (longer games, reaches food) and a few *directed*
+scenarios that deterministically exercise the machinery that matters most: eat-along-a-row (single
+and dual spawn replay + observation-with-growth), a head-on draw, and a win_food_lead win.
+
+Temporary cross-repo harness: imports snake_RL from a sibling checkout; skipped where absent (CI).
 """
 
 import os
@@ -24,13 +27,13 @@ pytest.importorskip("snake_rl.environment.clean", reason="snake_RL oracle not av
 
 import reinfors  # noqa: E402
 from snake_rl.agent.shared.observation import EgocentricGridObservation  # noqa: E402
-from snake_rl.environment.base import ACTIONS, BaseSnakeEnv  # noqa: E402
+from snake_rl.environment.base import ACTIONS, Action, BaseSnakeEnv  # noqa: E402
 from snake_rl.environment.clean import CleanSnakeEnv  # noqa: E402
 
 _A = BaseSnakeEnv.PLAYER_A
 _B = BaseSnakeEnv.PLAYER_B
 _SIDS = (_A, _B)
-# snake_RL Action enum order is UP, DOWN, LEFT, RIGHT -> matches reinfors' 0,1,2,3.
+# snake_RL Action enum order is UP, DOWN, LEFT, RIGHT -> reinfors' 0, 1, 2, 3.
 _ACT2I = {a: i for i, a in enumerate(ACTIONS)}
 
 
@@ -57,16 +60,24 @@ def _assert_events(py_events: dict, rein_events: list) -> None:
         assert expected == tuple(rein_events[idx]), f"event mismatch for {sid}"
 
 
-def _run_episode(seed: int, n_ticks: int, *, grid=20, init_len=3, play_to_last=False, win_food_lead=None) -> None:
+def _run(
+    seed: int,
+    n_ticks: int,
+    policy,  # (sid, state, tick) -> Action | None
+    *,
+    grid: int = 20,
+    init_len: int = 3,
+    play_to_last: bool = False,
+    win_food_lead: int | None = None,
+    setup=None,  # (py) -> None, called after reset to override the initial state (e.g. seed food)
+):
     py = CleanSnakeEnv(
-        grid_size=grid,
-        initial_length=init_len,
-        play_to_last=play_to_last,
-        win_food_lead=win_food_lead,
-        seed=seed,
+        grid_size=grid, initial_length=init_len, play_to_last=play_to_last, win_food_lead=win_food_lead, seed=seed
     )
-    rein = reinfors._reinfors.SnakeEnv(grid, init_len, play_to_last, win_food_lead)
-    rein.set_food([tuple(c) for c in py.state.food])  # match the oracle's initial (RNG-spawned) food
+    if setup is not None:
+        setup(py)
+    rein = reinfors._reinfors.SnakeEnv(grid, init_len, play_to_last, win_food_lead)  # default placement matches py
+    rein.set_food([tuple(c) for c in py.state.food])
 
     spawn_log: list = []
     original_spawn = py._spawn_cells
@@ -79,41 +90,102 @@ def _run_episode(seed: int, n_ticks: int, *, grid=20, init_len=3, play_to_last=F
     py._spawn_cells = capturing_spawn  # type: ignore[method-assign]
 
     obs_builder = EgocentricGridObservation(grid_size=grid)
-    rng = random.Random(seed)
+    _assert_state(py, rein, obs_builder)
 
-    _assert_state(py, rein, obs_builder)  # initial state must already agree
-
-    for _ in range(n_ticks):
+    last = None
+    for tick in range(n_ticks):
         state = py.state
         chosen: dict = {}
         for sid in _SIDS:
             if state.snakes[sid].alive:
-                action = rng.choice(ACTIONS)
-                chosen[sid] = action
-                py.submit_action(sid, action)
+                action = policy(sid, state, tick)
+                if action is not None:
+                    chosen[sid] = action
+                    py.submit_action(sid, action)
 
         spawn_log.clear()
-        py_result = py.tick()
+        last = py.tick()
         rein_actions = (_ACT2I.get(chosen.get(_A)), _ACT2I.get(chosen.get(_B)))
         rein_events = rein.step(rein_actions, [tuple(c) for c in spawn_log])
 
-        _assert_events(py_result.events, rein_events)
+        _assert_events(last.events, rein_events)
         _assert_state(py, rein, obs_builder)
-        assert py_result.done == rein.is_done(), "done flag mismatch"
-        if py_result.done:
+        assert last.done == rein.is_done(), "done flag mismatch"
+        if last.done:
             break
+    return py, last
+
+
+# --- random / forward-biased rollouts ---------------------------------------------------------
 
 
 @pytest.mark.parametrize("seed", range(12))
 def test_parity_random_rollouts(seed: int) -> None:
-    _run_episode(seed, n_ticks=300)
+    rng = random.Random(seed)
+    _run(seed, 300, lambda sid, state, tick: rng.choice(ACTIONS))
 
 
-@pytest.mark.parametrize("seed", range(4))
-def test_parity_play_to_last(seed: int) -> None:
-    _run_episode(seed, n_ticks=500, play_to_last=True)
+@pytest.mark.parametrize("seed", range(8))
+def test_parity_forward_biased_rollouts(seed: int) -> None:
+    # Mostly coast straight -> snakes live much longer and occasionally reach RNG-spawned food,
+    # so the random harness exercises eating/growth/longer trajectories, not just quick deaths.
+    rng = random.Random(seed)
+
+    def policy(sid, state, tick):  # type: ignore[no-untyped-def]
+        if rng.random() < 0.85:
+            return state.snakes[sid].direction  # forward
+        return rng.choice(ACTIONS)
+
+    _run(seed, 500, policy, play_to_last=True)
 
 
-@pytest.mark.parametrize("seed", range(4))
-def test_parity_win_food_lead(seed: int) -> None:
-    _run_episode(seed, n_ticks=500, win_food_lead=3)
+# --- directed scenarios ------------------------------------------------------------------------
+
+
+def _seed_food(*cells: tuple[int, int]):
+    """Setup that replaces the reset's random apples with an exact set, for a deterministic scenario."""
+
+    def setup(py: CleanSnakeEnv) -> None:
+        py._food = set(cells)
+
+    return setup
+
+
+def _go(sid: str, direction: Action):
+    """Policy: snake `sid` follows `direction`; the other steers up, out of the way and staying alive."""
+
+    def policy(s, state, tick):  # type: ignore[no-untyped-def]
+        return direction if s == sid else Action.UP
+
+    return policy
+
+
+def test_parity_eat_along_row_single_spawn() -> None:
+    # A starts at (10,6) heading Right; seed four apples straight ahead on its row. A eats one per
+    # tick (single spawn replay each time) and grows, exercising observation-with-growth. B steers up.
+    py, _ = _run(0, 6, _go(_A, Action.RIGHT), setup=_seed_food((10, 7), (10, 8), (10, 9), (10, 10)))
+    assert py.state.snakes[_A].length >= 3 + 4, "A should have eaten the row of apples and grown"
+
+
+def test_parity_dual_spawn_same_tick() -> None:
+    # Apples directly ahead of BOTH snakes -> both eat on the same tick -> two spawns replayed at once.
+    def policy(sid, state, tick):  # type: ignore[no-untyped-def]
+        return Action.RIGHT if sid == _A else Action.LEFT  # each moves forward onto its apple
+
+    _, last = _run(0, 1, policy, setup=_seed_food((10, 7), (10, 13)))
+    assert last is not None
+    assert last.events[_A].ate_food and last.events[_B].ate_food, "both eat on the same tick (dual spawn)"
+
+
+def test_parity_head_on_draw() -> None:
+    # Default placement faces A and B across row 10; both coast forward and meet at (10,10) on tick 4.
+    _, last = _run(0, 10, lambda sid, s, t: Action.RIGHT if sid == _A else Action.LEFT, setup=_seed_food())
+    assert last is not None and last.done
+    assert last.events[_A].drew and last.events[_B].drew, "head-on with no survivors is a draw"
+
+
+def test_parity_win_food_lead() -> None:
+    # A eats two apples (B eats none) to reach a 2-apple lead, triggering an outright win_food_lead win.
+    _, last = _run(0, 4, _go(_A, Action.RIGHT), win_food_lead=2, setup=_seed_food((10, 7), (10, 8)))
+    assert last is not None and last.done
+    assert last.events[_A].won and last.events[_B].lost, "A should win on the food lead"
