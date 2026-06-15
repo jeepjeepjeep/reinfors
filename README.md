@@ -26,3 +26,15 @@ uvx maturin build -o dist          # build the wheel
 uvx maturin develop                # or: install into the active venv for iteration
 cargo test -p reinfors-core        # pure-Rust unit tests (no Python)
 ```
+
+## Git hooks
+
+`main` is protected by a client-side guard that blocks direct pushes (changes go through a PR).
+After cloning, enable the pre-commit and pre-push hooks once:
+
+```sh
+uvx pre-commit install --hook-type pre-commit --hook-type pre-push
+```
+
+The pre-push hook (`scripts/block-main-push.sh`) rejects `git push` to `main`; use a branch + PR
+instead. (It can be bypassed with `git push --no-verify` for genuine emergencies.)

@@ -1,7 +1,8 @@
 """Differential parity: reinfors' selective expectimax vs snake_RL's SelectiveExpectimaxPlanner.
 
-Covers the matrix the oracle supports: opponent in {uniform, distributional (deferred)} x heads in
-{1, 4} x both agents x several (budget, top_k, max_depth, beta) configs. Both sides share the exact
+Covers the matrix the oracle supports: 3 root geometries (food-free, wall-hug, dead-opponent) x
+opponent in {uniform, distributional (deferred)} x heads in {1, 4} x (budget, top_k, max_depth,
+beta) configs. Both sides share the exact
 per-head value function `_q_heads` (reinfors calls it through the Rust -> Python inference callback),
 so we assert the root action values match (1e-9) and the search shape (max_depth, expansions, leaves,
 rounds) matches exactly — the latter proving the VOI/sigma priority orders expansions identically.
@@ -69,6 +70,35 @@ def _food_free_state() -> WorldState:
     )
 
 
+def _wall_hug_state() -> WorldState:
+    # A runs along the top wall heading Right: its Left (= Up) move goes off-grid, forcing terminal
+    # edges at the very first ply (and at each step along the wall). B is clear.
+    return WorldState(
+        snakes={
+            _A: Snake(deque([(0, 5), (0, 4), (0, 3)]), Action.RIGHT),
+            _B: Snake(deque([(6, 8), (6, 9), (6, 10)]), Action.LEFT),
+        },
+        food=set(),
+        grid_size=_GRID,
+    )
+
+
+def _dead_opp_state() -> WorldState:
+    # B is already dead, so opponent branching takes the null path throughout (no opponent rows, so
+    # the distributional softmax is exercised in the degenerate dead-opponent case too).
+    return WorldState(
+        snakes={
+            _A: Snake(deque([(6, 5), (6, 4), (6, 3)]), Action.RIGHT),
+            _B: Snake(deque([(2, 8), (2, 9)]), Action.LEFT, alive=False),
+        },
+        food=set(),
+        grid_size=_GRID,
+    )
+
+
+_STATES = {"food_free": _food_free_state, "wall_hug": _wall_hug_state, "dead_opp": _dead_opp_state}
+
+
 def _oracle(opponent: str, k: int, budget: int, top_k: int, max_depth: int, beta: float) -> SelectiveExpectimaxPlanner:
     obs_builder = EgocentricGridObservation(grid_size=_GRID)
 
@@ -111,14 +141,19 @@ def _reinfors_env(state: WorldState) -> object:
     return env
 
 
-@pytest.mark.parametrize("agent_id", [_A, _B])
+# Root geometries: food-free (both agents), wall-hug (terminal edges at the first ply), and a dead
+# opponent (the null opponent-branch path). The beta sweep is meaningful here because K=4 heads
+# disagree (sigma > 0), so it actually steers the VOI priority.
+@pytest.mark.parametrize(
+    ("scenario", "agent_id"), [("food_free", _A), ("food_free", _B), ("wall_hug", _A), ("dead_opp", _A)]
+)
 @pytest.mark.parametrize("opponent", ["uniform", "distributional"])
 @pytest.mark.parametrize("k", [1, 4])
 @pytest.mark.parametrize(("budget", "top_k", "max_depth", "beta"), [(40, 4, 8, 1.0), (24, 4, 6, 0.0), (64, 8, 10, 0.5)])
 def test_selective_search_matches_oracle(
-    agent_id: str, opponent: str, k: int, budget: int, top_k: int, max_depth: int, beta: float
+    scenario: str, agent_id: str, opponent: str, k: int, budget: int, top_k: int, max_depth: int, beta: float
 ) -> None:
-    state = _food_free_state()
+    state = _STATES[scenario]()
     planner = _oracle(opponent, k, budget, top_k, max_depth, beta)
     oracle_values = np.asarray(planner.action_values(state, agent_id))  # (A,) for K=1 else (K, A)
     stats = planner.last_stats[0]
