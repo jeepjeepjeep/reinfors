@@ -69,6 +69,33 @@ uvx maturin develop                # or: install into the active venv for iterat
 cargo test -p reinfors-core        # pure-Rust unit tests (no Python)
 ```
 
+## Training a model + comparing to snake_RL
+
+`scripts/train.py` runs a config-driven training loop whose hyperparameters mirror snake_RL's
+`configs/ensemble_treestrap.yaml`, logging the same TensorBoard scalars snake_RL's
+`EnsembleTreeStrapRunner` does (`train/loss`, `train/mean_q`, `episode/reward_*`, `episode/length`,
+`search/*`) plus `throughput/*`. Every scalar carries wall-clock, so TensorBoard's Relative/Wall
+x-axis gives the time-based learning curve and the step axis gives the per-step one — both axes of the
+comparison from one run.
+
+```sh
+maturin develop --release                                   # release build (see benchmark note)
+python scripts/train.py --device mps --log-dir runs/reinfors_ensemble
+# snake_RL side, same config (in the sibling checkout):
+python scripts/train.py configs/ensemble_treestrap.yaml --device mps --log-dir runs/snake_rl
+tensorboard --logdir runs                                   # both runs overlaid
+```
+
+Reading the comparison honestly:
+
+- **Train speed** (the unconfounded axis): reinfors generates data in parallel Rust with one pooled
+  GPU forward per round across `--n-games` games; snake_RL runs a single Python self-play env. Compare
+  `throughput/*` and any curve on the Wall x-axis.
+- **Quality per step** has known confounds in this phase, surfaced in the script's header: the search's
+  **spawn belief** (reinfors first-empty vs snake_RL uniform — the *agents* differ; a stochastic spawn
+  belief in Phase 2 removes this), the `--n-games` **parallelism** (changes the replay mix), and the
+  **train cadence** mapping (snake_RL's per-tick `train_every` vs reinfors' `collect_size / grad_steps`).
+
 ## Git hooks
 
 `main` is protected by a client-side guard that blocks direct pushes (changes go through a PR).
