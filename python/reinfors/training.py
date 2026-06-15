@@ -217,7 +217,7 @@ def train(
     c, h, w = net.obs_shape
     losses: list[float] = []
     for _ in range(iterations):
-        obs, target, mask = engine.collect(collect_size, infer)  # type: ignore[attr-defined]
+        obs, target, mask, _stats = engine.collect(collect_size, infer)  # type: ignore[attr-defined]
         buffer.push_batch(obs, target, mask)
         if buffer.size < min_buffer:
             continue

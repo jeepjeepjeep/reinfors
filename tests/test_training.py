@@ -186,7 +186,7 @@ def test_mps_training_reduces_loss_on_fixed_batch() -> None:
     if not torch.backends.mps.is_available():
         pytest.skip("MPS not available")
     net = _net(0)
-    obs, target, mask = _engine(1).collect(64, make_infer(net, "mps"))  # make_infer moved net to MPS
+    obs, target, mask, _ = _engine(1).collect(64, make_infer(net, "mps"))  # make_infer moved net to MPS
     obs_t = torch.from_numpy(obs).reshape(-1, 5, _G, _G).to("mps")
     target_t = torch.from_numpy(target).float().to("mps")
     mask_t = torch.from_numpy(mask).to("mps")
@@ -205,7 +205,7 @@ def test_overfits_a_fixed_batch() -> None:
     # loss down. (The full loop re-collects each step; here we fix the batch to isolate "it learns".)
     net = _net(0)
     opt = torch.optim.Adam(net.parameters(), lr=3e-3)
-    obs, target, mask = _engine(1).collect(64, make_infer(net))
+    obs, target, mask, _ = _engine(1).collect(64, make_infer(net))
     obs_t = torch.from_numpy(obs).reshape(-1, 5, _G, _G)
     target_t = torch.from_numpy(target).float()
     mask_t = torch.from_numpy(mask)

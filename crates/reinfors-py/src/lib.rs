@@ -10,6 +10,7 @@ use std::collections::VecDeque;
 use numpy::ndarray::{Array2, Array3};
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArray3, PyReadonlyArray3};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use reinfors_core::snake::{Cell, DeathCause, Snake, SnakeEnv as CoreEnv};
 use reinfors_core::{Action, Engine as CoreEngine, EngineConfig, Opponent, Reward, SearchParams};
@@ -477,11 +478,15 @@ fn selective_search_many(
         .collect())
 }
 
-/// (observations [M, 5*g*g] f32, per-head targets [M, K, A] f64, per-head bootstrap masks [M, K] f32).
+/// (observations [M, 5*g*g] f32, per-head targets [M, K, A] f64, per-head bootstrap masks [M, K] f32,
+/// telemetry dict). The dict holds `episodes` (a list of `(reward_a, reward_b, length)` for each
+/// episode that finished during the call) plus the call's `decisions`, `max_depth`, and per-decision
+/// means `mean_leaves`/`mean_rounds`/`mean_expansions`/`mean_sigma`/`mean_disagreement`.
 type CollectOutput<'py> = (
     Bound<'py, PyArray2<f32>>,
     Bound<'py, PyArray3<f64>>,
     Bound<'py, PyArray2<f32>>,
+    Bound<'py, PyDict>,
 );
 
 /// Parallel rollout collector: drives N games via the pooled selective search and yields TreeStrap
@@ -603,7 +608,7 @@ impl Engine {
     ) -> PyResult<CollectOutput<'py>> {
         let dim = self.dim;
         let mut callback_err: Option<PyErr> = None;
-        let records = {
+        let (records, stats) = {
             let mut infer_fn =
                 infer_closure(py, &infer, dim, Some(self.n_heads), &mut callback_err);
             self.inner.collect(n_records, &mut infer_fn)
@@ -634,7 +639,22 @@ impl Engine {
         let mask_arr = Array2::from_shape_vec((m, k), mask_flat)
             .expect("mask shape")
             .into_pyarray(py);
-        Ok((obs_arr, tgt_arr, mask_arr))
+        let d = (stats.decisions.max(1)) as f64;
+        let episodes: Vec<(f64, f64, usize)> = stats
+            .episodes
+            .iter()
+            .map(|e| (e.reward[0], e.reward[1], e.length))
+            .collect();
+        let telemetry = PyDict::new(py);
+        telemetry.set_item("episodes", episodes)?;
+        telemetry.set_item("decisions", stats.decisions)?;
+        telemetry.set_item("max_depth", stats.max_depth)?;
+        telemetry.set_item("mean_leaves", stats.sum_leaves / d)?;
+        telemetry.set_item("mean_rounds", stats.sum_rounds / d)?;
+        telemetry.set_item("mean_expansions", stats.sum_expansions / d)?;
+        telemetry.set_item("mean_sigma", stats.sum_sigma / d)?;
+        telemetry.set_item("mean_disagreement", stats.sum_disagreement / d)?;
+        Ok((obs_arr, tgt_arr, mask_arr, telemetry))
     }
 }
 

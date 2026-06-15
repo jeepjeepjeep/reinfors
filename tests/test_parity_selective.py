@@ -431,8 +431,8 @@ def test_survival_reward_matches_oracle_minimal_reward(survival: float) -> None:
             0,
         )
 
-    _, t0, _ = engine(0.0).collect(2, _infer_k2)
-    _, ts, _ = engine(survival).collect(2, _infer_k2)
+    _, t0, _, _ = engine(0.0).collect(2, _infer_k2)
+    _, ts, _, _ = engine(survival).collect(2, _infer_k2)
     diff = np.asarray(ts) - np.asarray(t0)
     assert diff.shape[0] >= 2
     for m in range(diff.shape[0]):

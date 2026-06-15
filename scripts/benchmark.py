@@ -101,7 +101,7 @@ def bench_collect(args: argparse.Namespace) -> None:
     infer = build_infer(args)
     engine.collect(args.games * 4, infer)  # warm up
     t0 = time.perf_counter()
-    obs, _tgt, _mask = engine.collect(args.records, infer)
+    obs, _tgt, _mask, _stats = engine.collect(args.records, infer)
     dt = time.perf_counter() - t0
     _report("Engine.collect", obs.shape[0], dt)
 
