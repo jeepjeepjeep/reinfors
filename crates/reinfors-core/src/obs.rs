@@ -4,7 +4,9 @@
 //! 4 food. Coordinates are pre-rotated by `k` CCW quarter-turns (k from the agent's heading) so the
 //! queried snake always faces "up" — identical to the Python `_fill` in-place rotation.
 
-use crate::snake::SnakeEnv;
+use std::collections::HashSet;
+
+use crate::snake::{Cell, Snake, SnakeEnv};
 
 pub const N_CHANNELS: usize = 5;
 const CH_OWN_HEAD: usize = 0;
@@ -15,9 +17,20 @@ const CH_FOOD: usize = 4;
 
 /// Build the egocentric observation for `agent` (0 = A, 1 = B) as a flat `[5 * g * g]` f32 buffer.
 pub fn egocentric(env: &SnakeEnv, agent: usize) -> Vec<f32> {
-    let g = env.grid_size;
+    egocentric_parts(&env.snakes, &env.food, env.grid_size, agent)
+}
+
+/// Same as [`egocentric`], operating directly on a (snakes, food) state — used by the search, which
+/// builds observations for simulated child states without constructing a full `SnakeEnv`.
+pub fn egocentric_parts(
+    snakes: &[Snake; 2],
+    food: &HashSet<Cell>,
+    grid_size: i32,
+    agent: usize,
+) -> Vec<f32> {
+    let g = grid_size;
     let edge = g - 1;
-    let k = env.snakes[agent].direction.ego_rot_k();
+    let k = snakes[agent].direction.ego_rot_k();
     let plane = (g * g) as usize;
     let mut obs = vec![0.0f32; N_CHANNELS * plane];
 
@@ -34,23 +47,22 @@ pub fn egocentric(env: &SnakeEnv, agent: usize) -> Vec<f32> {
         obs[ch * plane + (rr as usize) * (g as usize) + (cc as usize)] = 1.0;
     };
 
-    for i in 0..2 {
-        if env.snakes[i].is_empty() {
+    for (i, snake) in snakes.iter().enumerate() {
+        if snake.is_empty() {
             continue;
         }
-        let is_own = i == agent;
-        let (head_ch, body_ch) = if is_own {
+        let (head_ch, body_ch) = if i == agent {
             (CH_OWN_HEAD, CH_OWN_BODY)
         } else {
             (CH_OPP_HEAD, CH_OPP_BODY)
         };
         let mut ch = head_ch; // head is body[0]; everything after lands in the body channel
-        for &(r, c) in &env.snakes[i].body {
+        for &(r, c) in &snake.body {
             set(ch, r, c);
             ch = body_ch;
         }
     }
-    for &(r, c) in &env.food {
+    for &(r, c) in food {
         set(CH_FOOD, r, c);
     }
     obs
