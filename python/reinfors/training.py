@@ -114,16 +114,18 @@ def make_infer(net: BootstrappedQNetwork, device: str | torch.device = "cpu") ->
     per-head action values, a no-grad forward of `net` on `device`. Closes over the live network, so
     successive searches automatically use the latest weights.
 
-    Puts the net in eval mode for the forward (correct inference if BatchNorm/Dropout are ever added;
-    the training loop flips back to train mode for its gradient steps) and upcasts to float64 on the
-    host *after* the device->host copy, so that copy moves float32, not float64."""
+    Runs the forward in eval mode (correct inference if BatchNorm/Dropout are ever added) but restores
+    the net's prior mode afterwards, so `infer` is side-effect-free w.r.t. training mode. Upcasts to
+    float64 on the host *after* the device->host copy, so that copy moves float32, not float64."""
     c, h, w = net.obs_shape
 
     def infer(obs_batch: np.ndarray) -> np.ndarray:
+        was_training = net.training
         net.eval()
         with torch.no_grad():
             x = torch.from_numpy(np.ascontiguousarray(obs_batch)).reshape(-1, c, h, w).to(device)
             q = net(x)
+        net.train(was_training)
         return q.cpu().double().numpy()
 
     return infer
@@ -203,6 +205,7 @@ def train(
     matching `EnsembleTreeStrapRunner`'s dynamics rather than the single-pass on-policy approximation.
     """
     net.to(device)
+    net.train()  # gradient steps run in train mode; `infer` is mode-neutral (saves/restores)
     obs_dim = math.prod(net.obs_shape)
     k, a = net.n_heads, net.n_actions
     buffer = ReplayBuffer(buffer_capacity, obs_dim, k, a, seed)
@@ -215,7 +218,6 @@ def train(
         buffer.push_batch(obs, target, mask)
         if buffer.size < min_buffer:
             continue
-        net.train()  # `infer` left the net in eval mode; gradient steps run in train mode
         for _ in range(grad_steps_per_collect):
             batch = buffer.sample(batch_size).to(device)  # one host->device transfer
             obs_t = batch[:, :obs_dim].reshape(-1, c, h, w)
