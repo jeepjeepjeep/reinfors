@@ -112,14 +112,19 @@ def treestrap_loss(q: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) ->
 def make_infer(net: BootstrappedQNetwork, device: str | torch.device = "cpu") -> Callable[[np.ndarray], np.ndarray]:
     """Build the `infer` callback the search calls: an (N, C*H*W) float32 batch -> (N, K, A) float64
     per-head action values, a no-grad forward of `net` on `device`. Closes over the live network, so
-    successive searches automatically use the latest weights."""
+    successive searches automatically use the latest weights.
+
+    Puts the net in eval mode for the forward (correct inference if BatchNorm/Dropout are ever added;
+    the training loop flips back to train mode for its gradient steps) and upcasts to float64 on the
+    host *after* the device->host copy, so that copy moves float32, not float64."""
     c, h, w = net.obs_shape
 
     def infer(obs_batch: np.ndarray) -> np.ndarray:
+        net.eval()
         with torch.no_grad():
             x = torch.from_numpy(np.ascontiguousarray(obs_batch)).reshape(-1, c, h, w).to(device)
             q = net(x)
-        return q.double().cpu().numpy()
+        return q.cpu().double().numpy()
 
     return infer
 
@@ -210,6 +215,7 @@ def train(
         buffer.push_batch(obs, target, mask)
         if buffer.size < min_buffer:
             continue
+        net.train()  # `infer` left the net in eval mode; gradient steps run in train mode
         for _ in range(grad_steps_per_collect):
             batch = buffer.sample(batch_size).to(device)  # one host->device transfer
             obs_t = batch[:, :obs_dim].reshape(-1, c, h, w)

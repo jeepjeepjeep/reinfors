@@ -173,6 +173,28 @@ def test_treestrap_loss_masking() -> None:
     assert torch.allclose(full, expected)
 
 
+def test_inference_uses_eval_mode_training_uses_train_mode() -> None:
+    # `infer` must run in eval mode (so the search gets correct values if BatchNorm/Dropout are ever
+    # added), and the training loop must run its gradient steps in train mode. Latent today (the net
+    # has no mode-dependent layers) but a correctness trap otherwise.
+    net = _net(0)
+    net.train()
+    make_infer(net)(np.zeros((4, 5 * _G * _G), dtype=np.float32))
+    assert not net.training, "infer should put the net in eval mode"
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+    train(
+        _engine(7),
+        net,
+        opt,
+        iterations=3,
+        collect_size=24,
+        batch_size=16,
+        grad_steps_per_collect=1,
+        min_buffer_size=16,
+    )
+    assert net.training, "gradient steps should run in (and leave) train mode"
+
+
 def test_priors_stay_frozen_during_training() -> None:
     # The randomized priors are fixed per-head offsets that keep the heads disagreeing — the
     # epistemic-uncertainty signal (sigma) the whole selective search expands on. They must never
