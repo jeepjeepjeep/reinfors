@@ -1,8 +1,16 @@
 //! reinfors-core: the pure-Rust simulation engine (no Python dependency).
 //!
-//! Phase 1 fills this in with a concrete snake game (dynamics + egocentric observation), built to
-//! match `snake_RL`'s `CleanSnakeEnv` so it can be differential-tested against it. Generic game
+//! Phase 1 is a concrete snake game (dynamics + egocentric observation) built to match
+//! `snake_RL`'s `CleanSnakeEnv`, so it can be differential-tested against it. Generic game
 //! abstractions come later (Phase 5), once the concrete slice is proven.
+
+pub mod action;
+pub mod obs;
+pub mod snake;
+
+pub use action::Action;
+pub use obs::egocentric;
+pub use snake::{Cell, DeathCause, Snake, SnakeEnv, StepEvent};
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
