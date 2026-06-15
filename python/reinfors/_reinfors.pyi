@@ -26,6 +26,7 @@ def selective_search_many(
     opp_floor: float,
     infer: Any,
     collect_interior: bool = ...,
+    food_samples: int = ...,
 ) -> list[SearchOutput]: ...
 def blend_outcome_targets(
     search_values: object,  # (T, K, A) float64
@@ -60,6 +61,7 @@ class SnakeEnv:
         opp_floor: float,
         infer: Any,
         collect_interior: bool = ...,
+        food_samples: int = ...,
     ) -> SearchOutput: ...
 
 class Engine:
@@ -87,6 +89,7 @@ class Engine:
         interior_targets: bool,
         bootstrap_p: float,
         seed: int,
+        food_samples: int = ...,
     ) -> None: ...
     # collect returns (obs [M, 5*g*g] f32, targets [M, K, 3] f64, masks [M, K] f32) numpy arrays.
     def collect(self, n_records: int, infer: Any) -> tuple[object, object, object]: ...

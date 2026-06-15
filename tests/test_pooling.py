@@ -86,3 +86,9 @@ def test_search_rejects_bad_params(budget: int, top_k: int, max_depth: int, beta
         reinfors._reinfors.selective_search_many(
             [e0], [0], _GAMMA, beta, budget, top_k, max_depth, _REWARD, "uniform", _TEMP, _FLOOR, _infer
         )
+
+
+def test_search_rejects_food_samples_zero() -> None:
+    e0 = _env([(6, 5), (6, 4), (6, 3)], 3, [(2, 8), (2, 9), (1, 9)], 2)
+    with pytest.raises(ValueError, match="food_samples"):
+        e0.selective_search(0, _GAMMA, 1.0, 40, 4, 8, _REWARD, "uniform", _TEMP, _FLOOR, _infer, False, 0)

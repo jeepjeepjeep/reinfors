@@ -128,7 +128,9 @@ def _first_empty(snakes: dict, food: set, n: int) -> list:
     return out
 
 
-def _oracle(opponent: str, k: int, budget: int, top_k: int, max_depth: int, beta: float) -> SelectiveExpectimaxPlanner:
+def _oracle(
+    opponent: str, k: int, budget: int, top_k: int, max_depth: int, beta: float, food_samples: int = 1
+) -> SelectiveExpectimaxPlanner:
     obs_builder = EgocentricGridObservation(grid_size=_GRID)
 
     def qf(o: object) -> np.ndarray:
@@ -152,6 +154,7 @@ def _oracle(opponent: str, k: int, budget: int, top_k: int, max_depth: int, beta
         top_k=top_k,
         max_depth=max_depth,
         beta=beta,
+        food_samples=food_samples,
     )
 
 
@@ -237,6 +240,45 @@ def test_selective_search_with_food_matches_oracle(agent_id: str, opponent: str,
         _TEMP,
         _FLOOR,
         lambda arr: np.stack([_q_heads(row, k) for row in arr]),
+    )
+    rein = np.asarray(values)
+    rein = rein[0] if k == 1 else rein
+
+    assert np.allclose(rein, oracle_values, atol=1e-9), f"values: {rein} vs {oracle_values}"
+    assert tuple(rein_stats) == (stats.max_depth, stats.expansions, stats.leaves, stats.rounds), "search shape"
+
+
+@pytest.mark.parametrize("agent_id", [_A, _B])
+@pytest.mark.parametrize("opponent", ["uniform", "distributional"])
+@pytest.mark.parametrize("k", [1, 4])
+def test_food_samples_fan_out_matches_oracle(agent_id: str, opponent: str, k: int) -> None:
+    # food_samples > 1 fans each eating branch into K equally-weighted sub-branches. Under the shared
+    # deterministic first-empty spawn the sub-branches are identical on both sides, so reinfors and the
+    # oracle must still match bit-for-bit — values and the (now larger) search shape, including the
+    # deferred-weight 1/K scaling for the distributional opponent.
+    budget, top_k, max_depth, beta, food_samples = 40, 4, 8, 1.0, 3
+    state = _food_state()
+    planner = _oracle(opponent, k, budget, top_k, max_depth, beta, food_samples=food_samples)
+    planner._sample_spawn = lambda snakes, food, n: _first_empty(snakes, food, n)
+    oracle_values = np.asarray(planner.action_values(state, agent_id))
+    stats = planner.last_stats[0]
+
+    agent_idx = 0 if agent_id == _A else 1
+    env = _reinfors_env(state)
+    values, _interior, rein_stats = env.selective_search(
+        agent_idx,
+        _GAMMA,
+        beta,
+        budget,
+        top_k,
+        max_depth,
+        _REWARD_TUPLE,
+        opponent,
+        _TEMP,
+        _FLOOR,
+        lambda arr: np.stack([_q_heads(row, k) for row in arr]),
+        False,  # collect_interior
+        food_samples,
     )
     rein = np.asarray(values)
     rein = rein[0] if k == 1 else rein
