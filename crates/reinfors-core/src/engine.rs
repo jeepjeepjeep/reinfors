@@ -142,21 +142,9 @@ impl Engine {
     where
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
-        // Wrap `infer` to verify the network's head count matches `cfg.n_heads`: a mismatch would
-        // otherwise be silently absorbed by the per-game head clamp (which legitimately handles
-        // all-terminal searches that return a single head) and corrupt Thompson sampling.
-        let (n_heads, a) = (self.cfg.n_heads, RELATIVE_ACTIONS.len());
-        let mut infer = move |obs: Vec<f32>, n: usize| -> Vec<f64> {
-            let out = infer(obs, n);
-            assert!(
-                n == 0 || out.len() == n * n_heads * a,
-                "infer returned {} values for {n} rows; expected n_heads ({n_heads}) x {a} actions \
-                 per row — the network's head count must equal the Engine's n_heads",
-                out.len(),
-            );
-            out
-        };
-
+        // (The infer head-count check lives in the Python binding, where it can distinguish a real
+        // wrong-K output from the error fallback and surface a clean error; here we only consume the
+        // values, with the per-game clamp handling the all-terminal single-head case.)
         let mut out: Vec<Record> = Vec::new();
 
         while out.len() < n_records {
@@ -525,14 +513,6 @@ mod tests {
         for (_, _, mask) in Engine::new(none).collect(40, infer) {
             assert!(mask.iter().all(|&m| m == 0.0), "p=0 must include no head");
         }
-    }
-
-    #[test]
-    #[should_panic(expected = "must equal the Engine's n_heads")]
-    fn mismatched_infer_head_count_panics() {
-        // `infer` returns 2 heads but the Engine is configured for 3 — caught loudly, not silently
-        // clamped (which would corrupt Thompson sampling).
-        Engine::new(config(4, 3, 0)).collect(10, infer);
     }
 
     #[test]
