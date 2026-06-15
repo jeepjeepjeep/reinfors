@@ -41,9 +41,23 @@ The concrete snake slice is in place, differential-tested against `snake_RL` (th
   buffers (obs moved straight into numpy, no copy) instead of nested `Vec`s. On a **release** build
   (CPU value function, grid 20 / 16 games / 10 heads / budget 64) `scripts/benchmark.py` measures
   ~2.4 ms per searched decision — about **6x faster than the pure-Python oracle**, with the flat
-  boundary worth ~1.6x over nested-`Vec` marshalling and rayon ~1.3x from 1→10 threads; the advantage
-  compounds further with GPU inference. (Benchmark only a release build — a debug extension inflates
-  reinfors' per-search cost several-fold and is meaningless.)
+  boundary worth ~1.6x over nested-`Vec` marshalling and rayon ~1.3x from 1→10 threads. (Benchmark
+  only a release build — a debug extension inflates reinfors' per-search cost several-fold and is
+  meaningless.)
+- **GPU validation** (this stage) — the pipeline runs end to end on a real `BootstrappedQNetwork` on
+  the GPU (MPS): `make_infer(net, "mps")` serves the search, gradient steps run on-device, and the
+  forward matches CPU within float tolerance (all MPS-gated tests). `scripts/benchmark.py --net
+  --device mps` confirms the founding premise — **pooling is what makes the GPU win**: with the real
+  10-head conv net (grid 20, budget 64) a solo search ties CPU vs MPS (~30 ms/decision, MPS launch
+  overhead cancels its compute edge), but the pooled per-round batch grows MPS to **~3.9x at 8 games
+  and ~6.1x at 32** (≈4 ms/decision) over CPU inference, and rising with pool size. Against snake_RL's
+  planner on the *same* MPS net and pooling (`--baseline --net`), reinfors is ~3-4x faster pooled
+  (0.34x at 8 games, 0.24x at 32). Decomposing that with the pool=1 control (single search, so no
+  rayon parallelism): the raw Rust-vs-Python *search* gap is ~10x when the search dominates (pool=1, a
+  cheap CPU value fn), but only ~1.3x with the real net at pool=1 — there the tiny per-round batch
+  leaves both pinned on un-amortized GPU launches. So reinfors' pooled GPU lead over snake_RL is
+  mostly pooling + parallelising the search across cores (which the GIL denies the Python planner),
+  with the search-implementation gap re-emerging as the per-decision GPU cost shrinks.
 
 Generic game abstractions and the declarative builder come later, once the concrete slice is proven.
 

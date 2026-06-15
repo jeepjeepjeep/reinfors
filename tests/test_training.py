@@ -144,6 +144,62 @@ def test_infer_callback_shape_and_dtype() -> None:
     assert out.shape == (6, _K, _A) and out.dtype == np.float64
 
 
+def test_mps_infer_matches_cpu_forward() -> None:
+    # The real-net forward on the GPU (MPS) matches CPU within float tolerance, so the search gets
+    # the same values whichever device serves inference. Skips where MPS is unavailable (CI, non-Mac).
+    if not torch.backends.mps.is_available():
+        pytest.skip("MPS not available")
+    net = _net(0)
+    obs = np.random.default_rng(0).standard_normal((8, 5 * _G * _G)).astype(np.float32)
+    cpu = make_infer(net, "cpu")(obs)
+    mps = make_infer(net, "mps")(obs)
+    assert cpu.shape == mps.shape == (8, _K, _A)
+    assert np.allclose(cpu, mps, atol=1e-4), f"max |cpu-mps| = {np.abs(cpu - mps).max()}"
+
+
+def test_pipeline_runs_on_mps() -> None:
+    # The whole loop — pooled search calling the GPU `infer`, replay, masked-Huber gradient steps, all
+    # on MPS — runs end to end with finite losses. Validates the design target: real GPU inference
+    # driving the Rust data generator (it's a moving-target loop, so we don't assert loss descent here
+    # — that's the fixed-batch test below). Skips without MPS.
+    if not torch.backends.mps.is_available():
+        pytest.skip("MPS not available")
+    net = _net(0)
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+    losses = train(
+        _engine(7),
+        net,
+        opt,
+        iterations=4,
+        collect_size=24,
+        batch_size=16,
+        grad_steps_per_collect=2,
+        min_buffer_size=16,
+        device="mps",
+    )
+    assert len(losses) == 8 and all(np.isfinite(losses))
+
+
+def test_mps_training_reduces_loss_on_fixed_batch() -> None:
+    # GPU training learns: collect one batch (via the MPS net) and overfit it on MPS — the masked-Huber
+    # loss falls past half. The MPS analogue of test_overfits_a_fixed_batch. Skips without MPS.
+    if not torch.backends.mps.is_available():
+        pytest.skip("MPS not available")
+    net = _net(0)
+    obs, target, mask = _engine(1).collect(64, make_infer(net, "mps"))  # make_infer moved net to MPS
+    obs_t = torch.from_numpy(obs).reshape(-1, 5, _G, _G).to("mps")
+    target_t = torch.from_numpy(target).float().to("mps")
+    mask_t = torch.from_numpy(mask).to("mps")
+    opt = torch.optim.Adam(net.parameters(), lr=3e-3)
+    first = treestrap_loss(net(obs_t), target_t, mask_t).item()
+    for _ in range(200):
+        loss = treestrap_loss(net(obs_t), target_t, mask_t)
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+    assert loss.item() < 0.5 * first, f"loss did not drop on MPS: {first} -> {loss.item()}"
+
+
 def test_overfits_a_fixed_batch() -> None:
     # Train repeatedly on one collected batch: the net + masked-Huber loss + optimizer must drive the
     # loss down. (The full loop re-collects each step; here we fix the batch to isolate "it learns".)
