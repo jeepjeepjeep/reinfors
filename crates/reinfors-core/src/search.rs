@@ -723,4 +723,39 @@ mod tests {
             solo.get()
         );
     }
+
+    #[test]
+    fn all_terminal_root_returns_single_head_without_calling_infer() {
+        // Agent boxed in heading Left at the top-left: Forward (Left) and Right (Up) hit the wall, and
+        // Left (Down) moves onto its own neck (self-collision). Every root child is terminal, so the
+        // round produces no observations -> infer is never called and n_heads falls back to 1.
+        let snakes = [
+            snake(&[(0, 0), (1, 0), (2, 0)], Action::Left),
+            snake(&[(5, 5), (5, 6), (5, 7)], Action::Left),
+        ];
+        let p = params(); // uniform opponent, loss = -10
+        let mut calls = 0usize;
+        let results = selective_search_many(&p, vec![(snakes, HashSet::new(), 0)], |obs| {
+            calls += 1;
+            vec![vec![vec![0.0; 3]]; obs.len()]
+        });
+        let (values, stats) = &results[0];
+        assert_eq!(
+            calls, 0,
+            "no observations this round -> infer must not be called"
+        );
+        assert_eq!(
+            values.len(),
+            1,
+            "n_heads falls back to 1 when nothing was evaluated"
+        );
+        for v in &values[0] {
+            assert!(
+                (v - (-10.0)).abs() < 1e-9,
+                "every action is fatal -> the loss: {values:?}"
+            );
+        }
+        assert_eq!(stats.leaves, 0);
+        assert_eq!(stats.expansions, 1);
+    }
 }

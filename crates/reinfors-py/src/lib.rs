@@ -53,6 +53,29 @@ type StatsTuple = (i32, usize, usize, usize);
 /// (root action values as [K][A], search stats).
 type SearchOutput = (Vec<Vec<f64>>, StatsTuple);
 
+/// Reject search hyperparameters the core would mishandle (it does not validate them itself).
+fn validate_search_params(
+    expansion_budget: usize,
+    top_k: usize,
+    max_depth: i32,
+    beta: f64,
+) -> PyResult<()> {
+    use pyo3::exceptions::PyValueError;
+    if expansion_budget < 1 {
+        return Err(PyValueError::new_err("expansion_budget must be >= 1"));
+    }
+    if top_k < 1 {
+        return Err(PyValueError::new_err("top_k must be >= 1"));
+    }
+    if max_depth < 1 {
+        return Err(PyValueError::new_err("max_depth must be >= 1"));
+    }
+    if !(0.0..=1.0).contains(&beta) {
+        return Err(PyValueError::new_err("beta must be in [0, 1]"));
+    }
+    Ok(())
+}
+
 #[pyclass]
 struct SnakeEnv {
     inner: CoreEnv,
@@ -182,6 +205,7 @@ impl SnakeEnv {
         opp_floor: f64,
         infer: Bound<'_, PyAny>,
     ) -> PyResult<SearchOutput> {
+        validate_search_params(expansion_budget, top_k, max_depth, beta)?;
         let g = self.inner.grid_size;
         let dim = 5 * (g as usize) * (g as usize);
         let opp_model = match opponent {
@@ -291,6 +315,7 @@ fn selective_search_many(
     if envs.is_empty() {
         return Ok(Vec::new());
     }
+    validate_search_params(expansion_budget, top_k, max_depth, beta)?;
     let opp_model = match opponent {
         "uniform" => Opponent::Uniform,
         "distributional" => Opponent::Distributional {
@@ -312,6 +337,22 @@ fn selective_search_many(
             e0.inner.win_food_lead,
         )
     };
+    // The pooled search applies one shared config (taken from envs[0]) to all requests; a differing
+    // grid_size in particular would feed wrong-dimension observations into the search. Require them equal.
+    for e in &envs[1..] {
+        let r = e.borrow(py);
+        if (
+            r.inner.grid_size,
+            r.inner.initial_length,
+            r.inner.play_to_last,
+            r.inner.win_food_lead,
+        ) != (g, init_len, play_to_last, win_food_lead)
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "all envs must share grid_size/initial_length/play_to_last/win_food_lead for a pooled search",
+            ));
+        }
+    }
     let dim = 5 * (g as usize) * (g as usize);
     let params = SearchParams {
         grid_size: g,

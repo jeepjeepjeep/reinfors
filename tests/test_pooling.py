@@ -5,6 +5,7 @@ No oracle needed — this validates reinfors against itself, so it runs in CI.
 """
 
 import numpy as np
+import pytest
 import reinfors
 
 _REWARD = (0.0, 0.0, -10.0, -6.0, 20.0, 20.0, 0.0)  # step, food, loss, draw, kill, win, survival
@@ -56,3 +57,32 @@ def test_pooled_matches_solo_and_issues_fewer_forwards() -> None:
     # ...but it batches: fewer, larger forwards.
     assert pooled_calls < solo_calls, f"pooled forwards {pooled_calls} vs solo {solo_calls}"
     assert pooled_batch > solo_batch, f"pooled batch {pooled_batch} vs solo {solo_batch}"
+
+
+def _infer(arr: np.ndarray) -> np.ndarray:
+    return np.stack([_q_heads(row, _K) for row in arr])
+
+
+def test_pooled_rejects_mismatched_grid_size() -> None:
+    # The pooled search applies envs[0]'s config to all requests; a differing grid_size would feed
+    # wrong-dimension observations into the search, so it must be rejected up front (not silently run).
+    e0 = _env([(6, 5), (6, 4), (6, 3)], 3, [(2, 8), (2, 9), (1, 9)], 2)  # grid 12
+    e1 = reinfors._reinfors.SnakeEnv(10, 3, True, None)  # grid 10 — mismatched
+    args = (_GAMMA, _BETA, _BUDGET, _TOP_K, _MAX_DEPTH, _REWARD, "uniform", _TEMP, _FLOOR, _infer)
+    with pytest.raises(ValueError, match="grid_size"):
+        reinfors._reinfors.selective_search_many([e0, e1], [0, 0], *args)
+
+
+@pytest.mark.parametrize(
+    ("budget", "top_k", "max_depth", "beta"),
+    [(0, 4, 8, 1.0), (40, 0, 8, 1.0), (40, 4, 0, 1.0), (40, 4, 8, 1.5), (40, 4, 8, -0.1)],
+)
+def test_search_rejects_bad_params(budget: int, top_k: int, max_depth: int, beta: float) -> None:
+    e0 = _env([(6, 5), (6, 4), (6, 3)], 3, [(2, 8), (2, 9), (1, 9)], 2)
+    args = (budget, top_k, max_depth, _REWARD, "uniform", _TEMP, _FLOOR, _infer)
+    with pytest.raises(ValueError):
+        e0.selective_search(0, _GAMMA, beta, *args)
+    with pytest.raises(ValueError):
+        reinfors._reinfors.selective_search_many(
+            [e0], [0], _GAMMA, beta, budget, top_k, max_depth, _REWARD, "uniform", _TEMP, _FLOOR, _infer
+        )
