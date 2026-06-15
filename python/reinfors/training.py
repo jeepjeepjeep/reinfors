@@ -116,7 +116,10 @@ def make_infer(net: BootstrappedQNetwork, device: str | torch.device = "cpu") ->
 
     Runs the forward in eval mode (correct inference if BatchNorm/Dropout are ever added) but restores
     the net's prior mode afterwards, so `infer` is side-effect-free w.r.t. training mode. Upcasts to
-    float64 on the host *after* the device->host copy, so that copy moves float32, not float64."""
+    float64 on the host *after* the device->host copy, so that copy moves float32, not float64.
+
+    Moves the net onto `device` once up front, so the callback is self-contained on CPU or GPU."""
+    net.to(device)
     c, h, w = net.obs_shape
 
     def infer(obs_batch: np.ndarray) -> np.ndarray:

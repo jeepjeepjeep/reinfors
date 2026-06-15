@@ -56,6 +56,23 @@ def make_infer(k: int) -> object:
     return infer
 
 
+def make_net_infer(grid: int, k: int, device: str) -> object:
+    """A real `BootstrappedQNetwork` forward on `device` (e.g. "mps") as the value function, via the
+    production `reinfors.training.make_infer`. Lets the benchmark measure the GPU-inference regime the
+    pooling design targets, instead of the cheap CPU proxy."""
+    import torch
+    from reinfors.training import BootstrappedQNetwork
+    from reinfors.training import make_infer as net_infer
+
+    torch.manual_seed(0)
+    net = BootstrappedQNetwork((5, grid, grid), 3, k)
+    return net_infer(net, device)
+
+
+def build_infer(args: argparse.Namespace) -> object:
+    return make_net_infer(args.grid, args.heads, args.device) if args.net else make_infer(args.heads)
+
+
 def bench_collect(args: argparse.Namespace) -> None:
     engine = reinfors._reinfors.Engine(
         args.games,
@@ -81,7 +98,7 @@ def bench_collect(args: argparse.Namespace) -> None:
         1.0,  # outcome_weight, interior_targets (off so records == decisions), bootstrap_p
         0,
     )
-    infer = make_infer(args.heads)
+    infer = build_infer(args)
     engine.collect(args.games * 4, infer)  # warm up
     t0 = time.perf_counter()
     obs, _tgt, _mask = engine.collect(args.records, infer)
@@ -100,7 +117,7 @@ def _fixed_state() -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
 
 def bench_pooled_search(args: argparse.Namespace) -> float:
     a, b = _fixed_state()
-    infer = make_infer(args.heads)
+    infer = build_infer(args)
     search_args = (0.99, 1.0, args.budget, 4, args.max_depth, _REWARD, "uniform", 1.0, 0.1)
 
     def fresh_envs() -> list[object]:
@@ -190,12 +207,15 @@ def main() -> None:
     parser.add_argument("--records", type=int, default=1000, help="decisions for the collect benchmark")
     parser.add_argument("--reps", type=int, default=30, help="search-round reps for the pooled benchmark")
     parser.add_argument("--baseline", action="store_true", help="compare against snake_RL's planner")
+    parser.add_argument("--net", action="store_true", help="use a real BootstrappedQNetwork as the value function")
+    parser.add_argument("--device", default="cpu", help="torch device for --net (e.g. cpu, mps, cuda)")
     args = parser.parse_args()
 
     threads = os.environ.get("RAYON_NUM_THREADS", "all cores (default)")
     print(
         f"reinfors benchmark — grid={args.grid} games={args.games} heads={args.heads} "
-        f"budget={args.budget} depth={args.max_depth}, RAYON_NUM_THREADS={threads}"
+        f"budget={args.budget} depth={args.max_depth}, "
+        f"value_fn={'net@' + args.device if args.net else 'numpy'}, RAYON_NUM_THREADS={threads}"
     )
     print("  (numbers are only meaningful for a RELEASE extension build — see module docstring)\n")
     bench_collect(args)
