@@ -50,7 +50,11 @@ The concrete snake slice is in place, differential-tested against `snake_RL` (th
   --device mps` confirms the founding premise — **pooling is what makes the GPU win**: with the real
   10-head conv net (grid 20, budget 64) a solo search ties CPU vs MPS (~30 ms/decision, MPS launch
   overhead cancels its compute edge), but the pooled per-round batch grows MPS to **~3.9x at 8 games
-  and ~6.1x at 32** (≈4 ms/decision) over CPU inference, and rising with pool size.
+  and ~6.1x at 32** (≈4 ms/decision) over CPU inference, and rising with pool size. Against snake_RL's
+  planner on the *same* MPS net and pooling (`--baseline --net`), reinfors stays **~3-4x faster**
+  (0.34x at 8 games, 0.24x at 32) — the GPU forward is shared and amortized, so the Rust search vs the
+  Python search is what separates them (a smaller margin than the ~6x on a cheap CPU value function,
+  since the heavier shared forward takes a larger slice of both).
 
 Generic game abstractions and the declarative builder come later, once the concrete slice is proven.
 

@@ -157,8 +157,27 @@ def bench_baseline(args: argparse.Namespace) -> float | None:
     obs_builder = EgocentricGridObservation(grid_size=args.grid)
     k = args.heads
 
+    # Match reinfors' value function: the same vectorised numpy proxy, or — with `--net` — a real
+    # BootstrappedQNetwork forward on the chosen device, so the search-implementation comparison is
+    # apples-to-apples (both pool the round's leaf observations into one batched forward).
+    if args.net:
+        import torch
+        from reinfors.training import BootstrappedQNetwork
+
+        torch.manual_seed(0)
+        net = BootstrappedQNetwork((5, args.grid, args.grid), 3, k).to(args.device)
+
+        def q_value_batch(obss: object) -> np.ndarray:
+            with torch.no_grad():
+                x = torch.from_numpy(np.asarray(obss, dtype=np.float32).reshape(len(obss), 5, args.grid, args.grid))
+                return net(x.to(args.device)).cpu().double().numpy()
+    else:
+
+        def q_value_batch(obss: object) -> np.ndarray:
+            return q_batch(np.asarray(obss).reshape(len(obss), -1), k)
+
     def qf(o: object) -> np.ndarray:
-        return q_heads(o, k)
+        return q_value_batch([o])[0]
 
     a, b = _fixed_state()
     from collections import deque
@@ -179,7 +198,7 @@ def bench_baseline(args: argparse.Namespace) -> float | None:
         opp_model=UniformOpponent(RELATIVE_ACTIONS),
         actions=RELATIVE_ACTIONS,
         gamma=0.99,
-        q_value_batch=lambda obss: q_batch(np.asarray(obss).reshape(len(obss), -1), k),
+        q_value_batch=q_value_batch,
         seed=0,
         expansion_budget=args.budget,
         top_k=4,
