@@ -18,6 +18,8 @@
 
 use std::collections::HashSet;
 
+use rayon::prelude::*;
+
 use crate::action::{relative_to_absolute, Action, RELATIVE_ACTIONS};
 use crate::obs::egocentric_parts;
 use crate::reward::Reward;
@@ -175,6 +177,12 @@ fn expand_round(s: &mut Search, p: &SearchParams, first: bool) {
 /// opponent + leaf observations across all active searches into ONE `infer` call. Pooling does not
 /// change any individual search's result — each reads only its own slice of the batched output — so
 /// it is a pure throughput win when `infer` is a GPU network. Returns per-request (values, stats).
+///
+/// The per-search CPU work (expand, evaluate, back up) is independent across searches, so it runs in
+/// parallel via rayon; only the pooled-observation gather and the single `infer` call per round are
+/// serial. This is value-neutral: every search is deterministic and reads only its own state, so the
+/// result is bit-identical to a sequential run regardless of thread count. `infer` is never called
+/// off the calling thread, so a Python `infer` callback keeps the GIL on one thread.
 pub fn selective_search_many<F>(
     p: &SearchParams,
     requests: Vec<([Snake; 2], HashSet<Cell>, usize)>,
@@ -188,63 +196,72 @@ where
         .into_iter()
         .map(|(s, f, a)| Search::new(s, f, a))
         .collect();
+    let budget = p.expansion_budget;
     let mut first = true;
     loop {
         let active: Vec<usize> = (0..searches.len())
-            .filter(|&i| searches[i].active(p.expansion_budget))
+            .filter(|&i| searches[i].active(budget))
             .collect();
         if active.is_empty() {
             break;
         }
-        for &si in &active {
-            expand_round(&mut searches[si], p, first);
-        }
+        // Build phase (parallel): each active search expands its top-k one ply, staging leaves + opp
+        // observations. Re-checking `active` inside is equivalent to the list above (nothing mutates
+        // between), and gives rayon disjoint &mut per search.
+        searches.par_iter_mut().for_each(|s| {
+            if s.active(budget) {
+                expand_round(s, p, first);
+            }
+        });
         first = false;
 
-        // Pool this round's observations across all active searches into a single batch; each search's
-        // rows are contiguous as [its opponent rows .. its leaf rows].
+        // Pool this round's observations across all active searches into a single batch (serial: order
+        // matters), recording each search's slice. `span_by_idx[si].is_some()` marks "active this round".
         let mut big_obs: Vec<Vec<f32>> = Vec::new();
-        let mut spans: Vec<(usize, usize)> = Vec::new(); // per active search: (start, n_opp)
+        let mut span_by_idx: Vec<Option<(usize, usize)>> = vec![None; searches.len()]; // (start, n_opp)
         for &si in &active {
             let s = &searches[si];
             let start = big_obs.len();
             big_obs.extend(s.opp_obs.iter().cloned());
             big_obs.extend(s.new_leaves.iter().map(|&li| s.arena[li].obs.clone()));
-            spans.push((start, s.opp_obs.len()));
+            span_by_idx[si] = Some((start, s.opp_obs.len()));
         }
         if !big_obs.is_empty() {
-            let q = infer(&big_obs);
+            let q = infer(&big_obs); // serial: the (GPU/Python) network forward
             let n_heads = q[0].len();
-            for (idx, &si) in active.iter().enumerate() {
-                let (start, n_opp) = spans[idx];
-                let s = &mut searches[si];
-                let end = start + n_opp + s.new_leaves.len();
-                s.n_heads = n_heads;
-                evaluate(
-                    &mut s.arena,
-                    &s.batch,
-                    &s.new_leaves,
-                    &q[start..end],
-                    n_opp,
-                    p,
-                    &mut s.stats,
-                );
-            }
+            // Evaluate phase (parallel): each active search resolves its own slice of the batch.
+            searches.par_iter_mut().enumerate().for_each(|(si, s)| {
+                if let Some((start, n_opp)) = span_by_idx[si] {
+                    let end = start + n_opp + s.new_leaves.len();
+                    s.n_heads = n_heads;
+                    evaluate(
+                        &mut s.arena,
+                        &s.batch,
+                        &s.new_leaves,
+                        &q[start..end],
+                        n_opp,
+                        p,
+                        &mut s.stats,
+                    );
+                }
+            });
         }
 
-        for &si in &active {
-            let s = &mut searches[si];
-            for k in 0..s.new_leaves.len() {
-                let li = s.new_leaves[k];
-                if s.arena[li].depth < p.max_depth {
-                    s.frontier.push(li);
+        // Frontier phase (parallel): each active search enqueues its surviving leaves for next round.
+        searches.par_iter_mut().enumerate().for_each(|(si, s)| {
+            if span_by_idx[si].is_some() {
+                for k in 0..s.new_leaves.len() {
+                    let li = s.new_leaves[k];
+                    if s.arena[li].depth < p.max_depth {
+                        s.frontier.push(li);
+                    }
                 }
             }
-        }
+        });
     }
 
     searches
-        .into_iter()
+        .into_par_iter()
         .map(|mut s| {
             resolve(&mut s.arena, 0, p.gamma, s.n_heads);
             let values = node_action_values(&s.arena, 0, p.gamma, s.n_heads);
@@ -764,6 +781,50 @@ mod tests {
         assert_eq!(many[0].2.expansions, solo_a.2.expansions);
         assert_eq!(many[1].2.expansions, solo_b.2.expansions);
         assert_eq!(many[0].2.rounds, solo_a.2.rounds);
+    }
+
+    #[test]
+    fn parallel_search_is_thread_count_independent() {
+        // The rayon-parallel per-search work is value-neutral: running the same pooled search inside a
+        // 1-thread pool and a 4-thread pool must give bit-identical values, interior, and stats.
+        let (a, b) = two_requests();
+        let mut p = params();
+        p.expansion_budget = 24;
+        let run = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                selective_search_many(&p, vec![a.clone(), b.clone()], true, two_head_infer)
+            })
+        };
+        let one = run(1);
+        let many = run(4);
+        for i in 0..2 {
+            assert_eq!(
+                one[i].0, many[i].0,
+                "values must not depend on thread count"
+            );
+            assert_eq!(
+                one[i].1, many[i].1,
+                "interior targets must not depend on thread count"
+            );
+            assert_eq!(
+                (
+                    one[i].2.max_depth,
+                    one[i].2.expansions,
+                    one[i].2.leaves,
+                    one[i].2.rounds
+                ),
+                (
+                    many[i].2.max_depth,
+                    many[i].2.expansions,
+                    many[i].2.leaves,
+                    many[i].2.rounds
+                ),
+            );
+        }
     }
 
     #[test]

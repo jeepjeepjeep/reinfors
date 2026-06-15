@@ -27,11 +27,20 @@ The concrete snake slice is in place, differential-tested against `snake_RL` (th
   `EnsembleTreeStrapRunner` semantics: episode-end **z-mixing** of the realized return into the
   executed action, optional **interior** MAX-node targets (true TreeStrap), and a per-head
   **bootstrap mask** on every record.
-- **trainer** (`reinfors.training`, this stage) — the end-to-end actor-learner loop: an ensemble
-  Q-network (a faithful port of the oracle's, so checkpoints are interchangeable) whose forward is
-  the search's `infer` callback, regressed onto `collect`'s records with the per-head masked-Huber
-  loss. Because `infer` reads the live network, each `collect` searches with the current weights —
-  the weight sync is implicit. Optional `torch` dependency (`pip install reinfors[train]`).
+- **trainer** (`reinfors.training`) — the end-to-end actor-learner loop: an ensemble Q-network (a
+  faithful port of the oracle's, so checkpoints are interchangeable) whose forward is the search's
+  `infer` callback, regressed onto `collect`'s records with the per-head masked-Huber loss. Because
+  `infer` reads the live network, each `collect` searches with the current weights — the weight sync
+  is implicit. Optional `torch` dependency (`pip install reinfors[train]`).
+- **parallel search + benchmark** (this stage) — the per-search CPU work (expand, evaluate, back up)
+  runs in parallel across the pooled requests via rayon, with only the pooled-obs gather and the one
+  `infer` call per round serial; this is value-neutral (bit-identical regardless of thread count).
+  `scripts/benchmark.py` measures ms/decision and the parallel scaling. The benchmark's finding: on a
+  *CPU* value function the per-round cost is dominated by the serial path (obs marshalling across PyO3
+  + the `infer` call) and per-node allocation in the search, so rollout parallelism is modest (~1.1x)
+  and the search trails the pure-Python oracle; the Rust + pooling win is designed for *GPU* inference
+  (one large batched forward per round). Cutting the boundary marshalling / per-node allocation is the
+  next latency lever the benchmark points at.
 
 Generic game abstractions and the declarative builder come later, once the concrete slice is proven.
 
