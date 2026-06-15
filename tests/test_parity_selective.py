@@ -189,7 +189,7 @@ def test_selective_search_matches_oracle(
 
     agent_idx = 0 if agent_id == _A else 1
     env = _reinfors_env(state)
-    values, rein_stats = env.selective_search(
+    values, _interior, rein_stats = env.selective_search(
         agent_idx,
         _GAMMA,
         beta,
@@ -225,7 +225,7 @@ def test_selective_search_with_food_matches_oracle(agent_id: str, opponent: str,
 
     agent_idx = 0 if agent_id == _A else 1
     env = _reinfors_env(state)
-    values, rein_stats = env.selective_search(
+    values, _interior, rein_stats = env.selective_search(
         agent_idx,
         _GAMMA,
         beta,
@@ -278,4 +278,123 @@ def test_pooled_search_many_matches_oracle(opponent: str, k: int) -> None:
         oracle_values = np.asarray(oracle[idx][0])
         assert np.allclose(rein, oracle_values, atol=1e-9), f"agent {idx}: {rein} vs {oracle_values}"
         s = planner.last_stats[idx]
-        assert tuple(results[idx][1]) == (s.max_depth, s.expansions, s.leaves, s.rounds), f"agent {idx} search shape"
+        assert tuple(results[idx][2]) == (s.max_depth, s.expansions, s.leaves, s.rounds), f"agent {idx} search shape"
+
+
+@pytest.mark.parametrize("agent_id", [_A, _B])
+@pytest.mark.parametrize("opponent", ["uniform", "distributional"])
+@pytest.mark.parametrize("k", [1, 4])
+def test_interior_targets_match_oracle(agent_id: str, opponent: str, k: int) -> None:
+    # True TreeStrap: every expanded interior MAX node below the root is emitted as (obs, values). A
+    # food state gives a richer tree (eating lines), so there are interior nodes to compare. We assert
+    # the same count and, node-for-node in DFS order, identical observations and backed-up values.
+    budget, top_k, max_depth, beta = 40, 4, 8, 1.0
+    state = _food_state()
+    planner = _oracle(opponent, k, budget, top_k, max_depth, beta)
+    planner._sample_spawn = lambda snakes, food, n: _first_empty(snakes, food, n)
+    _, oracle_interior = planner.search_many(state, [(agent_id, True)])[0]
+
+    agent_idx = 0 if agent_id == _A else 1
+    env = _reinfors_env(state)
+    _, interior, _ = env.selective_search(
+        agent_idx,
+        _GAMMA,
+        beta,
+        budget,
+        top_k,
+        max_depth,
+        _REWARD_TUPLE,
+        opponent,
+        _TEMP,
+        _FLOOR,
+        lambda arr: np.stack([_q_heads(row, k) for row in arr]),
+        True,  # collect_interior
+    )
+
+    assert len(interior) == len(oracle_interior) > 0, f"{len(interior)} vs {len(oracle_interior)}"
+    for (r_obs, r_vals), (o_obs, o_vals) in zip(interior, oracle_interior, strict=True):
+        r_v = np.asarray(r_vals)
+        r_v = r_v[0] if k == 1 else r_v
+        assert np.allclose(r_v, np.asarray(o_vals), atol=1e-9)
+        assert np.array_equal(np.asarray(r_obs, dtype=np.float32), np.asarray(o_obs, dtype=np.float32).ravel())
+
+
+@pytest.mark.parametrize("outcome_weight", [0.0, 0.3, 1.0])
+@pytest.mark.parametrize("k", [1, 4])
+def test_blend_outcome_targets_matches_oracle(outcome_weight: float, k: int) -> None:
+    # z-mixing kernel: blend the realized return into the executed action's per-head entry. Compared
+    # against the oracle's EnsembleTreeStrapRunner._blend_outcome_targets on an identical trajectory.
+    # treestrap imports torch; skip (rather than error) where it is absent.
+    treestrap = pytest.importorskip("snake_rl.agent.model_based.treestrap")
+    EnsembleTrajectoryStep = treestrap.EnsembleTrajectoryStep
+    EnsembleTreeStrapRunner = treestrap.EnsembleTreeStrapRunner
+
+    rng = np.random.default_rng(0)
+    t, a = 6, 3
+    values = rng.standard_normal((t, k, a))
+    actions = [int(i % a) for i in range(t)]
+    rewards = [float(r) for r in rng.standard_normal(t)]
+    tail = rng.standard_normal(k)
+
+    oracle_traj = [EnsembleTrajectoryStep(np.zeros(1), values[i], actions[i], rewards[i]) for i in range(t)]
+    oracle_targets, _gap = EnsembleTreeStrapRunner._blend_outcome_targets(oracle_traj, _GAMMA, outcome_weight, tail)
+    oracle_arr = np.stack(oracle_targets)  # (T, K, A)
+
+    rein = np.asarray(
+        reinfors._reinfors.blend_outcome_targets(values, actions, rewards, _GAMMA, outcome_weight, list(tail))
+    )
+    assert np.allclose(rein, oracle_arr, atol=1e-12), f"{rein} vs {oracle_arr}"
+
+
+def _infer_k2(arr: object) -> np.ndarray:
+    return np.stack([_q_heads(row, 2) for row in arr])
+
+
+@pytest.mark.parametrize("survival", [0.25, -0.1])
+def test_survival_reward_matches_oracle_minimal_reward(survival: float) -> None:
+    # The truncation survival bonus reaches z-mixing by exactly snake_RL's MinimalReward contribution.
+    # A 1-tick (food-free, surviving) episode with outcome_weight=1 makes the executed action's target
+    # equal the realized return; two engines differing only in `survival` differ by MinimalReward's
+    # survived-vs-not delta, in the executed action's entry alone.
+    from snake_rl.agent.shared.reward import MinimalReward
+    from snake_rl.environment.base import StepEvent
+
+    mr = MinimalReward(step=0.0, food=0.0, loss=-10.0, draw=-6.0, kill=20.0, win=20.0, survival=survival)
+    delta = mr(StepEvent(survived_to_max_ticks=True)) - mr(StepEvent())
+
+    def engine(surv: float) -> object:
+        reward = (0.0, 0.0, -10.0, -6.0, 20.0, 20.0, surv)
+        return reinfors._reinfors.Engine(
+            2,
+            _GRID,
+            3,
+            False,
+            None,
+            0,  # 2 games, food-free
+            _GAMMA,
+            1.0,
+            24,
+            4,
+            6,  # gamma, beta, budget, top_k, max_depth
+            reward,
+            "uniform",
+            _TEMP,
+            _FLOOR,
+            0.1,
+            1,
+            2,  # epsilon, max_ticks=1, n_heads=2
+            1.0,
+            False,
+            1.0,  # outcome_weight=1, interior off, bootstrap_p=1
+            0,
+        )
+
+    _, t0, _ = engine(0.0).collect(2, _infer_k2)
+    _, ts, _ = engine(survival).collect(2, _infer_k2)
+    diff = np.asarray(ts) - np.asarray(t0)
+    assert diff.shape[0] >= 2
+    for m in range(diff.shape[0]):
+        for h in range(2):
+            changed = np.flatnonzero(np.abs(diff[m, h]) > 1e-9)
+            assert changed.size == 1, "only the executed action's target should move"
+            assert np.isclose(diff[m, h, changed[0]], delta, atol=1e-9)

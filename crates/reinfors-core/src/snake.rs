@@ -54,6 +54,9 @@ pub struct StepEvent {
     pub won: bool,
     pub lost: bool,
     pub drew: bool,
+    /// Set by the rollout engine (never by `advance` or the search) when this is a truncation tick
+    /// the snake reached alive, so the `survival` reward fires only there — matching the runner.
+    pub survived_to_max_ticks: bool,
 }
 
 pub struct SnakeEnv {

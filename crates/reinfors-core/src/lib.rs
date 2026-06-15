@@ -12,10 +12,13 @@ pub mod search;
 pub mod snake;
 
 pub use action::{Action, RelativeAction};
-pub use engine::{Engine, EngineConfig};
+pub use engine::{blend_outcome_targets, Engine, EngineConfig};
 pub use obs::egocentric;
 pub use reward::Reward;
-pub use search::{selective_search, selective_search_many, Opponent, SearchParams, SearchStats};
+pub use search::{
+    selective_search, selective_search_many, InteriorTarget, Opponent, SearchParams, SearchResult,
+    SearchStats,
+};
 pub use snake::{Cell, DeathCause, Snake, SnakeEnv, StepEvent};
 
 pub fn version() -> &'static str {
