@@ -142,6 +142,21 @@ impl Engine {
     where
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
+        // Wrap `infer` to verify the network's head count matches `cfg.n_heads`: a mismatch would
+        // otherwise be silently absorbed by the per-game head clamp (which legitimately handles
+        // all-terminal searches that return a single head) and corrupt Thompson sampling.
+        let (n_heads, a) = (self.cfg.n_heads, RELATIVE_ACTIONS.len());
+        let mut infer = move |obs: Vec<f32>, n: usize| -> Vec<f64> {
+            let out = infer(obs, n);
+            assert!(
+                n == 0 || out.len() == n * n_heads * a,
+                "infer returned {} values for {n} rows; expected n_heads ({n_heads}) x {a} actions \
+                 per row — the network's head count must equal the Engine's n_heads",
+                out.len(),
+            );
+            out
+        };
+
         let mut out: Vec<Record> = Vec::new();
 
         while out.len() < n_records {
@@ -497,7 +512,7 @@ mod tests {
 
     #[test]
     fn bootstrap_p_extremes_set_all_or_no_heads() {
-        let mut all = config(4, 3, 5);
+        let mut all = config(4, 2, 5); // n_heads matches `infer`'s 2 heads
         all.bootstrap_p = 1.0;
         for (_, _, mask) in Engine::new(all).collect(40, infer) {
             assert!(
@@ -505,11 +520,19 @@ mod tests {
                 "p=1 must include every head"
             );
         }
-        let mut none = config(4, 3, 5);
+        let mut none = config(4, 2, 5);
         none.bootstrap_p = 0.0;
         for (_, _, mask) in Engine::new(none).collect(40, infer) {
             assert!(mask.iter().all(|&m| m == 0.0), "p=0 must include no head");
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "must equal the Engine's n_heads")]
+    fn mismatched_infer_head_count_panics() {
+        // `infer` returns 2 heads but the Engine is configured for 3 — caught loudly, not silently
+        // clamped (which would corrupt Thompson sampling).
+        Engine::new(config(4, 3, 0)).collect(10, infer);
     }
 
     #[test]

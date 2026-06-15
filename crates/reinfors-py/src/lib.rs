@@ -78,6 +78,37 @@ fn validate_search_params(
     Ok(())
 }
 
+/// Reject degenerate `Engine` rollout parameters (the search block is checked separately).
+fn validate_engine_params(
+    n_games: usize,
+    max_ticks: usize,
+    n_heads: usize,
+    epsilon: f64,
+    outcome_weight: f64,
+    bootstrap_p: f64,
+) -> PyResult<()> {
+    use pyo3::exceptions::PyValueError;
+    if n_games < 1 {
+        return Err(PyValueError::new_err("n_games must be >= 1"));
+    }
+    if max_ticks < 1 {
+        return Err(PyValueError::new_err("max_ticks must be >= 1"));
+    }
+    if n_heads < 1 {
+        return Err(PyValueError::new_err("n_heads must be >= 1"));
+    }
+    for (name, v) in [
+        ("epsilon", epsilon),
+        ("outcome_weight", outcome_weight),
+        ("bootstrap_p", bootstrap_p),
+    ] {
+        if !(0.0..=1.0).contains(&v) {
+            return Err(PyValueError::new_err(format!("{name} must be in [0, 1]")));
+        }
+    }
+    Ok(())
+}
+
 /// The core's `infer` callback, wrapping the Python network forward. Obs arrive as one flat
 /// row-major `[n, dim]` buffer (moved straight into a numpy array — no copy), and per-head values
 /// `[n, K, 3]` come back as one flat row-major buffer. On a Python error the first failure is latched
@@ -463,6 +494,14 @@ impl Engine {
         seed: u64,
     ) -> PyResult<Self> {
         validate_search_params(expansion_budget, top_k, max_depth, beta)?;
+        validate_engine_params(
+            n_games,
+            max_ticks,
+            n_heads,
+            epsilon,
+            outcome_weight,
+            bootstrap_p,
+        )?;
         let opponent = match opponent {
             "uniform" => Opponent::Uniform,
             "distributional" => Opponent::Distributional {
