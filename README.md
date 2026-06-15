@@ -32,15 +32,14 @@ The concrete snake slice is in place, differential-tested against `snake_RL` (th
   `infer` callback, regressed onto `collect`'s records with the per-head masked-Huber loss. Because
   `infer` reads the live network, each `collect` searches with the current weights — the weight sync
   is implicit. Optional `torch` dependency (`pip install reinfors[train]`).
-- **parallel search + benchmark** (this stage) — the per-search CPU work (expand, evaluate, back up)
-  runs in parallel across the pooled requests via rayon, with only the pooled-obs gather and the one
-  `infer` call per round serial; this is value-neutral (bit-identical regardless of thread count).
-  `scripts/benchmark.py` measures ms/decision and the parallel scaling. The benchmark's finding: on a
-  *CPU* value function the per-round cost is dominated by the serial path (obs marshalling across PyO3
-  + the `infer` call) and per-node allocation in the search, so rollout parallelism is modest (~1.1x)
-  and the search trails the pure-Python oracle; the Rust + pooling win is designed for *GPU* inference
-  (one large batched forward per round). Cutting the boundary marshalling / per-node allocation is the
-  next latency lever the benchmark points at.
+- **parallel search + flat marshalling + benchmark** (this stage) — the per-search CPU work (expand,
+  evaluate, back up) runs in parallel across the pooled requests via rayon, with only the pooled-obs
+  gather and the one `infer` call per round serial; this is value-neutral (bit-identical regardless of
+  thread count). The `infer` boundary passes obs in and values out as single contiguous row-major
+  buffers (obs moved straight into numpy, no copy), instead of nested `Vec`s — which `scripts/benchmark.py`
+  identified as the dominant cost. Together these take a searched decision from ~25 ms to ~3 ms on a CPU
+  value function (grid 20 / 16 games / 10 heads / budget 64), ≈5x faster than the pure-Python oracle
+  and ≈1.9x from 1→10 threads; the Rust + pooling advantage compounds further with GPU inference.
 
 Generic game abstractions and the declarative builder come later, once the concrete slice is proven.
 
