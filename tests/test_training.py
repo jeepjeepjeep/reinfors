@@ -12,7 +12,9 @@ torch = pytest.importorskip("torch")
 import reinfors  # noqa: E402
 from reinfors.training import (  # noqa: E402
     BootstrappedQNetwork,
+    CollectReport,
     ReplayBuffer,
+    StepMetrics,
     make_infer,
     train,
     treestrap_loss,
@@ -81,6 +83,38 @@ def test_train_loop_runs_and_is_deterministic() -> None:
     assert len(losses1) == 8  # 4 collects x 2 grad steps (buffer fills on the first collect)
     assert all(np.isfinite(losses1))
     assert losses1 == losses2  # same net init + engine + buffer seeds -> identical loop
+
+
+def test_train_telemetry_callbacks() -> None:
+    # on_step fires once per gradient step with finite metrics; on_collect once per iteration (incl.
+    # the warm-up collect before the buffer fills) carrying the Engine telemetry + throughput, so a
+    # caller can log the loss curve, self-play learning curve, and data-gen speed.
+    net = _net(0)
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+    steps: list[StepMetrics] = []
+    reports: list[CollectReport] = []
+    losses = train(
+        _engine(7),
+        net,
+        opt,
+        iterations=4,
+        collect_size=24,
+        batch_size=16,
+        grad_steps_per_collect=2,
+        min_buffer_size=16,
+        on_step=lambda _i, m: steps.append(m),
+        on_collect=lambda _i, r: reports.append(r),
+    )
+    assert len(steps) == len(losses)
+    for m in steps:
+        assert np.isfinite(m.loss) and np.isfinite(m.mean_q) and np.isfinite(m.mean_target_q)
+    assert [m.loss for m in steps] == losses
+    assert len(reports) == 4  # one per iteration, including warm-up collects
+    for it, r in enumerate(reports):
+        assert r.iteration == it and r.records > 0 and r.seconds >= 0.0
+        assert "episodes" in r.telemetry and "mean_sigma" in r.telemetry
+        for reward_a, reward_b, length in r.telemetry["episodes"]:
+            assert length >= 1 and np.isfinite(reward_a) and np.isfinite(reward_b)
 
 
 def test_train_reuses_records() -> None:
