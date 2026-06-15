@@ -67,6 +67,35 @@ def _food_free_state() -> WorldState:
     )
 
 
+def _wall_hug_state() -> WorldState:
+    # A runs along the top wall heading Right: its Left (= Up) move goes off-grid, so the root expands
+    # into terminal edges at the very first ply (and again at each step along the wall). B is clear.
+    return WorldState(
+        snakes={
+            _A: Snake(deque([(0, 5), (0, 4), (0, 3)]), Action.RIGHT),
+            _B: Snake(deque([(6, 8), (6, 9), (6, 10)]), Action.LEFT),
+        },
+        food=set(),
+        grid_size=_GRID,
+    )
+
+
+def _dead_opp_state() -> WorldState:
+    # B is already dead, so the opponent branching takes the null path ([(None, 1.0)]) throughout —
+    # the depth-0 dead-opponent branch that the food-free geometry never reaches.
+    return WorldState(
+        snakes={
+            _A: Snake(deque([(6, 5), (6, 4), (6, 3)]), Action.RIGHT),
+            _B: Snake(deque([(2, 8), (2, 9)]), Action.LEFT, alive=False),
+        },
+        food=set(),
+        grid_size=_GRID,
+    )
+
+
+_STATES = {"food_free": _food_free_state, "wall_hug": _wall_hug_state, "dead_opp": _dead_opp_state}
+
+
 def _oracle(budget: int, top_k: int, max_depth: int, beta: float) -> SelectiveExpectimaxPlanner:
     return SelectiveExpectimaxPlanner(
         rules=CleanSnakeEnv(grid_size=_GRID, initial_food_count=0, play_to_last=True, seed=0),
@@ -104,21 +133,26 @@ def _rein_infer(arr: np.ndarray) -> np.ndarray:
     return np.stack([_q(row) for row in arr])  # arr: (N, 5*g*g); _q sums it -> identical to the oracle
 
 
-@pytest.mark.parametrize("agent_id", [_A, _B])
+# Single beta: at single-head sigma == 0, so the VOI term is inert and beta does nothing. The
+# beta sweep only becomes meaningful once heads disagree — that lives in the ensemble parity test.
+_BETA = 1.0
+
+
 @pytest.mark.parametrize(
-    ("budget", "top_k", "max_depth", "beta"),
-    [(40, 4, 8, 1.0), (24, 4, 6, 1.0), (100, 16, 4, 1.0), (40, 4, 8, 0.0), (64, 8, 12, 0.5)],
+    ("scenario", "agent_id"),
+    [("food_free", _A), ("food_free", _B), ("wall_hug", _A), ("dead_opp", _A)],
 )
-def test_selective_search_matches_oracle(agent_id: str, budget: int, top_k: int, max_depth: int, beta: float) -> None:
-    state = _food_free_state()
-    planner = _oracle(budget, top_k, max_depth, beta)
+@pytest.mark.parametrize(("budget", "top_k", "max_depth"), [(40, 4, 8), (24, 4, 6), (100, 16, 4)])
+def test_selective_search_matches_oracle(scenario: str, agent_id: str, budget: int, top_k: int, max_depth: int) -> None:
+    state = _STATES[scenario]()
+    planner = _oracle(budget, top_k, max_depth, _BETA)
     oracle_values = planner.action_values(state, agent_id)
     stats = planner.last_stats[0]
 
     agent_idx = 0 if agent_id == _A else 1
     env = _reinfors_env(state)
     values, rein_stats = env.selective_search(
-        agent_idx, _GAMMA, beta, budget, top_k, max_depth, _REWARD_TUPLE, _rein_infer
+        agent_idx, _GAMMA, _BETA, budget, top_k, max_depth, _REWARD_TUPLE, _rein_infer
     )
 
     assert np.allclose(values, oracle_values, atol=1e-9), f"values: {values} vs {oracle_values}"
