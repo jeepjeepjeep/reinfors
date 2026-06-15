@@ -13,11 +13,53 @@ crates/reinfors-py     PyO3 bindings -> compiled module `reinfors._reinfors`
 python/reinfors/       ergonomic Python API (the declarative game builder) — grows over time
 ```
 
-## Status: Phase 1
+## Status
 
-Porting `snake_RL`'s `CleanSnakeEnv` dynamics + egocentric observation into `reinfors-core`,
-differential-tested against the Python implementation (the oracle). Generic game abstractions and
-the declarative builder come later, once the concrete slice is proven and measured.
+The concrete snake slice is in place, differential-tested against `snake_RL` (the oracle):
+
+- **env + egocentric observation** — bit-identical to `CleanSnakeEnv`.
+- **selective expectimax search** — per-head ensemble (σ-VOI priority), uniform and distributional
+  deferred opponents, in-tree apple spawning (deterministic first-empty belief, with `food_samples`
+  Monte-Carlo fan-out of eating branches), and pooled cross-game `search_many` (one batched `infer`
+  per round across all games). Leaf values come from a Python inference callback.
+- **rollout `Engine`** — drives N parallel games (apples spawned uniformly per game) through the
+  pooled search, Thompson-samples a head per game, and `collect`s training records with the full
+  `EnsembleTreeStrapRunner` semantics: episode-end **z-mixing** of the realized return into the
+  executed action, optional **interior** MAX-node targets (true TreeStrap), and a per-head
+  **bootstrap mask** on every record.
+- **trainer** (`reinfors.training`) — the end-to-end actor-learner loop: an ensemble Q-network (a
+  faithful port of the oracle's, so checkpoints are interchangeable) whose forward is the search's
+  `infer` callback. Each iteration pushes `collect`'s records into a ring `ReplayBuffer` (a port of
+  the oracle's `EnsembleTreeStrapBuffer`) and takes several gradient steps on sampled minibatches with
+  the per-head masked-Huber loss — off-policy replay that reuses each (expensive) searched record many
+  times and decorrelates updates. Because `infer` reads the live network, each `collect` searches with
+  the current weights — the weight sync is implicit. Optional `torch` dependency (`pip install reinfors[train]`).
+- **parallel search + flat marshalling + benchmark** (this stage) — the per-search CPU work (expand,
+  evaluate, back up) runs in parallel across the pooled requests via rayon, with only the pooled-obs
+  gather and the one `infer` call per round serial; this is value-neutral (bit-identical regardless of
+  thread count). The `infer` boundary passes obs in and values out as single contiguous row-major
+  buffers (obs moved straight into numpy, no copy) instead of nested `Vec`s. On a **release** build
+  (CPU value function, grid 20 / 16 games / 10 heads / budget 64) `scripts/benchmark.py` measures
+  ~2.4 ms per searched decision — about **6x faster than the pure-Python oracle**, with the flat
+  boundary worth ~1.6x over nested-`Vec` marshalling and rayon ~1.3x from 1→10 threads. (Benchmark
+  only a release build — a debug extension inflates reinfors' per-search cost several-fold and is
+  meaningless.)
+- **GPU validation** (this stage) — the pipeline runs end to end on a real `BootstrappedQNetwork` on
+  the GPU (MPS): `make_infer(net, "mps")` serves the search, gradient steps run on-device, and the
+  forward matches CPU within float tolerance (all MPS-gated tests). `scripts/benchmark.py --net
+  --device mps` confirms the founding premise — **pooling is what makes the GPU win**: with the real
+  10-head conv net (grid 20, budget 64) a solo search ties CPU vs MPS (~30 ms/decision, MPS launch
+  overhead cancels its compute edge), but the pooled per-round batch grows MPS to **~3.9x at 8 games
+  and ~6.1x at 32** (≈4 ms/decision) over CPU inference, and rising with pool size. Against snake_RL's
+  planner on the *same* MPS net and pooling (`--baseline --net`), reinfors is ~3-4x faster pooled
+  (0.34x at 8 games, 0.24x at 32). Decomposing that with the pool=1 control (single search, so no
+  rayon parallelism): the raw Rust-vs-Python *search* gap is ~10x when the search dominates (pool=1, a
+  cheap CPU value fn), but only ~1.3x with the real net at pool=1 — there the tiny per-round batch
+  leaves both pinned on un-amortized GPU launches. So reinfors' pooled GPU lead over snake_RL is
+  mostly pooling + parallelising the search across cores (which the GIL denies the Python planner),
+  with the search-implementation gap re-emerging as the per-decision GPU cost shrinks.
+
+Generic game abstractions and the declarative builder come later, once the concrete slice is proven.
 
 ## Build
 

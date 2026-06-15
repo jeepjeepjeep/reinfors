@@ -9,13 +9,23 @@
 //!
 //! The tree is an arena (`Vec<Node>` indexed by `usize`) so the frontier can hold node references
 //! without fighting the borrow checker.
+//!
+//! When a move eats an apple in-tree, a replacement is spawned at the first unoccupied cell
+//! (row-major). This deterministic spawn belief is bit-reproducible across Rust and Python, so the
+//! differential test injects the same rule into the oracle — unlike the env's true RNG spawn, which
+//! Option B treats as injected input. `food_samples > 1` fans each eating branch into that many
+//! equally-weighted sub-branches (the Monte-Carlo spawn structure, matching the oracle); under the
+//! deterministic spawn the sub-branches are identical, so it only adds value once the spawn belief is
+//! stochastic — the production config uses a single sample.
 
 use std::collections::HashSet;
+
+use rayon::prelude::*;
 
 use crate::action::{relative_to_absolute, Action, RELATIVE_ACTIONS};
 use crate::obs::egocentric_parts;
 use crate::reward::Reward;
-use crate::snake::{Cell, Snake, SnakeEnv};
+use crate::snake::{first_empty_cell, Cell, Snake, SnakeEnv};
 
 /// The agent's belief about the opponent's move distribution.
 pub enum Opponent {
@@ -36,6 +46,10 @@ pub struct SearchParams {
     pub expansion_budget: usize,
     pub top_k: usize,
     pub max_depth: i32,
+    /// Monte-Carlo apple-spawn samples per eaten-apple branch (>= 1). With the deterministic
+    /// first-empty spawn belief the samples are identical, so this is the fan-out structure a
+    /// stochastic spawn would populate; 1 disables it.
+    pub food_samples: usize,
     pub reward: Reward,
     pub opponent: Opponent,
 }
@@ -48,12 +62,22 @@ pub struct SearchStats {
     pub rounds: usize,
 }
 
+/// An interior MAX node's TreeStrap target: its observation and per-head backed-up action values
+/// `[K][A]`. Collected (when requested) for every expanded non-terminal node below the root.
+pub type InteriorTarget = (Vec<f32>, Vec<Vec<f64>>);
+
+/// Per-request search output: root per-head action values `[K][A]`, interior TreeStrap targets (empty
+/// unless `collect_interior`), and the search diagnostics.
+pub type SearchResult = (Vec<Vec<f64>>, Vec<InteriorTarget>, SearchStats);
+
 /// A committed agent action's chance branch. `weight` is the resolved chance probability; for a
 /// deferred (distributional) opponent it is filled in during evaluation from `deferred = (opp obs
-/// index this round, opponent action index)`.
+/// index this round, opponent action index)`. `scale` (1/food_samples on a fanned-out branch, else 1)
+/// multiplies the deferred weight at resolution; fixed weights are pre-scaled at construction.
 struct Branch {
     weight: f64,
     deferred: Option<(usize, usize)>,
+    scale: f64,
     reward: f64,
     child: usize,
 }
@@ -157,83 +181,149 @@ fn expand_round(s: &mut Search, p: &SearchParams, first: bool) {
     s.stats.rounds += 1;
 }
 
+/// Apply `f(search_index, &mut search)` to every search, in parallel (rayon) when `parallel`, else
+/// serially. The per-search work is independent, so this is value-neutral either way; the serial path
+/// avoids rayon's per-dispatch cost when the active pool is too small to win from it.
+fn for_each_search<F>(searches: &mut [Search], parallel: bool, f: F)
+where
+    F: Fn(usize, &mut Search) + Sync,
+{
+    if parallel {
+        searches
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, s)| f(i, s));
+    } else {
+        for (i, s) in searches.iter_mut().enumerate() {
+            f(i, s);
+        }
+    }
+}
+
 /// Run several best-first searches over (possibly different) states in lockstep, pooling each round's
 /// opponent + leaf observations across all active searches into ONE `infer` call. Pooling does not
 /// change any individual search's result — each reads only its own slice of the batched output — so
 /// it is a pure throughput win when `infer` is a GPU network. Returns per-request (values, stats).
+///
+/// The per-search CPU work (expand, evaluate, back up) is independent across searches, so it runs in
+/// parallel via rayon; only the pooled-observation gather and the single `infer` call per round are
+/// serial. This is value-neutral: every search is deterministic and reads only its own state, so the
+/// result is bit-identical to a sequential run regardless of thread count. `infer` is never called
+/// off the calling thread, so a Python `infer` callback keeps the GIL on one thread.
 pub fn selective_search_many<F>(
     p: &SearchParams,
     requests: Vec<([Snake; 2], HashSet<Cell>, usize)>,
+    collect_interior: bool,
     mut infer: F,
-) -> Vec<(Vec<Vec<f64>>, SearchStats)>
+) -> Vec<SearchResult>
 where
-    F: FnMut(&[Vec<f32>]) -> Vec<Vec<Vec<f64>>>,
+    // `infer(obs_flat, n_rows) -> values_flat`: obs is one contiguous row-major `[n_rows, dim]` buffer
+    // (moved in, so the binding hands it to numpy with no copy); values come back as one contiguous
+    // row-major `[n_rows, K, A]` buffer (K inferred from its length). Flat on both sides avoids the
+    // per-row obs clones and the per-leaf nested-`Vec` allocations the boundary would otherwise incur.
+    F: FnMut(Vec<f32>, usize) -> Vec<f64>,
 {
     let mut searches: Vec<Search> = requests
         .into_iter()
         .map(|(s, f, a)| Search::new(s, f, a))
         .collect();
+    let budget = p.expansion_budget;
     let mut first = true;
     loop {
         let active: Vec<usize> = (0..searches.len())
-            .filter(|&i| searches[i].active(p.expansion_budget))
+            .filter(|&i| searches[i].active(budget))
             .collect();
         if active.is_empty() {
             break;
         }
-        for &si in &active {
-            expand_round(&mut searches[si], p, first);
-        }
-        first = false;
+        // Parallelize across searches only when the active pool is large enough to amortize rayon's
+        // per-dispatch cost; a solo search (e.g. `selective_search`) or a near-dead pool runs serially.
+        let parallel = active.len() >= 2;
 
-        // Pool this round's observations across all active searches into a single batch; each search's
-        // rows are contiguous as [its opponent rows .. its leaf rows].
-        let mut big_obs: Vec<Vec<f32>> = Vec::new();
-        let mut spans: Vec<(usize, usize)> = Vec::new(); // per active search: (start, n_opp)
-        for &si in &active {
-            let s = &searches[si];
-            let start = big_obs.len();
-            big_obs.extend(s.opp_obs.iter().cloned());
-            big_obs.extend(s.new_leaves.iter().map(|&li| s.arena[li].obs.clone()));
-            spans.push((start, s.opp_obs.len()));
-        }
-        if !big_obs.is_empty() {
-            let q = infer(&big_obs);
-            let n_heads = q[0].len();
-            for (idx, &si) in active.iter().enumerate() {
-                let (start, n_opp) = spans[idx];
-                let s = &mut searches[si];
-                let end = start + n_opp + s.new_leaves.len();
-                s.n_heads = n_heads;
-                evaluate(
-                    &mut s.arena,
-                    &s.batch,
-                    &s.new_leaves,
-                    &q[start..end],
-                    n_opp,
-                    p,
-                    &mut s.stats,
-                );
-            }
-        }
-
-        for &si in &active {
-            let s = &mut searches[si];
-            for k in 0..s.new_leaves.len() {
-                let li = s.new_leaves[k];
-                if s.arena[li].depth < p.max_depth {
-                    s.frontier.push(li);
+        // Build phase: each active search expands its top-k one ply (staging leaves + opp observations)
+        // and enqueues its surviving leaves for a future round. Folding the frontier push in here —
+        // rather than a separate parallel pass — drops a barrier per round; the push needs only the
+        // leaves' depths (known after expansion), not the not-yet-computed leaf values. Re-checking
+        // `active` inside is equivalent to the list above (nothing mutates between).
+        for_each_search(&mut searches, parallel, |_, s| {
+            if s.active(budget) {
+                expand_round(s, p, first);
+                for k in 0..s.new_leaves.len() {
+                    let li = s.new_leaves[k];
+                    if s.arena[li].depth < p.max_depth {
+                        s.frontier.push(li);
+                    }
                 }
             }
+        });
+        first = false;
+
+        // Pool this round's observations across all active searches into one contiguous row-major
+        // buffer (serial: order matters), recording each search's row span. `span_by_idx[si].is_some()`
+        // marks "active this round". `row_start` is a row index into the batch / the returned values.
+        let mut obs_flat: Vec<f32> = Vec::new();
+        let mut span_by_idx: Vec<Option<(usize, usize)>> = vec![None; searches.len()]; // (row_start, n_opp)
+        let mut n_rows = 0;
+        for &si in &active {
+            let s = &searches[si];
+            let row_start = n_rows;
+            for o in &s.opp_obs {
+                obs_flat.extend_from_slice(o);
+            }
+            for &li in &s.new_leaves {
+                obs_flat.extend_from_slice(&s.arena[li].obs);
+            }
+            n_rows += s.opp_obs.len() + s.new_leaves.len();
+            span_by_idx[si] = Some((row_start, s.opp_obs.len()));
+        }
+        if n_rows > 0 {
+            let a = RELATIVE_ACTIONS.len();
+            let q = infer(obs_flat, n_rows); // serial: the (GPU/Python) network forward, flat in/out
+            let n_heads = q.len() / (n_rows * a);
+            // Evaluate phase: each active search resolves its own row span of the batch.
+            for_each_search(&mut searches, parallel, |si, s| {
+                if let Some((row_start, n_opp)) = span_by_idx[si] {
+                    let rows = n_opp + s.new_leaves.len();
+                    let slice = &q[row_start * n_heads * a..(row_start + rows) * n_heads * a];
+                    s.n_heads = n_heads;
+                    evaluate(
+                        &mut s.arena,
+                        &s.batch,
+                        &s.new_leaves,
+                        slice,
+                        n_opp,
+                        n_heads,
+                        p,
+                        &mut s.stats,
+                    );
+                }
+            });
         }
     }
 
     searches
-        .into_iter()
+        .into_par_iter()
         .map(|mut s| {
             resolve(&mut s.arena, 0, p.gamma, s.n_heads);
-            let values = root_action_values(&s.arena, p.gamma, s.n_heads);
-            (values, s.stats)
+            let values = node_action_values(&s.arena, 0, p.gamma, s.n_heads);
+            let mut interior: Vec<InteriorTarget> = Vec::new();
+            if collect_interior && s.arena[0].edges.is_some() {
+                // Walk the expanded tree below the root (the root itself is the decision recorded as
+                // `values`), DFS in edge-then-branch order to match the oracle.
+                let root_edges = take_edges(&s.arena, 0);
+                for edge in &root_edges {
+                    for &(_, _, child) in edge {
+                        collect_interior_targets(
+                            &s.arena,
+                            child,
+                            p.gamma,
+                            s.n_heads,
+                            &mut interior,
+                        );
+                    }
+                }
+            }
+            (values, interior, s.stats)
         })
         .collect()
 }
@@ -244,43 +334,54 @@ pub fn selective_search<F>(
     snakes: [Snake; 2],
     food: HashSet<Cell>,
     agent: usize,
+    collect_interior: bool,
     infer: F,
-) -> (Vec<Vec<f64>>, SearchStats)
+) -> SearchResult
 where
-    F: FnMut(&[Vec<f32>]) -> Vec<Vec<Vec<f64>>>,
+    F: FnMut(Vec<f32>, usize) -> Vec<f64>,
 {
-    selective_search_many(p, vec![(snakes, food, agent)], infer)
+    selective_search_many(p, vec![(snakes, food, agent)], collect_interior, infer)
         .pop()
         .unwrap()
 }
 
 /// Resolve a round's batched forward: opponent rows -> chance weights, leaf rows -> per-head
-/// bootstrap + sigma, then write branch weights and child path-weights.
+/// bootstrap + sigma, then write branch weights and child path-weights. `q` is this search's flat
+/// row-major slice `[rows, k, A]`; row `r`'s `[k, A]` block is `q[r*k*A .. (r+1)*k*A]`.
+#[allow(clippy::too_many_arguments)]
 fn evaluate(
     arena: &mut [Node],
     batch: &[usize],
     new_leaves: &[usize],
-    q: &[Vec<Vec<f64>>],
+    q: &[f64],
     n_opp: usize,
+    k: usize,
     p: &SearchParams,
     stats: &mut SearchStats,
 ) {
+    let a = RELATIVE_ACTIONS.len();
+    let row = |r: usize| -> &[f64] { &q[r * k * a..(r + 1) * k * a] }; // [k, A], head-major
+
     // Opponent move probabilities from the head-mean Q (shared across heads, so chance weights stay
     // scalar and sigma reflects only the agent's own value disagreement).
     let opp_probs: Vec<Vec<f64>> = (0..n_opp)
         .map(|i| match &p.opponent {
             Opponent::Distributional { temperature, floor } => {
-                softmax_floor(&head_mean(&q[i]), *temperature, *floor)
+                softmax_floor(&head_mean(row(i), k, a), *temperature, *floor)
             }
             Opponent::Uniform => Vec::new(), // uniform registers no opponent observations
         })
         .collect();
 
     for (j, &li) in new_leaves.iter().enumerate() {
-        let leaf_q = &q[n_opp + j]; // [K][A]
-        let boot: Vec<f64> = leaf_q
-            .iter()
-            .map(|row| row.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+        let leaf_q = row(n_opp + j); // [k, A]
+        let boot: Vec<f64> = (0..k)
+            .map(|h| {
+                leaf_q[h * a..(h + 1) * a]
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max)
+            })
             .collect();
         arena[li].sigma = std(&boot);
         arena[li].bootstrap = boot;
@@ -297,7 +398,7 @@ fn evaluate(
             for (ei, edge) in edges.iter().enumerate() {
                 for (bi, b) in edge.branches.iter().enumerate() {
                     let w = match b.deferred {
-                        Some((oi, si)) => opp_probs[oi][si],
+                        Some((oi, si)) => opp_probs[oi][si] * b.scale,
                         None => b.weight,
                     };
                     weight_updates.push((ni, ei, bi, w));
@@ -388,7 +489,6 @@ fn expand_node(
             if let Some(oa) = opp_abs {
                 moves[opp] = Some(*oa);
             }
-            // Food-free root => no eating => spawn closure is never called.
             let mut sim = SnakeEnv::from_parts(
                 p.grid_size,
                 p.initial_length,
@@ -400,24 +500,79 @@ fn expand_node(
             let events = sim.advance(moves, || None);
             let reward = p.reward.eval(&events[agent]);
 
-            let child = if sim.done || !sim.snakes[agent].alive {
-                push_node(arena, sim.snakes, sim.food, Vec::new(), depth + 1, true)
+            // In-tree apple respawn: one replacement per eaten apple, in snake order so each spawn
+            // sees the prior one's cell as occupied (matching the oracle's advance). The spawn model
+            // is the deterministic first-empty belief (see module docs); it only affects child state,
+            // so it is applied after advance rather than threaded through it.
+            for ev in events.iter() {
+                if ev.ate_food {
+                    if let Some(cell) = first_empty_cell(&sim.snakes, &sim.food, p.grid_size) {
+                        sim.food.insert(cell);
+                    }
+                }
+            }
+
+            // food_samples Monte-Carlo fan-out: an eaten apple's replacement is a chance event, so an
+            // eating branch splits into `food_samples` equally-weighted sub-branches (matching the
+            // oracle). Under the deterministic first-empty spawn the sub-branches are identical (see
+            // module docs) — this is the structure a stochastic spawn belief would populate. The 1/k
+            // weight goes onto fixed branches directly; for deferred (distributional) ones it rides
+            // `scale`, applied to the resolved opponent probability during evaluation.
+            let terminal = sim.done || !sim.snakes[agent].alive;
+            let ate = events.iter().any(|e| e.ate_food);
+            let n = if ate && p.food_samples > 1 {
+                p.food_samples
             } else {
-                let obs = egocentric_parts(&sim.snakes, &sim.food, p.grid_size, agent);
-                let idx = push_node(arena, sim.snakes, sim.food, obs, depth + 1, false);
-                new_leaves.push(idx);
-                idx
+                1
             };
-            let (weight, deferred) = match *bw {
-                BranchWeight::Fixed(f) => (f, None),
-                BranchWeight::Deferred(oi, si) => (0.0, Some((oi, si))),
+            let (weight, deferred, scale) = match *bw {
+                BranchWeight::Fixed(f) => (f / n as f64, None, 1.0),
+                BranchWeight::Deferred(oi, si) => (0.0, Some((oi, si)), 1.0 / n as f64),
             };
-            branches.push(Branch {
-                weight,
-                deferred,
-                reward,
-                child,
-            });
+            if n == 1 {
+                // common path: move the single child's state in (no clone)
+                let child = if terminal {
+                    push_node(arena, sim.snakes, sim.food, Vec::new(), depth + 1, true)
+                } else {
+                    let obs = egocentric_parts(&sim.snakes, &sim.food, p.grid_size, agent);
+                    let idx = push_node(arena, sim.snakes, sim.food, obs, depth + 1, false);
+                    new_leaves.push(idx);
+                    idx
+                };
+                branches.push(Branch {
+                    weight,
+                    deferred,
+                    scale,
+                    reward,
+                    child,
+                });
+            } else {
+                let obs = if terminal {
+                    Vec::new()
+                } else {
+                    egocentric_parts(&sim.snakes, &sim.food, p.grid_size, agent)
+                };
+                for _ in 0..n {
+                    let child = push_node(
+                        arena,
+                        sim.snakes.clone(),
+                        sim.food.clone(),
+                        obs.clone(),
+                        depth + 1,
+                        terminal,
+                    );
+                    if !terminal {
+                        new_leaves.push(child);
+                    }
+                    branches.push(Branch {
+                        weight,
+                        deferred,
+                        scale,
+                        reward,
+                        child,
+                    });
+                }
+            }
         }
         edges.push(Edge { branches });
     }
@@ -507,11 +662,12 @@ fn edge_value(arena: &[Node], branches: &[(f64, f64, usize)], gamma: f64, k: usi
     acc
 }
 
-/// Root action values as `[K][A]` (per head, per relative action).
-fn root_action_values(arena: &[Node], gamma: f64, k: usize) -> Vec<Vec<f64>> {
-    let edges = match &arena[0].edges {
+/// A decision node's action values as `[K][A]` (per head, per relative action) — the chance-averaged
+/// value of each agent action. Used for both the root target and interior TreeStrap targets.
+fn node_action_values(arena: &[Node], idx: usize, gamma: f64, k: usize) -> Vec<Vec<f64>> {
+    let edges = match &arena[idx].edges {
         None => return vec![vec![0.0; RELATIVE_ACTIONS.len()]; k],
-        Some(_) => take_edges(arena, 0),
+        Some(_) => take_edges(arena, idx),
     };
     let per_action: Vec<Vec<f64>> = edges
         .iter()
@@ -522,11 +678,34 @@ fn root_action_values(arena: &[Node], gamma: f64, k: usize) -> Vec<Vec<f64>> {
         .collect() // -> [K][A]
 }
 
-fn head_mean(q: &[Vec<f64>]) -> Vec<f64> {
-    let k = q.len();
-    let a = q[0].len();
+/// DFS-collect every expanded non-terminal MAX node at or below `idx` as `(obs, [K][A] values)` —
+/// true TreeStrap data. Terminal and unexpanded-frontier nodes are skipped (no backed-up values).
+fn collect_interior_targets(
+    arena: &[Node],
+    idx: usize,
+    gamma: f64,
+    k: usize,
+    out: &mut Vec<InteriorTarget>,
+) {
+    if arena[idx].terminal || arena[idx].edges.is_none() {
+        return;
+    }
+    out.push((
+        arena[idx].obs.clone(),
+        node_action_values(arena, idx, gamma, k),
+    ));
+    let edges = take_edges(arena, idx);
+    for edge in &edges {
+        for &(_, _, child) in edge {
+            collect_interior_targets(arena, child, gamma, k, out);
+        }
+    }
+}
+
+/// Per-action mean over heads of one node's flat `[k, A]` (head-major) Q block.
+fn head_mean(row: &[f64], k: usize, a: usize) -> Vec<f64> {
     (0..a)
-        .map(|j| (0..k).map(|h| q[h][j]).sum::<f64>() / k as f64)
+        .map(|j| (0..k).map(|h| row[h * a + j]).sum::<f64>() / k as f64)
         .collect()
 }
 
@@ -575,6 +754,7 @@ mod tests {
             expansion_budget: 30,
             top_k: 4,
             max_depth: 6,
+            food_samples: 1,
             reward: Reward {
                 step: 0.0,
                 food: 0.0,
@@ -597,9 +777,10 @@ mod tests {
             snake(&[(6, 6), (6, 7), (6, 8)], Action::Left), // opponent, far away
         ];
         let p = params();
-        let (values, stats) = selective_search(&p, snakes, HashSet::new(), 0, |obs| {
-            vec![vec![vec![0.0; 3]]; obs.len()]
-        });
+        let (values, _interior, stats) =
+            selective_search(&p, snakes, HashSet::new(), 0, false, |_obs, n| {
+                vec![0.0; n * 3]
+            });
         let v = &values[0]; // single head
         assert!(
             (v[0] - (-10.0)).abs() < 1e-9,
@@ -626,33 +807,30 @@ mod tests {
         ];
         let mut p = params();
         p.expansion_budget = 24;
-        let (values, stats) = selective_search(&p, snakes, HashSet::new(), 0, |obs| {
-            obs.iter()
-                .map(|o| {
-                    let s = o.iter().sum::<f32>() as f64;
-                    vec![
-                        vec![s.sin(), s.cos(), (s * 0.5).sin()],
-                        vec![(s + 1.0).sin(), s.cos(), (s * 0.3).sin()],
-                    ]
-                })
-                .collect()
-        });
+        let (values, _interior, stats) =
+            selective_search(&p, snakes, HashSet::new(), 0, false, two_head_infer);
         assert_eq!(values.len(), 2); // two heads
         assert_eq!(values[0].len(), 3);
         assert!(stats.expansions > 0);
     }
 
-    // Two disagreeing heads, sum-dependent — exercises sigma + the VOI priority under pooling.
-    fn two_head_infer(obs: &[Vec<f32>]) -> Vec<Vec<Vec<f64>>> {
-        obs.iter()
-            .map(|o| {
-                let s = o.iter().sum::<f32>() as f64;
-                vec![
-                    vec![s.sin(), s.cos(), (s * 0.5).sin()],
-                    vec![(s + 1.0).sin(), (s * 0.3).cos(), (s * 0.2).sin()],
-                ]
-            })
-            .collect()
+    // Two disagreeing heads, sum-dependent — exercises sigma + the VOI priority under pooling. Flat
+    // `(obs[n*dim], n) -> values[n*2*3]` (head-major rows), matching the new infer interface.
+    fn two_head_infer(obs: Vec<f32>, n: usize) -> Vec<f64> {
+        let dim = obs.len() / n;
+        let mut out = Vec::with_capacity(n * 2 * 3);
+        for i in 0..n {
+            let s = obs[i * dim..(i + 1) * dim].iter().sum::<f32>() as f64;
+            out.extend_from_slice(&[
+                s.sin(),
+                s.cos(),
+                (s * 0.5).sin(), // head 0
+                (s + 1.0).sin(),
+                (s * 0.3).cos(),
+                (s * 0.2).sin(), // head 1
+            ]);
+        }
+        out
     }
 
     type Request = ([Snake; 2], HashSet<Cell>, usize);
@@ -682,17 +860,61 @@ mod tests {
         let (a, b) = two_requests();
         let mut p = params();
         p.expansion_budget = 24;
-        let many = selective_search_many(&p, vec![a.clone(), b.clone()], two_head_infer);
-        let solo_a = selective_search(&p, a.0.clone(), a.1.clone(), a.2, two_head_infer);
-        let solo_b = selective_search(&p, b.0.clone(), b.1.clone(), b.2, two_head_infer);
+        let many = selective_search_many(&p, vec![a.clone(), b.clone()], false, two_head_infer);
+        let solo_a = selective_search(&p, a.0.clone(), a.1.clone(), a.2, false, two_head_infer);
+        let solo_b = selective_search(&p, b.0.clone(), b.1.clone(), b.2, false, two_head_infer);
         assert_eq!(
             many[0].0, solo_a.0,
             "pooled values must equal the solo search"
         );
         assert_eq!(many[1].0, solo_b.0);
-        assert_eq!(many[0].1.expansions, solo_a.1.expansions);
-        assert_eq!(many[1].1.expansions, solo_b.1.expansions);
-        assert_eq!(many[0].1.rounds, solo_a.1.rounds);
+        assert_eq!(many[0].2.expansions, solo_a.2.expansions);
+        assert_eq!(many[1].2.expansions, solo_b.2.expansions);
+        assert_eq!(many[0].2.rounds, solo_a.2.rounds);
+    }
+
+    #[test]
+    fn parallel_search_is_thread_count_independent() {
+        // The rayon-parallel per-search work is value-neutral: running the same pooled search inside a
+        // 1-thread pool and a 4-thread pool must give bit-identical values, interior, and stats.
+        let (a, b) = two_requests();
+        let mut p = params();
+        p.expansion_budget = 24;
+        let run = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                selective_search_many(&p, vec![a.clone(), b.clone()], true, two_head_infer)
+            })
+        };
+        let one = run(1);
+        let many = run(4);
+        for i in 0..2 {
+            assert_eq!(
+                one[i].0, many[i].0,
+                "values must not depend on thread count"
+            );
+            assert_eq!(
+                one[i].1, many[i].1,
+                "interior targets must not depend on thread count"
+            );
+            assert_eq!(
+                (
+                    one[i].2.max_depth,
+                    one[i].2.expansions,
+                    one[i].2.leaves,
+                    one[i].2.rounds
+                ),
+                (
+                    many[i].2.max_depth,
+                    many[i].2.expansions,
+                    many[i].2.leaves,
+                    many[i].2.rounds
+                ),
+            );
+        }
     }
 
     #[test]
@@ -703,18 +925,18 @@ mod tests {
         p.expansion_budget = 24;
 
         let pooled = Counter::new(0usize);
-        selective_search_many(&p, vec![a.clone(), b.clone()], |o| {
+        selective_search_many(&p, vec![a.clone(), b.clone()], false, |o, n| {
             pooled.set(pooled.get() + 1);
-            two_head_infer(o)
+            two_head_infer(o, n)
         });
         let solo = Counter::new(0usize);
-        selective_search(&p, a.0.clone(), a.1.clone(), a.2, |o| {
+        selective_search(&p, a.0.clone(), a.1.clone(), a.2, false, |o, n| {
             solo.set(solo.get() + 1);
-            two_head_infer(o)
+            two_head_infer(o, n)
         });
-        selective_search(&p, b.0.clone(), b.1.clone(), b.2, |o| {
+        selective_search(&p, b.0.clone(), b.1.clone(), b.2, false, |o, n| {
             solo.set(solo.get() + 1);
-            two_head_infer(o)
+            two_head_infer(o, n)
         });
         assert!(
             pooled.get() < solo.get(),
@@ -735,11 +957,12 @@ mod tests {
         ];
         let p = params(); // uniform opponent, loss = -10
         let mut calls = 0usize;
-        let results = selective_search_many(&p, vec![(snakes, HashSet::new(), 0)], |obs| {
-            calls += 1;
-            vec![vec![vec![0.0; 3]]; obs.len()]
-        });
-        let (values, stats) = &results[0];
+        let results =
+            selective_search_many(&p, vec![(snakes, HashSet::new(), 0)], false, |_obs, n| {
+                calls += 1;
+                vec![0.0; n * 3]
+            });
+        let (values, _interior, stats) = &results[0];
         assert_eq!(
             calls, 0,
             "no observations this round -> infer must not be called"
@@ -757,5 +980,36 @@ mod tests {
         }
         assert_eq!(stats.leaves, 0);
         assert_eq!(stats.expansions, 1);
+    }
+
+    #[test]
+    fn food_samples_fans_out_only_eating_branches() {
+        // Agent mid-grid heading Right with an apple directly ahead; opponent dead (one opp branch per
+        // edge). In a single root expansion only Forward eats, so food_samples=3 turns its one child
+        // into three while Left/Right keep one each: 3 leaves at k=1 -> 5 at k=3.
+        let snakes = [
+            snake(&[(6, 5), (6, 4), (6, 3)], Action::Right),
+            Snake {
+                body: [(0, 0), (1, 0)].into_iter().collect(),
+                direction: Action::Down,
+                alive: false,
+            },
+        ];
+        let food: HashSet<Cell> = [(6, 6)].into_iter().collect();
+        let infer = |_o: Vec<f32>, n: usize| vec![0.0; n * 3]; // single head, zero values
+        let leaves = |samples: usize| {
+            let mut p = params();
+            p.expansion_budget = 1; // one expansion: just the root
+            p.food_samples = samples;
+            selective_search(&p, snakes.clone(), food.clone(), 0, false, infer)
+                .2
+                .leaves
+        };
+        assert_eq!(leaves(1), 3);
+        assert_eq!(
+            leaves(3),
+            5,
+            "the eating (Forward) branch fans 1 -> 3; the others are unchanged"
+        );
     }
 }

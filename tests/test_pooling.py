@@ -51,9 +51,9 @@ def test_pooled_matches_solo_and_issues_fewer_forwards() -> None:
     solo1 = e1.selective_search(1, *args)
     solo_calls, solo_batch = calls["n"], calls["max_batch"]
 
-    # Pooling must not change any individual result.
-    assert np.allclose(pooled[0][0], solo0[0]) and pooled[0][1] == solo0[1]
-    assert np.allclose(pooled[1][0], solo1[0]) and pooled[1][1] == solo1[1]
+    # Pooling must not change any individual result (values at [0], search stats at [2]).
+    assert np.allclose(pooled[0][0], solo0[0]) and pooled[0][2] == solo0[2]
+    assert np.allclose(pooled[1][0], solo1[0]) and pooled[1][2] == solo1[2]
     # ...but it batches: fewer, larger forwards.
     assert pooled_calls < solo_calls, f"pooled forwards {pooled_calls} vs solo {solo_calls}"
     assert pooled_batch > solo_batch, f"pooled batch {pooled_batch} vs solo {solo_batch}"
@@ -86,3 +86,9 @@ def test_search_rejects_bad_params(budget: int, top_k: int, max_depth: int, beta
         reinfors._reinfors.selective_search_many(
             [e0], [0], _GAMMA, beta, budget, top_k, max_depth, _REWARD, "uniform", _TEMP, _FLOOR, _infer
         )
+
+
+def test_search_rejects_food_samples_zero() -> None:
+    e0 = _env([(6, 5), (6, 4), (6, 3)], 3, [(2, 8), (2, 9), (1, 9)], 2)
+    with pytest.raises(ValueError, match="food_samples"):
+        e0.selective_search(0, _GAMMA, 1.0, 40, 4, 8, _REWARD, "uniform", _TEMP, _FLOOR, _infer, False, 0)
