@@ -112,14 +112,21 @@ def treestrap_loss(q: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) ->
 def make_infer(net: BootstrappedQNetwork, device: str | torch.device = "cpu") -> Callable[[np.ndarray], np.ndarray]:
     """Build the `infer` callback the search calls: an (N, C*H*W) float32 batch -> (N, K, A) float64
     per-head action values, a no-grad forward of `net` on `device`. Closes over the live network, so
-    successive searches automatically use the latest weights."""
+    successive searches automatically use the latest weights.
+
+    Runs the forward in eval mode (correct inference if BatchNorm/Dropout are ever added) but restores
+    the net's prior mode afterwards, so `infer` is side-effect-free w.r.t. training mode. Upcasts to
+    float64 on the host *after* the device->host copy, so that copy moves float32, not float64."""
     c, h, w = net.obs_shape
 
     def infer(obs_batch: np.ndarray) -> np.ndarray:
+        was_training = net.training
+        net.eval()
         with torch.no_grad():
             x = torch.from_numpy(np.ascontiguousarray(obs_batch)).reshape(-1, c, h, w).to(device)
             q = net(x)
-        return q.double().cpu().numpy()
+        net.train(was_training)
+        return q.cpu().double().numpy()
 
     return infer
 
@@ -198,6 +205,7 @@ def train(
     matching `EnsembleTreeStrapRunner`'s dynamics rather than the single-pass on-policy approximation.
     """
     net.to(device)
+    net.train()  # gradient steps run in train mode; `infer` is mode-neutral (saves/restores)
     obs_dim = math.prod(net.obs_shape)
     k, a = net.n_heads, net.n_actions
     buffer = ReplayBuffer(buffer_capacity, obs_dim, k, a, seed)

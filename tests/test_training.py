@@ -173,6 +173,34 @@ def test_treestrap_loss_masking() -> None:
     assert torch.allclose(full, expected)
 
 
+def test_infer_is_mode_neutral_and_train_ends_in_train_mode() -> None:
+    # `infer` runs its forward in eval mode (correct inference if BatchNorm/Dropout are ever added) but
+    # restores the net's prior mode — so it's side-effect-free. And `train()` leaves the net in train
+    # mode regardless of whether the buffer filled, so its post-condition doesn't depend on whether a
+    # gradient step happened (the never-fills edge the split eval/train handling had).
+    obs = np.zeros((4, 5 * _G * _G), dtype=np.float32)
+    net = _net(0)
+    net.eval()
+    make_infer(net)(obs)
+    assert not net.training, "infer must restore eval mode"
+    net.train()
+    make_infer(net)(obs)
+    assert net.training, "infer must restore train mode"
+    # A run whose buffer never fills takes no gradient step, yet must still end in train mode.
+    net.eval()
+    train(
+        _engine(7),
+        net,
+        torch.optim.Adam(net.parameters()),
+        iterations=2,
+        collect_size=8,
+        batch_size=16,
+        grad_steps_per_collect=1,
+        min_buffer_size=10**9,
+    )
+    assert net.training, "train() must end in train mode even when no gradient step ran"
+
+
 def test_priors_stay_frozen_during_training() -> None:
     # The randomized priors are fixed per-head offsets that keep the heads disagreeing — the
     # epistemic-uncertainty signal (sigma) the whole selective search expands on. They must never
