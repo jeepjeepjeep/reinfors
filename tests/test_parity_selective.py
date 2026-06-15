@@ -344,3 +344,57 @@ def test_blend_outcome_targets_matches_oracle(outcome_weight: float, k: int) -> 
         reinfors._reinfors.blend_outcome_targets(values, actions, rewards, _GAMMA, outcome_weight, list(tail))
     )
     assert np.allclose(rein, oracle_arr, atol=1e-12), f"{rein} vs {oracle_arr}"
+
+
+def _infer_k2(arr: object) -> np.ndarray:
+    return np.stack([_q_heads(row, 2) for row in arr])
+
+
+@pytest.mark.parametrize("survival", [0.25, -0.1])
+def test_survival_reward_matches_oracle_minimal_reward(survival: float) -> None:
+    # The truncation survival bonus reaches z-mixing by exactly snake_RL's MinimalReward contribution.
+    # A 1-tick (food-free, surviving) episode with outcome_weight=1 makes the executed action's target
+    # equal the realized return; two engines differing only in `survival` differ by MinimalReward's
+    # survived-vs-not delta, in the executed action's entry alone.
+    from snake_rl.agent.shared.reward import MinimalReward
+    from snake_rl.environment.base import StepEvent
+
+    mr = MinimalReward(step=0.0, food=0.0, loss=-10.0, draw=-6.0, kill=20.0, win=20.0, survival=survival)
+    delta = mr(StepEvent(survived_to_max_ticks=True)) - mr(StepEvent())
+
+    def engine(surv: float) -> object:
+        reward = (0.0, 0.0, -10.0, -6.0, 20.0, 20.0, surv)
+        return reinfors._reinfors.Engine(
+            2,
+            _GRID,
+            3,
+            False,
+            None,
+            0,  # 2 games, food-free
+            _GAMMA,
+            1.0,
+            24,
+            4,
+            6,  # gamma, beta, budget, top_k, max_depth
+            reward,
+            "uniform",
+            _TEMP,
+            _FLOOR,
+            0.1,
+            1,
+            2,  # epsilon, max_ticks=1, n_heads=2
+            1.0,
+            False,
+            1.0,  # outcome_weight=1, interior off, bootstrap_p=1
+            0,
+        )
+
+    _, t0, _ = engine(0.0).collect(2, _infer_k2)
+    _, ts, _ = engine(survival).collect(2, _infer_k2)
+    diff = np.asarray(ts) - np.asarray(t0)
+    assert diff.shape[0] >= 2
+    for m in range(diff.shape[0]):
+        for h in range(2):
+            changed = np.flatnonzero(np.abs(diff[m, h]) > 1e-9)
+            assert changed.size == 1, "only the executed action's target should move"
+            assert np.isclose(diff[m, h, changed[0]], delta, atol=1e-9)

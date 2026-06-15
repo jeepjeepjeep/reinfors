@@ -15,7 +15,8 @@
 //! Records carry the full TreeStrap training semantics of `snake_RL`'s `EnsembleTreeStrapRunner`:
 //! - **z-mixing** — each executed decision is held back until its episode ends, then the executed
 //!   action's entry of every head is blended with the realized discounted return (`blend_outcome_targets`),
-//!   so deaths the search failed to foresee still reach the training signal.
+//!   so deaths the search failed to foresee still reach the training signal. A truncation tick reached
+//!   alive pays the `survival` reward (`survived_to_max_ticks`), which z-mixing carries to earlier steps.
 //! - **interior targets** — with `interior_targets`, every expanded interior MAX node of the search
 //!   tree is emitted as an extra `(obs, values)` record (true TreeStrap). These are counterfactual
 //!   states with no realized outcome, so they are emitted immediately and never z-blended.
@@ -195,19 +196,28 @@ impl Engine {
             //    decisions' rewards; flush finished games' trajectories with z-mixing and reset them.
             let mut finished: Vec<usize> = Vec::new();
             for (gi, act) in actions.into_iter().enumerate() {
-                let events = self.games[gi].advance(act, || None);
-                for (si, ev) in events.iter().enumerate() {
+                let mut events = self.games[gi].advance(act, || None);
+                for ev in events.iter() {
                     if ev.ate_food {
                         spawn_food(&mut self.games[gi], &mut self.rngs[gi], 1);
                     }
+                }
+                self.ticks[gi] += 1;
+                // A truncation tick — max_ticks reached while the game is still playing — pays the
+                // survival bonus to snakes that did not die this tick, matching snake_RL's runner
+                // setting `survived_to_max_ticks` (so it propagates through z-mixing to earlier steps).
+                let truncated = self.ticks[gi] >= self.cfg.max_ticks && !self.games[gi].done;
+                for (si, ev) in events.iter_mut().enumerate() {
                     if act[si].is_some() {
+                        if truncated && !ev.died {
+                            ev.survived_to_max_ticks = true;
+                        }
                         // this snake acted this tick — attach the realized reward to its last decision
                         if let Some(step) = self.traj[gi][si].last_mut() {
                             step.reward = self.cfg.search.reward.eval(ev);
                         }
                     }
                 }
-                self.ticks[gi] += 1;
                 if self.games[gi].done || self.ticks[gi] >= self.cfg.max_ticks {
                     finished.push(gi);
                 }
@@ -522,5 +532,41 @@ mod tests {
         // unexecuted entries unchanged.
         assert_eq!(blended[0][0][0], 1.0);
         assert_eq!(blended[0][1][2], 6.0);
+    }
+
+    #[test]
+    fn survival_bonus_propagates_through_z_mixing_on_truncation() {
+        // max_ticks = 1: every episode truncates after one (surviving) decision. With outcome_weight
+        // = 1 the executed action's target equals the realized return, which on a truncation includes
+        // the survival bonus. Two engines identical but for `survival` must differ in their targets by
+        // exactly the bonus, and only in the executed action's entry — survival touches neither the
+        // search values, the chosen action, nor the z-tail.
+        let bonus = 0.25;
+        let mk = |survival: f64| {
+            let mut c = config(4, 2, 0);
+            c.max_ticks = 1;
+            c.outcome_weight = 1.0;
+            c.interior_targets = false;
+            c.initial_food_count = 0;
+            c.search.reward.survival = survival;
+            c
+        };
+        let base = Engine::new(mk(0.0)).collect(4, infer);
+        let surv = Engine::new(mk(bonus)).collect(4, infer);
+        assert_eq!(base.len(), surv.len());
+        assert!(!base.is_empty());
+        for ((_, tb, _), (_, ts, _)) in base.iter().zip(surv.iter()) {
+            for (rb, rs) in tb.iter().zip(ts.iter()) {
+                let changed: Vec<usize> = (0..rb.len())
+                    .filter(|&a| (rs[a] - rb[a]).abs() > 1e-9)
+                    .collect();
+                assert_eq!(
+                    changed.len(),
+                    1,
+                    "only the executed action's target should move"
+                );
+                assert!((rs[changed[0]] - rb[changed[0]] - bonus).abs() < 1e-9);
+            }
+        }
     }
 }

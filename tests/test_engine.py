@@ -36,7 +36,9 @@ def _engine(
     outcome_weight: float = 0.5,
     interior: bool = True,
     bootstrap_p: float = 0.8,
+    survival: float = 0.0,
 ) -> object:
+    reward = (*_REWARD[:6], survival)  # (step, food, loss, draw, kill, win, survival)
     return reinfors._reinfors.Engine(
         n_games,
         _G,
@@ -45,7 +47,7 @@ def _engine(
         None,
         food,  # n_games, grid, initial_length, play_to_last, win_food_lead, initial_food_count
         *_SEARCH,
-        _REWARD,
+        reward,
         "uniform",
         1.0,
         0.1,  # reward, opponent, opp_temperature, opp_floor
@@ -86,6 +88,25 @@ def test_bootstrap_p_extremes_set_all_or_no_heads() -> None:
     assert (all_mask == 1.0).all()
     _, _, no_mask = _engine(3, bootstrap_p=0.0).collect(40, _infer)
     assert (no_mask == 0.0).all()
+
+
+def test_survival_bonus_propagates_through_z_mixing_on_truncation() -> None:
+    # max_ticks=1 truncates every episode after one surviving, food-free decision; outcome_weight=1
+    # makes the executed action's target equal the realized return, which on truncation includes the
+    # survival bonus. Two engines that differ only in `survival` must produce targets differing by
+    # exactly the bonus, and only in the executed action's entry: survival changes neither the search
+    # values, the chosen action, nor the z-tail. Guards the previously-dead survival reward.
+    bonus = 0.25
+    kw = {"food": 0, "max_ticks": 1, "outcome_weight": 1.0, "interior": False}
+    _, t0, _ = _engine(0, survival=0.0, **kw).collect(4, _infer)
+    _, ts, _ = _engine(0, survival=bonus, **kw).collect(4, _infer)
+    assert t0.shape == ts.shape and t0.shape[0] >= 4
+    diff = ts - t0  # (M, K, A)
+    for m in range(diff.shape[0]):
+        for h in range(_K):
+            changed = np.flatnonzero(np.abs(diff[m, h]) > 1e-9)
+            assert changed.size == 1, "only the executed action's target should move"
+            assert np.isclose(diff[m, h, changed[0]], bonus, atol=1e-9)
 
 
 def test_first_targets_equal_a_direct_pooled_search() -> None:
