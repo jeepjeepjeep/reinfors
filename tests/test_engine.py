@@ -26,13 +26,14 @@ def _infer(arr: np.ndarray) -> np.ndarray:
     return np.stack([_q_heads(row, _K) for row in arr])
 
 
-def _engine(seed: int, n_games: int = 4) -> object:
+def _engine(seed: int, n_games: int = 4, food: int = 3) -> object:
     return reinfors._reinfors.Engine(
         n_games,
         _G,
         3,
         False,
-        None,  # n_games, grid, initial_length, play_to_last, win_food_lead
+        None,
+        food,  # n_games, grid, initial_length, play_to_last, win_food_lead, initial_food_count
         *_SEARCH,
         _REWARD,
         "uniform",
@@ -69,7 +70,8 @@ def test_first_targets_equal_a_direct_pooled_search() -> None:
     # Every game starts from the same deterministic placement, and records are gathered game-major
     # (snake A then B). So the first two targets must equal a direct pooled search of both agents on
     # the initial state — pinning the collected targets to the (separately oracle-validated) search.
-    _, tgt = _engine(0).collect(2, _infer)
+    # Food-free here so the direct search starts from the same (empty-food) root.
+    _, tgt = _engine(0, food=0).collect(2, _infer)
     env = reinfors._reinfors.SnakeEnv(_G, 3, False, None)
     results = reinfors._reinfors.selective_search_many(
         [env, env], [0, 1], *_SEARCH, _REWARD, "uniform", 1.0, 0.1, _infer

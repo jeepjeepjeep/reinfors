@@ -6,16 +6,18 @@
 //! a TreeStrap target, picks an action by Thompson sampling (one head per game per episode) with an
 //! epsilon-greedy override, advances every game, and resets finished ones.
 //!
-//! Per-game diversity comes from each game drawing its own Thompson head and epsilon noise (games
-//! start from the same deterministic placement, so without this they would be identical). This first
-//! milestone runs food-free games, so the in-tree spawn model is not yet exercised.
+//! Per-game diversity comes from each game drawing its own Thompson head and epsilon noise, plus its
+//! own RNG apple spawns (games start from the same deterministic placement, so without this they
+//! would be identical). Each game's apples spawn uniformly over empty cells from its own RNG — the
+//! true env model. (The search's in-tree spawn belief is the deterministic first-empty rule; see
+//! `search`.)
 
 use std::collections::HashSet;
 
 use crate::action::{relative_to_absolute, RELATIVE_ACTIONS};
 use crate::obs::egocentric;
 use crate::search::{selective_search_many, SearchParams};
-use crate::snake::{Cell, Snake, SnakeEnv};
+use crate::snake::{empty_cells, Cell, Snake, SnakeEnv};
 
 /// One pooled-search request: a game state (snakes, food) and the agent searching it.
 type Request = ([Snake; 2], HashSet<Cell>, usize);
@@ -54,6 +56,7 @@ pub struct EngineConfig {
     pub initial_length: usize,
     pub play_to_last: bool,
     pub win_food_lead: Option<usize>,
+    pub initial_food_count: usize,
     pub max_ticks: usize,
     pub epsilon: f64,
     pub n_heads: usize,
@@ -71,6 +74,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(cfg: EngineConfig) -> Self {
+        let n_heads = cfg.n_heads.max(1);
         let mut rngs: Vec<SplitMix64> = (0..cfg.n_games)
             .map(|i| {
                 SplitMix64::new(
@@ -79,18 +83,19 @@ impl Engine {
                 )
             })
             .collect();
-        let games = (0..cfg.n_games)
-            .map(|_| {
-                SnakeEnv::new(
-                    cfg.grid_size,
-                    cfg.initial_length,
-                    cfg.play_to_last,
-                    cfg.win_food_lead,
-                )
-            })
-            .collect();
-        let n_heads = cfg.n_heads.max(1);
-        let heads = rngs.iter_mut().map(|r| r.below(n_heads)).collect();
+        let mut games: Vec<SnakeEnv> = Vec::with_capacity(cfg.n_games);
+        let mut heads: Vec<usize> = Vec::with_capacity(cfg.n_games);
+        for rng in rngs.iter_mut() {
+            let mut game = SnakeEnv::new(
+                cfg.grid_size,
+                cfg.initial_length,
+                cfg.play_to_last,
+                cfg.win_food_lead,
+            );
+            spawn_food(&mut game, rng, cfg.initial_food_count);
+            heads.push(rng.below(n_heads));
+            games.push(game);
+        }
         let ticks = vec![0; cfg.n_games];
         Engine {
             cfg,
@@ -149,23 +154,43 @@ impl Engine {
                 actions[gi][si] = Some(relative_to_absolute(direction, RELATIVE_ACTIONS[rel]));
             }
 
-            // 4. Advance every game; reset finished ones and resample their Thompson head.
+            // 4. Advance every game (spawning a replacement apple per eaten one from the game's own
+            //    RNG); reset finished ones and resample their Thompson head + initial food.
             for (gi, act) in actions.into_iter().enumerate() {
-                self.games[gi].advance(act, || None); // food-free: no spawn this milestone
+                let events = self.games[gi].advance(act, || None);
+                for ev in events.iter() {
+                    if ev.ate_food {
+                        spawn_food(&mut self.games[gi], &mut self.rngs[gi], 1);
+                    }
+                }
                 self.ticks[gi] += 1;
                 if self.games[gi].done || self.ticks[gi] >= self.cfg.max_ticks {
-                    self.games[gi] = SnakeEnv::new(
+                    let mut game = SnakeEnv::new(
                         self.cfg.grid_size,
                         self.cfg.initial_length,
                         self.cfg.play_to_last,
                         self.cfg.win_food_lead,
                     );
+                    spawn_food(&mut game, &mut self.rngs[gi], self.cfg.initial_food_count);
+                    self.games[gi] = game;
                     self.ticks[gi] = 0;
                     self.heads[gi] = self.rngs[gi].below(self.cfg.n_heads.max(1));
                 }
             }
         }
         (obs_out, tgt_out)
+    }
+}
+
+/// Spawn `n` apples into `game`, each uniformly over the currently empty cells drawn from `rng` (the
+/// env's true spawn model). Stops early if the grid fills.
+fn spawn_food(game: &mut SnakeEnv, rng: &mut SplitMix64, n: usize) {
+    for _ in 0..n {
+        let empty = empty_cells(&game.snakes, &game.food, game.grid_size);
+        if empty.is_empty() {
+            break;
+        }
+        game.food.insert(empty[rng.below(empty.len())]);
     }
 }
 
@@ -192,6 +217,7 @@ mod tests {
             initial_length: 3,
             play_to_last: false,
             win_food_lead: None,
+            initial_food_count: 3,
             max_ticks: 50,
             epsilon: 0.1,
             n_heads,
@@ -258,5 +284,16 @@ mod tests {
         let (o1, _) = Engine::new(config(4, 2, 1)).collect(80, infer);
         let (o2, _) = Engine::new(config(4, 2, 2)).collect(80, infer);
         assert_ne!(o1, o2, "different seeds should produce different rollouts");
+    }
+
+    #[test]
+    fn games_carry_food_so_snakes_can_eat() {
+        // With initial_food_count > 0 the games start with apples; over a rollout some snake should
+        // grow past its initial length (it ate), exercising the in-tree spawn + env respawn path.
+        let mut e = Engine::new(config(6, 2, 3));
+        e.collect(200, infer);
+        let grew = e.games.iter().any(|g| g.snakes.iter().any(|s| s.len() > 3));
+        assert!(grew, "no snake ever ate across the rollout");
+        assert!(e.games.iter().all(|g| !g.food.is_empty()));
     }
 }

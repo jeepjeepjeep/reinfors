@@ -99,6 +99,35 @@ def _dead_opp_state() -> WorldState:
 _STATES = {"food_free": _food_free_state, "wall_hug": _wall_hug_state, "dead_opp": _dead_opp_state}
 
 
+def _food_state() -> WorldState:
+    # Apples in both agents' forward regions, so the search eats them within the horizon (and may eat
+    # the spawned replacements deeper), exercising in-tree spawning along many lines.
+    return WorldState(
+        snakes={
+            _A: Snake(deque([(6, 5), (6, 4), (6, 3)]), Action.RIGHT),
+            _B: Snake(deque([(2, 8), (2, 9), (1, 9)]), Action.LEFT),
+        },
+        food={(6, 6), (6, 7), (6, 8), (5, 5), (7, 5), (2, 7), (2, 6), (3, 8)},
+        grid_size=_GRID,
+    )
+
+
+def _first_empty(snakes: dict, food: set, n: int) -> list:
+    """First `n` unoccupied cells in row-major order — the deterministic spawn rule reinfors uses
+    in-tree, injected into the oracle so both sides place replacement apples identically."""
+    occupied = set(food)
+    for s in snakes.values():
+        occupied |= set(s.body)
+    out: list = []
+    for r in range(_GRID):
+        for c in range(_GRID):
+            if (r, c) not in occupied:
+                out.append((r, c))
+                if len(out) == n:
+                    return out
+    return out
+
+
 def _oracle(opponent: str, k: int, budget: int, top_k: int, max_depth: int, beta: float) -> SelectiveExpectimaxPlanner:
     obs_builder = EgocentricGridObservation(grid_size=_GRID)
 
@@ -174,6 +203,42 @@ def test_selective_search_matches_oracle(
         lambda arr: np.stack([_q_heads(row, k) for row in arr]),
     )
     rein = np.asarray(values)  # (K, A)
+    rein = rein[0] if k == 1 else rein
+
+    assert np.allclose(rein, oracle_values, atol=1e-9), f"values: {rein} vs {oracle_values}"
+    assert tuple(rein_stats) == (stats.max_depth, stats.expansions, stats.leaves, stats.rounds), "search shape"
+
+
+@pytest.mark.parametrize("agent_id", [_A, _B])
+@pytest.mark.parametrize("opponent", ["uniform", "distributional"])
+@pytest.mark.parametrize("k", [1, 4])
+def test_selective_search_with_food_matches_oracle(agent_id: str, opponent: str, k: int) -> None:
+    # In-tree apple spawning: the agent reaches food within the horizon, so the search must place
+    # replacements. Both sides use the deterministic first-empty rule (built into reinfors, injected
+    # into the oracle), so values and search shape must still match bit-for-bit.
+    budget, top_k, max_depth, beta = 40, 4, 8, 1.0
+    state = _food_state()
+    planner = _oracle(opponent, k, budget, top_k, max_depth, beta)
+    planner._sample_spawn = lambda snakes, food, n: _first_empty(snakes, food, n)
+    oracle_values = np.asarray(planner.action_values(state, agent_id))
+    stats = planner.last_stats[0]
+
+    agent_idx = 0 if agent_id == _A else 1
+    env = _reinfors_env(state)
+    values, rein_stats = env.selective_search(
+        agent_idx,
+        _GAMMA,
+        beta,
+        budget,
+        top_k,
+        max_depth,
+        _REWARD_TUPLE,
+        opponent,
+        _TEMP,
+        _FLOOR,
+        lambda arr: np.stack([_q_heads(row, k) for row in arr]),
+    )
+    rein = np.asarray(values)
     rein = rein[0] if k == 1 else rein
 
     assert np.allclose(rein, oracle_values, atol=1e-9), f"values: {rein} vs {oracle_values}"

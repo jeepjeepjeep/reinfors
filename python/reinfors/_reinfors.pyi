@@ -59,6 +59,7 @@ class Engine:
         initial_length: int,
         play_to_last: bool,
         win_food_lead: int | None,
+        initial_food_count: int,
         gamma: float,
         beta: float,
         expansion_budget: int,

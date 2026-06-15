@@ -9,13 +9,19 @@
 //!
 //! The tree is an arena (`Vec<Node>` indexed by `usize`) so the frontier can hold node references
 //! without fighting the borrow checker.
+//!
+//! When a move eats an apple in-tree, a replacement is spawned at the first unoccupied cell
+//! (row-major). This deterministic spawn belief is bit-reproducible across Rust and Python, so the
+//! differential test injects the same rule into the oracle — unlike the env's true RNG spawn, which
+//! Option B treats as injected input. `food_samples` Monte-Carlo fan-out (only meaningful under a
+//! stochastic spawn belief) is not modelled; the production config uses a single sample.
 
 use std::collections::HashSet;
 
 use crate::action::{relative_to_absolute, Action, RELATIVE_ACTIONS};
 use crate::obs::egocentric_parts;
 use crate::reward::Reward;
-use crate::snake::{Cell, Snake, SnakeEnv};
+use crate::snake::{first_empty_cell, Cell, Snake, SnakeEnv};
 
 /// The agent's belief about the opponent's move distribution.
 pub enum Opponent {
@@ -388,7 +394,6 @@ fn expand_node(
             if let Some(oa) = opp_abs {
                 moves[opp] = Some(*oa);
             }
-            // Food-free root => no eating => spawn closure is never called.
             let mut sim = SnakeEnv::from_parts(
                 p.grid_size,
                 p.initial_length,
@@ -399,6 +404,18 @@ fn expand_node(
             );
             let events = sim.advance(moves, || None);
             let reward = p.reward.eval(&events[agent]);
+
+            // In-tree apple respawn: one replacement per eaten apple, in snake order so each spawn
+            // sees the prior one's cell as occupied (matching the oracle's advance). The spawn model
+            // is the deterministic first-empty belief (see module docs); it only affects child state,
+            // so it is applied after advance rather than threaded through it.
+            for ev in events.iter() {
+                if ev.ate_food {
+                    if let Some(cell) = first_empty_cell(&sim.snakes, &sim.food, p.grid_size) {
+                        sim.food.insert(cell);
+                    }
+                }
+            }
 
             let child = if sim.done || !sim.snakes[agent].alive {
                 push_node(arena, sim.snakes, sim.food, Vec::new(), depth + 1, true)
