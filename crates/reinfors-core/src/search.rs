@@ -54,6 +54,14 @@ pub struct SearchStats {
     pub rounds: usize,
 }
 
+/// An interior MAX node's TreeStrap target: its observation and per-head backed-up action values
+/// `[K][A]`. Collected (when requested) for every expanded non-terminal node below the root.
+pub type InteriorTarget = (Vec<f32>, Vec<Vec<f64>>);
+
+/// Per-request search output: root per-head action values `[K][A]`, interior TreeStrap targets (empty
+/// unless `collect_interior`), and the search diagnostics.
+pub type SearchResult = (Vec<Vec<f64>>, Vec<InteriorTarget>, SearchStats);
+
 /// A committed agent action's chance branch. `weight` is the resolved chance probability; for a
 /// deferred (distributional) opponent it is filled in during evaluation from `deferred = (opp obs
 /// index this round, opponent action index)`.
@@ -170,8 +178,9 @@ fn expand_round(s: &mut Search, p: &SearchParams, first: bool) {
 pub fn selective_search_many<F>(
     p: &SearchParams,
     requests: Vec<([Snake; 2], HashSet<Cell>, usize)>,
+    collect_interior: bool,
     mut infer: F,
-) -> Vec<(Vec<Vec<f64>>, SearchStats)>
+) -> Vec<SearchResult>
 where
     F: FnMut(&[Vec<f32>]) -> Vec<Vec<Vec<f64>>>,
 {
@@ -238,8 +247,25 @@ where
         .into_iter()
         .map(|mut s| {
             resolve(&mut s.arena, 0, p.gamma, s.n_heads);
-            let values = root_action_values(&s.arena, p.gamma, s.n_heads);
-            (values, s.stats)
+            let values = node_action_values(&s.arena, 0, p.gamma, s.n_heads);
+            let mut interior: Vec<InteriorTarget> = Vec::new();
+            if collect_interior && s.arena[0].edges.is_some() {
+                // Walk the expanded tree below the root (the root itself is the decision recorded as
+                // `values`), DFS in edge-then-branch order to match the oracle.
+                let root_edges = take_edges(&s.arena, 0);
+                for edge in &root_edges {
+                    for &(_, _, child) in edge {
+                        collect_interior_targets(
+                            &s.arena,
+                            child,
+                            p.gamma,
+                            s.n_heads,
+                            &mut interior,
+                        );
+                    }
+                }
+            }
+            (values, interior, s.stats)
         })
         .collect()
 }
@@ -250,12 +276,13 @@ pub fn selective_search<F>(
     snakes: [Snake; 2],
     food: HashSet<Cell>,
     agent: usize,
+    collect_interior: bool,
     infer: F,
-) -> (Vec<Vec<f64>>, SearchStats)
+) -> SearchResult
 where
     F: FnMut(&[Vec<f32>]) -> Vec<Vec<Vec<f64>>>,
 {
-    selective_search_many(p, vec![(snakes, food, agent)], infer)
+    selective_search_many(p, vec![(snakes, food, agent)], collect_interior, infer)
         .pop()
         .unwrap()
 }
@@ -524,11 +551,12 @@ fn edge_value(arena: &[Node], branches: &[(f64, f64, usize)], gamma: f64, k: usi
     acc
 }
 
-/// Root action values as `[K][A]` (per head, per relative action).
-fn root_action_values(arena: &[Node], gamma: f64, k: usize) -> Vec<Vec<f64>> {
-    let edges = match &arena[0].edges {
+/// A decision node's action values as `[K][A]` (per head, per relative action) — the chance-averaged
+/// value of each agent action. Used for both the root target and interior TreeStrap targets.
+fn node_action_values(arena: &[Node], idx: usize, gamma: f64, k: usize) -> Vec<Vec<f64>> {
+    let edges = match &arena[idx].edges {
         None => return vec![vec![0.0; RELATIVE_ACTIONS.len()]; k],
-        Some(_) => take_edges(arena, 0),
+        Some(_) => take_edges(arena, idx),
     };
     let per_action: Vec<Vec<f64>> = edges
         .iter()
@@ -537,6 +565,30 @@ fn root_action_values(arena: &[Node], gamma: f64, k: usize) -> Vec<Vec<f64>> {
     (0..k)
         .map(|h| per_action.iter().map(|ev| ev[h]).collect())
         .collect() // -> [K][A]
+}
+
+/// DFS-collect every expanded non-terminal MAX node at or below `idx` as `(obs, [K][A] values)` —
+/// true TreeStrap data. Terminal and unexpanded-frontier nodes are skipped (no backed-up values).
+fn collect_interior_targets(
+    arena: &[Node],
+    idx: usize,
+    gamma: f64,
+    k: usize,
+    out: &mut Vec<InteriorTarget>,
+) {
+    if arena[idx].terminal || arena[idx].edges.is_none() {
+        return;
+    }
+    out.push((
+        arena[idx].obs.clone(),
+        node_action_values(arena, idx, gamma, k),
+    ));
+    let edges = take_edges(arena, idx);
+    for edge in &edges {
+        for &(_, _, child) in edge {
+            collect_interior_targets(arena, child, gamma, k, out);
+        }
+    }
 }
 
 fn head_mean(q: &[Vec<f64>]) -> Vec<f64> {
@@ -614,9 +666,10 @@ mod tests {
             snake(&[(6, 6), (6, 7), (6, 8)], Action::Left), // opponent, far away
         ];
         let p = params();
-        let (values, stats) = selective_search(&p, snakes, HashSet::new(), 0, |obs| {
-            vec![vec![vec![0.0; 3]]; obs.len()]
-        });
+        let (values, _interior, stats) =
+            selective_search(&p, snakes, HashSet::new(), 0, false, |obs| {
+                vec![vec![vec![0.0; 3]]; obs.len()]
+            });
         let v = &values[0]; // single head
         assert!(
             (v[0] - (-10.0)).abs() < 1e-9,
@@ -643,17 +696,18 @@ mod tests {
         ];
         let mut p = params();
         p.expansion_budget = 24;
-        let (values, stats) = selective_search(&p, snakes, HashSet::new(), 0, |obs| {
-            obs.iter()
-                .map(|o| {
-                    let s = o.iter().sum::<f32>() as f64;
-                    vec![
-                        vec![s.sin(), s.cos(), (s * 0.5).sin()],
-                        vec![(s + 1.0).sin(), s.cos(), (s * 0.3).sin()],
-                    ]
-                })
-                .collect()
-        });
+        let (values, _interior, stats) =
+            selective_search(&p, snakes, HashSet::new(), 0, false, |obs| {
+                obs.iter()
+                    .map(|o| {
+                        let s = o.iter().sum::<f32>() as f64;
+                        vec![
+                            vec![s.sin(), s.cos(), (s * 0.5).sin()],
+                            vec![(s + 1.0).sin(), s.cos(), (s * 0.3).sin()],
+                        ]
+                    })
+                    .collect()
+            });
         assert_eq!(values.len(), 2); // two heads
         assert_eq!(values[0].len(), 3);
         assert!(stats.expansions > 0);
@@ -699,17 +753,17 @@ mod tests {
         let (a, b) = two_requests();
         let mut p = params();
         p.expansion_budget = 24;
-        let many = selective_search_many(&p, vec![a.clone(), b.clone()], two_head_infer);
-        let solo_a = selective_search(&p, a.0.clone(), a.1.clone(), a.2, two_head_infer);
-        let solo_b = selective_search(&p, b.0.clone(), b.1.clone(), b.2, two_head_infer);
+        let many = selective_search_many(&p, vec![a.clone(), b.clone()], false, two_head_infer);
+        let solo_a = selective_search(&p, a.0.clone(), a.1.clone(), a.2, false, two_head_infer);
+        let solo_b = selective_search(&p, b.0.clone(), b.1.clone(), b.2, false, two_head_infer);
         assert_eq!(
             many[0].0, solo_a.0,
             "pooled values must equal the solo search"
         );
         assert_eq!(many[1].0, solo_b.0);
-        assert_eq!(many[0].1.expansions, solo_a.1.expansions);
-        assert_eq!(many[1].1.expansions, solo_b.1.expansions);
-        assert_eq!(many[0].1.rounds, solo_a.1.rounds);
+        assert_eq!(many[0].2.expansions, solo_a.2.expansions);
+        assert_eq!(many[1].2.expansions, solo_b.2.expansions);
+        assert_eq!(many[0].2.rounds, solo_a.2.rounds);
     }
 
     #[test]
@@ -720,16 +774,16 @@ mod tests {
         p.expansion_budget = 24;
 
         let pooled = Counter::new(0usize);
-        selective_search_many(&p, vec![a.clone(), b.clone()], |o| {
+        selective_search_many(&p, vec![a.clone(), b.clone()], false, |o| {
             pooled.set(pooled.get() + 1);
             two_head_infer(o)
         });
         let solo = Counter::new(0usize);
-        selective_search(&p, a.0.clone(), a.1.clone(), a.2, |o| {
+        selective_search(&p, a.0.clone(), a.1.clone(), a.2, false, |o| {
             solo.set(solo.get() + 1);
             two_head_infer(o)
         });
-        selective_search(&p, b.0.clone(), b.1.clone(), b.2, |o| {
+        selective_search(&p, b.0.clone(), b.1.clone(), b.2, false, |o| {
             solo.set(solo.get() + 1);
             two_head_infer(o)
         });
@@ -752,11 +806,11 @@ mod tests {
         ];
         let p = params(); // uniform opponent, loss = -10
         let mut calls = 0usize;
-        let results = selective_search_many(&p, vec![(snakes, HashSet::new(), 0)], |obs| {
+        let results = selective_search_many(&p, vec![(snakes, HashSet::new(), 0)], false, |obs| {
             calls += 1;
             vec![vec![vec![0.0; 3]]; obs.len()]
         });
-        let (values, stats) = &results[0];
+        let (values, _interior, stats) = &results[0];
         assert_eq!(
             calls, 0,
             "no observations this round -> infer must not be called"

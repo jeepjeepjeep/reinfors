@@ -23,8 +23,10 @@ The concrete snake slice is in place, differential-tested against `snake_RL` (th
   cross-game `search_many` (one batched `infer` per round across all games). Leaf values come from a
   Python inference callback.
 - **rollout `Engine`** (this stage) — drives N parallel games (apples spawned uniformly per game)
-  through the pooled search, Thompson-samples a head per game, and `collect`s `(observation, searched
-  per-head target)` records for training. Trainer integration comes next.
+  through the pooled search, Thompson-samples a head per game, and `collect`s training records with
+  the full `EnsembleTreeStrapRunner` semantics: episode-end **z-mixing** of the realized return into
+  the executed action, optional **interior** MAX-node targets (true TreeStrap), and a per-head
+  **bootstrap mask** on every record. Trainer integration comes next.
 
 Generic game abstractions and the declarative builder come later, once the concrete slice is proven.
 

@@ -11,13 +11,34 @@
 //! would be identical). Each game's apples spawn uniformly over empty cells from its own RNG — the
 //! true env model. (The search's in-tree spawn belief is the deterministic first-empty rule; see
 //! `search`.)
+//!
+//! Records carry the full TreeStrap training semantics of `snake_RL`'s `EnsembleTreeStrapRunner`:
+//! - **z-mixing** — each executed decision is held back until its episode ends, then the executed
+//!   action's entry of every head is blended with the realized discounted return (`blend_outcome_targets`),
+//!   so deaths the search failed to foresee still reach the training signal.
+//! - **interior targets** — with `interior_targets`, every expanded interior MAX node of the search
+//!   tree is emitted as an extra `(obs, values)` record (true TreeStrap). These are counterfactual
+//!   states with no realized outcome, so they are emitted immediately and never z-blended.
+//! - **bootstrap masks** — every record carries a per-head `(K,)` mask (`rng < bootstrap_p`) so the
+//!   ensemble heads train on different subsets and stay diverse.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::action::{relative_to_absolute, RELATIVE_ACTIONS};
 use crate::obs::egocentric;
 use crate::search::{selective_search_many, SearchParams};
 use crate::snake::{empty_cells, Cell, Snake, SnakeEnv};
+
+/// One buffered decision, held until its episode ends so the realized return is known for z-mixing.
+struct TrajStep {
+    obs: Vec<f32>,
+    values: Vec<Vec<f64>>, // per-head searched action values [K][A]
+    action: usize,         // executed relative-action index (after any epsilon override)
+    reward: f64,
+}
+
+/// A collected training record: observation, per-head target `[K][A]`, and per-head bootstrap mask.
+type Record = (Vec<f32>, Vec<Vec<f64>>, Vec<f32>);
 
 /// One pooled-search request: a game state (snakes, food) and the agent searching it.
 type Request = ([Snake; 2], HashSet<Cell>, usize);
@@ -60,6 +81,9 @@ pub struct EngineConfig {
     pub max_ticks: usize,
     pub epsilon: f64,
     pub n_heads: usize,
+    pub outcome_weight: f64,
+    pub interior_targets: bool,
+    pub bootstrap_p: f64,
     pub seed: u64,
     pub search: SearchParams,
 }
@@ -70,6 +94,7 @@ pub struct Engine {
     rngs: Vec<SplitMix64>,
     heads: Vec<usize>, // per-game Thompson head for the current episode
     ticks: Vec<usize>,
+    traj: Vec<[Vec<TrajStep>; 2]>, // per-game, per-snake decisions awaiting episode-end z-mixing
 }
 
 impl Engine {
@@ -97,30 +122,28 @@ impl Engine {
             games.push(game);
         }
         let ticks = vec![0; cfg.n_games];
+        let traj = (0..cfg.n_games).map(|_| [Vec::new(), Vec::new()]).collect();
         Engine {
             cfg,
             games,
             rngs,
             heads,
             ticks,
+            traj,
         }
     }
 
-    /// Roll the games forward until at least `n_records` decisions have been collected, returning the
-    /// per-decision observations (each a flat `[5 * g * g]` buffer) and per-head searched targets
-    /// (each `[K][A]`). `infer` is the value network forward, called once per pooled round.
-    pub fn collect<F>(
-        &mut self,
-        n_records: usize,
-        mut infer: F,
-    ) -> (Vec<Vec<f32>>, Vec<Vec<Vec<f64>>>)
+    /// Roll the games forward until at least `n_records` training records have been collected,
+    /// returning each record's observation (a flat `[5 * g * g]` buffer), per-head target `[K][A]`,
+    /// and per-head bootstrap mask `[K]`. Executed decisions are z-mixed at episode end; interior MAX
+    /// nodes (when enabled) are emitted immediately. `infer` is the value-network forward.
+    pub fn collect<F>(&mut self, n_records: usize, mut infer: F) -> Vec<Record>
     where
         F: FnMut(&[Vec<f32>]) -> Vec<Vec<Vec<f64>>>,
     {
-        let mut obs_out: Vec<Vec<f32>> = Vec::new();
-        let mut tgt_out: Vec<Vec<Vec<f64>>> = Vec::new();
+        let mut out: Vec<Record> = Vec::new();
 
-        while obs_out.len() < n_records {
+        while out.len() < n_records {
             // 1. Gather one search request per alive snake across all games.
             let mut requests: Vec<Request> = Vec::new();
             let mut meta: Vec<(usize, usize)> = Vec::new(); // (game index, snake index)
@@ -137,49 +160,191 @@ impl Engine {
             }
 
             // 2. One pooled search for all of them (one batched forward per round, shared across games).
-            let results = selective_search_many(&self.cfg.search, requests, &mut infer);
+            let results = selective_search_many(
+                &self.cfg.search,
+                requests,
+                self.cfg.interior_targets,
+                &mut infer,
+            );
 
-            // 3. Record each decision and choose its action (Thompson head argmax + epsilon).
+            // 3. Emit interior targets immediately, buffer each executed decision, choose its action.
             let mut actions = vec![[None, None]; self.games.len()];
-            for ((values, _stats), &(gi, si)) in results.iter().zip(meta.iter()) {
-                obs_out.push(egocentric(&self.games[gi], si));
-                tgt_out.push(values.clone());
+            for ((values, interior, _stats), &(gi, si)) in results.iter().zip(meta.iter()) {
+                let k = values.len();
+                for (iobs, ivalues) in interior {
+                    let mask = sample_mask(&mut self.rngs[gi], k, self.cfg.bootstrap_p);
+                    out.push((iobs.clone(), ivalues.clone(), mask));
+                }
 
-                let head = self.heads[gi].min(values.len() - 1);
+                let head = self.heads[gi].min(k - 1);
                 let mut rel = argmax(&values[head]);
                 if self.cfg.epsilon > 0.0 && self.rngs[gi].unit() < self.cfg.epsilon {
                     rel = self.rngs[gi].below(RELATIVE_ACTIONS.len());
                 }
                 let direction = self.games[gi].snakes[si].direction;
                 actions[gi][si] = Some(relative_to_absolute(direction, RELATIVE_ACTIONS[rel]));
+                self.traj[gi][si].push(TrajStep {
+                    obs: egocentric(&self.games[gi], si),
+                    values: values.clone(),
+                    action: rel,
+                    reward: 0.0, // filled in from this tick's event after advancing
+                });
             }
 
-            // 4. Advance every game (spawning a replacement apple per eaten one from the game's own
-            //    RNG); reset finished ones and resample their Thompson head + initial food.
+            // 4. Advance every game (spawning a replacement apple per eaten one); record the executed
+            //    decisions' rewards; flush finished games' trajectories with z-mixing and reset them.
+            let mut finished: Vec<usize> = Vec::new();
             for (gi, act) in actions.into_iter().enumerate() {
                 let events = self.games[gi].advance(act, || None);
-                for ev in events.iter() {
+                for (si, ev) in events.iter().enumerate() {
                     if ev.ate_food {
                         spawn_food(&mut self.games[gi], &mut self.rngs[gi], 1);
+                    }
+                    if act[si].is_some() {
+                        // this snake acted this tick — attach the realized reward to its last decision
+                        if let Some(step) = self.traj[gi][si].last_mut() {
+                            step.reward = self.cfg.search.reward.eval(ev);
+                        }
                     }
                 }
                 self.ticks[gi] += 1;
                 if self.games[gi].done || self.ticks[gi] >= self.cfg.max_ticks {
-                    let mut game = SnakeEnv::new(
-                        self.cfg.grid_size,
-                        self.cfg.initial_length,
-                        self.cfg.play_to_last,
-                        self.cfg.win_food_lead,
-                    );
-                    spawn_food(&mut game, &mut self.rngs[gi], self.cfg.initial_food_count);
-                    self.games[gi] = game;
-                    self.ticks[gi] = 0;
-                    self.heads[gi] = self.rngs[gi].below(self.cfg.n_heads.max(1));
+                    finished.push(gi);
+                }
+            }
+
+            self.flush_finished(&finished, &mut out, &mut infer);
+        }
+        out
+    }
+
+    /// Flush each finished game's buffered trajectories: z-mix the executed-action targets with the
+    /// realized return (tail-seeded by the net's value of the final state on truncation), emit the
+    /// records, then reset the game and resample its head + initial food.
+    fn flush_finished<F>(&mut self, finished: &[usize], out: &mut Vec<Record>, infer: &mut F)
+    where
+        F: FnMut(&[Vec<f32>]) -> Vec<Vec<Vec<f64>>>,
+    {
+        // On truncation (alive, not terminal) z is seeded by the net's per-head state value, so early
+        // decisions of long episodes are not systematically undervalued. Batch those into one forward.
+        let tails = self.tail_values(finished, infer);
+
+        for &gi in finished {
+            for si in 0..2 {
+                let steps = std::mem::take(&mut self.traj[gi][si]);
+                if steps.is_empty() {
+                    continue;
+                }
+                let k = steps[0].values.len();
+                let tail = tails
+                    .get(&(gi, si))
+                    .cloned()
+                    .unwrap_or_else(|| vec![0.0; k]);
+                let traj: Vec<(Vec<Vec<f64>>, usize, f64)> = steps
+                    .iter()
+                    .map(|s| (s.values.clone(), s.action, s.reward))
+                    .collect();
+                let blended = blend_outcome_targets(
+                    &traj,
+                    self.cfg.search.gamma,
+                    self.cfg.outcome_weight,
+                    &tail,
+                );
+                for (step, target) in steps.iter().zip(blended) {
+                    let mask = sample_mask(&mut self.rngs[gi], k, self.cfg.bootstrap_p);
+                    out.push((step.obs.clone(), target, mask));
+                }
+            }
+            let mut game = SnakeEnv::new(
+                self.cfg.grid_size,
+                self.cfg.initial_length,
+                self.cfg.play_to_last,
+                self.cfg.win_food_lead,
+            );
+            spawn_food(&mut game, &mut self.rngs[gi], self.cfg.initial_food_count);
+            self.games[gi] = game;
+            self.ticks[gi] = 0;
+            self.heads[gi] = self.rngs[gi].below(self.cfg.n_heads.max(1));
+        }
+    }
+
+    /// Per-(game, snake) z-tail: the net's per-head value `max_a Q(final_obs)` for snakes still alive
+    /// at a truncation (terminal episodes and dead snakes seed with 0, so they are absent here). Empty
+    /// when `outcome_weight == 0`, where the tail never enters the (no-op) blend.
+    fn tail_values<F>(
+        &mut self,
+        finished: &[usize],
+        infer: &mut F,
+    ) -> HashMap<(usize, usize), Vec<f64>>
+    where
+        F: FnMut(&[Vec<f32>]) -> Vec<Vec<Vec<f64>>>,
+    {
+        let mut tails: HashMap<(usize, usize), Vec<f64>> = HashMap::new();
+        if self.cfg.outcome_weight <= 0.0 {
+            return tails;
+        }
+        let mut obs: Vec<Vec<f32>> = Vec::new();
+        let mut meta: Vec<(usize, usize)> = Vec::new();
+        for &gi in finished {
+            if self.games[gi].done {
+                continue; // terminal: tail stays 0
+            }
+            for si in 0..2 {
+                if self.games[gi].snakes[si].alive && !self.traj[gi][si].is_empty() {
+                    obs.push(egocentric(&self.games[gi], si));
+                    meta.push((gi, si));
                 }
             }
         }
-        (obs_out, tgt_out)
+        if !obs.is_empty() {
+            let q = infer(&obs);
+            for (qm, &key) in q.iter().zip(meta.iter()) {
+                let per_head = qm
+                    .iter()
+                    .map(|row| row.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+                    .collect();
+                tails.insert(key, per_head);
+            }
+        }
+        tails
     }
+}
+
+/// AlphaGo-style z-mixing: blend each step's realized discounted return-to-go into the executed
+/// action's entry of every head, `(1 - w) * V + w * z`. `trajectory` is time-ordered
+/// `(searched values [K][A], executed action, reward)`; `tail` (len K) seeds z past the last step
+/// (0 at a terminal, the net's per-head state value at a truncation). Unexecuted entries keep their
+/// pure searched value. Returns the per-step blended `[K][A]` targets in time order.
+pub fn blend_outcome_targets(
+    trajectory: &[(Vec<Vec<f64>>, usize, f64)],
+    gamma: f64,
+    outcome_weight: f64,
+    tail: &[f64],
+) -> Vec<Vec<Vec<f64>>> {
+    let mut z: Vec<f64> = tail.to_vec();
+    let mut out: Vec<Vec<Vec<f64>>> = Vec::with_capacity(trajectory.len());
+    for (values, action, reward) in trajectory.iter().rev() {
+        for zi in z.iter_mut() {
+            *zi = reward + gamma * *zi;
+        }
+        let mut blended = values.clone();
+        if outcome_weight > 0.0 {
+            for (h, row) in blended.iter_mut().enumerate() {
+                row[*action] = (1.0 - outcome_weight) * row[*action] + outcome_weight * z[h];
+            }
+        }
+        out.push(blended);
+    }
+    out.reverse();
+    out
+}
+
+/// A per-head bootstrap mask `[K]`: head `h` trains on this record iff `rng.unit() < p` (Osband et
+/// al. 2016). `p = 1` includes every head (the masks are all-ones).
+fn sample_mask(rng: &mut SplitMix64, n_heads: usize, p: f64) -> Vec<f32> {
+    (0..n_heads)
+        .map(|_| if rng.unit() < p { 1.0 } else { 0.0 })
+        .collect()
 }
 
 /// Spawn `n` apples into `game`, each uniformly over the currently empty cells drawn from `rng` (the
@@ -221,6 +386,9 @@ mod tests {
             max_ticks: 50,
             epsilon: 0.1,
             n_heads,
+            outcome_weight: 0.5,
+            interior_targets: true,
+            bootstrap_p: 0.8,
             seed,
             search: SearchParams {
                 grid_size: 12,
@@ -262,38 +430,97 @@ mod tests {
     #[test]
     fn collect_returns_well_formed_records() {
         let mut e = Engine::new(config(4, 2, 0));
-        let (obs, tgt) = e.collect(50, infer);
-        assert!(obs.len() >= 50 && obs.len() == tgt.len());
-        for (o, t) in obs.iter().zip(tgt.iter()) {
-            assert_eq!(o.len(), 5 * 12 * 12); // flat observation
-            assert_eq!(t.len(), 2); // K heads
-            assert!(t.iter().all(|row| row.len() == 3)); // A actions
+        let records = e.collect(50, infer);
+        assert!(records.len() >= 50);
+        for (obs, tgt, mask) in &records {
+            assert_eq!(obs.len(), 5 * 12 * 12); // flat observation
+            assert_eq!(tgt.len(), 2); // K heads
+            assert!(tgt.iter().all(|row| row.len() == 3)); // A actions
+            assert_eq!(mask.len(), 2); // per-head bootstrap mask
+            assert!(mask.iter().all(|&m| m == 0.0 || m == 1.0));
         }
     }
 
     #[test]
     fn collect_is_deterministic_for_a_seed() {
-        let (o1, t1) = Engine::new(config(4, 2, 7)).collect(60, infer);
-        let (o2, t2) = Engine::new(config(4, 2, 7)).collect(60, infer);
-        assert_eq!(o1, o2);
-        assert_eq!(t1, t2);
+        let r1 = Engine::new(config(4, 2, 7)).collect(60, infer);
+        let r2 = Engine::new(config(4, 2, 7)).collect(60, infer);
+        assert_eq!(r1, r2);
     }
 
     #[test]
     fn distinct_seeds_diverge() {
-        let (o1, _) = Engine::new(config(4, 2, 1)).collect(80, infer);
-        let (o2, _) = Engine::new(config(4, 2, 2)).collect(80, infer);
-        assert_ne!(o1, o2, "different seeds should produce different rollouts");
+        let r1 = Engine::new(config(4, 2, 1)).collect(80, infer);
+        let r2 = Engine::new(config(4, 2, 2)).collect(80, infer);
+        assert_ne!(r1, r2, "different seeds should produce different rollouts");
     }
 
     #[test]
     fn games_carry_food_so_snakes_can_eat() {
-        // With initial_food_count > 0 the games start with apples; over a rollout some snake should
-        // grow past its initial length (it ate), exercising the in-tree spawn + env respawn path.
-        let mut e = Engine::new(config(6, 2, 3));
-        e.collect(200, infer);
-        let grew = e.games.iter().any(|g| g.snakes.iter().any(|s| s.len() > 3));
+        // Over a long rollout some snake should grow past its initial length (it ate), exercising the
+        // in-tree spawn + env respawn path. Interior off so the record floor tracks decisions (with it
+        // on, the floor is reached in far fewer ticks). The apple count is invariant: eating discards
+        // one and respawns one, so every game always holds initial_food_count.
+        let mut cfg = config(8, 2, 3);
+        cfg.interior_targets = false;
+        let mut e = Engine::new(cfg);
+        let mut grew = false;
+        for _ in 0..4 {
+            e.collect(300, infer);
+            grew |= e.games.iter().any(|g| g.snakes.iter().any(|s| s.len() > 3));
+        }
         assert!(grew, "no snake ever ate across the rollout");
-        assert!(e.games.iter().all(|g| !g.food.is_empty()));
+        assert!(e.games.iter().all(|g| g.food.len() == 3));
+    }
+
+    #[test]
+    fn bootstrap_p_extremes_set_all_or_no_heads() {
+        let mut all = config(4, 3, 5);
+        all.bootstrap_p = 1.0;
+        for (_, _, mask) in Engine::new(all).collect(40, infer) {
+            assert!(
+                mask.iter().all(|&m| m == 1.0),
+                "p=1 must include every head"
+            );
+        }
+        let mut none = config(4, 3, 5);
+        none.bootstrap_p = 0.0;
+        for (_, _, mask) in Engine::new(none).collect(40, infer) {
+            assert!(mask.iter().all(|&m| m == 0.0), "p=0 must include no head");
+        }
+    }
+
+    #[test]
+    fn zero_outcome_weight_leaves_targets_unblended() {
+        // With outcome_weight = 0 the z-mix is a no-op, so a record's target equals its raw searched
+        // values; with weight > 0 some executed-action entry must differ. We can't read the search
+        // values here, but determinism lets us assert the two configs diverge.
+        let mut w0 = config(4, 2, 9);
+        w0.outcome_weight = 0.0;
+        w0.interior_targets = false;
+        let mut w1 = config(4, 2, 9);
+        w1.outcome_weight = 0.9;
+        w1.interior_targets = false;
+        let r0 = Engine::new(w0).collect(60, infer);
+        let r1 = Engine::new(w1).collect(60, infer);
+        let targets_differ = r0.iter().zip(&r1).any(|((_, t0, _), (_, t1, _))| t0 != t1);
+        assert!(
+            targets_differ,
+            "outcome_weight should change executed-action targets"
+        );
+    }
+
+    #[test]
+    fn blend_outcome_targets_mixes_only_the_executed_action() {
+        // Two heads, three actions, action 1 executed; one step, terminal tail (z = reward).
+        let values = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
+        let traj = vec![(values.clone(), 1usize, 10.0)];
+        let blended = blend_outcome_targets(&traj, 0.9, 0.25, &[0.0, 0.0]);
+        // z = 10 + 0.9*0 = 10; executed entry -> 0.75*v + 0.25*10.
+        assert!((blended[0][0][1] - (0.75 * 2.0 + 0.25 * 10.0)).abs() < 1e-12);
+        assert!((blended[0][1][1] - (0.75 * 5.0 + 0.25 * 10.0)).abs() < 1e-12);
+        // unexecuted entries unchanged.
+        assert_eq!(blended[0][0][0], 1.0);
+        assert_eq!(blended[0][1][2], 6.0);
     }
 }
