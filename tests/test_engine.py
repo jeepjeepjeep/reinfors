@@ -144,8 +144,20 @@ def test_engine_rejects_degenerate_params(bad: dict) -> None:
 
 
 def test_engine_rejects_head_count_mismatch() -> None:
-    # The Engine is built for 3 heads but `_infer` returns _K=4 — the search's head count must match,
-    # else Thompson sampling silently breaks. Caught loudly at collect rather than clamped away.
+    # The Engine is built for 3 heads but `_infer` returns _K=4 — the head count must match, else
+    # Thompson sampling silently breaks. Surfaces as a clean ValueError, not a clamp (or a panic).
     engine = _engine(0, n_heads=3, interior=False)
-    with pytest.raises(BaseException, match="n_heads"):
+    with pytest.raises(ValueError, match="n_heads"):
         engine.collect(10, _infer)
+
+
+def test_infer_error_surfaces_during_collect() -> None:
+    # A failing network forward must propagate its real error — the head-count check (success path
+    # only) must not mask it. Regression guard: a raising infer with n_heads > 1 used to panic with a
+    # head-count message because the error fallback (K=1) tripped a core-side assert.
+    def boom(_arr: np.ndarray) -> np.ndarray:
+        raise RuntimeError("MY_NETWORK_OOM_xyz")
+
+    engine = _engine(0, n_heads=2, interior=False)
+    with pytest.raises(RuntimeError, match="MY_NETWORK_OOM_xyz"):
+        engine.collect(10, boom)

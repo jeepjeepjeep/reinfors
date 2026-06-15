@@ -111,13 +111,18 @@ fn validate_engine_params(
 
 /// The core's `infer` callback, wrapping the Python network forward. Obs arrive as one flat
 /// row-major `[n, dim]` buffer (moved straight into a numpy array — no copy), and per-head values
-/// `[n, K, 3]` come back as one flat row-major buffer. On a Python error the first failure is latched
-/// into `callback_err` and zeros (K=1) are returned so the in-flight search unwinds cheaply; the
-/// caller checks `callback_err` afterwards and propagates it.
+/// `[n, K, 3]` come back as one flat row-major buffer. The first failure — a Python error, or (when
+/// `expected_heads` is set, i.e. the `Engine`) a returned head count that disagrees with the
+/// configured `n_heads` — is latched into `callback_err` and zeros (K=1) are returned so the in-flight
+/// search unwinds cheaply; the caller checks `callback_err` afterwards and propagates it. The check
+/// is on the success path only, so a genuine network error always wins (it is never masked by the
+/// head-count check), and it must be here rather than in the core, which cannot tell a real
+/// wrong-K output from this very fallback.
 fn infer_closure<'a, 'py>(
     py: Python<'py>,
     infer: &'a Bound<'py, PyAny>,
     dim: usize,
+    expected_heads: Option<usize>,
     callback_err: &'a mut Option<PyErr>,
 ) -> impl FnMut(Vec<f32>, usize) -> Vec<f64> + 'a {
     move |obs_flat: Vec<f32>, n: usize| -> Vec<f64> {
@@ -131,7 +136,22 @@ fn infer_closure<'a, 'py>(
             .call1((arr,))
             .and_then(|r| r.extract::<PyReadonlyArray3<f64>>())
         {
-            Ok(out) => out.as_array().iter().copied().collect(), // flat [n, K, 3], row-major
+            Ok(out) => {
+                let flat: Vec<f64> = out.as_array().iter().copied().collect(); // flat [n, K, 3]
+                if let Some(k) = expected_heads {
+                    if n > 0 && flat.len() != n * k * 3 {
+                        callback_err.get_or_insert_with(|| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "infer returned {} values for {n} rows; expected n_heads ({k}) x 3 \
+                                 actions per row — the network's head count must equal n_heads",
+                                flat.len()
+                            ))
+                        });
+                        return vec![0.0; n * 3];
+                    }
+                }
+                flat
+            }
             Err(e) => {
                 *callback_err = Some(e);
                 vec![0.0; n * 3]
@@ -312,7 +332,7 @@ impl SnakeEnv {
 
         let mut callback_err: Option<PyErr> = None;
         let (values, interior, stats) = {
-            let mut infer_fn = infer_closure(py, &infer, dim, &mut callback_err);
+            let mut infer_fn = infer_closure(py, &infer, dim, None, &mut callback_err);
             reinfors_core::selective_search(
                 &params,
                 snakes,
@@ -437,7 +457,7 @@ fn selective_search_many(
 
     let mut callback_err: Option<PyErr> = None;
     let results = {
-        let mut infer_fn = infer_closure(py, &infer, dim, &mut callback_err);
+        let mut infer_fn = infer_closure(py, &infer, dim, None, &mut callback_err);
         reinfors_core::selective_search_many(&params, requests, collect_interior, &mut infer_fn)
     };
     if let Some(e) = callback_err {
@@ -463,6 +483,7 @@ type CollectOutput<'py> = (
 struct Engine {
     inner: CoreEngine,
     dim: usize,
+    n_heads: usize,
 }
 
 #[pymethods]
@@ -555,6 +576,7 @@ impl Engine {
         Ok(Engine {
             inner: CoreEngine::new(cfg),
             dim,
+            n_heads,
         })
     }
 
@@ -571,7 +593,8 @@ impl Engine {
         let dim = self.dim;
         let mut callback_err: Option<PyErr> = None;
         let records = {
-            let mut infer_fn = infer_closure(py, &infer, dim, &mut callback_err);
+            let mut infer_fn =
+                infer_closure(py, &infer, dim, Some(self.n_heads), &mut callback_err);
             self.inner.collect(n_records, &mut infer_fn)
         };
         if let Some(e) = callback_err {
