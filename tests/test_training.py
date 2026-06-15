@@ -173,6 +173,29 @@ def test_treestrap_loss_masking() -> None:
     assert torch.allclose(full, expected)
 
 
+def test_priors_stay_frozen_during_training() -> None:
+    # The randomized priors are fixed per-head offsets that keep the heads disagreeing — the
+    # epistemic-uncertainty signal (sigma) the whole selective search expands on. They must never
+    # receive gradient or change; a regression leaking gradient in would still drop the loss and pass
+    # every other test while silently destroying that signal. Snapshot, train, assert frozen.
+    net = _net(0)
+    priors = [h.prior.weight.detach().clone() for h in net.heads]
+    opt = torch.optim.Adam(net.parameters(), lr=1e-2)
+    train(
+        _engine(7),
+        net,
+        opt,
+        iterations=5,
+        collect_size=24,
+        batch_size=16,
+        grad_steps_per_collect=3,
+        min_buffer_size=16,
+    )
+    for h, before in zip(net.heads, priors, strict=True):
+        assert h.prior.weight.grad is None, "a prior received a gradient"
+        assert torch.equal(h.prior.weight, before), "a prior weight changed during training"
+
+
 def test_forward_matches_oracle_network() -> None:
     # The port is bit-compatible with snake_RL's BootstrappedQNetwork: same architecture and state_dict
     # keys, so the oracle's weights load and produce the same (B, K, A) forward.
