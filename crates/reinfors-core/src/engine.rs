@@ -140,8 +140,23 @@ impl Engine {
     /// nodes (when enabled) are emitted immediately. `infer` is the value-network forward.
     pub fn collect<F>(&mut self, n_records: usize, mut infer: F) -> Vec<Record>
     where
-        F: FnMut(&[Vec<f32>]) -> Vec<Vec<Vec<f64>>>,
+        F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
+        // Wrap `infer` to verify the network's head count matches `cfg.n_heads`: a mismatch would
+        // otherwise be silently absorbed by the per-game head clamp (which legitimately handles
+        // all-terminal searches that return a single head) and corrupt Thompson sampling.
+        let (n_heads, a) = (self.cfg.n_heads, RELATIVE_ACTIONS.len());
+        let mut infer = move |obs: Vec<f32>, n: usize| -> Vec<f64> {
+            let out = infer(obs, n);
+            assert!(
+                n == 0 || out.len() == n * n_heads * a,
+                "infer returned {} values for {n} rows; expected n_heads ({n_heads}) x {a} actions \
+                 per row — the network's head count must equal the Engine's n_heads",
+                out.len(),
+            );
+            out
+        };
+
         let mut out: Vec<Record> = Vec::new();
 
         while out.len() < n_records {
@@ -233,7 +248,7 @@ impl Engine {
     /// records, then reset the game and resample its head + initial food.
     fn flush_finished<F>(&mut self, finished: &[usize], out: &mut Vec<Record>, infer: &mut F)
     where
-        F: FnMut(&[Vec<f32>]) -> Vec<Vec<Vec<f64>>>,
+        F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
         // On truncation (alive, not terminal) z is seeded by the net's per-head state value, so early
         // decisions of long episodes are not systematically undervalued. Batch those into one forward.
@@ -287,13 +302,13 @@ impl Engine {
         infer: &mut F,
     ) -> HashMap<(usize, usize), Vec<f64>>
     where
-        F: FnMut(&[Vec<f32>]) -> Vec<Vec<Vec<f64>>>,
+        F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
         let mut tails: HashMap<(usize, usize), Vec<f64>> = HashMap::new();
         if self.cfg.outcome_weight <= 0.0 {
             return tails;
         }
-        let mut obs: Vec<Vec<f32>> = Vec::new();
+        let mut obs_flat: Vec<f32> = Vec::new();
         let mut meta: Vec<(usize, usize)> = Vec::new();
         for &gi in finished {
             if self.games[gi].done {
@@ -301,17 +316,24 @@ impl Engine {
             }
             for si in 0..2 {
                 if self.games[gi].snakes[si].alive && !self.traj[gi][si].is_empty() {
-                    obs.push(egocentric(&self.games[gi], si));
+                    obs_flat.extend(egocentric(&self.games[gi], si));
                     meta.push((gi, si));
                 }
             }
         }
-        if !obs.is_empty() {
-            let q = infer(&obs);
-            for (qm, &key) in q.iter().zip(meta.iter()) {
-                let per_head = qm
-                    .iter()
-                    .map(|row| row.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+        if !meta.is_empty() {
+            let a = RELATIVE_ACTIONS.len();
+            let q = infer(obs_flat, meta.len()); // flat [n, k, A], row-major
+            let k = q.len() / (meta.len() * a);
+            for (i, &key) in meta.iter().enumerate() {
+                let row = &q[i * k * a..(i + 1) * k * a]; // [k, A], head-major
+                let per_head = (0..k)
+                    .map(|h| {
+                        row[h * a..(h + 1) * a]
+                            .iter()
+                            .copied()
+                            .fold(f64::NEG_INFINITY, f64::max)
+                    })
                     .collect();
                 tails.insert(key, per_head);
             }
@@ -424,17 +446,22 @@ mod tests {
         }
     }
 
-    // Two disagreeing heads, sum-dependent.
-    fn infer(obs: &[Vec<f32>]) -> Vec<Vec<Vec<f64>>> {
-        obs.iter()
-            .map(|o| {
-                let s = o.iter().sum::<f32>() as f64;
-                vec![
-                    vec![s.sin(), s.cos(), (s * 0.5).sin()],
-                    vec![(s + 1.0).sin(), (s * 0.3).cos(), (s * 0.2).sin()],
-                ]
-            })
-            .collect()
+    // Two disagreeing heads, sum-dependent — flat `(obs[n*dim], n) -> values[n*2*3]` (head-major).
+    fn infer(obs: Vec<f32>, n: usize) -> Vec<f64> {
+        let dim = obs.len() / n;
+        let mut out = Vec::with_capacity(n * 2 * 3);
+        for i in 0..n {
+            let s = obs[i * dim..(i + 1) * dim].iter().sum::<f32>() as f64;
+            out.extend_from_slice(&[
+                s.sin(),
+                s.cos(),
+                (s * 0.5).sin(),
+                (s + 1.0).sin(),
+                (s * 0.3).cos(),
+                (s * 0.2).sin(),
+            ]);
+        }
+        out
     }
 
     #[test]
@@ -485,7 +512,7 @@ mod tests {
 
     #[test]
     fn bootstrap_p_extremes_set_all_or_no_heads() {
-        let mut all = config(4, 3, 5);
+        let mut all = config(4, 2, 5); // n_heads matches `infer`'s 2 heads
         all.bootstrap_p = 1.0;
         for (_, _, mask) in Engine::new(all).collect(40, infer) {
             assert!(
@@ -493,11 +520,19 @@ mod tests {
                 "p=1 must include every head"
             );
         }
-        let mut none = config(4, 3, 5);
+        let mut none = config(4, 2, 5);
         none.bootstrap_p = 0.0;
         for (_, _, mask) in Engine::new(none).collect(40, infer) {
             assert!(mask.iter().all(|&m| m == 0.0), "p=0 must include no head");
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "must equal the Engine's n_heads")]
+    fn mismatched_infer_head_count_panics() {
+        // `infer` returns 2 heads but the Engine is configured for 3 — caught loudly, not silently
+        // clamped (which would corrupt Thompson sampling).
+        Engine::new(config(4, 3, 0)).collect(10, infer);
     }
 
     #[test]

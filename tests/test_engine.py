@@ -6,6 +6,7 @@ No oracle needed — validates reinfors against itself, so it runs in CI.
 """
 
 import numpy as np
+import pytest
 import reinfors
 
 _G = 12
@@ -37,6 +38,8 @@ def _engine(
     interior: bool = True,
     bootstrap_p: float = 0.8,
     survival: float = 0.0,
+    n_heads: int = _K,
+    epsilon: float = 0.1,
 ) -> object:
     reward = (*_REWARD[:6], survival)  # (step, food, loss, draw, kill, win, survival)
     return reinfors._reinfors.Engine(
@@ -51,9 +54,9 @@ def _engine(
         "uniform",
         1.0,
         0.1,  # reward, opponent, opp_temperature, opp_floor
-        0.1,
+        epsilon,
         max_ticks,
-        _K,  # epsilon, max_ticks, n_heads
+        n_heads,  # epsilon, max_ticks, n_heads
         outcome_weight,
         interior,
         bootstrap_p,  # outcome_weight, interior_targets, bootstrap_p
@@ -121,3 +124,28 @@ def test_first_targets_equal_a_direct_pooled_search() -> None:
     )
     assert np.allclose(tgt[0], np.asarray(results[0][0]), atol=1e-9)  # game 0, agent A
     assert np.allclose(tgt[1], np.asarray(results[1][0]), atol=1e-9)  # game 0, agent B
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"n_games": 0},
+        {"max_ticks": 0},
+        {"n_heads": 0},
+        {"epsilon": 1.5},
+        {"epsilon": -0.1},
+        {"outcome_weight": 2.0},
+        {"bootstrap_p": -0.1},
+    ],
+)
+def test_engine_rejects_degenerate_params(bad: dict) -> None:
+    with pytest.raises(ValueError):
+        _engine(0, **bad)
+
+
+def test_engine_rejects_head_count_mismatch() -> None:
+    # The Engine is built for 3 heads but `_infer` returns _K=4 — the search's head count must match,
+    # else Thompson sampling silently breaks. Caught loudly at collect rather than clamped away.
+    engine = _engine(0, n_heads=3, interior=False)
+    with pytest.raises(BaseException, match="n_heads"):
+        engine.collect(10, _infer)

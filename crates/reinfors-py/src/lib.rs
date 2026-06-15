@@ -78,6 +78,68 @@ fn validate_search_params(
     Ok(())
 }
 
+/// Reject degenerate `Engine` rollout parameters (the search block is checked separately).
+fn validate_engine_params(
+    n_games: usize,
+    max_ticks: usize,
+    n_heads: usize,
+    epsilon: f64,
+    outcome_weight: f64,
+    bootstrap_p: f64,
+) -> PyResult<()> {
+    use pyo3::exceptions::PyValueError;
+    if n_games < 1 {
+        return Err(PyValueError::new_err("n_games must be >= 1"));
+    }
+    if max_ticks < 1 {
+        return Err(PyValueError::new_err("max_ticks must be >= 1"));
+    }
+    if n_heads < 1 {
+        return Err(PyValueError::new_err("n_heads must be >= 1"));
+    }
+    for (name, v) in [
+        ("epsilon", epsilon),
+        ("outcome_weight", outcome_weight),
+        ("bootstrap_p", bootstrap_p),
+    ] {
+        if !(0.0..=1.0).contains(&v) {
+            return Err(PyValueError::new_err(format!("{name} must be in [0, 1]")));
+        }
+    }
+    Ok(())
+}
+
+/// The core's `infer` callback, wrapping the Python network forward. Obs arrive as one flat
+/// row-major `[n, dim]` buffer (moved straight into a numpy array — no copy), and per-head values
+/// `[n, K, 3]` come back as one flat row-major buffer. On a Python error the first failure is latched
+/// into `callback_err` and zeros (K=1) are returned so the in-flight search unwinds cheaply; the
+/// caller checks `callback_err` afterwards and propagates it.
+fn infer_closure<'a, 'py>(
+    py: Python<'py>,
+    infer: &'a Bound<'py, PyAny>,
+    dim: usize,
+    callback_err: &'a mut Option<PyErr>,
+) -> impl FnMut(Vec<f32>, usize) -> Vec<f64> + 'a {
+    move |obs_flat: Vec<f32>, n: usize| -> Vec<f64> {
+        if callback_err.is_some() {
+            return vec![0.0; n * 3]; // K=1 fallback (A = 3 relative actions)
+        }
+        let arr = Array2::from_shape_vec((n, dim), obs_flat)
+            .expect("obs batch shape")
+            .into_pyarray(py);
+        match infer
+            .call1((arr,))
+            .and_then(|r| r.extract::<PyReadonlyArray3<f64>>())
+        {
+            Ok(out) => out.as_array().iter().copied().collect(), // flat [n, K, 3], row-major
+            Err(e) => {
+                *callback_err = Some(e);
+                vec![0.0; n * 3]
+            }
+        }
+    }
+}
+
 #[pyclass]
 struct SnakeEnv {
     inner: CoreEnv,
@@ -249,38 +311,17 @@ impl SnakeEnv {
         let food = self.inner.food.clone();
 
         let mut callback_err: Option<PyErr> = None;
-        let mut infer_fn = |obs_batch: &[Vec<f32>]| -> Vec<Vec<Vec<f64>>> {
-            let n = obs_batch.len();
-            if callback_err.is_some() {
-                return vec![vec![vec![0.0; 3]]; n];
-            }
-            let flat: Vec<f32> = obs_batch.iter().flatten().copied().collect();
-            let arr = Array2::from_shape_vec((n, dim), flat)
-                .expect("obs batch shape")
-                .into_pyarray(py);
-            match infer
-                .call1((arr,))
-                .and_then(|r| r.extract::<PyReadonlyArray3<f64>>())
-            {
-                Ok(out) => out
-                    .as_array()
-                    .outer_iter()
-                    .map(|head_mat| head_mat.outer_iter().map(|row| row.to_vec()).collect())
-                    .collect(),
-                Err(e) => {
-                    callback_err = Some(e);
-                    vec![vec![vec![0.0; 3]]; n]
-                }
-            }
+        let (values, interior, stats) = {
+            let mut infer_fn = infer_closure(py, &infer, dim, &mut callback_err);
+            reinfors_core::selective_search(
+                &params,
+                snakes,
+                food,
+                agent,
+                collect_interior,
+                &mut infer_fn,
+            )
         };
-        let (values, interior, stats) = reinfors_core::selective_search(
-            &params,
-            snakes,
-            food,
-            agent,
-            collect_interior,
-            &mut infer_fn,
-        );
         if let Some(e) = callback_err {
             return Err(e);
         }
@@ -395,32 +436,10 @@ fn selective_search_many(
     }
 
     let mut callback_err: Option<PyErr> = None;
-    let mut infer_fn = |obs_batch: &[Vec<f32>]| -> Vec<Vec<Vec<f64>>> {
-        let n = obs_batch.len();
-        if callback_err.is_some() {
-            return vec![vec![vec![0.0; 3]]; n];
-        }
-        let flat: Vec<f32> = obs_batch.iter().flatten().copied().collect();
-        let arr = Array2::from_shape_vec((n, dim), flat)
-            .expect("obs batch shape")
-            .into_pyarray(py);
-        match infer
-            .call1((arr,))
-            .and_then(|r| r.extract::<PyReadonlyArray3<f64>>())
-        {
-            Ok(out) => out
-                .as_array()
-                .outer_iter()
-                .map(|head_mat| head_mat.outer_iter().map(|row| row.to_vec()).collect())
-                .collect(),
-            Err(e) => {
-                callback_err = Some(e);
-                vec![vec![vec![0.0; 3]]; n]
-            }
-        }
+    let results = {
+        let mut infer_fn = infer_closure(py, &infer, dim, &mut callback_err);
+        reinfors_core::selective_search_many(&params, requests, collect_interior, &mut infer_fn)
     };
-    let results =
-        reinfors_core::selective_search_many(&params, requests, collect_interior, &mut infer_fn);
     if let Some(e) = callback_err {
         return Err(e);
     }
@@ -475,6 +494,14 @@ impl Engine {
         seed: u64,
     ) -> PyResult<Self> {
         validate_search_params(expansion_budget, top_k, max_depth, beta)?;
+        validate_engine_params(
+            n_games,
+            max_ticks,
+            n_heads,
+            epsilon,
+            outcome_weight,
+            bootstrap_p,
+        )?;
         let opponent = match opponent {
             "uniform" => Opponent::Uniform,
             "distributional" => Opponent::Distributional {
@@ -543,31 +570,10 @@ impl Engine {
     ) -> PyResult<CollectOutput<'py>> {
         let dim = self.dim;
         let mut callback_err: Option<PyErr> = None;
-        let mut infer_fn = |obs_batch: &[Vec<f32>]| -> Vec<Vec<Vec<f64>>> {
-            let n = obs_batch.len();
-            if callback_err.is_some() {
-                return vec![vec![vec![0.0; 3]]; n];
-            }
-            let flat: Vec<f32> = obs_batch.iter().flatten().copied().collect();
-            let arr = Array2::from_shape_vec((n, dim), flat)
-                .expect("obs batch shape")
-                .into_pyarray(py);
-            match infer
-                .call1((arr,))
-                .and_then(|r| r.extract::<PyReadonlyArray3<f64>>())
-            {
-                Ok(out) => out
-                    .as_array()
-                    .outer_iter()
-                    .map(|head_mat| head_mat.outer_iter().map(|row| row.to_vec()).collect())
-                    .collect(),
-                Err(e) => {
-                    callback_err = Some(e);
-                    vec![vec![vec![0.0; 3]]; n]
-                }
-            }
+        let records = {
+            let mut infer_fn = infer_closure(py, &infer, dim, &mut callback_err);
+            self.inner.collect(n_records, &mut infer_fn)
         };
-        let records = self.inner.collect(n_records, &mut infer_fn);
         if let Some(e) = callback_err {
             return Err(e);
         }

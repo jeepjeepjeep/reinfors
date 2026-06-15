@@ -27,11 +27,23 @@ The concrete snake slice is in place, differential-tested against `snake_RL` (th
   `EnsembleTreeStrapRunner` semantics: episode-end **z-mixing** of the realized return into the
   executed action, optional **interior** MAX-node targets (true TreeStrap), and a per-head
   **bootstrap mask** on every record.
-- **trainer** (`reinfors.training`, this stage) — the end-to-end actor-learner loop: an ensemble
-  Q-network (a faithful port of the oracle's, so checkpoints are interchangeable) whose forward is
-  the search's `infer` callback, regressed onto `collect`'s records with the per-head masked-Huber
-  loss. Because `infer` reads the live network, each `collect` searches with the current weights —
-  the weight sync is implicit. Optional `torch` dependency (`pip install reinfors[train]`).
+- **trainer** (`reinfors.training`) — the end-to-end actor-learner loop: an ensemble Q-network (a
+  faithful port of the oracle's, so checkpoints are interchangeable) whose forward is the search's
+  `infer` callback. Each iteration pushes `collect`'s records into a ring `ReplayBuffer` (a port of
+  the oracle's `EnsembleTreeStrapBuffer`) and takes several gradient steps on sampled minibatches with
+  the per-head masked-Huber loss — off-policy replay that reuses each (expensive) searched record many
+  times and decorrelates updates. Because `infer` reads the live network, each `collect` searches with
+  the current weights — the weight sync is implicit. Optional `torch` dependency (`pip install reinfors[train]`).
+- **parallel search + flat marshalling + benchmark** (this stage) — the per-search CPU work (expand,
+  evaluate, back up) runs in parallel across the pooled requests via rayon, with only the pooled-obs
+  gather and the one `infer` call per round serial; this is value-neutral (bit-identical regardless of
+  thread count). The `infer` boundary passes obs in and values out as single contiguous row-major
+  buffers (obs moved straight into numpy, no copy) instead of nested `Vec`s. On a **release** build
+  (CPU value function, grid 20 / 16 games / 10 heads / budget 64) `scripts/benchmark.py` measures
+  ~2.4 ms per searched decision — about **6x faster than the pure-Python oracle**, with the flat
+  boundary worth ~1.6x over nested-`Vec` marshalling and rayon ~1.3x from 1→10 threads; the advantage
+  compounds further with GPU inference. (Benchmark only a release build — a debug extension inflates
+  reinfors' per-search cost several-fold and is meaningless.)
 
 Generic game abstractions and the declarative builder come later, once the concrete slice is proven.
 

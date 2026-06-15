@@ -14,6 +14,7 @@ torch is an optional dependency (`pip install reinfors[train]`); importing this 
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Sequence
 
 import numpy as np
@@ -111,16 +112,68 @@ def treestrap_loss(q: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) ->
 def make_infer(net: BootstrappedQNetwork, device: str | torch.device = "cpu") -> Callable[[np.ndarray], np.ndarray]:
     """Build the `infer` callback the search calls: an (N, C*H*W) float32 batch -> (N, K, A) float64
     per-head action values, a no-grad forward of `net` on `device`. Closes over the live network, so
-    successive searches automatically use the latest weights."""
+    successive searches automatically use the latest weights.
+
+    Runs the forward in eval mode (correct inference if BatchNorm/Dropout are ever added) but restores
+    the net's prior mode afterwards, so `infer` is side-effect-free w.r.t. training mode. Upcasts to
+    float64 on the host *after* the device->host copy, so that copy moves float32, not float64."""
     c, h, w = net.obs_shape
 
     def infer(obs_batch: np.ndarray) -> np.ndarray:
+        was_training = net.training
+        net.eval()
         with torch.no_grad():
             x = torch.from_numpy(np.ascontiguousarray(obs_batch)).reshape(-1, c, h, w).to(device)
             q = net(x)
-        return q.double().cpu().numpy()
+        net.train(was_training)
+        return q.cpu().double().numpy()
 
     return infer
+
+
+class ReplayBuffer:
+    """Off-policy replay of TreeStrap records — a faithful port of `snake_RL`'s
+    `EnsembleTreeStrapBuffer`. Each record is one contiguous float32 row `[obs ‖ K·A target ‖ K mask]`
+    in a ring buffer, so a sampled minibatch reaches the device in a single transfer and the trainer
+    splits it there. Reusing each record across many gradient steps amortises the (expensive) search
+    that produced it — without a buffer every record costs a full search and is used exactly once.
+    """
+
+    def __init__(self, capacity: int, obs_dim: int, n_heads: int, n_actions: int, seed: int = 0) -> None:
+        self.capacity = capacity
+        self.obs_dim = obs_dim
+        self.n_heads = n_heads
+        self.n_actions = n_actions
+        self._target_w = n_heads * n_actions
+        self._row = obs_dim + self._target_w + n_heads
+        self._data = np.zeros((capacity, self._row), dtype=np.float32)
+        self._rng = np.random.default_rng(seed)
+        self._idx = 0
+        self._size = 0
+
+    @property
+    def size(self) -> int:
+        return self._size
+
+    def push_batch(self, obs: np.ndarray, target: np.ndarray, mask: np.ndarray) -> None:
+        """Append a `collect` batch: `obs` (M, obs_dim), `target` (M, K, A), `mask` (M, K). Equivalent
+        to M sequential single-record pushes (ring-overwrites oldest); requires M <= capacity."""
+        m = obs.shape[0]
+        if m == 0:
+            return
+        rows = np.empty((m, self._row), dtype=np.float32)
+        rows[:, : self.obs_dim] = obs
+        rows[:, self.obs_dim : self.obs_dim + self._target_w] = np.asarray(target, dtype=np.float32).reshape(m, -1)
+        rows[:, self.obs_dim + self._target_w :] = mask
+        pos = (self._idx + np.arange(m)) % self.capacity
+        self._data[pos] = rows
+        self._idx = (self._idx + m) % self.capacity
+        self._size = min(self._size + m, self.capacity)
+
+    def sample(self, batch_size: int) -> torch.Tensor:
+        """A `(batch_size, row)` float32 tensor — obs, target, and mask travel to the device together."""
+        idx = self._rng.integers(0, self._size, size=batch_size)
+        return torch.from_numpy(self._data[idx])
 
 
 def train(
@@ -129,34 +182,53 @@ def train(
     optimizer: Optimizer,
     *,
     iterations: int,
+    collect_size: int,
     batch_size: int,
+    grad_steps_per_collect: int = 1,
+    buffer_capacity: int = 100_000,
+    min_buffer_size: int | None = None,
     device: str | torch.device = "cpu",
     grad_clip: float = 10.0,
+    seed: int = 0,
     on_step: Callable[[int, float], None] | None = None,
 ) -> list[float]:
-    """Run the actor-learner loop for `iterations` steps and return the per-step losses.
+    """Off-policy actor-learner loop; returns the per-gradient-step losses.
 
-    Each step: `engine.collect(batch_size, infer)` searches the parallel games with the current
-    network and returns TreeStrap records `(obs, targets, masks)`; the network regresses onto them
-    (per-head masked Huber, gradient-clipped). Because `infer` reads the live `net`, the next collect
-    already searches with the updated weights — no explicit actor-learner weight sync.
+    Each iteration searches with the current network — `engine.collect(collect_size, infer)` — pushes
+    the TreeStrap records `(obs, targets, masks)` into a replay buffer, then (once it holds at least
+    `min_buffer_size`) takes `grad_steps_per_collect` gradient steps, each on a fresh minibatch sampled
+    from the buffer (per-head masked Huber, gradient-clipped). Because `infer` reads the live `net`,
+    the next collect already searches with the updated weights — the actor-learner sync is implicit.
+
+    Reusing buffered records across steps amortises the search (the dominant cost): the reuse factor is
+    roughly `grad_steps_per_collect * batch_size / collect_size`, and replay decorrelates updates —
+    matching `EnsembleTreeStrapRunner`'s dynamics rather than the single-pass on-policy approximation.
     """
     net.to(device)
+    net.train()  # gradient steps run in train mode; `infer` is mode-neutral (saves/restores)
+    obs_dim = math.prod(net.obs_shape)
+    k, a = net.n_heads, net.n_actions
+    buffer = ReplayBuffer(buffer_capacity, obs_dim, k, a, seed)
+    min_buffer = min_buffer_size if min_buffer_size is not None else batch_size
     infer = make_infer(net, device)
     c, h, w = net.obs_shape
     losses: list[float] = []
-    for step in range(iterations):
-        obs, target, mask = engine.collect(batch_size, infer)  # type: ignore[attr-defined]
-        obs_t = torch.from_numpy(np.ascontiguousarray(obs)).reshape(-1, c, h, w).to(device)
-        target_t = torch.from_numpy(np.ascontiguousarray(target)).float().to(device)
-        mask_t = torch.from_numpy(np.ascontiguousarray(mask)).to(device)
-        q = net(obs_t)  # (B, K, A)
-        loss = treestrap_loss(q, target_t, mask_t)
-        optimizer.zero_grad()
-        loss.backward()
-        nn.utils.clip_grad_norm_(net.parameters(), max_norm=grad_clip)
-        optimizer.step()
-        losses.append(float(loss.item()))
-        if on_step is not None:
-            on_step(step, losses[-1])
+    for _ in range(iterations):
+        obs, target, mask = engine.collect(collect_size, infer)  # type: ignore[attr-defined]
+        buffer.push_batch(obs, target, mask)
+        if buffer.size < min_buffer:
+            continue
+        for _ in range(grad_steps_per_collect):
+            batch = buffer.sample(batch_size).to(device)  # one host->device transfer
+            obs_t = batch[:, :obs_dim].reshape(-1, c, h, w)
+            target_t = batch[:, obs_dim : obs_dim + k * a].reshape(-1, k, a)
+            mask_t = batch[:, obs_dim + k * a :]
+            loss = treestrap_loss(net(obs_t), target_t, mask_t)
+            optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(net.parameters(), max_norm=grad_clip)
+            optimizer.step()
+            losses.append(float(loss.item()))
+            if on_step is not None:
+                on_step(len(losses), losses[-1])
     return losses
