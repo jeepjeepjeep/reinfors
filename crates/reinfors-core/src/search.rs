@@ -173,6 +173,25 @@ fn expand_round(s: &mut Search, p: &SearchParams, first: bool) {
     s.stats.rounds += 1;
 }
 
+/// Apply `f(search_index, &mut search)` to every search, in parallel (rayon) when `parallel`, else
+/// serially. The per-search work is independent, so this is value-neutral either way; the serial path
+/// avoids rayon's per-dispatch cost when the active pool is too small to win from it.
+fn for_each_search<F>(searches: &mut [Search], parallel: bool, f: F)
+where
+    F: Fn(usize, &mut Search) + Sync,
+{
+    if parallel {
+        searches
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, s)| f(i, s));
+    } else {
+        for (i, s) in searches.iter_mut().enumerate() {
+            f(i, s);
+        }
+    }
+}
+
 /// Run several best-first searches over (possibly different) states in lockstep, pooling each round's
 /// opponent + leaf observations across all active searches into ONE `infer` call. Pooling does not
 /// change any individual search's result — each reads only its own slice of the batched output — so
@@ -209,12 +228,24 @@ where
         if active.is_empty() {
             break;
         }
-        // Build phase (parallel): each active search expands its top-k one ply, staging leaves + opp
-        // observations. Re-checking `active` inside is equivalent to the list above (nothing mutates
-        // between), and gives rayon disjoint &mut per search.
-        searches.par_iter_mut().for_each(|s| {
+        // Parallelize across searches only when the active pool is large enough to amortize rayon's
+        // per-dispatch cost; a solo search (e.g. `selective_search`) or a near-dead pool runs serially.
+        let parallel = active.len() >= 2;
+
+        // Build phase: each active search expands its top-k one ply (staging leaves + opp observations)
+        // and enqueues its surviving leaves for a future round. Folding the frontier push in here —
+        // rather than a separate parallel pass — drops a barrier per round; the push needs only the
+        // leaves' depths (known after expansion), not the not-yet-computed leaf values. Re-checking
+        // `active` inside is equivalent to the list above (nothing mutates between).
+        for_each_search(&mut searches, parallel, |_, s| {
             if s.active(budget) {
                 expand_round(s, p, first);
+                for k in 0..s.new_leaves.len() {
+                    let li = s.new_leaves[k];
+                    if s.arena[li].depth < p.max_depth {
+                        s.frontier.push(li);
+                    }
+                }
             }
         });
         first = false;
@@ -241,8 +272,8 @@ where
             let a = RELATIVE_ACTIONS.len();
             let q = infer(obs_flat, n_rows); // serial: the (GPU/Python) network forward, flat in/out
             let n_heads = q.len() / (n_rows * a);
-            // Evaluate phase (parallel): each active search resolves its own row span of the batch.
-            searches.par_iter_mut().enumerate().for_each(|(si, s)| {
+            // Evaluate phase: each active search resolves its own row span of the batch.
+            for_each_search(&mut searches, parallel, |si, s| {
                 if let Some((row_start, n_opp)) = span_by_idx[si] {
                     let rows = n_opp + s.new_leaves.len();
                     let slice = &q[row_start * n_heads * a..(row_start + rows) * n_heads * a];
@@ -260,18 +291,6 @@ where
                 }
             });
         }
-
-        // Frontier phase (parallel): each active search enqueues its surviving leaves for next round.
-        searches.par_iter_mut().enumerate().for_each(|(si, s)| {
-            if span_by_idx[si].is_some() {
-                for k in 0..s.new_leaves.len() {
-                    let li = s.new_leaves[k];
-                    if s.arena[li].depth < p.max_depth {
-                        s.frontier.push(li);
-                    }
-                }
-            }
-        });
     }
 
     searches

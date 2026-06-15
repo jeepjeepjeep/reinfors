@@ -36,10 +36,12 @@ The concrete snake slice is in place, differential-tested against `snake_RL` (th
   evaluate, back up) runs in parallel across the pooled requests via rayon, with only the pooled-obs
   gather and the one `infer` call per round serial; this is value-neutral (bit-identical regardless of
   thread count). The `infer` boundary passes obs in and values out as single contiguous row-major
-  buffers (obs moved straight into numpy, no copy), instead of nested `Vec`s — which `scripts/benchmark.py`
-  identified as the dominant cost. Together these take a searched decision from ~25 ms to ~3 ms on a CPU
-  value function (grid 20 / 16 games / 10 heads / budget 64), ≈5x faster than the pure-Python oracle
-  and ≈1.9x from 1→10 threads; the Rust + pooling advantage compounds further with GPU inference.
+  buffers (obs moved straight into numpy, no copy) instead of nested `Vec`s. On a **release** build
+  (CPU value function, grid 20 / 16 games / 10 heads / budget 64) `scripts/benchmark.py` measures
+  ~2.4 ms per searched decision — about **6x faster than the pure-Python oracle**, with the flat
+  boundary worth ~1.6x over nested-`Vec` marshalling and rayon ~1.3x from 1→10 threads; the advantage
+  compounds further with GPU inference. (Benchmark only a release build — a debug extension inflates
+  reinfors' per-search cost several-fold and is meaningless.)
 
 Generic game abstractions and the declarative builder come later, once the concrete slice is proven.
 

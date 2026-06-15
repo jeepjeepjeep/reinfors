@@ -5,15 +5,20 @@ pooled search on a fixed state, and — with `--baseline`, where a sibling snake
 importable — the same isolated search through snake_RL's planner on an identical (vectorised) value
 function, as a rough cross-implementation comparison.
 
+IMPORTANT: build the extension in RELEASE, or these numbers are meaningless. A debug build (plain
+`maturin build` / `maturin develop`) leaves Rust's iterator and allocation paths unoptimised and
+inflates reinfors' per-search cost several-fold (the nested-buffer marshalling especially) — it does
+NOT affect the pure-Python oracle, so a debug run makes reinfors look both far slower than it is and
+far more marshalling-bound than it is. Use:
+
+    uvx maturin@1.14.0 build --release --out dist-release && \\
+        uv run --with dist-release/*.whl --with numpy python scripts/benchmark.py --baseline
+    # or, in a venv:  maturin develop --release;  python scripts/benchmark.py --baseline
+
 The per-search Rust work is rayon-parallel across the pooled requests; the controlled measurement of
 that is the single- vs multi-threaded run — set `RAYON_NUM_THREADS=1` and compare (the script prints
-the active setting). On a CPU value function the per-round work is dominated by the serial path (obs
-marshalling across PyO3 + the infer call), so parallel scaling is modest; the design target for the
-Rust + pooling win is GPU inference, where one large batched forward per round dominates.
-
-    python scripts/benchmark.py                 # reinfors only
-    python scripts/benchmark.py --baseline       # + snake_RL planner comparison
-    RAYON_NUM_THREADS=1 python scripts/benchmark.py   # single-threaded reinfors
+the active setting). The Rust + pooling advantage compounds further with GPU inference, where one
+large batched forward per round dominates.
 """
 
 from __future__ import annotations
@@ -190,8 +195,9 @@ def main() -> None:
     threads = os.environ.get("RAYON_NUM_THREADS", "all cores (default)")
     print(
         f"reinfors benchmark — grid={args.grid} games={args.games} heads={args.heads} "
-        f"budget={args.budget} depth={args.max_depth}, RAYON_NUM_THREADS={threads}\n"
+        f"budget={args.budget} depth={args.max_depth}, RAYON_NUM_THREADS={threads}"
     )
+    print("  (numbers are only meaningful for a RELEASE extension build — see module docstring)\n")
     bench_collect(args)
     rein_ms = bench_pooled_search(args)
     if args.baseline:
