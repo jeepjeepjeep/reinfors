@@ -29,9 +29,11 @@ The concrete snake slice is in place, differential-tested against `snake_RL` (th
   **bootstrap mask** on every record.
 - **trainer** (`reinfors.training`) — the end-to-end actor-learner loop: an ensemble Q-network (a
   faithful port of the oracle's, so checkpoints are interchangeable) whose forward is the search's
-  `infer` callback, regressed onto `collect`'s records with the per-head masked-Huber loss. Because
-  `infer` reads the live network, each `collect` searches with the current weights — the weight sync
-  is implicit. Optional `torch` dependency (`pip install reinfors[train]`).
+  `infer` callback. Each iteration pushes `collect`'s records into a ring `ReplayBuffer` (a port of
+  the oracle's `EnsembleTreeStrapBuffer`) and takes several gradient steps on sampled minibatches with
+  the per-head masked-Huber loss — off-policy replay that reuses each (expensive) searched record many
+  times and decorrelates updates. Because `infer` reads the live network, each `collect` searches with
+  the current weights — the weight sync is implicit. Optional `torch` dependency (`pip install reinfors[train]`).
 - **parallel search + flat marshalling + benchmark** (this stage) — the per-search CPU work (expand,
   evaluate, back up) runs in parallel across the pooled requests via rayon, with only the pooled-obs
   gather and the one `infer` call per round serial; this is value-neutral (bit-identical regardless of
