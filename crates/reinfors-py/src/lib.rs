@@ -8,11 +8,11 @@
 use std::collections::VecDeque;
 
 use numpy::ndarray::Array2;
-use numpy::{IntoPyArray, PyArray1, PyReadonlyArray2};
+use numpy::{IntoPyArray, PyArray1, PyReadonlyArray3};
 use pyo3::prelude::*;
 
 use reinfors_core::snake::{Cell, DeathCause, Snake, SnakeEnv as CoreEnv};
-use reinfors_core::{Action, Reward, SearchParams};
+use reinfors_core::{Action, Opponent, Reward, SearchParams};
 
 fn action_from_u8(v: u8) -> PyResult<Action> {
     Ok(match v {
@@ -50,8 +50,8 @@ fn cause_str(c: DeathCause) -> &'static str {
 type EventTuple = (bool, bool, Option<String>, bool, bool, bool, bool);
 /// (max_depth, expansions, leaves, rounds).
 type StatsTuple = (i32, usize, usize, usize);
-/// (root action values, search stats).
-type SearchOutput = (Vec<f64>, StatsTuple);
+/// (root action values as [K][A], search stats).
+type SearchOutput = (Vec<Vec<f64>>, StatsTuple);
 
 #[pyclass]
 struct SnakeEnv {
@@ -162,9 +162,10 @@ impl SnakeEnv {
     }
 
     /// Run a best-first selective-expectimax search from the current state for `agent` (0 or 1).
-    /// `reward` is (step, food, loss, draw, kill, win, survival). `infer` is a callable mapping an
-    /// (N, 5*g*g) float32 batch to an (N, 3) float64 array of action values. Returns
-    /// (action_values[3], (max_depth, expansions, leaves, rounds)).
+    /// `reward` is (step, food, loss, draw, kill, win, survival). `opponent` is "uniform" or
+    /// "distributional" (the latter using `opp_temperature`/`opp_floor`). `infer` is a callable
+    /// mapping an (N, 5*g*g) float32 batch to an (N, K, 3) float64 array of per-head action values.
+    /// Returns (action_values[K][3], (max_depth, expansions, leaves, rounds)).
     #[allow(clippy::too_many_arguments)]
     fn selective_search(
         &self,
@@ -176,10 +177,25 @@ impl SnakeEnv {
         top_k: usize,
         max_depth: i32,
         reward: (f64, f64, f64, f64, f64, f64, f64),
+        opponent: &str,
+        opp_temperature: f64,
+        opp_floor: f64,
         infer: Bound<'_, PyAny>,
     ) -> PyResult<SearchOutput> {
         let g = self.inner.grid_size;
         let dim = 5 * (g as usize) * (g as usize);
+        let opp_model = match opponent {
+            "uniform" => Opponent::Uniform,
+            "distributional" => Opponent::Distributional {
+                temperature: opp_temperature,
+                floor: opp_floor,
+            },
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown opponent {other}"
+                )))
+            }
+        };
         let params = SearchParams {
             grid_size: g,
             initial_length: self.inner.initial_length,
@@ -199,15 +215,16 @@ impl SnakeEnv {
                 win: reward.5,
                 survival: reward.6,
             },
+            opponent: opp_model,
         };
         let snakes = self.inner.snakes.clone();
         let food = self.inner.food.clone();
 
         let mut callback_err: Option<PyErr> = None;
-        let mut infer_fn = |obs_batch: &[Vec<f32>]| -> Vec<Vec<f64>> {
+        let mut infer_fn = |obs_batch: &[Vec<f32>]| -> Vec<Vec<Vec<f64>>> {
             let n = obs_batch.len();
             if callback_err.is_some() {
-                return vec![vec![0.0; 3]; n];
+                return vec![vec![vec![0.0; 3]]; n];
             }
             let flat: Vec<f32> = obs_batch.iter().flatten().copied().collect();
             let arr = Array2::from_shape_vec((n, dim), flat)
@@ -215,16 +232,16 @@ impl SnakeEnv {
                 .into_pyarray(py);
             match infer
                 .call1((arr,))
-                .and_then(|r| r.extract::<PyReadonlyArray2<f64>>())
+                .and_then(|r| r.extract::<PyReadonlyArray3<f64>>())
             {
                 Ok(out) => out
                     .as_array()
                     .outer_iter()
-                    .map(|row| row.to_vec())
+                    .map(|head_mat| head_mat.outer_iter().map(|row| row.to_vec()).collect())
                     .collect(),
                 Err(e) => {
                     callback_err = Some(e);
-                    vec![vec![0.0; 3]; n]
+                    vec![vec![vec![0.0; 3]]; n]
                 }
             }
         };
