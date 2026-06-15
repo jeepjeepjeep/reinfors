@@ -3,10 +3,28 @@
 Hand-maintained for now; once the API surface grows we can generate these from the Rust bindings.
 """
 
+from typing import Any
+
 Cell = tuple[int, int]
 EventTuple = tuple[bool, bool, str | None, bool, bool, bool, bool]
+StatsTuple = tuple[int, int, int, int]
+SearchOutput = tuple[list[list[float]], StatsTuple]
 
 def core_version() -> str: ...
+def selective_search_many(
+    envs: list[SnakeEnv],
+    agents: list[int],
+    gamma: float,
+    beta: float,
+    expansion_budget: int,
+    top_k: int,
+    max_depth: int,
+    reward: tuple[float, float, float, float, float, float, float],
+    opponent: str,
+    opp_temperature: float,
+    opp_floor: float,
+    infer: Any,
+) -> list[SearchOutput]: ...
 
 class SnakeEnv:
     def __init__(self, grid_size: int, initial_length: int, play_to_last: bool, win_food_lead: int | None) -> None: ...
@@ -18,3 +36,17 @@ class SnakeEnv:
     def food(self) -> list[Cell]: ...
     def is_done(self) -> bool: ...
     def obs(self, agent: int) -> object: ...  # numpy.ndarray[Any, dtype[float32]]
+    def selective_search(
+        self,
+        agent: int,
+        gamma: float,
+        beta: float,
+        expansion_budget: int,
+        top_k: int,
+        max_depth: int,
+        reward: tuple[float, float, float, float, float, float, float],
+        opponent: str,
+        opp_temperature: float,
+        opp_floor: float,
+        infer: Any,
+    ) -> SearchOutput: ...
