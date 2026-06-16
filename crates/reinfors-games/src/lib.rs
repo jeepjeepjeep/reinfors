@@ -3,6 +3,7 @@
 //! the selective-search wrappers all live here, leaving reinfors-core a game-free generic framework.
 
 pub mod action;
+pub mod gridworld;
 pub mod obs;
 pub mod reward;
 pub mod search;
@@ -10,6 +11,7 @@ pub mod snake;
 pub mod snake_game;
 
 pub use action::{relative_to_absolute, Action, RelativeAction, RELATIVE_ACTIONS};
+pub use gridworld::{GridState, GridWorld};
 pub use obs::{egocentric, N_CHANNELS};
 pub use reward::Reward;
 pub use search::{selective_search, selective_search_many, SearchParams};

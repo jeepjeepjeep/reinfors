@@ -22,7 +22,7 @@
 
 use rayon::prelude::*;
 
-use crate::game::Game;
+use crate::game::{Actor, Game};
 
 /// The agent's belief about the opponent's move distribution.
 #[derive(Clone, Copy)]
@@ -97,7 +97,8 @@ struct Node<S> {
     path_weight: f64,
 }
 
-/// What the opponent branching produced for one node, before evaluation resolves deferred weights.
+/// What a node's move branching produced, before evaluation resolves deferred weights.
+#[derive(Clone, Copy)]
 enum BranchWeight {
     Fixed(f64),
     Deferred(usize, usize),
@@ -224,7 +225,7 @@ where
     F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     G::State: Send,
 {
-    debug_assert_eq!(game.num_agents(), 2);
+    debug_assert!((1..=2).contains(&game.num_agents()));
     let a = game.action_count();
     let mut searches: Vec<Search<G::State>> = requests
         .into_iter()
@@ -431,40 +432,55 @@ fn expand_node<G: Game>(
 ) {
     let state = arena[ni].state.clone();
     let depth = arena[ni].depth;
+    let num_agents = game.num_agents();
 
-    // Opponent branching, shared across the agent's edges at this node. `opp_action` indexes into
-    // `0..action_count`; for a dead opponent the single branch carries a placeholder index (ignored).
-    let opp_legal = game.legal_actions(&state, opp);
-    let branching: Vec<(usize, BranchWeight)> = if opp_legal.is_empty() {
-        vec![(0, BranchWeight::Fixed(1.0))]
-    } else {
-        match cfg.opponent {
-            Opponent::Uniform => {
-                let prob = 1.0 / opp_legal.len() as f64;
-                opp_legal
-                    .iter()
-                    .map(|&oa| (oa, BranchWeight::Fixed(prob)))
-                    .collect()
-            }
-            Opponent::Distributional { .. } => {
-                let oi = opp_obs.len();
-                opp_obs.push(game.observe(&state, opp));
-                opp_legal
-                    .iter()
-                    .map(|&oa| (oa, BranchWeight::Deferred(oi, oa)))
-                    .collect()
-            }
+    // Per-node move structure, dispatched on whose turn it is:
+    //  - `Simultaneous` (snake): the searching agent's MAX edges, each fanned over the opponent's
+    //    modeled move distribution — a co-mover that also acts this ply. (`co_action` indexes into
+    //    `0..action_count`; an inactive opponent contributes a single placeholder branch.)
+    //  - `Agent(me)` (single-agent, or our turn in a sequential game): just our MAX edges, one
+    //    deterministic branch each, no co-mover.
+    // Other-agent decision nodes (sequential opponents) and explicit chance nodes arrive in a later step.
+    let (movers, set_co): (Vec<(usize, BranchWeight)>, bool) = match game.actor(&state) {
+        Actor::Simultaneous => {
+            let opp_legal = game.legal_actions(&state, opp);
+            let b = if opp_legal.is_empty() {
+                vec![(0, BranchWeight::Fixed(1.0))]
+            } else {
+                match cfg.opponent {
+                    Opponent::Uniform => {
+                        let prob = 1.0 / opp_legal.len() as f64;
+                        opp_legal
+                            .iter()
+                            .map(|&oa| (oa, BranchWeight::Fixed(prob)))
+                            .collect()
+                    }
+                    Opponent::Distributional { .. } => {
+                        let oi = opp_obs.len();
+                        opp_obs.push(game.observe(&state, opp));
+                        opp_legal
+                            .iter()
+                            .map(|&oa| (oa, BranchWeight::Deferred(oi, oa)))
+                            .collect()
+                    }
+                }
+            };
+            (b, true)
         }
+        Actor::Agent(a) if a == agent => (vec![(0, BranchWeight::Fixed(1.0))], false),
+        _ => unimplemented!("Actor::Agent(other) and Actor::Chance nodes are not yet supported"),
     };
 
     let agent_legal = game.legal_actions(&state, agent);
     let mut edges: Vec<Edge> = Vec::with_capacity(agent_legal.len());
     for &agent_action in agent_legal.iter() {
-        let mut branches: Vec<Branch> = Vec::with_capacity(branching.len());
-        for (opp_action, bw) in &branching {
-            let mut joint = vec![0usize; game.num_agents()];
+        let mut branches: Vec<Branch> = Vec::with_capacity(movers.len());
+        for &(co_action, bw) in &movers {
+            let mut joint = vec![0usize; num_agents];
             joint[agent] = agent_action;
-            joint[opp] = *opp_action;
+            if set_co {
+                joint[opp] = co_action;
+            }
 
             let t = game.step(&state, &joint);
             let reward = t.rewards[agent];
@@ -488,7 +504,7 @@ fn expand_node<G: Game>(
             } else {
                 1
             };
-            let (weight, deferred, scale) = match *bw {
+            let (weight, deferred, scale) = match bw {
                 BranchWeight::Fixed(f) => (f / n as f64, None, 1.0),
                 BranchWeight::Deferred(oi, si) => (0.0, Some((oi, si)), 1.0 / n as f64),
             };

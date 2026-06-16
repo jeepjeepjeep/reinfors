@@ -121,7 +121,7 @@ where
     /// Build an engine over `game` driven by `planner` (which owns the search/algorithm config), with
     /// the rollout knobs from `params`. The game owns its reward and rules.
     pub fn new(game: G, planner: P, params: EngineParams) -> Self {
-        debug_assert_eq!(game.num_agents(), 2);
+        debug_assert!((1..=2).contains(&game.num_agents()));
         let n_heads = params.n_heads.max(1);
         let mut rngs: Vec<SplitMix64> = (0..params.n_games)
             .map(|i| {
