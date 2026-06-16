@@ -46,10 +46,18 @@ pub trait Game {
     /// Apply a joint action (one index per agent) — the deterministic part of the transition, before
     /// any chance resolution. The entry for an agent with no legal moves is ignored.
     fn step(&self, state: &Self::State, actions: &[usize]) -> Transition<Self::State>;
-    /// Post-transition chance distribution (environment stochasticity): `(probability, state)`
-    /// branches summing to 1. Default: deterministic (no chance).
-    fn chance_outcomes(&self, state: &Self::State) -> Vec<(f64, Self::State)> {
-        vec![(1.0, state.clone())]
+    /// The believed chance outcomes of the transition from `state` to `transition.next_state` —
+    /// environment stochasticity the planner expands as a chance node: `(probability, state)` summing
+    /// to 1. An **empty** result means the transition was deterministic (no chance node). The default
+    /// is deterministic. Takes the source `state` so a game can derive what happened (e.g. how many
+    /// apples were eaten) by comparing it to `transition.next_state`.
+    fn chance_outcomes(
+        &self,
+        state: &Self::State,
+        transition: &Transition<Self::State>,
+    ) -> Vec<(f64, Self::State)> {
+        let _ = (state, transition);
+        Vec::new()
     }
     /// Egocentric observation for `agent`, a flat `[C*H*W]` f32 buffer.
     fn observe(&self, state: &Self::State, agent: usize) -> Vec<f32>;
@@ -70,7 +78,6 @@ pub struct SnakeGame {
     pub initial_length: usize,
     pub play_to_last: bool,
     pub win_food_lead: Option<usize>,
-    pub initial_food_count: usize,
     pub reward: Reward,
 }
 
@@ -140,18 +147,24 @@ impl Game for SnakeGame {
         }
     }
 
-    fn chance_outcomes(&self, state: &SnakeState) -> Vec<(f64, SnakeState)> {
-        // Deterministic first-empty respawn belief: restore the apples eaten last step (count = target
-        // minus current). This is the search's in-tree belief; the env's true spawn is uniform-RNG,
-        // injected by the rollout engine. The `food_samples` Monte-Carlo fan-out is a planner concern,
-        // not part of the game, so this returns the single believed outcome.
-        let missing = self.initial_food_count.saturating_sub(state.food.len());
-        if missing == 0 {
-            return vec![(1.0, state.clone())];
+    fn chance_outcomes(
+        &self,
+        state: &SnakeState,
+        transition: &Transition<SnakeState>,
+    ) -> Vec<(f64, SnakeState)> {
+        // An eaten apple is the only stochastic event: `step` removed it without respawning, so the
+        // count drop = apples eaten. None eaten -> deterministic (empty). Otherwise the believed
+        // outcome is a first-empty respawn per eaten apple (the search's bit-reproducible spawn belief;
+        // the env's true spawn is uniform-RNG, injected by the rollout engine). Single believed branch;
+        // the `food_samples` Monte-Carlo fan-out of it is a planner concern, not the game's.
+        let next = &transition.next_state;
+        let eaten = state.food.len().saturating_sub(next.food.len());
+        if eaten == 0 {
+            return Vec::new();
         }
-        let mut food = state.food.clone();
-        for _ in 0..missing {
-            match first_empty_cell(&state.snakes, &food, self.grid_size) {
+        let mut food = next.food.clone();
+        for _ in 0..eaten {
+            match first_empty_cell(&next.snakes, &food, self.grid_size) {
                 Some(cell) => {
                     food.insert(cell);
                 }
@@ -161,7 +174,7 @@ impl Game for SnakeGame {
         vec![(
             1.0,
             SnakeState {
-                snakes: state.snakes.clone(),
+                snakes: next.snakes.clone(),
                 food,
             },
         )]
@@ -192,13 +205,12 @@ mod tests {
         }
     }
 
-    fn game(food_count: usize) -> SnakeGame {
+    fn game() -> SnakeGame {
         SnakeGame {
             grid_size: G,
             initial_length: 3,
             play_to_last: false,
             win_food_lead: None,
-            initial_food_count: food_count,
             reward: reward(),
         }
     }
@@ -260,16 +272,21 @@ mod tests {
         actions: [usize; 2],
     ) -> (SnakeState, Vec<f64>, bool) {
         let t = g.step(state, &actions);
-        let outcomes = g.chance_outcomes(&t.next_state);
-        let total: f64 = outcomes.iter().map(|(p, _)| p).sum();
-        assert!((total - 1.0).abs() < 1e-12, "chance probs must sum to 1");
-        (outcomes[0].1.clone(), t.rewards, t.terminal)
+        let outcomes = g.chance_outcomes(state, &t);
+        let after = if outcomes.is_empty() {
+            t.next_state.clone() // empty == deterministic
+        } else {
+            let total: f64 = outcomes.iter().map(|(p, _)| p).sum();
+            assert!((total - 1.0).abs() < 1e-12, "chance probs must sum to 1");
+            outcomes[0].1.clone()
+        };
+        (after, t.rewards, t.terminal)
     }
 
     #[test]
     fn step_then_chance_matches_search_successor_with_an_eat() {
         // Food directly in front of A (faces Right, head (4,2)): Forward eats it, triggering a respawn.
-        let g = game(1);
+        let g = game();
         let st = initial_state(&[(4, 3)]);
         let (after, rewards, terminal) = apply(&g, &st, [0, 0]);
         let (exp_state, exp_rewards, exp_terminal) = search_successor(&g, &st, [0, 0]);
@@ -285,7 +302,7 @@ mod tests {
 
     #[test]
     fn step_then_chance_matches_search_successor_no_eat() {
-        let g = game(1);
+        let g = game();
         let st = initial_state(&[(0, 0)]); // far corner, untouched
         for actions in [[0usize, 0], [1, 2], [2, 1], [0, 2]] {
             let (after, rewards, terminal) = apply(&g, &st, actions);
@@ -294,14 +311,14 @@ mod tests {
             assert_eq!(rewards, exp_rewards.to_vec());
             assert_eq!(terminal, exp_terminal);
         }
-        // No apple eaten -> chance is identity.
+        // No apple eaten -> chance is deterministic (empty outcomes).
         let t = g.step(&st, &[1, 2]);
-        assert_eq!(g.chance_outcomes(&t.next_state)[0].1, t.next_state);
+        assert!(g.chance_outcomes(&st, &t).is_empty());
     }
 
     #[test]
     fn observe_matches_egocentric() {
-        let g = game(1);
+        let g = game();
         let st = initial_state(&[(4, 3)]);
         for agent in 0..2 {
             assert_eq!(
@@ -313,7 +330,7 @@ mod tests {
 
     #[test]
     fn legal_actions_and_metadata() {
-        let g = game(1);
+        let g = game();
         let st = initial_state(&[(4, 3)]);
         assert_eq!(g.num_agents(), 2);
         assert_eq!(g.action_count(), 3);

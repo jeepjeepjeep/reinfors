@@ -10,6 +10,11 @@
 //! The tree is an arena (`Vec<Node>` indexed by `usize`) so the frontier can hold node references
 //! without fighting the borrow checker.
 //!
+//! The engine is generic over the [`Game`] trait: a `Node<S>` carries an opaque game state `S` and
+//! successors come from `Game::step` + `Game::chance_outcomes`. Snake is the only game today, so the
+//! public `selective_search`/`selective_search_many` are thin wrappers that build a `SnakeGame` +
+//! `SnakeState` from `SearchParams` and call the generic [`search_many`].
+//!
 //! When a move eats an apple in-tree, a replacement is spawned at the first unoccupied cell
 //! (row-major). This deterministic spawn belief is bit-reproducible across Rust and Python, so the
 //! differential test injects the same rule into the oracle — unlike the env's true RNG spawn, which
@@ -22,12 +27,12 @@ use std::collections::HashSet;
 
 use rayon::prelude::*;
 
-use crate::action::{relative_to_absolute, Action, RELATIVE_ACTIONS};
-use crate::obs::egocentric_parts;
+use crate::game::{Game, SnakeGame, SnakeState};
 use crate::reward::Reward;
-use crate::snake::{first_empty_cell, Cell, Snake, SnakeEnv};
+use crate::snake::{Cell, Snake};
 
 /// The agent's belief about the opponent's move distribution.
+#[derive(Clone, Copy)]
 pub enum Opponent {
     /// Equal weight on each opponent action (no net dependency).
     Uniform,
@@ -51,6 +56,19 @@ pub struct SearchParams {
     /// stochastic spawn would populate; 1 disables it.
     pub food_samples: usize,
     pub reward: Reward,
+    pub opponent: Opponent,
+}
+
+/// Game-agnostic search knobs, derived from `SearchParams` once the game-specific config has been
+/// split off onto the `Game` itself.
+#[derive(Clone, Copy)]
+pub struct SearchConfig {
+    pub gamma: f64,
+    pub beta: f64,
+    pub expansion_budget: usize,
+    pub top_k: usize,
+    pub max_depth: i32,
+    pub food_samples: usize,
     pub opponent: Opponent,
 }
 
@@ -89,9 +107,8 @@ struct Edge {
     branches: Vec<Branch>,
 }
 
-struct Node {
-    snakes: [Snake; 2],
-    food: HashSet<Cell>,
+struct Node<S> {
+    state: S,
     obs: Vec<f32>, // leaf observation (empty for terminal nodes)
     depth: i32,
     terminal: bool,
@@ -110,8 +127,8 @@ enum BranchWeight {
 
 /// Per-request search state, advanced one round at a time so several searches can run in lockstep
 /// and pool their per-round observations into a single `infer` call.
-struct Search {
-    arena: Vec<Node>,
+struct Search<S> {
+    arena: Vec<Node<S>>,
     frontier: Vec<usize>,
     agent: usize,
     opp: usize,
@@ -122,11 +139,10 @@ struct Search {
     new_leaves: Vec<usize>,
 }
 
-impl Search {
-    fn new(snakes: [Snake; 2], food: HashSet<Cell>, agent: usize) -> Search {
+impl<S> Search<S> {
+    fn new(state: S, agent: usize) -> Search<S> {
         let root = Node {
-            snakes,
-            food,
+            state,
             obs: Vec::new(),
             depth: 0,
             terminal: false,
@@ -156,13 +172,13 @@ impl Search {
 
 /// One round's build phase for a single search: sort the frontier (after the root round), expand its
 /// top-k nodes one ply each, and stage the new leaves + opponent observations for the pooled forward.
-fn expand_round(s: &mut Search, p: &SearchParams, first: bool) {
+fn expand_round<G: Game>(s: &mut Search<G::State>, game: &G, cfg: &SearchConfig, first: bool) {
     if !first {
-        sort_frontier(&s.arena, &mut s.frontier, p);
+        sort_frontier(&s.arena, &mut s.frontier, cfg);
     }
-    let take = p
+    let take = cfg
         .top_k
-        .min(p.expansion_budget - s.stats.expansions)
+        .min(cfg.expansion_budget - s.stats.expansions)
         .min(s.frontier.len());
     s.batch = s.frontier.drain(..take).collect();
     s.opp_obs.clear();
@@ -171,10 +187,11 @@ fn expand_round(s: &mut Search, p: &SearchParams, first: bool) {
     for ni in s.batch.clone() {
         expand_node(
             &mut s.arena,
+            game,
+            cfg,
             ni,
             agent,
             opp,
-            p,
             &mut s.opp_obs,
             &mut s.new_leaves,
         );
@@ -187,9 +204,10 @@ fn expand_round(s: &mut Search, p: &SearchParams, first: bool) {
 /// Apply `f(search_index, &mut search)` to every search, in parallel (rayon) when `parallel`, else
 /// serially. The per-search work is independent, so this is value-neutral either way; the serial path
 /// avoids rayon's per-dispatch cost when the active pool is too small to win from it.
-fn for_each_search<F>(searches: &mut [Search], parallel: bool, f: F)
+fn for_each_search<S, F>(searches: &mut [Search<S>], parallel: bool, f: F)
 where
-    F: Fn(usize, &mut Search) + Sync,
+    S: Send,
+    F: Fn(usize, &mut Search<S>) + Sync,
 {
     if parallel {
         searches
@@ -213,9 +231,10 @@ where
 /// serial. This is value-neutral: every search is deterministic and reads only its own state, so the
 /// result is bit-identical to a sequential run regardless of thread count. `infer` is never called
 /// off the calling thread, so a Python `infer` callback keeps the GIL on one thread.
-pub fn selective_search_many<F>(
-    p: &SearchParams,
-    requests: Vec<([Snake; 2], HashSet<Cell>, usize)>,
+fn search_many<G: Game + Sync, F>(
+    game: &G,
+    cfg: &SearchConfig,
+    requests: Vec<(G::State, usize)>,
     collect_interior: bool,
     mut infer: F,
 ) -> Vec<SearchResult>
@@ -225,12 +244,15 @@ where
     // row-major `[n_rows, K, A]` buffer (K inferred from its length). Flat on both sides avoids the
     // per-row obs clones and the per-leaf nested-`Vec` allocations the boundary would otherwise incur.
     F: FnMut(Vec<f32>, usize) -> Vec<f64>,
+    G::State: Send,
 {
-    let mut searches: Vec<Search> = requests
+    debug_assert_eq!(game.num_agents(), 2);
+    let a = game.action_count();
+    let mut searches: Vec<Search<G::State>> = requests
         .into_iter()
-        .map(|(s, f, a)| Search::new(s, f, a))
+        .map(|(s, agent)| Search::new(s, agent))
         .collect();
-    let budget = p.expansion_budget;
+    let budget = cfg.expansion_budget;
     let mut first = true;
     loop {
         let active: Vec<usize> = (0..searches.len())
@@ -250,10 +272,10 @@ where
         // `active` inside is equivalent to the list above (nothing mutates between).
         for_each_search(&mut searches, parallel, |_, s| {
             if s.active(budget) {
-                expand_round(s, p, first);
+                expand_round(s, game, cfg, first);
                 for k in 0..s.new_leaves.len() {
                     let li = s.new_leaves[k];
-                    if s.arena[li].depth < p.max_depth {
+                    if s.arena[li].depth < cfg.max_depth {
                         s.frontier.push(li);
                     }
                 }
@@ -280,7 +302,6 @@ where
             span_by_idx[si] = Some((row_start, s.opp_obs.len()));
         }
         if n_rows > 0 {
-            let a = RELATIVE_ACTIONS.len();
             let q = infer(obs_flat, n_rows); // serial: the (GPU/Python) network forward, flat in/out
             let n_heads = q.len() / (n_rows * a);
             // Evaluate phase: each active search resolves its own row span of the batch.
@@ -296,7 +317,8 @@ where
                         slice,
                         n_opp,
                         n_heads,
-                        p,
+                        a,
+                        cfg,
                         &mut s.stats,
                     );
                 }
@@ -307,8 +329,8 @@ where
     searches
         .into_par_iter()
         .map(|mut s| {
-            resolve(&mut s.arena, 0, p.gamma, s.n_heads);
-            let values = node_action_values(&s.arena, 0, p.gamma, s.n_heads);
+            resolve(&mut s.arena, 0, cfg.gamma, s.n_heads);
+            let values = node_action_values(&s.arena, 0, cfg.gamma, s.n_heads, a);
             let mut interior: Vec<InteriorTarget> = Vec::new();
             if collect_interior && s.arena[0].edges.is_some() {
                 // Walk the expanded tree below the root (the root itself is the decision recorded as
@@ -319,8 +341,9 @@ where
                         collect_interior_targets(
                             &s.arena,
                             child,
-                            p.gamma,
+                            cfg.gamma,
                             s.n_heads,
+                            a,
                             &mut interior,
                         );
                     }
@@ -329,6 +352,47 @@ where
             (values, interior, s.stats)
         })
         .collect()
+}
+
+/// Build a `SnakeGame` + `SearchConfig` from `SearchParams`. The snake-specific config splits onto
+/// the game; the search keeps the game-agnostic knobs.
+fn snake_game_and_config(p: &SearchParams) -> (SnakeGame, SearchConfig) {
+    let game = SnakeGame {
+        grid_size: p.grid_size,
+        initial_length: p.initial_length,
+        play_to_last: p.play_to_last,
+        win_food_lead: p.win_food_lead,
+        reward: p.reward,
+    };
+    let cfg = SearchConfig {
+        gamma: p.gamma,
+        beta: p.beta,
+        expansion_budget: p.expansion_budget,
+        top_k: p.top_k,
+        max_depth: p.max_depth,
+        food_samples: p.food_samples,
+        opponent: p.opponent,
+    };
+    (game, cfg)
+}
+
+/// Snake wrapper over the generic [`search_many`]: maps each `([Snake;2], HashSet<Cell>)` request to a
+/// `SnakeState` and runs the generic engine. The public API is unchanged.
+pub fn selective_search_many<F>(
+    p: &SearchParams,
+    requests: Vec<([Snake; 2], HashSet<Cell>, usize)>,
+    collect_interior: bool,
+    infer: F,
+) -> Vec<SearchResult>
+where
+    F: FnMut(Vec<f32>, usize) -> Vec<f64>,
+{
+    let (game, cfg) = snake_game_and_config(p);
+    let requests: Vec<(SnakeState, usize)> = requests
+        .into_iter()
+        .map(|(snakes, food, agent)| (SnakeState { snakes, food }, agent))
+        .collect();
+    search_many(&game, &cfg, requests, collect_interior, infer)
 }
 
 /// Single-request convenience wrapper over [`selective_search_many`].
@@ -352,25 +416,25 @@ where
 /// bootstrap + sigma, then write branch weights and child path-weights. `q` is this search's flat
 /// row-major slice `[rows, k, A]`; row `r`'s `[k, A]` block is `q[r*k*A .. (r+1)*k*A]`.
 #[allow(clippy::too_many_arguments)]
-fn evaluate(
-    arena: &mut [Node],
+fn evaluate<S>(
+    arena: &mut [Node<S>],
     batch: &[usize],
     new_leaves: &[usize],
     q: &[f64],
     n_opp: usize,
     k: usize,
-    p: &SearchParams,
+    a: usize,
+    cfg: &SearchConfig,
     stats: &mut SearchStats,
 ) {
-    let a = RELATIVE_ACTIONS.len();
     let row = |r: usize| -> &[f64] { &q[r * k * a..(r + 1) * k * a] }; // [k, A], head-major
 
     // Opponent move probabilities from the head-mean Q (shared across heads, so chance weights stay
     // scalar and sigma reflects only the agent's own value disagreement).
     let opp_probs: Vec<Vec<f64>> = (0..n_opp)
-        .map(|i| match &p.opponent {
+        .map(|i| match cfg.opponent {
             Opponent::Distributional { temperature, floor } => {
-                softmax_floor(&head_mean(row(i), k, a), *temperature, *floor)
+                softmax_floor(&head_mean(row(i), k, a), temperature, floor)
             }
             Opponent::Uniform => Vec::new(), // uniform registers no opponent observations
         })
@@ -406,7 +470,7 @@ fn evaluate(
                         None => b.weight,
                     };
                     weight_updates.push((ni, ei, bi, w));
-                    path_updates.push((b.child, parent_pw * w * p.gamma));
+                    path_updates.push((b.child, parent_pw * w * cfg.gamma));
                 }
             }
         }
@@ -419,7 +483,7 @@ fn evaluate(
     }
 }
 
-fn sort_frontier(arena: &[Node], frontier: &mut [usize], p: &SearchParams) {
+fn sort_frontier<S>(arena: &[Node<S>], frontier: &mut [usize], cfg: &SearchConfig) {
     let max_voi = frontier
         .iter()
         .map(|&i| arena[i].path_weight * arena[i].sigma)
@@ -427,105 +491,80 @@ fn sort_frontier(arena: &[Node], frontier: &mut [usize], p: &SearchParams) {
     let max_voi = if max_voi > 0.0 { max_voi } else { 1.0 };
     let key = |i: usize| -> (f64, f64, f64) {
         let n = &arena[i];
-        let voi = p.beta * (n.path_weight * n.sigma) / max_voi;
-        let depth_term = (1.0 - p.beta) * (n.depth as f64) / (p.max_depth as f64);
+        let voi = cfg.beta * (n.path_weight * n.sigma) / max_voi;
+        let depth_term = (1.0 - cfg.beta) * (n.depth as f64) / (cfg.max_depth as f64);
         (-(voi + depth_term), -(n.depth as f64), -n.path_weight)
     };
     frontier.sort_by(|&a, &b| key(a).partial_cmp(&key(b)).unwrap());
 }
 
-fn expand_node(
-    arena: &mut Vec<Node>,
+#[allow(clippy::too_many_arguments)]
+fn expand_node<G: Game>(
+    arena: &mut Vec<Node<G::State>>,
+    game: &G,
+    cfg: &SearchConfig,
     ni: usize,
     agent: usize,
     opp: usize,
-    p: &SearchParams,
     opp_obs: &mut Vec<Vec<f32>>,
     new_leaves: &mut Vec<usize>,
 ) {
-    let snakes = arena[ni].snakes.clone();
-    let food = arena[ni].food.clone();
+    let state = arena[ni].state.clone();
     let depth = arena[ni].depth;
 
-    // Opponent branching, shared across the agent's edges at this node.
-    let branching: Vec<(Option<Action>, BranchWeight)> = if !snakes[opp].alive {
-        vec![(None, BranchWeight::Fixed(1.0))]
+    // Opponent branching, shared across the agent's edges at this node. `opp_action` indexes into
+    // `0..action_count`; for a dead opponent the single branch carries a placeholder index (ignored).
+    let opp_legal = game.legal_actions(&state, opp);
+    let branching: Vec<(usize, BranchWeight)> = if opp_legal.is_empty() {
+        vec![(0, BranchWeight::Fixed(1.0))]
     } else {
-        let heading = snakes[opp].direction;
-        match &p.opponent {
+        match cfg.opponent {
             Opponent::Uniform => {
-                let prob = 1.0 / RELATIVE_ACTIONS.len() as f64;
-                RELATIVE_ACTIONS
+                let prob = 1.0 / opp_legal.len() as f64;
+                opp_legal
                     .iter()
-                    .map(|&r| {
-                        (
-                            Some(relative_to_absolute(heading, r)),
-                            BranchWeight::Fixed(prob),
-                        )
-                    })
+                    .map(|&oa| (oa, BranchWeight::Fixed(prob)))
                     .collect()
             }
             Opponent::Distributional { .. } => {
                 let oi = opp_obs.len();
-                opp_obs.push(egocentric_parts(&snakes, &food, p.grid_size, opp));
-                RELATIVE_ACTIONS
+                opp_obs.push(game.observe(&state, opp));
+                opp_legal
                     .iter()
-                    .enumerate()
-                    .map(|(i, &r)| {
-                        (
-                            Some(relative_to_absolute(heading, r)),
-                            BranchWeight::Deferred(oi, i),
-                        )
-                    })
+                    .map(|&oa| (oa, BranchWeight::Deferred(oi, oa)))
                     .collect()
             }
         }
     };
 
-    let agent_heading = snakes[agent].direction;
-    let mut edges: Vec<Edge> = Vec::with_capacity(RELATIVE_ACTIONS.len());
-    for &agent_rel in RELATIVE_ACTIONS.iter() {
-        let agent_abs = relative_to_absolute(agent_heading, agent_rel);
+    let agent_legal = game.legal_actions(&state, agent);
+    let mut edges: Vec<Edge> = Vec::with_capacity(agent_legal.len());
+    for &agent_action in agent_legal.iter() {
         let mut branches: Vec<Branch> = Vec::with_capacity(branching.len());
-        for (opp_abs, bw) in &branching {
-            let mut moves: [Option<Action>; 2] = [None, None];
-            moves[agent] = Some(agent_abs);
-            if let Some(oa) = opp_abs {
-                moves[opp] = Some(*oa);
-            }
-            let mut sim = SnakeEnv::from_parts(
-                p.grid_size,
-                p.initial_length,
-                p.play_to_last,
-                p.win_food_lead,
-                snakes.clone(),
-                food.clone(),
-            );
-            let events = sim.advance(moves, || None);
-            let reward = p.reward.eval(&events[agent]);
+        for (opp_action, bw) in &branching {
+            let mut joint = vec![0usize; game.num_agents()];
+            joint[agent] = agent_action;
+            joint[opp] = *opp_action;
 
-            // In-tree apple respawn: one replacement per eaten apple, in snake order so each spawn
-            // sees the prior one's cell as occupied (matching the oracle's advance). The spawn model
-            // is the deterministic first-empty belief (see module docs); it only affects child state,
-            // so it is applied after advance rather than threaded through it.
-            for ev in events.iter() {
-                if ev.ate_food {
-                    if let Some(cell) = first_empty_cell(&sim.snakes, &sim.food, p.grid_size) {
-                        sim.food.insert(cell);
-                    }
-                }
-            }
+            let t = game.step(&state, &joint);
+            let reward = t.rewards[agent];
+            let chance = game.chance_outcomes(&state, &t);
+            let stochastic = !chance.is_empty();
+            let child_state = if stochastic {
+                chance[0].1.clone()
+            } else {
+                t.next_state
+            };
+            let terminal = t.terminal || game.legal_actions(&child_state, agent).is_empty();
 
-            // food_samples Monte-Carlo fan-out: an eaten apple's replacement is a chance event, so an
-            // eating branch splits into `food_samples` equally-weighted sub-branches (matching the
-            // oracle). Under the deterministic first-empty spawn the sub-branches are identical (see
-            // module docs) — this is the structure a stochastic spawn belief would populate. The 1/k
-            // weight goes onto fixed branches directly; for deferred (distributional) ones it rides
-            // `scale`, applied to the resolved opponent probability during evaluation.
-            let terminal = sim.done || !sim.snakes[agent].alive;
-            let ate = events.iter().any(|e| e.ate_food);
-            let n = if ate && p.food_samples > 1 {
-                p.food_samples
+            // food_samples Monte-Carlo fan-out: a stochastic (eaten-apple) transition splits into
+            // `food_samples` equally-weighted sub-branches (matching the oracle). Under the
+            // deterministic first-empty spawn belief the sub-branches are identical (see module docs) —
+            // this is the structure a stochastic spawn belief would populate. The 1/n weight goes onto
+            // fixed branches directly; for deferred (distributional) ones it rides `scale`, applied to
+            // the resolved opponent probability during evaluation.
+            let n = if stochastic && cfg.food_samples > 1 {
+                cfg.food_samples
             } else {
                 1
             };
@@ -536,10 +575,10 @@ fn expand_node(
             if n == 1 {
                 // common path: move the single child's state in (no clone)
                 let child = if terminal {
-                    push_node(arena, sim.snakes, sim.food, Vec::new(), depth + 1, true)
+                    push_node(arena, child_state, Vec::new(), depth + 1, true)
                 } else {
-                    let obs = egocentric_parts(&sim.snakes, &sim.food, p.grid_size, agent);
-                    let idx = push_node(arena, sim.snakes, sim.food, obs, depth + 1, false);
+                    let obs = game.observe(&child_state, agent);
+                    let idx = push_node(arena, child_state, obs, depth + 1, false);
                     new_leaves.push(idx);
                     idx
                 };
@@ -554,17 +593,11 @@ fn expand_node(
                 let obs = if terminal {
                     Vec::new()
                 } else {
-                    egocentric_parts(&sim.snakes, &sim.food, p.grid_size, agent)
+                    game.observe(&child_state, agent)
                 };
                 for _ in 0..n {
-                    let child = push_node(
-                        arena,
-                        sim.snakes.clone(),
-                        sim.food.clone(),
-                        obs.clone(),
-                        depth + 1,
-                        terminal,
-                    );
+                    let child =
+                        push_node(arena, child_state.clone(), obs.clone(), depth + 1, terminal);
                     if !terminal {
                         new_leaves.push(child);
                     }
@@ -583,17 +616,15 @@ fn expand_node(
     arena[ni].edges = Some(edges);
 }
 
-fn push_node(
-    arena: &mut Vec<Node>,
-    snakes: [Snake; 2],
-    food: HashSet<Cell>,
+fn push_node<S>(
+    arena: &mut Vec<Node<S>>,
+    state: S,
     obs: Vec<f32>,
     depth: i32,
     terminal: bool,
 ) -> usize {
     arena.push(Node {
-        snakes,
-        food,
+        state,
         obs,
         depth,
         terminal,
@@ -608,7 +639,7 @@ fn push_node(
 
 /// One bottom-up pass caching per-head `node.value`: 0 at terminals, the bootstrap at frontier
 /// leaves, the per-head max over agent actions of the chance-averaged edge value at decision nodes.
-fn resolve(arena: &mut Vec<Node>, idx: usize, gamma: f64, k: usize) {
+fn resolve<S>(arena: &mut Vec<Node<S>>, idx: usize, gamma: f64, k: usize) {
     if arena[idx].terminal {
         return; // value stays empty; treated as 0 in edge_value
     }
@@ -633,7 +664,7 @@ fn resolve(arena: &mut Vec<Node>, idx: usize, gamma: f64, k: usize) {
 }
 
 /// Snapshot a node's edges as (weight, reward, child) so we can recurse with `&mut arena`.
-fn take_edges(arena: &[Node], idx: usize) -> Vec<Vec<(f64, f64, usize)>> {
+fn take_edges<S>(arena: &[Node<S>], idx: usize) -> Vec<Vec<(f64, f64, usize)>> {
     arena[idx]
         .edges
         .as_ref()
@@ -650,7 +681,12 @@ fn take_edges(arena: &[Node], idx: usize) -> Vec<Vec<(f64, f64, usize)>> {
 
 /// Per-head chance-averaged value of one edge: sum over branches of `w * (r + gamma * child.value)`,
 /// with terminal children contributing `w * r` (their continuation value is 0).
-fn edge_value(arena: &[Node], branches: &[(f64, f64, usize)], gamma: f64, k: usize) -> Vec<f64> {
+fn edge_value<S>(
+    arena: &[Node<S>],
+    branches: &[(f64, f64, usize)],
+    gamma: f64,
+    k: usize,
+) -> Vec<f64> {
     let mut acc = vec![0.0; k];
     for &(w, r, c) in branches {
         if arena[c].terminal {
@@ -668,9 +704,15 @@ fn edge_value(arena: &[Node], branches: &[(f64, f64, usize)], gamma: f64, k: usi
 
 /// A decision node's action values as `[K][A]` (per head, per relative action) — the chance-averaged
 /// value of each agent action. Used for both the root target and interior TreeStrap targets.
-fn node_action_values(arena: &[Node], idx: usize, gamma: f64, k: usize) -> Vec<Vec<f64>> {
+fn node_action_values<S>(
+    arena: &[Node<S>],
+    idx: usize,
+    gamma: f64,
+    k: usize,
+    a: usize,
+) -> Vec<Vec<f64>> {
     let edges = match &arena[idx].edges {
-        None => return vec![vec![0.0; RELATIVE_ACTIONS.len()]; k],
+        None => return vec![vec![0.0; a]; k],
         Some(_) => take_edges(arena, idx),
     };
     let per_action: Vec<Vec<f64>> = edges
@@ -684,11 +726,12 @@ fn node_action_values(arena: &[Node], idx: usize, gamma: f64, k: usize) -> Vec<V
 
 /// DFS-collect every expanded non-terminal MAX node at or below `idx` as `(obs, [K][A] values)` —
 /// true TreeStrap data. Terminal and unexpanded-frontier nodes are skipped (no backed-up values).
-fn collect_interior_targets(
-    arena: &[Node],
+fn collect_interior_targets<S>(
+    arena: &[Node<S>],
     idx: usize,
     gamma: f64,
     k: usize,
+    a: usize,
     out: &mut Vec<InteriorTarget>,
 ) {
     if arena[idx].terminal || arena[idx].edges.is_none() {
@@ -696,12 +739,12 @@ fn collect_interior_targets(
     }
     out.push((
         arena[idx].obs.clone(),
-        node_action_values(arena, idx, gamma, k),
+        node_action_values(arena, idx, gamma, k, a),
     ));
     let edges = take_edges(arena, idx);
     for edge in &edges {
         for &(_, _, child) in edge {
-            collect_interior_targets(arena, child, gamma, k, out);
+            collect_interior_targets(arena, child, gamma, k, a, out);
         }
     }
 }
@@ -737,6 +780,7 @@ fn softmax_floor(q: &[f64], temperature: f64, floor: f64) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::action::Action;
     use crate::snake::Snake;
 
     fn snake(cells: &[Cell], dir: Action) -> Snake {
@@ -1014,6 +1058,46 @@ mod tests {
             leaves(3),
             5,
             "the eating (Forward) branch fans 1 -> 3; the others are unchanged"
+        );
+    }
+
+    #[test]
+    fn generic_search_many_matches_snake_wrapper() {
+        // The generic path (SnakeGame + SnakeState fed straight into search_many) must produce
+        // bit-identical results to the public snake wrapper on the same state.
+        let snakes = [
+            snake(&[(6, 5), (6, 4), (6, 3)], Action::Right),
+            snake(&[(2, 8), (2, 9), (1, 9)], Action::Left),
+        ];
+        let food: HashSet<Cell> = [(4, 4)].into_iter().collect();
+        let mut p = params();
+        p.expansion_budget = 24;
+
+        let (game, cfg) = snake_game_and_config(&p);
+        let state = SnakeState {
+            snakes: snakes.clone(),
+            food: food.clone(),
+        };
+        let generic = search_many(&game, &cfg, vec![(state, 0usize)], true, two_head_infer)
+            .pop()
+            .unwrap();
+        let wrapped = selective_search(&p, snakes, food, 0, true, two_head_infer);
+
+        assert_eq!(generic.0, wrapped.0, "root values must match");
+        assert_eq!(generic.1, wrapped.1, "interior targets must match");
+        assert_eq!(
+            (
+                generic.2.max_depth,
+                generic.2.expansions,
+                generic.2.leaves,
+                generic.2.rounds
+            ),
+            (
+                wrapped.2.max_depth,
+                wrapped.2.expansions,
+                wrapped.2.leaves,
+                wrapped.2.rounds
+            ),
         );
     }
 }
