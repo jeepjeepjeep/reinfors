@@ -63,6 +63,10 @@ LR = 2.5e-4
 BATCH_SIZE = 512
 BUFFER_CAPACITY = 100_000
 MIN_BUFFER_SIZE = 2_000
+# snake_RL trains once per `train_every` env ticks and logs against the env-tick count, so its "step"
+# advances by `train_every` per gradient update. We scale reinfors' gradient-step index by the same
+# factor when logging, so the TensorBoard step axis is directly comparable (no 4x offset to undo).
+TRAIN_EVERY = 4
 
 
 def build_engine(n_games: int, seed: int) -> object:
@@ -135,10 +139,11 @@ def main() -> None:
     state = {"episode": 0, "step": 0, "next_ckpt": args.checkpoint_every}
 
     def on_step(step: int, m: StepMetrics) -> None:
-        state["step"] = step
-        writer.add_scalar("train/loss", m.loss, step)
-        writer.add_scalar("train/mean_q", m.mean_q, step)
-        writer.add_scalar("train/mean_target_q", m.mean_target_q, step)
+        s = step * TRAIN_EVERY  # scale to snake_RL's env-tick step axis (see TRAIN_EVERY)
+        state["step"] = s
+        writer.add_scalar("train/loss", m.loss, s)
+        writer.add_scalar("train/mean_q", m.mean_q, s)
+        writer.add_scalar("train/mean_target_q", m.mean_target_q, s)
 
     def on_collect(it: int, r: CollectReport) -> None:
         t = r.telemetry
@@ -147,7 +152,7 @@ def main() -> None:
             writer.add_scalar("episode/reward_B", reward_b, state["episode"])
             writer.add_scalar("episode/length", length, state["episode"])
             state["episode"] += 1
-        s = state["step"]  # log search/throughput against the gradient-step axis (snake_RL parity)
+        s = state["step"]  # search/throughput share the scaled (env-tick) step axis with train/*
         writer.add_scalar("search/max_depth", t["max_depth"], s)
         writer.add_scalar("search/mean_leaves", t["mean_leaves"], s)
         writer.add_scalar("search/mean_rounds", t["mean_rounds"], s)
@@ -157,8 +162,9 @@ def main() -> None:
         writer.add_scalar("throughput/collect_seconds", r.seconds, s)
         if state["episode"] >= state["next_ckpt"]:
             path = out_dir / f"ckpt_ep{state['episode']}.pt"
-            torch.save({"net": net.state_dict(), "episode": state["episode"], "step": s}, path)
-            print(f"  {state['episode']} episodes, {s} steps -> {path}")
+            grad_steps = s // TRAIN_EVERY
+            torch.save({"net": net.state_dict(), "episode": state["episode"], "step": grad_steps}, path)
+            print(f"  {state['episode']} episodes, {grad_steps} gradient steps -> {path}")
             while state["next_ckpt"] <= state["episode"]:
                 state["next_ckpt"] += args.checkpoint_every
 
@@ -180,7 +186,7 @@ def main() -> None:
     )
     torch.save({"net": net.state_dict(), "episode": state["episode"], "step": state["step"]}, out_dir / "final.pt")
     writer.close()
-    print(f"done — {state['episode']} episodes, {state['step']} gradient steps")
+    print(f"done — {state['episode']} episodes, {state['step'] // TRAIN_EVERY} gradient steps")
 
 
 if __name__ == "__main__":
