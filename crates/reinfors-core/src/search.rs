@@ -95,6 +95,7 @@ struct Node<S> {
     value: Vec<f64>,          // per-head backed-up value (empty at terminals; treated as 0)
     sigma: f64,               // std over heads of the bootstrap — the VOI signal
     path_weight: f64,
+    max_node: bool, // a searching-agent decision node (vs an opponent/chance node)
 }
 
 /// What a node's move branching produced, before evaluation resolves deferred weights.
@@ -130,6 +131,7 @@ impl<S> Search<S> {
             value: Vec::new(),
             sigma: 0.0,
             path_weight: 1.0,
+            max_node: false, // set when the node is expanded (the root is always a MAX node)
         };
         Search {
             arena: vec![root],
@@ -419,6 +421,128 @@ fn sort_frontier<S>(arena: &[Node<S>], frontier: &mut [usize], cfg: &SearchConfi
     frontier.sort_by(|&a, &b| key(a).partial_cmp(&key(b)).unwrap());
 }
 
+/// A mover's believed move distribution at `state`: uniform, or distributional from its observed
+/// head-mean Q (deferred via `opp_obs`, resolved in `evaluate`). An inactive mover (no legal actions)
+/// contributes a single placeholder branch.
+fn agent_branching<G: Game>(
+    game: &G,
+    cfg: &SearchConfig,
+    state: &G::State,
+    mover: usize,
+    opp_obs: &mut Vec<Vec<f32>>,
+) -> Vec<(usize, BranchWeight)> {
+    let legal = game.legal_actions(state, mover);
+    if legal.is_empty() {
+        return vec![(0, BranchWeight::Fixed(1.0))];
+    }
+    match cfg.opponent {
+        Opponent::Uniform => {
+            let prob = 1.0 / legal.len() as f64;
+            legal
+                .iter()
+                .map(|&a| (a, BranchWeight::Fixed(prob)))
+                .collect()
+        }
+        Opponent::Distributional { .. } => {
+            let oi = opp_obs.len();
+            opp_obs.push(game.observe(state, mover));
+            legal
+                .iter()
+                .map(|&a| (a, BranchWeight::Deferred(oi, a)))
+                .collect()
+        }
+    }
+}
+
+/// Build the child node(s) for one `joint` action and append the resulting branch(es) to `branches`.
+/// `bw` is the move's chance weight. `agent_out_terminal` decides whether "the searching agent has no
+/// legal actions in the child" counts as terminal: true for simultaneous play (it means the agent
+/// died), false for a sequential turn (it just means it is not the agent's move next). The
+/// `food_samples` fan-out replicates a stochastic transition into equally-weighted sub-branches.
+#[allow(clippy::too_many_arguments)]
+fn push_branches<G: Game>(
+    arena: &mut Vec<Node<G::State>>,
+    game: &G,
+    cfg: &SearchConfig,
+    state: &G::State,
+    joint: &[usize],
+    bw: BranchWeight,
+    agent: usize,
+    agent_out_terminal: bool,
+    depth: i32,
+    new_leaves: &mut Vec<usize>,
+    branches: &mut Vec<Branch>,
+) {
+    let t = game.step(state, joint);
+    let reward = t.rewards[agent];
+    let chance = game.chance_outcomes(state, &t);
+    let stochastic = !chance.is_empty();
+    let child_state = if stochastic {
+        chance[0].1.clone()
+    } else {
+        t.next_state
+    };
+    let terminal =
+        t.terminal || (agent_out_terminal && game.legal_actions(&child_state, agent).is_empty());
+    let n = if stochastic && cfg.food_samples > 1 {
+        cfg.food_samples
+    } else {
+        1
+    };
+    let (weight, deferred, scale) = match bw {
+        BranchWeight::Fixed(f) => (f / n as f64, None, 1.0),
+        BranchWeight::Deferred(oi, si) => (0.0, Some((oi, si)), 1.0 / n as f64),
+    };
+    if n == 1 {
+        let child = if terminal {
+            push_node(arena, child_state, Vec::new(), depth + 1, true)
+        } else {
+            let obs = game.observe(&child_state, agent);
+            let idx = push_node(arena, child_state, obs, depth + 1, false);
+            new_leaves.push(idx);
+            idx
+        };
+        branches.push(Branch {
+            weight,
+            deferred,
+            scale,
+            reward,
+            child,
+        });
+    } else {
+        let obs = if terminal {
+            Vec::new()
+        } else {
+            game.observe(&child_state, agent)
+        };
+        for _ in 0..n {
+            let child = push_node(arena, child_state.clone(), obs.clone(), depth + 1, terminal);
+            if !terminal {
+                new_leaves.push(child);
+            }
+            branches.push(Branch {
+                weight,
+                deferred,
+                scale,
+                reward,
+                child,
+            });
+        }
+    }
+}
+
+/// Expand `ni` one ply, dispatching on whose turn it is:
+///  - `Simultaneous` (snake): the searching agent's MAX edges, each fanned over the opponent's modeled
+///    move distribution (a co-mover acting this ply). A MAX node.
+///  - `Agent(me)` (single-agent, or our turn in a sequential game): our MAX edges, one deterministic
+///    branch each, no co-mover. A MAX node.
+///  - `Agent(other)` (an opponent's turn in a sequential game): a single chance edge over that
+///    opponent's modeled move distribution. The searching agent does not choose here, so it is NOT a
+///    MAX node — it backs up as the expectation over the opponent's moves (MAX over its one edge) and
+///    is never collected as a TreeStrap target.
+///
+/// `max_node` marks the searching agent's decision points — the only nodes whose `[K][A]` action
+/// values are valid training targets.
 #[allow(clippy::too_many_arguments)]
 fn expand_node<G: Game>(
     arena: &mut Vec<Node<G::State>>,
@@ -434,122 +558,85 @@ fn expand_node<G: Game>(
     let depth = arena[ni].depth;
     let num_agents = game.num_agents();
 
-    // Per-node move structure, dispatched on whose turn it is:
-    //  - `Simultaneous` (snake): the searching agent's MAX edges, each fanned over the opponent's
-    //    modeled move distribution — a co-mover that also acts this ply. (`co_action` indexes into
-    //    `0..action_count`; an inactive opponent contributes a single placeholder branch.)
-    //  - `Agent(me)` (single-agent, or our turn in a sequential game): just our MAX edges, one
-    //    deterministic branch each, no co-mover.
-    // Other-agent decision nodes (sequential opponents) and explicit chance nodes arrive in a later step.
-    let (movers, set_co): (Vec<(usize, BranchWeight)>, bool) = match game.actor(&state) {
+    let (edges, max_node) = match game.actor(&state) {
         Actor::Simultaneous => {
-            let opp_legal = game.legal_actions(&state, opp);
-            let b = if opp_legal.is_empty() {
-                vec![(0, BranchWeight::Fixed(1.0))]
-            } else {
-                match cfg.opponent {
-                    Opponent::Uniform => {
-                        let prob = 1.0 / opp_legal.len() as f64;
-                        opp_legal
-                            .iter()
-                            .map(|&oa| (oa, BranchWeight::Fixed(prob)))
-                            .collect()
-                    }
-                    Opponent::Distributional { .. } => {
-                        let oi = opp_obs.len();
-                        opp_obs.push(game.observe(&state, opp));
-                        opp_legal
-                            .iter()
-                            .map(|&oa| (oa, BranchWeight::Deferred(oi, oa)))
-                            .collect()
-                    }
+            let opp_b = agent_branching(game, cfg, &state, opp, opp_obs);
+            let agent_legal = game.legal_actions(&state, agent);
+            let mut edges = Vec::with_capacity(agent_legal.len());
+            for &agent_action in &agent_legal {
+                let mut branches = Vec::with_capacity(opp_b.len());
+                for &(opp_action, bw) in &opp_b {
+                    let mut joint = vec![0usize; num_agents];
+                    joint[agent] = agent_action;
+                    joint[opp] = opp_action;
+                    push_branches(
+                        arena,
+                        game,
+                        cfg,
+                        &state,
+                        &joint,
+                        bw,
+                        agent,
+                        true,
+                        depth,
+                        new_leaves,
+                        &mut branches,
+                    );
                 }
-            };
-            (b, true)
+                edges.push(Edge { branches });
+            }
+            (edges, true)
         }
-        Actor::Agent(a) if a == agent => (vec![(0, BranchWeight::Fixed(1.0))], false),
-        _ => unimplemented!("Actor::Agent(other) and Actor::Chance nodes are not yet supported"),
+        Actor::Agent(a) if a == agent => {
+            let agent_legal = game.legal_actions(&state, agent);
+            let mut edges = Vec::with_capacity(agent_legal.len());
+            for &action in &agent_legal {
+                let mut branches = Vec::new();
+                let mut joint = vec![0usize; num_agents];
+                joint[agent] = action;
+                push_branches(
+                    arena,
+                    game,
+                    cfg,
+                    &state,
+                    &joint,
+                    BranchWeight::Fixed(1.0),
+                    agent,
+                    false,
+                    depth,
+                    new_leaves,
+                    &mut branches,
+                );
+                edges.push(Edge { branches });
+            }
+            (edges, true)
+        }
+        Actor::Agent(mover) => {
+            let mover_b = agent_branching(game, cfg, &state, mover, opp_obs);
+            let mut branches = Vec::with_capacity(mover_b.len());
+            for &(action, bw) in &mover_b {
+                let mut joint = vec![0usize; num_agents];
+                joint[mover] = action;
+                push_branches(
+                    arena,
+                    game,
+                    cfg,
+                    &state,
+                    &joint,
+                    bw,
+                    agent,
+                    false,
+                    depth,
+                    new_leaves,
+                    &mut branches,
+                );
+            }
+            (vec![Edge { branches }], false)
+        }
+        Actor::Chance => unimplemented!("explicit Actor::Chance nodes are not yet supported"),
     };
-
-    let agent_legal = game.legal_actions(&state, agent);
-    let mut edges: Vec<Edge> = Vec::with_capacity(agent_legal.len());
-    for &agent_action in agent_legal.iter() {
-        let mut branches: Vec<Branch> = Vec::with_capacity(movers.len());
-        for &(co_action, bw) in &movers {
-            let mut joint = vec![0usize; num_agents];
-            joint[agent] = agent_action;
-            if set_co {
-                joint[opp] = co_action;
-            }
-
-            let t = game.step(&state, &joint);
-            let reward = t.rewards[agent];
-            let chance = game.chance_outcomes(&state, &t);
-            let stochastic = !chance.is_empty();
-            let child_state = if stochastic {
-                chance[0].1.clone()
-            } else {
-                t.next_state
-            };
-            let terminal = t.terminal || game.legal_actions(&child_state, agent).is_empty();
-
-            // food_samples Monte-Carlo fan-out: a stochastic (eaten-apple) transition splits into
-            // `food_samples` equally-weighted sub-branches (matching the oracle). Under the
-            // deterministic first-empty spawn belief the sub-branches are identical (see module docs) —
-            // this is the structure a stochastic spawn belief would populate. The 1/n weight goes onto
-            // fixed branches directly; for deferred (distributional) ones it rides `scale`, applied to
-            // the resolved opponent probability during evaluation.
-            let n = if stochastic && cfg.food_samples > 1 {
-                cfg.food_samples
-            } else {
-                1
-            };
-            let (weight, deferred, scale) = match bw {
-                BranchWeight::Fixed(f) => (f / n as f64, None, 1.0),
-                BranchWeight::Deferred(oi, si) => (0.0, Some((oi, si)), 1.0 / n as f64),
-            };
-            if n == 1 {
-                // common path: move the single child's state in (no clone)
-                let child = if terminal {
-                    push_node(arena, child_state, Vec::new(), depth + 1, true)
-                } else {
-                    let obs = game.observe(&child_state, agent);
-                    let idx = push_node(arena, child_state, obs, depth + 1, false);
-                    new_leaves.push(idx);
-                    idx
-                };
-                branches.push(Branch {
-                    weight,
-                    deferred,
-                    scale,
-                    reward,
-                    child,
-                });
-            } else {
-                let obs = if terminal {
-                    Vec::new()
-                } else {
-                    game.observe(&child_state, agent)
-                };
-                for _ in 0..n {
-                    let child =
-                        push_node(arena, child_state.clone(), obs.clone(), depth + 1, terminal);
-                    if !terminal {
-                        new_leaves.push(child);
-                    }
-                    branches.push(Branch {
-                        weight,
-                        deferred,
-                        scale,
-                        reward,
-                        child,
-                    });
-                }
-            }
-        }
-        edges.push(Edge { branches });
-    }
     arena[ni].edges = Some(edges);
+    arena[ni].max_node = max_node;
 }
 
 fn push_node<S>(
@@ -569,6 +656,7 @@ fn push_node<S>(
         value: Vec::new(),
         sigma: 0.0,
         path_weight: 1.0,
+        max_node: false, // set if/when this leaf is later expanded
     });
     arena.len() - 1
 }
@@ -660,8 +748,10 @@ fn node_action_values<S>(
         .collect() // -> [K][A]
 }
 
-/// DFS-collect every expanded non-terminal MAX node at or below `idx` as `(obs, [K][A] values)` —
-/// true TreeStrap data. Terminal and unexpanded-frontier nodes are skipped (no backed-up values).
+/// DFS-collect every expanded non-terminal **MAX** node at or below `idx` as `(obs, [K][A] values)` —
+/// true TreeStrap data, valid only at the searching agent's decision points. Terminal and
+/// unexpanded-frontier nodes are skipped (no backed-up values); opponent/chance nodes are recursed
+/// through but not emitted (their `[K][A]` would be over the opponent's actions, not a training target).
 fn collect_interior_targets<S>(
     arena: &[Node<S>],
     idx: usize,
@@ -673,10 +763,12 @@ fn collect_interior_targets<S>(
     if arena[idx].terminal || arena[idx].edges.is_none() {
         return;
     }
-    out.push((
-        arena[idx].obs.clone(),
-        node_action_values(arena, idx, gamma, k, a),
-    ));
+    if arena[idx].max_node {
+        out.push((
+            arena[idx].obs.clone(),
+            node_action_values(arena, idx, gamma, k, a),
+        ));
+    }
     let edges = take_edges(arena, idx);
     for edge in &edges {
         for &(_, _, child) in edge {
