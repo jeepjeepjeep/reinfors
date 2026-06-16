@@ -9,7 +9,7 @@ use reinfors_core::game::{Actor, Game, Rng, Transition};
 use crate::action::{relative_to_absolute, Action, RELATIVE_ACTIONS};
 use crate::obs::{egocentric_parts, N_CHANNELS};
 use crate::reward::Reward;
-use crate::snake::{empty_cells, Cell, Snake, SnakeEnv};
+use crate::snake::{Cell, Snake, SnakeEnv};
 
 /// Snake's dynamic state: the two snakes and the food. Static config (grid size, rules, reward) lives
 /// on `SnakeGame`, so the search/engine can carry just this around per node.
@@ -42,12 +42,34 @@ impl SnakeGame {
         )
     }
 
-    /// Spawn one apple at a uniform-random empty cell (the env's true spawn), or nothing if the grid
-    /// is full — matching the rollout engine's `spawn_food`.
+    /// Spawn one apple at a uniform-random empty cell (the env's true spawn), or nothing if the grid is
+    /// full. Build the occupancy set once (food + both bodies, deduped), so the empty count is
+    /// `g² − occupied.len()` (no count pass) and lookups are O(1); then walk to the k-th empty cell in
+    /// row-major order. A single `rng.below(n)` indexing the row-major empties is identical to
+    /// materializing the empties `Vec` and indexing it — same cell, same RNG — but without that `Vec`.
     fn spawn_one(&self, snakes: &[Snake; 2], food: &mut HashSet<Cell>, rng: &mut dyn Rng) {
-        let empty = empty_cells(snakes, food, self.grid_size);
-        if !empty.is_empty() {
-            food.insert(empty[rng.below(empty.len())]);
+        let g = self.grid_size;
+        let mut occupied: HashSet<Cell> = food.clone();
+        for s in snakes {
+            occupied.extend(s.body.iter().copied());
+        }
+        let n = (g * g) as usize - occupied.len();
+        if n == 0 {
+            return;
+        }
+        let mut k = rng.below(n);
+        for r in 0..g {
+            for c in 0..g {
+                let cell = (r, c);
+                if occupied.contains(&cell) {
+                    continue;
+                }
+                if k == 0 {
+                    food.insert(cell);
+                    return;
+                }
+                k -= 1;
+            }
         }
     }
 }
@@ -169,7 +191,7 @@ impl Game for SnakeGame {
 mod tests {
     use super::*;
     use crate::obs::egocentric_parts;
-    use crate::snake::SnakeEnv;
+    use crate::snake::{empty_cells, SnakeEnv};
 
     const G: i32 = 8;
 
