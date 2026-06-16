@@ -4,12 +4,14 @@
 //! seam (`SelectiveTreeStrap`), and the parallel rollout `Engine`. Concrete games (e.g. snake) live in
 //! the `reinfors-games` crate and implement `Game`; the framework drives them through the trait only.
 
+pub mod algo;
 pub mod engine;
 pub mod game;
 pub mod planner;
 pub(crate) mod rng;
 pub mod search;
 
+pub use algo::{Learner, SearchEvaluation, Step, TreeStrapLearner, TreeStrapRecord};
 pub use engine::{blend_outcome_targets, CollectStats, Engine, EngineParams, EpisodeSummary};
 pub use game::{Actor, Game, Rng, Transition};
 pub use planner::{Planner, SelectiveTreeStrap};
