@@ -272,12 +272,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "reinfors-games"
+version = "0.0.0"
+dependencies = [
+ "rayon",
+ "reinfors-core",
+]
+
+[[package]]
 name = "reinfors-py"
 version = "0.0.0"
 dependencies = [
  "numpy",
  "pyo3",
  "reinfors-core",
+ "reinfors-games",
 ]
 
 [[package]]

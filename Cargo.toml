@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/reinfors-core", "crates/reinfors-py"]
+members = ["crates/reinfors-core", "crates/reinfors-games", "crates/reinfors-py"]
 resolver = "2"
 
 [workspace.package]
@@ -8,6 +8,7 @@ edition = "2021"
 license = "MIT"
 
 # reinfors: general-purpose gym-style simulation + batching engine.
-#   crates/reinfors-core  — pure Rust engine (no Python); the value, testable on its own.
+#   crates/reinfors-core  — pure Rust generic framework (no Python, no game); the value, testable on its own.
+#   crates/reinfors-games — concrete games (snake) implementing reinfors-core's Game trait.
 #   crates/reinfors-py    — PyO3 bindings, compiled into the `reinfors._reinfors` module.
 # The ergonomic Python API (the declarative game builder) lives in python/reinfors/ as it grows.
