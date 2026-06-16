@@ -31,7 +31,7 @@ _A = 3
 _REWARD = (0.0, 0.0, -10.0, -6.0, 20.0, 20.0, 0.0)
 
 
-def _engine(seed: int) -> object:
+def _engine(seed: int, *, interior: bool = True, max_ticks: int = 30) -> object:
     return reinfors._reinfors.Engine(
         4,
         _G,
@@ -49,10 +49,10 @@ def _engine(seed: int) -> object:
         1.0,
         0.1,  # reward, opponent, opp_temperature, opp_floor
         0.1,
-        30,
+        max_ticks,
         _K,  # epsilon, max_ticks, n_heads
         0.5,
-        True,
+        interior,
         0.8,  # outcome_weight, interior_targets, bootstrap_p
         seed,
     )
@@ -83,6 +83,47 @@ def test_train_loop_runs_and_is_deterministic() -> None:
     assert len(losses1) == 8  # 4 collects x 2 grad steps (buffer fills on the first collect)
     assert all(np.isfinite(losses1))
     assert losses1 == losses2  # same net init + engine + buffer seeds -> identical loop
+
+
+def test_train_stops_at_max_episodes() -> None:
+    # max_episodes is the budget that matches snake_RL's num_episodes: the loop runs until that many
+    # self-play episodes finish, regardless of how many collects/gradient steps that takes. Short
+    # episodes (max_ticks=5) so the budget is reached in a few collects; the generous iteration cap
+    # must NOT be what stops it.
+    net = _net(0)
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+    eps: list = []
+    its: list[int] = []
+
+    def on_collect(it: int, r: CollectReport) -> None:
+        eps.extend(r.telemetry["episodes"])  # type: ignore[arg-type]
+        its.append(it)
+
+    train(
+        _engine(7, interior=False, max_ticks=5),
+        net,
+        opt,
+        max_episodes=5,
+        iterations=500,  # safety cap; episode budget should stop the loop well before this
+        collect_size=16,
+        batch_size=16,
+        min_buffer_size=16,
+        on_collect=on_collect,
+    )
+    assert len(eps) >= 5
+    assert max(its) < 100, "should stop on the episode budget, not the iteration cap"
+
+
+def test_train_requires_a_budget() -> None:
+    net = _net(0)
+    with pytest.raises(ValueError, match="iterations"):
+        train(
+            _engine(7),
+            net,
+            torch.optim.Adam(net.parameters()),
+            collect_size=16,
+            batch_size=16,
+        )
 
 
 def test_train_telemetry_callbacks() -> None:
