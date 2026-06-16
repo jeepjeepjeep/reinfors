@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any, cast
 
 import reinfors
 import torch
@@ -146,8 +147,8 @@ def main() -> None:
         writer.add_scalar("train/mean_target_q", m.mean_target_q, s)
 
     def on_collect(it: int, r: CollectReport) -> None:
-        t = r.telemetry
-        for reward_a, reward_b, length in t["episodes"]:  # type: ignore[union-attr]
+        t = cast("dict[str, Any]", r.telemetry)  # heterogeneous telemetry dict from the Rust binding
+        for reward_a, reward_b, length in t["episodes"]:
             writer.add_scalar("episode/reward_A", reward_a, state["episode"])
             writer.add_scalar("episode/reward_B", reward_b, state["episode"])
             writer.add_scalar("episode/length", length, state["episode"])
