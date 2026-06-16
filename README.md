@@ -61,6 +61,35 @@ The concrete snake slice is in place, differential-tested against `snake_RL` (th
 
 Generic game abstractions and the declarative builder come later, once the concrete slice is proven.
 
+## Multiple games through one generic core
+
+The search and rollout engine are generic over a `Game` trait, so the same core now drives three
+games — **snake** (2-player simultaneous), **Connect-4** (sequential 2-player, alternating MAX vs
+modeled-opponent-chance nodes), and **GridWorld** (single-agent, pure MAX + lookahead). Each is
+exposed as its own PyO3 rollout engine — `reinfors._reinfors.Engine` (snake),
+`Connect4Engine`, and `GridWorldEngine` — all with the same `collect(n_records, infer) -> (obs, targets,
+masks, telemetry)` contract, differing only in their `#[new]` (the game's rules/rewards) and their
+observation/action dimensions.
+
+`reinfors.games` is a small registry that ties a game name to its engine class and shape metadata, so
+a caller can size a `BootstrappedQNetwork` and pick an engine without hard-coding dimensions:
+
+```python
+import reinfors
+from reinfors import games
+from reinfors.training import BootstrappedQNetwork
+
+obs_shape, n_actions = games.net_shape("connect4")  # ((2, 6, 7), 7); pass size kwargs for
+                                                     # variable-shape games, e.g. games.net_shape("gridworld", size=5)
+net = BootstrappedQNetwork(obs_shape, n_actions=n_actions, n_heads=4)
+engine = reinfors._reinfors.Connect4Engine(1.0, -1.0, 0.0, ...)  # win/loss/draw rewards + search/rollout knobs
+reinfors.training.train(engine, net, optimizer, iterations=..., collect_size=..., batch_size=...)
+```
+
+`games.get(name)` returns the full `GameSpec` (engine class, `action_count`, and an `obs_shape` that is
+a fixed tuple for snake/Connect-4 and a callable for size-parameterized GridWorld); `games.net_shape`
+is the convenience that returns just `(obs_shape, action_count)`.
+
 ## Build
 
 ```sh

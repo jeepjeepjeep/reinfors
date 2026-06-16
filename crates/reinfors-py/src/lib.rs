@@ -13,10 +13,10 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use reinfors_core::{
-    Engine as CoreEngine, EngineParams, Opponent, SearchConfig, SelectiveTreeStrap,
+    Engine as CoreEngine, EngineParams, Game, Opponent, SearchConfig, SelectiveTreeStrap,
 };
 use reinfors_games::snake::{Cell, DeathCause, Snake, SnakeEnv as CoreEnv};
-use reinfors_games::{Action, Reward, SearchParams, SnakeGame};
+use reinfors_games::{Action, Connect4, GridWorld, Reward, SearchParams, SnakeGame};
 
 fn action_from_u8(v: u8) -> PyResult<Action> {
     Ok(match v {
@@ -119,7 +119,7 @@ fn validate_engine_params(
 
 /// The core's `infer` callback, wrapping the Python network forward. Obs arrive as one flat
 /// row-major `[n, dim]` buffer (moved straight into a numpy array — no copy), and per-head values
-/// `[n, K, 3]` come back as one flat row-major buffer. The first failure — a Python error, or (when
+/// `[n, K, action_count]` come back as one flat row-major buffer. The first failure — a Python error, or (when
 /// `expected_heads` is set, i.e. the `Engine`) a returned head count that disagrees with the
 /// configured `n_heads` — is latched into `callback_err` and zeros (K=1) are returned so the in-flight
 /// search unwinds cheaply; the caller checks `callback_err` afterwards and propagates it. The check
@@ -130,12 +130,13 @@ fn infer_closure<'a, 'py>(
     py: Python<'py>,
     infer: &'a Bound<'py, PyAny>,
     dim: usize,
+    action_count: usize,
     expected_heads: Option<usize>,
     callback_err: &'a mut Option<PyErr>,
 ) -> impl FnMut(Vec<f32>, usize) -> Vec<f64> + 'a {
     move |obs_flat: Vec<f32>, n: usize| -> Vec<f64> {
         if callback_err.is_some() {
-            return vec![0.0; n * 3]; // K=1 fallback (A = 3 relative actions)
+            return vec![0.0; n * action_count]; // K=1 fallback
         }
         let arr = Array2::from_shape_vec((n, dim), obs_flat)
             .expect("obs batch shape")
@@ -145,24 +146,25 @@ fn infer_closure<'a, 'py>(
             .and_then(|r| r.extract::<PyReadonlyArray3<f64>>())
         {
             Ok(out) => {
-                let flat: Vec<f64> = out.as_array().iter().copied().collect(); // flat [n, K, 3]
+                let flat: Vec<f64> = out.as_array().iter().copied().collect(); // flat [n, K, A]
                 if let Some(k) = expected_heads {
-                    if n > 0 && flat.len() != n * k * 3 {
+                    if n > 0 && flat.len() != n * k * action_count {
                         callback_err.get_or_insert_with(|| {
                             pyo3::exceptions::PyValueError::new_err(format!(
-                                "infer returned {} values for {n} rows; expected n_heads ({k}) x 3 \
-                                 actions per row — the network's head count must equal n_heads",
+                                "infer returned {} values for {n} rows; expected n_heads ({k}) x \
+                                 {action_count} actions per row — the network's head count must \
+                                 equal n_heads",
                                 flat.len()
                             ))
                         });
-                        return vec![0.0; n * 3];
+                        return vec![0.0; n * action_count];
                     }
                 }
                 flat
             }
             Err(e) => {
                 *callback_err = Some(e);
-                vec![0.0; n * 3]
+                vec![0.0; n * action_count]
             }
         }
     }
@@ -342,7 +344,7 @@ impl SnakeEnv {
 
         let mut callback_err: Option<PyErr> = None;
         let (values, interior, stats) = {
-            let mut infer_fn = infer_closure(py, &infer, dim, None, &mut callback_err);
+            let mut infer_fn = infer_closure(py, &infer, dim, 3, None, &mut callback_err);
             reinfors_games::selective_search(
                 &params,
                 snakes,
@@ -469,7 +471,7 @@ fn selective_search_many(
 
     let mut callback_err: Option<PyErr> = None;
     let results = {
-        let mut infer_fn = infer_closure(py, &infer, dim, None, &mut callback_err);
+        let mut infer_fn = infer_closure(py, &infer, dim, 3, None, &mut callback_err);
         reinfors_games::selective_search_many(&params, requests, collect_interior, &mut infer_fn)
     };
     if let Some(e) = callback_err {
@@ -492,6 +494,91 @@ type CollectOutput<'py> = (
     Bound<'py, PyDict>,
 );
 
+/// Map an opponent name ("uniform"/"distributional") to its `Opponent`, rejecting anything else.
+fn parse_opponent(opponent: &str, opp_temperature: f64, opp_floor: f64) -> PyResult<Opponent> {
+    match opponent {
+        "uniform" => Ok(Opponent::Uniform),
+        "distributional" => Ok(Opponent::Distributional {
+            temperature: opp_temperature,
+            floor: opp_floor,
+        }),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown opponent {other}"
+        ))),
+    }
+}
+
+/// Drive a generic rollout `Engine` for at least `n_records` records and build the
+/// `(obs[M,dim] f32, targets[M,K,A] f64, masks[M,K] f32, telemetry dict)` `CollectOutput`. The
+/// per-game `collect` methods delegate here; behaviour is identical to the original snake collect.
+fn engine_collect<'py, G: Game + Sync>(
+    inner: &mut CoreEngine<G, SelectiveTreeStrap>,
+    py: Python<'py>,
+    n_records: usize,
+    infer: &Bound<'_, PyAny>,
+    dim: usize,
+    action_count: usize,
+    n_heads: usize,
+) -> PyResult<CollectOutput<'py>>
+where
+    G::State: Send,
+{
+    let mut callback_err: Option<PyErr> = None;
+    let (records, stats) = {
+        let mut infer_fn = infer_closure(
+            py,
+            infer,
+            dim,
+            action_count,
+            Some(n_heads),
+            &mut callback_err,
+        );
+        inner.collect(n_records, &mut infer_fn)
+    };
+    if let Some(e) = callback_err {
+        return Err(e);
+    }
+    let m = records.len();
+    let (k, a) = if m > 0 {
+        (records[0].1.len(), records[0].1[0].len())
+    } else {
+        (0, 0)
+    };
+    let mut obs_flat: Vec<f32> = Vec::with_capacity(m * dim);
+    let mut tgt_flat: Vec<f64> = Vec::with_capacity(m * k * a);
+    let mut mask_flat: Vec<f32> = Vec::with_capacity(m * k);
+    for (obs, tgt, mask) in records {
+        obs_flat.extend(obs);
+        tgt_flat.extend(tgt.into_iter().flatten());
+        mask_flat.extend(mask);
+    }
+    let obs_arr = Array2::from_shape_vec((m, dim), obs_flat)
+        .expect("obs shape")
+        .into_pyarray(py);
+    let tgt_arr = Array3::from_shape_vec((m, k, a), tgt_flat)
+        .expect("target shape")
+        .into_pyarray(py);
+    let mask_arr = Array2::from_shape_vec((m, k), mask_flat)
+        .expect("mask shape")
+        .into_pyarray(py);
+    let d = (stats.decisions.max(1)) as f64;
+    let episodes: Vec<(f64, f64, usize)> = stats
+        .episodes
+        .iter()
+        .map(|e| (e.reward[0], e.reward[1], e.length))
+        .collect();
+    let telemetry = PyDict::new(py);
+    telemetry.set_item("episodes", episodes)?;
+    telemetry.set_item("decisions", stats.decisions)?;
+    telemetry.set_item("max_depth", stats.max_depth)?;
+    telemetry.set_item("mean_leaves", stats.sum_leaves / d)?;
+    telemetry.set_item("mean_rounds", stats.sum_rounds / d)?;
+    telemetry.set_item("mean_expansions", stats.sum_expansions / d)?;
+    telemetry.set_item("mean_sigma", stats.sum_sigma / d)?;
+    telemetry.set_item("mean_disagreement", stats.sum_disagreement / d)?;
+    Ok((obs_arr, tgt_arr, mask_arr, telemetry))
+}
+
 /// Parallel rollout collector: drives N games via the pooled selective search and yields TreeStrap
 /// records (z-mixed roots + interior targets), each with a per-head bootstrap mask. Per-game
 /// Thompson-head, epsilon, and RNG apple spawns give the games diversity.
@@ -499,6 +586,7 @@ type CollectOutput<'py> = (
 struct Engine {
     inner: CoreEngine<SnakeGame, SelectiveTreeStrap>,
     dim: usize,
+    action_count: usize,
     n_heads: usize,
 }
 
@@ -541,18 +629,7 @@ impl Engine {
             outcome_weight,
             bootstrap_p,
         )?;
-        let opponent = match opponent {
-            "uniform" => Opponent::Uniform,
-            "distributional" => Opponent::Distributional {
-                temperature: opp_temperature,
-                floor: opp_floor,
-            },
-            other => {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "unknown opponent {other}"
-                )))
-            }
-        };
+        let opponent = parse_opponent(opponent, opp_temperature, opp_floor)?;
         let reward = Reward {
             step: reward.0,
             food: reward.1,
@@ -608,6 +685,7 @@ impl Engine {
         Ok(Engine {
             inner: CoreEngine::new(game, planner, engine_params),
             dim,
+            action_count: 3,
             n_heads,
         })
     }
@@ -622,55 +700,210 @@ impl Engine {
         n_records: usize,
         infer: Bound<'_, PyAny>,
     ) -> PyResult<CollectOutput<'py>> {
-        let dim = self.dim;
-        let mut callback_err: Option<PyErr> = None;
-        let (records, stats) = {
-            let mut infer_fn =
-                infer_closure(py, &infer, dim, Some(self.n_heads), &mut callback_err);
-            self.inner.collect(n_records, &mut infer_fn)
+        engine_collect(
+            &mut self.inner,
+            py,
+            n_records,
+            &infer,
+            self.dim,
+            self.action_count,
+            self.n_heads,
+        )
+    }
+}
+
+/// Parallel rollout collector for Connect-4 (sequential 2-player). Mirrors the snake `Engine`:
+/// builds the game + search config + TreeStrap planner, and `collect` delegates to `engine_collect`.
+#[pyclass]
+struct Connect4Engine {
+    inner: CoreEngine<Connect4, SelectiveTreeStrap>,
+    dim: usize,
+    action_count: usize,
+    n_heads: usize,
+}
+
+#[pymethods]
+impl Connect4Engine {
+    #[new]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (win_reward, loss_reward, draw_reward, gamma, beta, expansion_budget, top_k, max_depth, opponent, opp_temperature, opp_floor, epsilon, max_ticks, n_heads, outcome_weight, interior_targets, bootstrap_p, seed, n_games, food_samples=1))]
+    fn new(
+        win_reward: f64,
+        loss_reward: f64,
+        draw_reward: f64,
+        gamma: f64,
+        beta: f64,
+        expansion_budget: usize,
+        top_k: usize,
+        max_depth: i32,
+        opponent: &str,
+        opp_temperature: f64,
+        opp_floor: f64,
+        epsilon: f64,
+        max_ticks: usize,
+        n_heads: usize,
+        outcome_weight: f64,
+        interior_targets: bool,
+        bootstrap_p: f64,
+        seed: u64,
+        n_games: usize,
+        food_samples: usize,
+    ) -> PyResult<Self> {
+        validate_search_params(expansion_budget, top_k, max_depth, beta, food_samples)?;
+        validate_engine_params(
+            n_games,
+            max_ticks,
+            n_heads,
+            epsilon,
+            outcome_weight,
+            bootstrap_p,
+        )?;
+        let opponent = parse_opponent(opponent, opp_temperature, opp_floor)?;
+        let cfg = SearchConfig {
+            gamma,
+            beta,
+            expansion_budget,
+            top_k,
+            max_depth,
+            food_samples,
+            opponent,
         };
-        if let Some(e) = callback_err {
-            return Err(e);
-        }
-        let m = records.len();
-        let (k, a) = if m > 0 {
-            (records[0].1.len(), records[0].1[0].len())
-        } else {
-            (0, 0)
+        let planner = SelectiveTreeStrap::new(cfg, outcome_weight, interior_targets);
+        let game = Connect4 {
+            win_reward,
+            loss_reward,
+            draw_reward,
         };
-        let mut obs_flat: Vec<f32> = Vec::with_capacity(m * dim);
-        let mut tgt_flat: Vec<f64> = Vec::with_capacity(m * k * a);
-        let mut mask_flat: Vec<f32> = Vec::with_capacity(m * k);
-        for (obs, tgt, mask) in records {
-            obs_flat.extend(obs);
-            tgt_flat.extend(tgt.into_iter().flatten());
-            mask_flat.extend(mask);
-        }
-        let obs_arr = Array2::from_shape_vec((m, dim), obs_flat)
-            .expect("obs shape")
-            .into_pyarray(py);
-        let tgt_arr = Array3::from_shape_vec((m, k, a), tgt_flat)
-            .expect("target shape")
-            .into_pyarray(py);
-        let mask_arr = Array2::from_shape_vec((m, k), mask_flat)
-            .expect("mask shape")
-            .into_pyarray(py);
-        let d = (stats.decisions.max(1)) as f64;
-        let episodes: Vec<(f64, f64, usize)> = stats
-            .episodes
-            .iter()
-            .map(|e| (e.reward[0], e.reward[1], e.length))
-            .collect();
-        let telemetry = PyDict::new(py);
-        telemetry.set_item("episodes", episodes)?;
-        telemetry.set_item("decisions", stats.decisions)?;
-        telemetry.set_item("max_depth", stats.max_depth)?;
-        telemetry.set_item("mean_leaves", stats.sum_leaves / d)?;
-        telemetry.set_item("mean_rounds", stats.sum_rounds / d)?;
-        telemetry.set_item("mean_expansions", stats.sum_expansions / d)?;
-        telemetry.set_item("mean_sigma", stats.sum_sigma / d)?;
-        telemetry.set_item("mean_disagreement", stats.sum_disagreement / d)?;
-        Ok((obs_arr, tgt_arr, mask_arr, telemetry))
+        let engine_params = EngineParams {
+            n_games,
+            max_ticks,
+            epsilon,
+            n_heads,
+            bootstrap_p,
+            seed,
+        };
+        Ok(Connect4Engine {
+            inner: CoreEngine::new(game, planner, engine_params),
+            dim: 2 * 6 * 7,
+            action_count: 7,
+            n_heads,
+        })
+    }
+
+    fn collect<'py>(
+        &mut self,
+        py: Python<'py>,
+        n_records: usize,
+        infer: Bound<'_, PyAny>,
+    ) -> PyResult<CollectOutput<'py>> {
+        engine_collect(
+            &mut self.inner,
+            py,
+            n_records,
+            &infer,
+            self.dim,
+            self.action_count,
+            self.n_heads,
+        )
+    }
+}
+
+/// Parallel rollout collector for GridWorld (single-agent). Mirrors the snake `Engine`. The
+/// `opponent`/`opp_*` args are unused by this single-agent game but kept for a uniform signature.
+#[pyclass]
+struct GridWorldEngine {
+    inner: CoreEngine<GridWorld, SelectiveTreeStrap>,
+    dim: usize,
+    action_count: usize,
+    n_heads: usize,
+}
+
+#[pymethods]
+impl GridWorldEngine {
+    #[new]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (size, goal_row, goal_col, step_reward, goal_reward, gamma, beta, expansion_budget, top_k, max_depth, opponent, opp_temperature, opp_floor, epsilon, max_ticks, n_heads, outcome_weight, interior_targets, bootstrap_p, seed, n_games, food_samples=1))]
+    fn new(
+        size: i32,
+        goal_row: i32,
+        goal_col: i32,
+        step_reward: f64,
+        goal_reward: f64,
+        gamma: f64,
+        beta: f64,
+        expansion_budget: usize,
+        top_k: usize,
+        max_depth: i32,
+        opponent: &str,
+        opp_temperature: f64,
+        opp_floor: f64,
+        epsilon: f64,
+        max_ticks: usize,
+        n_heads: usize,
+        outcome_weight: f64,
+        interior_targets: bool,
+        bootstrap_p: f64,
+        seed: u64,
+        n_games: usize,
+        food_samples: usize,
+    ) -> PyResult<Self> {
+        validate_search_params(expansion_budget, top_k, max_depth, beta, food_samples)?;
+        validate_engine_params(
+            n_games,
+            max_ticks,
+            n_heads,
+            epsilon,
+            outcome_weight,
+            bootstrap_p,
+        )?;
+        let opponent = parse_opponent(opponent, opp_temperature, opp_floor)?;
+        let cfg = SearchConfig {
+            gamma,
+            beta,
+            expansion_budget,
+            top_k,
+            max_depth,
+            food_samples,
+            opponent,
+        };
+        let planner = SelectiveTreeStrap::new(cfg, outcome_weight, interior_targets);
+        let game = GridWorld {
+            size,
+            goal: (goal_row, goal_col),
+            step_reward,
+            goal_reward,
+        };
+        let engine_params = EngineParams {
+            n_games,
+            max_ticks,
+            epsilon,
+            n_heads,
+            bootstrap_p,
+            seed,
+        };
+        Ok(GridWorldEngine {
+            inner: CoreEngine::new(game, planner, engine_params),
+            dim: 2 * (size as usize) * (size as usize),
+            action_count: 4,
+            n_heads,
+        })
+    }
+
+    fn collect<'py>(
+        &mut self,
+        py: Python<'py>,
+        n_records: usize,
+        infer: Bound<'_, PyAny>,
+    ) -> PyResult<CollectOutput<'py>> {
+        engine_collect(
+            &mut self.inner,
+            py,
+            n_records,
+            &infer,
+            self.dim,
+            self.action_count,
+            self.n_heads,
+        )
     }
 }
 
@@ -726,5 +959,7 @@ fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(blend_outcome_targets, m)?)?;
     m.add_class::<SnakeEnv>()?;
     m.add_class::<Engine>()?;
+    m.add_class::<Connect4Engine>()?;
+    m.add_class::<GridWorldEngine>()?;
     Ok(())
 }
