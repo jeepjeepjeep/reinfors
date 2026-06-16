@@ -6,14 +6,18 @@
 
 pub mod action;
 pub mod engine;
+pub mod game;
 pub mod obs;
+pub mod planner;
 pub mod reward;
 pub mod search;
 pub mod snake;
 
 pub use action::{Action, RelativeAction};
 pub use engine::{blend_outcome_targets, CollectStats, Engine, EngineConfig, EpisodeSummary};
+pub use game::{Actor, Game, SnakeGame, SnakeState, Transition};
 pub use obs::egocentric;
+pub use planner::{Planner, SelectiveTreeStrap};
 pub use reward::Reward;
 pub use search::{
     selective_search, selective_search_many, InteriorTarget, Opponent, SearchParams, SearchResult,

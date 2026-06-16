@@ -23,7 +23,7 @@ pub enum DeathCause {
     HeadOn,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Snake {
     pub body: VecDeque<Cell>, // body[0] is the head, body[len-1] the tail
     pub direction: Action,
