@@ -154,8 +154,8 @@ def test_train_telemetry_callbacks() -> None:
     for it, r in enumerate(reports):
         assert r.iteration == it and r.records > 0 and r.seconds >= 0.0
         assert "episodes" in r.telemetry and "mean_sigma" in r.telemetry
-        for reward_a, reward_b, length in r.telemetry["episodes"]:
-            assert length >= 1 and np.isfinite(reward_a) and np.isfinite(reward_b)
+        for rewards, length in r.telemetry["episodes"]:
+            assert length >= 1 and all(np.isfinite(x) for x in rewards)
 
 
 def test_train_reuses_records() -> None:

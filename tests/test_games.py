@@ -100,6 +100,22 @@ def test_collect_shapes_and_telemetry(make_engine, action_count: int) -> None:
 
 
 @pytest.mark.parametrize(
+    ("make_engine", "action_count", "num_agents"),
+    [(_connect4_engine, 7, 2), (_gridworld_engine, 4, 1)],
+)
+def test_episode_reward_is_per_agent(make_engine, action_count: int, num_agents: int) -> None:
+    # The engine generalizes to any agent count: each finished episode's telemetry carries one reward
+    # per agent — length 1 for single-agent GridWorld, 2 for Connect-4 — not a hardcoded pair.
+    engine = make_engine()
+    _, _, _, telemetry = engine.collect(150, _dummy_infer(action_count))
+    episodes = telemetry["episodes"]
+    assert len(episodes) > 0
+    for rewards, length in episodes:
+        assert len(rewards) == num_agents
+        assert length >= 1 and all(np.isfinite(r) for r in rewards)
+
+
+@pytest.mark.parametrize(
     ("name", "kwargs", "obs_shape", "action_count"),
     [
         ("snake", {"grid_size": 12}, (5, 12, 12), 3),

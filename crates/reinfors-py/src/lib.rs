@@ -493,8 +493,8 @@ fn selective_search_many(
 }
 
 /// (observations [M, 5*g*g] f32, per-head targets [M, K, A] f64, per-head bootstrap masks [M, K] f32,
-/// telemetry dict). The dict holds `episodes` (a list of `(reward_a, reward_b, length)` for each
-/// episode that finished during the call) plus the call's `decisions`, `max_depth`, and per-decision
+/// telemetry dict). The dict holds `episodes` (a list of `(rewards, length)` per episode that finished
+/// during the call, `rewards` being the per-agent total) plus the call's `decisions`, `max_depth`, and per-decision
 /// means `mean_leaves`/`mean_rounds`/`mean_expansions`/`mean_sigma`/`mean_disagreement`.
 type CollectOutput<'py> = (
     Bound<'py, PyArray2<f32>>,
@@ -571,10 +571,10 @@ where
         .expect("mask shape")
         .into_pyarray(py);
     let d = (stats.decisions.max(1)) as f64;
-    let episodes: Vec<(f64, f64, usize)> = stats
+    let episodes: Vec<(Vec<f64>, usize)> = stats
         .episodes
         .iter()
-        .map(|e| (e.reward[0], e.reward[1], e.length))
+        .map(|e| (e.reward.clone(), e.length))
         .collect();
     let telemetry = PyDict::new(py);
     telemetry.set_item("episodes", episodes)?;

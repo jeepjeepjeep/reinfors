@@ -41,11 +41,11 @@ struct TrajStep {
 /// A collected training record: observation, per-head target `[K][A]`, and per-head bootstrap mask.
 type Record = (Vec<f32>, Vec<Vec<f64>>, Vec<f32>);
 
-/// One finished episode's outcome, for logging: per-agent total realized reward and the episode
-/// length in ticks.
-#[derive(Clone, Copy)]
+/// One finished episode's outcome, for logging: per-agent total realized reward (one entry per
+/// agent) and the episode length in ticks.
+#[derive(Clone)]
 pub struct EpisodeSummary {
-    pub reward: [f64; 2],
+    pub reward: Vec<f64>,
     pub length: usize,
 }
 
@@ -87,7 +87,7 @@ pub struct Engine<G: Game + Sync, P: Planner> {
     search_rng: SplitMix64,
     heads: Vec<usize>, // per-game Thompson head for the current episode
     ticks: Vec<usize>,
-    traj: Vec<[Vec<TrajStep>; 2]>, // per-game, per-agent decisions awaiting episode-end z-mixing
+    traj: Vec<Vec<Vec<TrajStep>>>, // [game][agent] decisions awaiting episode-end z-mixing
 }
 
 impl<G: Game + Sync, P: Planner> Engine<G, P>
@@ -115,8 +115,9 @@ where
             heads.push(rng.below(n_heads));
         }
         let ticks = vec![0; params.n_games];
+        let num_agents = game.num_agents();
         let traj = (0..params.n_games)
-            .map(|_| [Vec::new(), Vec::new()])
+            .map(|_| (0..num_agents).map(|_| Vec::new()).collect())
             .collect();
         let search_rng = SplitMix64::new(params.seed ^ 0xD1B5_4A32_D192_ED03);
         Engine {
@@ -150,13 +151,14 @@ where
         let mut out: Vec<Record> = Vec::new();
         let mut stats = CollectStats::default();
         let action_count = self.game.action_count();
+        let num_agents = self.game.num_agents();
 
         while out.len() < n_records {
             // 1. Gather one search request per active agent across all games.
             let mut requests: Vec<(G::State, usize)> = Vec::new();
             let mut meta: Vec<(usize, usize)> = Vec::new(); // (game index, agent index)
             for (gi, state) in self.states.iter().enumerate() {
-                for si in 0..2 {
+                for si in 0..num_agents {
                     if self.agent_active(state, si) {
                         requests.push((state.clone(), si));
                         meta.push((gi, si));
@@ -176,7 +178,8 @@ where
 
             // 3. Emit interior targets immediately, buffer each executed decision, choose its action.
             //    `acted[gi][si]` records the relative action index for an agent that decided this tick.
-            let mut acted: Vec<[Option<usize>; 2]> = vec![[None, None]; self.states.len()];
+            let mut acted: Vec<Vec<Option<usize>>> =
+                vec![vec![None; num_agents]; self.states.len()];
             for ((values, interior, search_stats), &(gi, si)) in results.iter().zip(meta.iter()) {
                 stats.decisions += 1;
                 stats.max_depth = stats.max_depth.max(search_stats.max_depth);
@@ -223,7 +226,7 @@ where
             //    tick); flush finished games' trajectories with z-mixing and reset them.
             let mut finished: Vec<(usize, bool)> = Vec::new(); // (game index, terminal?)
             for (gi, agents) in acted.into_iter().enumerate() {
-                let joint = [agents[0].unwrap_or(0), agents[1].unwrap_or(0)];
+                let joint: Vec<usize> = agents.iter().map(|a| a.unwrap_or(0)).collect();
                 let transition = self
                     .game
                     .step_env(&self.states[gi], &joint, &mut self.rngs[gi]);
@@ -272,9 +275,10 @@ where
         // On truncation (alive, not terminal) z is seeded by the net's per-head state value, so early
         // decisions of long episodes are not systematically undervalued. Batch those into one forward.
         let tails = self.tail_values(finished, infer);
+        let num_agents = self.game.num_agents();
 
         for &(gi, _) in finished {
-            let mut ep_reward = [0.0; 2];
+            let mut ep_reward = vec![0.0; num_agents];
             for (si, ep_slot) in ep_reward.iter_mut().enumerate() {
                 let steps = std::mem::take(&mut self.traj[gi][si]);
                 if steps.is_empty() {
@@ -322,6 +326,7 @@ where
             return tails;
         }
         let a = self.game.action_count();
+        let num_agents = self.game.num_agents();
         let mut obs_flat: Vec<f32> = Vec::new();
         let mut meta: Vec<(usize, usize)> = Vec::new();
         for &(gi, terminal) in finished {
@@ -330,7 +335,7 @@ where
             if terminal {
                 continue;
             }
-            for si in 0..2 {
+            for si in 0..num_agents {
                 if self.agent_active(&self.states[gi], si) && !self.traj[gi][si].is_empty() {
                     obs_flat.extend(self.game.observe(&self.states[gi], si));
                     meta.push((gi, si));
