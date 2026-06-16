@@ -20,9 +20,9 @@ pub struct SearchParams {
     pub expansion_budget: usize,
     pub top_k: usize,
     pub max_depth: i32,
-    /// Monte-Carlo apple-spawn samples per eaten-apple branch (>= 1). With the deterministic
-    /// first-empty spawn belief the samples are identical, so this is the fan-out structure a
-    /// stochastic spawn would populate; 1 disables it.
+    /// Monte-Carlo apple-spawn samples per eaten-apple branch (>= 1): each is an independent
+    /// uniform-random respawn drawn from the search's seeded RNG, the same spawn the env uses; 1 keeps
+    /// a single sampled branch.
     pub food_samples: usize,
     pub reward: Reward,
     pub opponent: Opponent,
@@ -36,7 +36,7 @@ fn snake_game_and_config(p: &SearchParams) -> (SnakeGame, SearchConfig) {
         initial_length: p.initial_length,
         play_to_last: p.play_to_last,
         win_food_lead: p.win_food_lead,
-        initial_food_count: 0, // unused on the search path (chance_outcomes derives eaten from the food drop)
+        initial_food_count: 0, // unused on the search path (sample_chance derives eaten from the food drop)
         reward: p.reward,
     };
     let cfg = SearchConfig {
@@ -57,6 +57,7 @@ pub fn selective_search_many<F>(
     p: &SearchParams,
     requests: Vec<([Snake; 2], HashSet<Cell>, usize)>,
     collect_interior: bool,
+    seed: u64,
     infer: F,
 ) -> Vec<SearchResult>
 where
@@ -67,7 +68,7 @@ where
         .into_iter()
         .map(|(snakes, food, agent)| (SnakeState { snakes, food }, agent))
         .collect();
-    search_many(&game, &cfg, requests, collect_interior, infer)
+    search_many(&game, &cfg, requests, collect_interior, seed, infer)
 }
 
 /// Single-request convenience wrapper over [`selective_search_many`].
@@ -77,14 +78,21 @@ pub fn selective_search<F>(
     food: HashSet<Cell>,
     agent: usize,
     collect_interior: bool,
+    seed: u64,
     infer: F,
 ) -> SearchResult
 where
     F: FnMut(Vec<f32>, usize) -> Vec<f64>,
 {
-    selective_search_many(p, vec![(snakes, food, agent)], collect_interior, infer)
-        .pop()
-        .unwrap()
+    selective_search_many(
+        p,
+        vec![(snakes, food, agent)],
+        collect_interior,
+        seed,
+        infer,
+    )
+    .pop()
+    .unwrap()
 }
 
 #[cfg(test)]
@@ -137,7 +145,7 @@ mod tests {
         ];
         let p = params();
         let (values, _interior, stats) =
-            selective_search(&p, snakes, HashSet::new(), 0, false, |_obs, n| {
+            selective_search(&p, snakes, HashSet::new(), 0, false, 0, |_obs, n| {
                 vec![0.0; n * 3]
             });
         let v = &values[0]; // single head
@@ -167,7 +175,7 @@ mod tests {
         let mut p = params();
         p.expansion_budget = 24;
         let (values, _interior, stats) =
-            selective_search(&p, snakes, HashSet::new(), 0, false, two_head_infer);
+            selective_search(&p, snakes, HashSet::new(), 0, false, 0, two_head_infer);
         assert_eq!(values.len(), 2); // two heads
         assert_eq!(values[0].len(), 3);
         assert!(stats.expansions > 0);
@@ -219,9 +227,9 @@ mod tests {
         let (a, b) = two_requests();
         let mut p = params();
         p.expansion_budget = 24;
-        let many = selective_search_many(&p, vec![a.clone(), b.clone()], false, two_head_infer);
-        let solo_a = selective_search(&p, a.0.clone(), a.1.clone(), a.2, false, two_head_infer);
-        let solo_b = selective_search(&p, b.0.clone(), b.1.clone(), b.2, false, two_head_infer);
+        let many = selective_search_many(&p, vec![a.clone(), b.clone()], false, 0, two_head_infer);
+        let solo_a = selective_search(&p, a.0.clone(), a.1.clone(), a.2, false, 0, two_head_infer);
+        let solo_b = selective_search(&p, b.0.clone(), b.1.clone(), b.2, false, 0, two_head_infer);
         assert_eq!(
             many[0].0, solo_a.0,
             "pooled values must equal the solo search"
@@ -245,7 +253,7 @@ mod tests {
                 .build()
                 .unwrap();
             pool.install(|| {
-                selective_search_many(&p, vec![a.clone(), b.clone()], true, two_head_infer)
+                selective_search_many(&p, vec![a.clone(), b.clone()], true, 0, two_head_infer)
             })
         };
         let one = run(1);
@@ -284,16 +292,16 @@ mod tests {
         p.expansion_budget = 24;
 
         let pooled = Counter::new(0usize);
-        selective_search_many(&p, vec![a.clone(), b.clone()], false, |o, n| {
+        selective_search_many(&p, vec![a.clone(), b.clone()], false, 0, |o, n| {
             pooled.set(pooled.get() + 1);
             two_head_infer(o, n)
         });
         let solo = Counter::new(0usize);
-        selective_search(&p, a.0.clone(), a.1.clone(), a.2, false, |o, n| {
+        selective_search(&p, a.0.clone(), a.1.clone(), a.2, false, 0, |o, n| {
             solo.set(solo.get() + 1);
             two_head_infer(o, n)
         });
-        selective_search(&p, b.0.clone(), b.1.clone(), b.2, false, |o, n| {
+        selective_search(&p, b.0.clone(), b.1.clone(), b.2, false, 0, |o, n| {
             solo.set(solo.get() + 1);
             two_head_infer(o, n)
         });
@@ -316,11 +324,16 @@ mod tests {
         ];
         let p = params(); // uniform opponent, loss = -10
         let mut calls = 0usize;
-        let results =
-            selective_search_many(&p, vec![(snakes, HashSet::new(), 0)], false, |_obs, n| {
+        let results = selective_search_many(
+            &p,
+            vec![(snakes, HashSet::new(), 0)],
+            false,
+            0,
+            |_obs, n| {
                 calls += 1;
                 vec![0.0; n * 3]
-            });
+            },
+        );
         let (values, _interior, stats) = &results[0];
         assert_eq!(
             calls, 0,
@@ -360,7 +373,7 @@ mod tests {
             let mut p = params();
             p.expansion_budget = 1; // one expansion: just the root
             p.food_samples = samples;
-            selective_search(&p, snakes.clone(), food.clone(), 0, false, infer)
+            selective_search(&p, snakes.clone(), food.clone(), 0, false, 0, infer)
                 .2
                 .leaves
         };
@@ -389,10 +402,10 @@ mod tests {
             snakes: snakes.clone(),
             food: food.clone(),
         };
-        let generic = search_many(&game, &cfg, vec![(state, 0usize)], true, two_head_infer)
+        let generic = search_many(&game, &cfg, vec![(state, 0usize)], true, 0, two_head_infer)
             .pop()
             .unwrap();
-        let wrapped = selective_search(&p, snakes, food, 0, true, two_head_infer);
+        let wrapped = selective_search(&p, snakes, food, 0, true, 0, two_head_infer);
 
         assert_eq!(generic.0, wrapped.0, "root values must match");
         assert_eq!(generic.1, wrapped.1, "interior targets must match");

@@ -284,7 +284,7 @@ impl SnakeEnv {
     /// mapping an (N, 5*g*g) float32 batch to an (N, K, 3) float64 array of per-head action values.
     /// Returns (action_values[K][3], (max_depth, expansions, leaves, rounds)).
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (agent, gamma, beta, expansion_budget, top_k, max_depth, reward, opponent, opp_temperature, opp_floor, infer, collect_interior=false, food_samples=1))]
+    #[pyo3(signature = (agent, gamma, beta, expansion_budget, top_k, max_depth, reward, opponent, opp_temperature, opp_floor, infer, collect_interior=false, food_samples=1, seed=0))]
     fn selective_search(
         &self,
         py: Python<'_>,
@@ -301,6 +301,7 @@ impl SnakeEnv {
         infer: Bound<'_, PyAny>,
         collect_interior: bool,
         food_samples: usize,
+        seed: u64,
     ) -> PyResult<SearchOutput> {
         validate_search_params(expansion_budget, top_k, max_depth, beta, food_samples)?;
         let g = self.inner.grid_size;
@@ -351,6 +352,7 @@ impl SnakeEnv {
                 food,
                 agent,
                 collect_interior,
+                seed,
                 &mut infer_fn,
             )
         };
@@ -376,7 +378,7 @@ impl SnakeEnv {
 /// list of (action_values[K][3], (max_depth, expansions, leaves, rounds)), in input order.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (envs, agents, gamma, beta, expansion_budget, top_k, max_depth, reward, opponent, opp_temperature, opp_floor, infer, collect_interior=false, food_samples=1))]
+#[pyo3(signature = (envs, agents, gamma, beta, expansion_budget, top_k, max_depth, reward, opponent, opp_temperature, opp_floor, infer, collect_interior=false, food_samples=1, seed=0))]
 fn selective_search_many(
     py: Python<'_>,
     envs: Vec<Py<SnakeEnv>>,
@@ -393,6 +395,7 @@ fn selective_search_many(
     infer: Bound<'_, PyAny>,
     collect_interior: bool,
     food_samples: usize,
+    seed: u64,
 ) -> PyResult<Vec<SearchOutput>> {
     if envs.len() != agents.len() {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -472,7 +475,13 @@ fn selective_search_many(
     let mut callback_err: Option<PyErr> = None;
     let results = {
         let mut infer_fn = infer_closure(py, &infer, dim, 3, None, &mut callback_err);
-        reinfors_games::selective_search_many(&params, requests, collect_interior, &mut infer_fn)
+        reinfors_games::selective_search_many(
+            &params,
+            requests,
+            collect_interior,
+            seed,
+            &mut infer_fn,
+        )
     };
     if let Some(e) = callback_err {
         return Err(e);

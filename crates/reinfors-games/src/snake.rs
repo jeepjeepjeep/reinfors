@@ -344,19 +344,6 @@ pub fn empty_cells(snakes: &[Snake; 2], food: &HashSet<Cell>, grid_size: i32) ->
     out
 }
 
-/// First unoccupied cell in row-major order, or `None` if the grid is full. This is the search's
-/// deterministic in-tree apple-spawn belief: bit-reproducible across Rust and Python (unlike the
-/// env's RNG spawn), so the differential test can inject the same rule into the oracle.
-pub fn first_empty_cell(snakes: &[Snake; 2], food: &HashSet<Cell>, grid_size: i32) -> Option<Cell> {
-    let mut occupied: HashSet<Cell> = food.clone();
-    for s in snakes {
-        occupied.extend(s.body.iter().copied());
-    }
-    (0..grid_size)
-        .flat_map(|r| (0..grid_size).map(move |c| (r, c)))
-        .find(|cell| !occupied.contains(cell))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

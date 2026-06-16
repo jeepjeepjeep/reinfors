@@ -286,13 +286,14 @@ fn evaluate_wraps_the_pooled_search() {
         food: std::collections::HashSet::new(),
     };
     let mut infer_fn = infer;
-    let results = p.evaluate(&g, vec![(st.clone(), 0)], &mut infer_fn);
+    let results = p.evaluate(&g, vec![(st.clone(), 0)], 0, &mut infer_fn);
     let (values, _i, _stat) = selective_search(
         &s,
         st.snakes.clone(),
         st.food.clone(),
         0,
         false,
+        0,
         &mut infer_fn,
     );
     assert_eq!(results.len(), 1);

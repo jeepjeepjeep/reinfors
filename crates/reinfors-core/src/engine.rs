@@ -10,8 +10,8 @@
 //! Per-game diversity comes from each game drawing its own Thompson head and epsilon noise, plus its
 //! own RNG environment chance (e.g. snake's apple spawns): games start from the same deterministic
 //! placement, so without this they would be identical. The game's `step_env`/`initial_state` draw the
-//! true environment chance from each game's own RNG. (The search's in-tree belief is the game's
-//! deterministic `chance_outcomes`; see `search`.)
+//! true environment chance from each game's own RNG — the same `sample_chance` the search Monte-Carlos
+//! in-tree (from its own seeded stream), so env and search share one chance model; see `search`.)
 //!
 //! Records carry the full TreeStrap training semantics of `snake_RL`'s `EnsembleTreeStrapRunner`:
 //! - **z-mixing** — each executed decision is held back until its episode ends, then the executed
@@ -28,6 +28,7 @@ use std::collections::HashMap;
 
 use crate::game::{Game, Rng};
 use crate::planner::Planner;
+use crate::rng::SplitMix64;
 
 /// One buffered decision, held until its episode ends so the realized return is known for z-mixing.
 struct TrajStep {
@@ -63,35 +64,6 @@ pub struct CollectStats {
     pub sum_disagreement: f64, // sum over decisions of the root head-disagreement
 }
 
-/// Tiny deterministic PRNG (splitmix64) for the per-game environment chance, Thompson-head, and
-/// epsilon draws — keeps rollouts reproducible from a seed without pulling in an RNG dependency.
-struct SplitMix64 {
-    state: u64,
-}
-
-impl SplitMix64 {
-    fn new(seed: u64) -> Self {
-        SplitMix64 { state: seed }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-}
-
-impl crate::game::Rng for SplitMix64 {
-    fn below(&mut self, n: usize) -> usize {
-        (self.next_u64() % n as u64) as usize
-    }
-    fn unit(&mut self) -> f64 {
-        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
-    }
-}
-
 /// Engine-level rollout knobs (everything that is not a game or *algorithm* parameter — the search
 /// config, z-mix `outcome_weight`, and interior-target flag live on the `Planner`).
 pub struct EngineParams {
@@ -109,6 +81,10 @@ pub struct Engine<G: Game + Sync, P: Planner> {
     params: EngineParams,
     states: Vec<G::State>,
     rngs: Vec<SplitMix64>,
+    // The search's chance-sampling stream — independent of the per-game env `rngs` so adding search
+    // draws never perturbs the env's draw order (deterministic games stay bit-reproducible). A fresh
+    // per-decision seed is drawn from it so each search samples with fresh randomness, like the env.
+    search_rng: SplitMix64,
     heads: Vec<usize>, // per-game Thompson head for the current episode
     ticks: Vec<usize>,
     traj: Vec<[Vec<TrajStep>; 2]>, // per-game, per-agent decisions awaiting episode-end z-mixing
@@ -142,12 +118,14 @@ where
         let traj = (0..params.n_games)
             .map(|_| [Vec::new(), Vec::new()])
             .collect();
+        let search_rng = SplitMix64::new(params.seed ^ 0xD1B5_4A32_D192_ED03);
         Engine {
             game,
             planner,
             params,
             states,
             rngs,
+            search_rng,
             heads,
             ticks,
             traj,
@@ -191,7 +169,10 @@ where
 
             // 2. The planner evaluates them all in one pooled pass (one batched forward per round,
             //    shared across games — the throughput win); for TreeStrap this is the selective search.
-            let results = self.planner.evaluate(&self.game, requests, &mut infer);
+            let search_seed = self.search_rng.next_u64();
+            let results = self
+                .planner
+                .evaluate(&self.game, requests, search_seed, &mut infer);
 
             // 3. Emit interior targets immediately, buffer each executed decision, choose its action.
             //    `acted[gi][si]` records the relative action index for an agent that decided this tick.

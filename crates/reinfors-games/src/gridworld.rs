@@ -1,7 +1,7 @@
 //! GridWorld — a minimal single-agent navigation game, the first non-snake `Game`. It exercises the
 //! framework's single-agent path (`num_agents == 1`, `Actor::Agent(0)` at every node — pure MAX +
 //! lookahead, no opponent) end to end through the generic search and rollout engine. Deterministic, so
-//! `chance_outcomes` is the default (empty).
+//! `sample_chance` is the default (empty).
 
 use reinfors_core::{Actor, Game, Transition};
 
@@ -100,14 +100,7 @@ impl Game for GridWorld {
         }
     }
 
-    fn step_env(
-        &self,
-        state: &GridState,
-        actions: &[usize],
-        _rng: &mut dyn reinfors_core::Rng,
-    ) -> Transition<GridState> {
-        self.step(state, actions) // deterministic: the realized transition is the believed one
-    }
+    // Deterministic: no `sample_chance` / `step_env` override needed (the trait defaults suffice).
 }
 
 #[cfg(test)]
@@ -226,7 +219,7 @@ mod tests {
             pos: (0, 0),
             done: false,
         };
-        let results = search_many(&w, &cfg(), vec![(start, 0)], false, zero_infer);
+        let results = search_many(&w, &cfg(), vec![(start, 0)], false, 0, zero_infer);
         let values = &results[0].0; // [K][A]
         for head in values {
             let best = (0..4)

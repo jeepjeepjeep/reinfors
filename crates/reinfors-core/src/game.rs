@@ -44,17 +44,24 @@ pub trait Game {
     /// Apply a joint action (one index per agent) — the deterministic part of the transition, before
     /// any chance resolution. The entry for an agent with no legal moves is ignored.
     fn step(&self, state: &Self::State, actions: &[usize]) -> Transition<Self::State>;
-    /// The believed chance outcomes of the transition from `state` to `transition.next_state` —
-    /// environment stochasticity the planner expands as a chance node: `(probability, state)` summing
-    /// to 1. An **empty** result means the transition was deterministic (no chance node). The default
-    /// is deterministic. Takes the source `state` so a game can derive what happened (e.g. how many
-    /// apples were eaten) by comparing it to `transition.next_state`.
-    fn chance_outcomes(
+    /// Sample `n` independent realizations of the transition's environment chance — the stochastic
+    /// successors of `transition.next_state` (e.g. apple respawn), each drawn from `rng`. An **empty**
+    /// result means the transition is deterministic (no chance node); callers then use
+    /// `transition.next_state` directly. The default is deterministic.
+    ///
+    /// This is the single source of a game's chance dynamics: the rollout draws one realization (`n =
+    /// 1`, via the default `step_env`) and the search draws `food_samples` to Monte-Carlo the chance
+    /// node — both through this method, so the env and the search can never use different dynamics.
+    /// Takes the source `state` so a game can derive what happened (e.g. how many apples were eaten) by
+    /// comparing it to `transition.next_state`.
+    fn sample_chance(
         &self,
         state: &Self::State,
         transition: &Transition<Self::State>,
-    ) -> Vec<(f64, Self::State)> {
-        let _ = (state, transition);
+        rng: &mut dyn Rng,
+        n: usize,
+    ) -> Vec<Self::State> {
+        let _ = (state, transition, rng, n);
         Vec::new()
     }
     /// Egocentric observation for `agent`, a flat `[C*H*W]` f32 buffer.
@@ -62,15 +69,29 @@ pub trait Game {
 
     /// A fresh episode's initial state, drawing any initial chance (e.g. apple placement) from `rng`.
     fn initial_state(&self, rng: &mut dyn Rng) -> Self::State;
-    /// The *realized* environment transition for the rollout: apply the joint action and sample its
-    /// chance (e.g. apple respawn) from `rng` — the true env, as opposed to the search's deterministic
-    /// belief in `chance_outcomes`. The reward vector excludes any horizon-truncation bonus.
+    /// The *realized* environment transition for the rollout: the deterministic `step` followed by one
+    /// sampled chance realization (`sample_chance` with `n = 1`) — the true env step. The reward vector
+    /// excludes any horizon-truncation bonus. Defined in terms of `step` + `sample_chance` so the
+    /// rollout and the search share one chance model; games should not override it.
     fn step_env(
         &self,
         state: &Self::State,
         actions: &[usize],
         rng: &mut dyn Rng,
-    ) -> Transition<Self::State>;
+    ) -> Transition<Self::State> {
+        let t = self.step(state, actions);
+        let mut outcomes = self.sample_chance(state, &t, rng, 1);
+        let next_state = if outcomes.is_empty() {
+            t.next_state
+        } else {
+            outcomes.swap_remove(0)
+        };
+        Transition {
+            next_state,
+            rewards: t.rewards,
+            terminal: t.terminal,
+        }
+    }
     /// Extra reward for `agent` on a horizon-truncation tick (reached alive at `max_ticks`), e.g.
     /// snake's survival bonus. Added by the rollout engine, which owns the horizon. Default: none.
     fn truncation_bonus(&self, state: &Self::State, agent: usize) -> f64 {

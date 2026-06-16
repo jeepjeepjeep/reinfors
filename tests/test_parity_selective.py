@@ -112,22 +112,6 @@ def _food_state() -> WorldState:
     )
 
 
-def _first_empty(snakes: dict, food: set, n: int) -> list:
-    """First `n` unoccupied cells in row-major order — the deterministic spawn rule reinfors uses
-    in-tree, injected into the oracle so both sides place replacement apples identically."""
-    occupied = set(food)
-    for s in snakes.values():
-        occupied |= set(s.body)
-    out: list = []
-    for r in range(_GRID):
-        for c in range(_GRID):
-            if (r, c) not in occupied:
-                out.append((r, c))
-                if len(out) == n:
-                    return out
-    return out
-
-
 def _oracle(
     opponent: str, k: int, budget: int, top_k: int, max_depth: int, beta: float, food_samples: int = 1
 ) -> SelectiveExpectimaxPlanner:
@@ -212,60 +196,11 @@ def test_selective_search_matches_oracle(
     assert tuple(rein_stats) == (stats.max_depth, stats.expansions, stats.leaves, stats.rounds), "search shape"
 
 
-@pytest.mark.parametrize("agent_id", [_A, _B])
-@pytest.mark.parametrize("opponent", ["uniform", "distributional"])
-@pytest.mark.parametrize("k", [1, 4])
-def test_selective_search_with_food_matches_oracle(agent_id: str, opponent: str, k: int) -> None:
-    # In-tree apple spawning: the agent reaches food within the horizon, so the search must place
-    # replacements. Both sides use the deterministic first-empty rule (built into reinfors, injected
-    # into the oracle), so values and search shape must still match bit-for-bit.
+def _search_with_food(
+    env: object, agent_idx: int, opponent: str, k: int, *, food_samples: int, seed: int
+) -> np.ndarray:
     budget, top_k, max_depth, beta = 40, 4, 8, 1.0
-    state = _food_state()
-    planner = _oracle(opponent, k, budget, top_k, max_depth, beta)
-    planner._sample_spawn = lambda snakes, food, n: _first_empty(snakes, food, n)
-    oracle_values = np.asarray(planner.action_values(state, agent_id))
-    stats = planner.last_stats[0]
-
-    agent_idx = 0 if agent_id == _A else 1
-    env = _reinfors_env(state)
-    values, _interior, rein_stats = env.selective_search(
-        agent_idx,
-        _GAMMA,
-        beta,
-        budget,
-        top_k,
-        max_depth,
-        _REWARD_TUPLE,
-        opponent,
-        _TEMP,
-        _FLOOR,
-        lambda arr: np.stack([_q_heads(row, k) for row in arr]),
-    )
-    rein = np.asarray(values)
-    rein = rein[0] if k == 1 else rein
-
-    assert np.allclose(rein, oracle_values, atol=1e-9), f"values: {rein} vs {oracle_values}"
-    assert tuple(rein_stats) == (stats.max_depth, stats.expansions, stats.leaves, stats.rounds), "search shape"
-
-
-@pytest.mark.parametrize("agent_id", [_A, _B])
-@pytest.mark.parametrize("opponent", ["uniform", "distributional"])
-@pytest.mark.parametrize("k", [1, 4])
-def test_food_samples_fan_out_matches_oracle(agent_id: str, opponent: str, k: int) -> None:
-    # food_samples > 1 fans each eating branch into K equally-weighted sub-branches. Under the shared
-    # deterministic first-empty spawn the sub-branches are identical on both sides, so reinfors and the
-    # oracle must still match bit-for-bit — values and the (now larger) search shape, including the
-    # deferred-weight 1/K scaling for the distributional opponent.
-    budget, top_k, max_depth, beta, food_samples = 40, 4, 8, 1.0, 3
-    state = _food_state()
-    planner = _oracle(opponent, k, budget, top_k, max_depth, beta, food_samples=food_samples)
-    planner._sample_spawn = lambda snakes, food, n: _first_empty(snakes, food, n)
-    oracle_values = np.asarray(planner.action_values(state, agent_id))
-    stats = planner.last_stats[0]
-
-    agent_idx = 0 if agent_id == _A else 1
-    env = _reinfors_env(state)
-    values, _interior, rein_stats = env.selective_search(
+    values, _interior, _stats = env.selective_search(
         agent_idx,
         _GAMMA,
         beta,
@@ -279,12 +214,60 @@ def test_food_samples_fan_out_matches_oracle(agent_id: str, opponent: str, k: in
         lambda arr: np.stack([_q_heads(row, k) for row in arr]),
         False,  # collect_interior
         food_samples,
+        seed,
     )
     rein = np.asarray(values)
-    rein = rein[0] if k == 1 else rein
+    return rein[0] if k == 1 else rein
 
-    assert np.allclose(rein, oracle_values, atol=1e-9), f"values: {rein} vs {oracle_values}"
-    assert tuple(rein_stats) == (stats.max_depth, stats.expansions, stats.leaves, stats.rounds), "search shape"
+
+@pytest.mark.parametrize("agent_id", [_A, _B])
+@pytest.mark.parametrize("opponent", ["uniform", "distributional"])
+def test_search_with_food_is_reproducible_and_stochastic(agent_id: str, opponent: str) -> None:
+    # In-tree apple spawning is now genuinely stochastic (a uniform-random respawn drawn from the
+    # search's seeded RNG, not a deterministic first-empty belief). So: a fixed seed is exactly
+    # reproducible, and two different seeds generally give different values (the spawn is really
+    # sampled). Both are exact (boolean) properties — no oracle, no tolerance.
+    k = 4
+    agent_idx = 0 if agent_id == _A else 1
+    env = _reinfors_env(_food_state())
+
+    a = _search_with_food(env, agent_idx, opponent, k, food_samples=1, seed=7)
+    a_again = _search_with_food(env, agent_idx, opponent, k, food_samples=1, seed=7)
+    assert np.array_equal(a, a_again), "same seed must reproduce the search exactly"
+
+    b = _search_with_food(env, agent_idx, opponent, k, food_samples=1, seed=8)
+    assert not np.array_equal(a, b), "different seeds must sample different spawns -> different values"
+
+
+@pytest.mark.parametrize("agent_id", [_A, _B])
+@pytest.mark.parametrize("opponent", ["uniform", "distributional"])
+def test_search_with_food_matches_oracle_in_expectation(agent_id: str, opponent: str) -> None:
+    # Distributional parity: reinfors and the oracle BOTH respawn apples uniformly at random over empty
+    # cells (the shared deterministic rule is gone), so bit-parity is no longer the invariant — equality
+    # of the Monte-Carlo *expectation* is. Averaging many independent spawn realizations on each side,
+    # the mean root action values must converge to the same vector. This is the test that would catch a
+    # reinfors spawn distribution that differed from the env's/oracle's uniform-over-empty draw.
+    k = 4
+    budget, top_k, max_depth, beta, food_samples, m = 40, 4, 8, 1.0, 4, 120
+    agent_idx = 0 if agent_id == _A else 1
+    state = _food_state()
+
+    # Oracle: one planner whose persistent RNG yields a fresh random spawn set on each `action_values`.
+    planner = _oracle(opponent, k, budget, top_k, max_depth, beta, food_samples=food_samples)
+    oracle_mean = np.mean([np.asarray(planner.action_values(state, agent_id)) for _ in range(m)], axis=0)
+
+    # reinfors: vary the search seed to draw independent spawn realizations of the same search.
+    env = _reinfors_env(state)
+    rein_mean = np.mean(
+        [_search_with_food(env, agent_idx, opponent, k, food_samples=food_samples, seed=s) for s in range(m)],
+        axis=0,
+    )
+
+    assert rein_mean.shape == oracle_mean.shape
+    # Both means are Monte-Carlo estimates of the same expectation; the gap is sampling noise that
+    # shrinks like 1/sqrt(m*food_samples). The tolerance is loose relative to bit-parity but far tighter
+    # than the value scale (q in [-1, 1], rewards up to 20), so a distribution mismatch would still fail.
+    assert np.allclose(rein_mean, oracle_mean, atol=0.05), f"E[values]: {rein_mean} vs {oracle_mean}"
 
 
 @pytest.mark.parametrize("opponent", ["uniform", "distributional"])
@@ -327,13 +310,13 @@ def test_pooled_search_many_matches_oracle(opponent: str, k: int) -> None:
 @pytest.mark.parametrize("opponent", ["uniform", "distributional"])
 @pytest.mark.parametrize("k", [1, 4])
 def test_interior_targets_match_oracle(agent_id: str, opponent: str, k: int) -> None:
-    # True TreeStrap: every expanded interior MAX node below the root is emitted as (obs, values). A
-    # food state gives a richer tree (eating lines), so there are interior nodes to compare. We assert
-    # the same count and, node-for-node in DFS order, identical observations and backed-up values.
+    # True TreeStrap: every expanded interior MAX node below the root is emitted as (obs, values). We
+    # use a food-free state so the tree is fully deterministic (no stochastic spawning) and the interior
+    # targets still match the oracle bit-for-bit: same count and, node-for-node in DFS order, identical
+    # observations and backed-up values. (Stochastic-spawn parity is covered in expectation above.)
     budget, top_k, max_depth, beta = 40, 4, 8, 1.0
-    state = _food_state()
+    state = _food_free_state()
     planner = _oracle(opponent, k, budget, top_k, max_depth, beta)
-    planner._sample_spawn = lambda snakes, food, n: _first_empty(snakes, food, n)
     _, oracle_interior = planner.search_many(state, [(agent_id, True)])[0]
 
     agent_idx = 0 if agent_id == _A else 1
