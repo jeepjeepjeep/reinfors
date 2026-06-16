@@ -120,10 +120,11 @@ Reading the comparison honestly:
 - **Train speed** (the unconfounded axis): reinfors generates data in parallel Rust with one pooled
   GPU forward per round across `--n-games` games; snake_RL runs a single Python self-play env. Compare
   `throughput/*` and any curve on the Wall x-axis.
-- **Quality per step** has known confounds in this phase, surfaced in the script's header: the search's
-  **spawn belief** (reinfors first-empty vs snake_RL uniform — the *agents* differ; a stochastic spawn
-  belief in Phase 2 removes this), the `--n-games` **parallelism** (changes the replay mix), and the
-  **train cadence** mapping (snake_RL's per-tick `train_every` vs reinfors' `collect_size / grad_steps`).
+- **Quality per step** has known confounds in this phase, surfaced in the script's header: the
+  `--n-games` **parallelism** (changes the replay mix) and the **train cadence** mapping (snake_RL's
+  per-tick `train_every` vs reinfors' `collect_size / grad_steps`). The search's apple respawn is now a
+  uniform-random draw shared by the env and the search (matching snake_RL), so spawning is no longer a
+  confound.
 
 ## Git hooks
 

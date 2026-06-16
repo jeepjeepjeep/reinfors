@@ -16,11 +16,13 @@ pub trait Planner {
     /// Pooled evaluation of a batch of `(state, agent)` requests with the live net (`infer`): per
     /// request, the per-head root action values `[K][A]`, any extra training records to emit
     /// immediately (TreeStrap interior nodes), and search diagnostics. (Thompson-head/epsilon action
-    /// choice on top of the returned values is the Engine's job, not the planner's.)
+    /// choice on top of the returned values is the Engine's job, not the planner's.) `seed` seeds any
+    /// stochastic chance sampling the search does, so a caller controls reproducibility.
     fn evaluate<G, F>(
         &self,
         game: &G,
         requests: Vec<(G::State, usize)>,
+        seed: u64,
         infer: &mut F,
     ) -> Vec<SearchResult>
     where
@@ -68,6 +70,7 @@ impl Planner for SelectiveTreeStrap {
         &self,
         game: &G,
         requests: Vec<(G::State, usize)>,
+        seed: u64,
         infer: &mut F,
     ) -> Vec<SearchResult>
     where
@@ -80,6 +83,7 @@ impl Planner for SelectiveTreeStrap {
             &self.cfg,
             requests,
             self.collect_interior,
+            seed,
             &mut *infer,
         )
     }

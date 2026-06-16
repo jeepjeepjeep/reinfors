@@ -14,10 +14,6 @@ wall-clock (TensorBoard's "Relative"/"Wall" x-axis) learning curves can be read 
     tensorboard --logdir runs    # both runs side by side
 
 Caveats for reading the *quality* comparison fairly (the speed comparison is unaffected):
-  * Spawn belief — reinfors' search assumes food respawns at the first empty cell (deterministic,
-    for cross-impl parity); snake_RL's assumes uniform-random. The env is uniform-random in both, so
-    the two *agents* differ. Phase 2 (a stochastic spawn belief) removes this; until then the quality
-    curves compare different agents.
   * Parallelism — `--n-games` is a reinfors-only knob (snake_RL runs one self-play env). It changes
     the replay mix, so it affects the per-step curve; it is the source of reinfors' wall-clock win.
   * Cadence — snake_RL trains once per `train_every` env ticks. reinfors trains `--grad-steps` per

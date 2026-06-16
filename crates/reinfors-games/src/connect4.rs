@@ -1,7 +1,7 @@
 //! Connect-4 — a sequential 2-player zero-sum `Game`, the first adversarial non-snake game. It
 //! validates the search's sequential path: alternating `Actor::Agent(0)` / `Actor::Agent(1)` nodes
 //! (the searching agent's MAX turns vs the opponent's modeled-chance turns), driven through the same
-//! generic search + rollout engine as snake. Deterministic, so `chance_outcomes` is the default
+//! generic search + rollout engine as snake. Deterministic, so `sample_chance` is the default
 //! (empty). Action legality is fixed — all 7 columns are always selectable; a move into a full column
 //! is an immediate loss for the mover — so the framework needs no action masking here.
 
@@ -170,14 +170,7 @@ impl Game for Connect4 {
         }
     }
 
-    fn step_env(
-        &self,
-        state: &Connect4State,
-        actions: &[usize],
-        _rng: &mut dyn Rng,
-    ) -> Transition<Connect4State> {
-        self.step(state, actions) // deterministic
-    }
+    // Deterministic: no `sample_chance` / `step_env` override needed (the trait defaults suffice).
 }
 
 #[cfg(test)]
@@ -284,7 +277,7 @@ mod tests {
             turn: 0,
             done: false,
         };
-        let results = search_many(&g, &cfg(), vec![(state, 0)], false, zero_infer);
+        let results = search_many(&g, &cfg(), vec![(state, 0)], false, 0, zero_infer);
         let values = &results[0].0; // [K][7]
         for head in values {
             let best = (0..7)

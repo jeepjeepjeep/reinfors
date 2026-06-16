@@ -27,6 +27,7 @@ def selective_search_many(
     infer: Any,
     collect_interior: bool = ...,
     food_samples: int = ...,
+    seed: int = ...,
 ) -> list[SearchOutput]: ...
 def blend_outcome_targets(
     search_values: object,  # (T, K, A) float64
@@ -65,6 +66,7 @@ class SnakeEnv:
         infer: Any,
         collect_interior: bool = ...,
         food_samples: int = ...,
+        seed: int = ...,
     ) -> SearchOutput: ...
 
 class Engine:

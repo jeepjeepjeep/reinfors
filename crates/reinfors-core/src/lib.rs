@@ -7,6 +7,7 @@
 pub mod engine;
 pub mod game;
 pub mod planner;
+pub(crate) mod rng;
 pub mod search;
 
 pub use engine::{blend_outcome_targets, CollectStats, Engine, EngineParams, EpisodeSummary};

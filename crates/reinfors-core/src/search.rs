@@ -11,18 +11,19 @@
 //! without fighting the borrow checker.
 //!
 //! The engine is generic over the [`Game`] trait: a `Node<S>` carries an opaque game state `S` and
-//! successors come from `Game::step` + `Game::chance_outcomes`. The public [`search_many`] +
+//! successors come from `Game::step` + `Game::sample_chance`. The public [`search_many`] +
 //! [`SearchConfig`] are game-agnostic; concrete games (e.g. the snake `selective_search` wrappers in
 //! reinfors-games) build a `SearchConfig` and a `Game` and call [`search_many`].
 //!
-//! A game's `chance_outcomes` declares the believed (deterministic or stochastic) successors of an
-//! eating-style transition. `food_samples > 1` fans each stochastic branch into that many
-//! equally-weighted sub-branches (the Monte-Carlo spawn structure); under a deterministic spawn belief
-//! the sub-branches are identical, so it only adds value once the belief is stochastic.
+//! A game's `sample_chance` draws the (stochastic) successors of an eating-style transition — the same
+//! sampler the rollout env uses, so search and env never diverge. `food_samples > 1` fans the chance
+//! node into that many independent Monte-Carlo draws; a deterministic transition (empty `sample_chance`)
+//! keeps a single child. Each search owns a seeded RNG, so results are reproducible from a seed.
 
 use rayon::prelude::*;
 
-use crate::game::{Actor, Game};
+use crate::game::{Actor, Game, Rng};
+use crate::rng::SplitMix64;
 
 /// The agent's belief about the opponent's move distribution.
 #[derive(Clone, Copy)]
@@ -43,9 +44,9 @@ pub struct SearchConfig {
     pub expansion_budget: usize,
     pub top_k: usize,
     pub max_depth: i32,
-    /// Monte-Carlo chance samples per stochastic branch (>= 1). With a deterministic spawn belief the
-    /// samples are identical, so this is the fan-out structure a stochastic belief would populate; 1
-    /// disables it.
+    /// Monte-Carlo chance samples per stochastic transition (>= 1): each is an independent
+    /// `sample_chance` draw, so the chance node is averaged over that many realizations; 1 keeps a
+    /// single sampled child. Inert for deterministic transitions (no chance node).
     pub food_samples: usize,
     pub opponent: Opponent,
 }
@@ -117,10 +118,11 @@ struct Search<S> {
     batch: Vec<usize>,
     opp_obs: Vec<Vec<f32>>,
     new_leaves: Vec<usize>,
+    rng: SplitMix64, // this search's chance-sampling stream (apple respawns), seeded per request
 }
 
 impl<S> Search<S> {
-    fn new(state: S, agent: usize) -> Search<S> {
+    fn new(state: S, agent: usize, seed: u64) -> Search<S> {
         let root = Node {
             state,
             obs: Vec::new(),
@@ -143,6 +145,7 @@ impl<S> Search<S> {
             batch: Vec::new(),
             opp_obs: Vec::new(),
             new_leaves: Vec::new(),
+            rng: SplitMix64::new(seed),
         }
     }
 
@@ -175,6 +178,7 @@ fn expand_round<G: Game>(s: &mut Search<G::State>, game: &G, cfg: &SearchConfig,
             opp,
             &mut s.opp_obs,
             &mut s.new_leaves,
+            &mut s.rng,
         );
         s.stats.expansions += 1;
         s.stats.max_depth = s.stats.max_depth.max(s.arena[ni].depth + 1);
@@ -217,6 +221,7 @@ pub fn search_many<G: Game + Sync, F>(
     cfg: &SearchConfig,
     requests: Vec<(G::State, usize)>,
     collect_interior: bool,
+    seed: u64,
     mut infer: F,
 ) -> Vec<SearchResult>
 where
@@ -229,9 +234,12 @@ where
 {
     debug_assert!((1..=2).contains(&game.num_agents()));
     let a = game.action_count();
+    // Each search gets its own chance-sampling stream, seeded deterministically from the request
+    // index, so results are reproducible and independent of the parallel-vs-serial expansion schedule.
     let mut searches: Vec<Search<G::State>> = requests
         .into_iter()
-        .map(|(s, agent)| Search::new(s, agent))
+        .enumerate()
+        .map(|(i, (s, agent))| Search::new(s, agent, seed.wrapping_add(i as u64)))
         .collect();
     let budget = cfg.expansion_budget;
     let mut first = true;
@@ -457,8 +465,9 @@ fn agent_branching<G: Game>(
 /// Build the child node(s) for one `joint` action and append the resulting branch(es) to `branches`.
 /// `bw` is the move's chance weight. `agent_out_terminal` decides whether "the searching agent has no
 /// legal actions in the child" counts as terminal: true for simultaneous play (it means the agent
-/// died), false for a sequential turn (it just means it is not the agent's move next). The
-/// `food_samples` fan-out replicates a stochastic transition into equally-weighted sub-branches.
+/// died), false for a sequential turn (it just means it is not the agent's move next). A stochastic
+/// transition fans into `food_samples` equally-weighted Monte-Carlo draws from `sample_chance` — the
+/// same chance model the env rollout uses, so search and env can never diverge.
 #[allow(clippy::too_many_arguments)]
 fn push_branches<G: Game>(
     arena: &mut Vec<Node<G::State>>,
@@ -472,28 +481,28 @@ fn push_branches<G: Game>(
     depth: i32,
     new_leaves: &mut Vec<usize>,
     branches: &mut Vec<Branch>,
+    rng: &mut dyn Rng,
 ) {
     let t = game.step(state, joint);
     let reward = t.rewards[agent];
-    let chance = game.chance_outcomes(state, &t);
-    let stochastic = !chance.is_empty();
-    let child_state = if stochastic {
-        chance[0].1.clone()
+    // Draw the chance children: an empty result means the transition is deterministic (one child from
+    // `t.next_state`); otherwise `food_samples` independent realizations, each a distinct sampled state.
+    let outcomes = game.sample_chance(state, &t, rng, cfg.food_samples.max(1));
+    let children: Vec<G::State> = if outcomes.is_empty() {
+        vec![t.next_state]
     } else {
-        t.next_state
+        outcomes
     };
-    let terminal =
-        t.terminal || (agent_out_terminal && game.legal_actions(&child_state, agent).is_empty());
-    let n = if stochastic && cfg.food_samples > 1 {
-        cfg.food_samples
-    } else {
-        1
-    };
+    let n = children.len();
     let (weight, deferred, scale) = match bw {
         BranchWeight::Fixed(f) => (f / n as f64, None, 1.0),
         BranchWeight::Deferred(oi, si) => (0.0, Some((oi, si)), 1.0 / n as f64),
     };
-    if n == 1 {
+    // Each sampled child is a distinct state, so its terminality and observation are computed per child
+    // (the food position differs across draws).
+    for child_state in children {
+        let terminal = t.terminal
+            || (agent_out_terminal && game.legal_actions(&child_state, agent).is_empty());
         let child = if terminal {
             push_node(arena, child_state, Vec::new(), depth + 1, true)
         } else {
@@ -509,25 +518,6 @@ fn push_branches<G: Game>(
             reward,
             child,
         });
-    } else {
-        let obs = if terminal {
-            Vec::new()
-        } else {
-            game.observe(&child_state, agent)
-        };
-        for _ in 0..n {
-            let child = push_node(arena, child_state.clone(), obs.clone(), depth + 1, terminal);
-            if !terminal {
-                new_leaves.push(child);
-            }
-            branches.push(Branch {
-                weight,
-                deferred,
-                scale,
-                reward,
-                child,
-            });
-        }
     }
 }
 
@@ -553,6 +543,7 @@ fn expand_node<G: Game>(
     opp: usize,
     opp_obs: &mut Vec<Vec<f32>>,
     new_leaves: &mut Vec<usize>,
+    rng: &mut dyn Rng,
 ) {
     let state = arena[ni].state.clone();
     let depth = arena[ni].depth;
@@ -581,6 +572,7 @@ fn expand_node<G: Game>(
                         depth,
                         new_leaves,
                         &mut branches,
+                        &mut *rng,
                     );
                 }
                 edges.push(Edge { branches });
@@ -606,6 +598,7 @@ fn expand_node<G: Game>(
                     depth,
                     new_leaves,
                     &mut branches,
+                    &mut *rng,
                 );
                 edges.push(Edge { branches });
             }
@@ -629,6 +622,7 @@ fn expand_node<G: Game>(
                     depth,
                     new_leaves,
                     &mut branches,
+                    &mut *rng,
                 );
             }
             (vec![Edge { branches }], false)
