@@ -1,72 +1,108 @@
-//! The `Planner` trait — how an agent *acts* (and, later, *learns*) given a `Game` and the value
-//! network. It is the seam that lets the search algorithm be swapped: `SelectiveTreeStrap` (the
-//! selective expectimax used today) is the first impl; a model-free planner (e.g. ensemble DQN) will
-//! be another, slotting into the same rollout/training loop without touching it.
-//!
-//! Step 1 covers *action selection* only — the half cleanly available before the search is made
-//! generic over `Game`. The training-target half (z-mixing, interior nodes) joins the trait when the
-//! rollout `Engine` is genericized (migration step 3), so it is not designed prematurely here.
+//! The `Planner` trait — the swappable *algorithm* seam. A planner turns the live value network into
+//! (a) per-decision action values for the rollout and (b) the training targets for executed
+//! trajectories. `SelectiveTreeStrap` (selective expectimax + z-mixing) is the first impl; a
+//! model-free planner (e.g. ensemble DQN) is another, slotting into the same rollout `Engine` without
+//! touching it. The Engine owns the game-agnostic framework (parallel rollout, ensemble Thompson +
+//! epsilon action choice, bootstrap masks, replay, telemetry); the Planner owns what is
+//! algorithm-specific (here: the search, the interior TreeStrap targets, and the z-mix).
 
-use crate::game::{Game, SnakeGame, SnakeState};
-use crate::search::{selective_search, SearchParams};
+use crate::engine::blend_outcome_targets;
+use crate::game::Game;
+use crate::search::{search_many, SearchConfig, SearchParams, SearchResult};
 
-/// A planner that selects actions for a `Game` using the value network. Exploration (epsilon,
-/// Thompson head choice) is the rollout engine's concern, not the planner's — `act` is greedy.
-pub trait Planner<G: Game> {
-    /// Greedily select an action index for `agent` at `state` under ensemble `head`, via `infer`.
-    fn act<F>(&self, game: &G, state: &G::State, agent: usize, head: usize, infer: &mut F) -> usize
-    where
-        F: FnMut(Vec<f32>, usize) -> Vec<f64>;
-}
-
-/// Selective expectimax + TreeStrap — today's algorithm. For now it wraps the snake-concrete
-/// `selective_search`; migration step 2 makes the search generic over `Game` and this generic over G.
-pub struct SelectiveTreeStrap {
-    pub params: SearchParams,
-}
-
-impl Planner<SnakeGame> for SelectiveTreeStrap {
-    fn act<F>(
+/// How an algorithm evaluates states and builds training targets, driving the rollout `Engine`. The
+/// trait is game-agnostic: `evaluate` is generic over the game, and the target methods don't touch it.
+pub trait Planner {
+    /// Pooled evaluation of a batch of `(state, agent)` requests with the live net (`infer`): per
+    /// request, the per-head root action values `[K][A]`, any extra training records to emit
+    /// immediately (TreeStrap interior nodes), and search diagnostics. (Thompson-head/epsilon action
+    /// choice on top of the returned values is the Engine's job, not the planner's.)
+    fn evaluate<G, F>(
         &self,
-        _game: &SnakeGame,
-        state: &SnakeState,
-        agent: usize,
-        head: usize,
+        game: &G,
+        requests: Vec<(G::State, usize)>,
         infer: &mut F,
-    ) -> usize
+    ) -> Vec<SearchResult>
     where
-        F: FnMut(Vec<f32>, usize) -> Vec<f64>,
-    {
-        let (values, _interior, _stats) = selective_search(
-            &self.params,
-            state.snakes.clone(),
-            state.food.clone(),
-            agent,
-            false,
-            infer,
-        );
-        let h = head.min(values.len().saturating_sub(1));
-        argmax(&values[h])
+        G: Game + Sync,
+        G::State: Send,
+        F: FnMut(Vec<f32>, usize) -> Vec<f64>;
+
+    /// Per-step training targets for one executed trajectory at episode end. `trajectory` is
+    /// time-ordered `(searched values [K][A], executed action, realized reward)`; `tail` (len K) seeds
+    /// the bootstrap past the last step (0 at a terminal, the net's per-head state value at a
+    /// truncation). Returns one `[K][A]` target per step, in time order. For TreeStrap this is z-mixing.
+    fn targets(
+        &self,
+        trajectory: &[(Vec<Vec<f64>>, usize, f64)],
+        tail: &[f64],
+    ) -> Vec<Vec<Vec<f64>>>;
+
+    /// Whether `targets` consumes the per-head bootstrap value of the final state (the z-tail). When
+    /// false the Engine skips computing it (a forward). Default: false.
+    fn uses_episode_tail(&self) -> bool {
+        false
     }
 }
 
-/// First-argmax (ties resolve to the lowest index), matching the rollout engine's action choice.
-fn argmax(values: &[f64]) -> usize {
-    let mut best = 0;
-    for (i, &v) in values.iter().enumerate() {
-        if v > values[best] {
-            best = i;
+/// Selective expectimax + TreeStrap — today's algorithm. Holds the (game-agnostic) search config, the
+/// z-mix `outcome_weight`, and whether to collect interior TreeStrap targets.
+pub struct SelectiveTreeStrap {
+    cfg: SearchConfig,
+    outcome_weight: f64,
+    collect_interior: bool,
+}
+
+impl SelectiveTreeStrap {
+    pub fn new(search: &SearchParams, outcome_weight: f64, collect_interior: bool) -> Self {
+        SelectiveTreeStrap {
+            cfg: SearchConfig::from_params(search),
+            outcome_weight,
+            collect_interior,
         }
     }
-    best
+}
+
+impl Planner for SelectiveTreeStrap {
+    fn evaluate<G, F>(
+        &self,
+        game: &G,
+        requests: Vec<(G::State, usize)>,
+        infer: &mut F,
+    ) -> Vec<SearchResult>
+    where
+        G: Game + Sync,
+        G::State: Send,
+        F: FnMut(Vec<f32>, usize) -> Vec<f64>,
+    {
+        search_many(
+            game,
+            &self.cfg,
+            requests,
+            self.collect_interior,
+            &mut *infer,
+        )
+    }
+
+    fn targets(
+        &self,
+        trajectory: &[(Vec<Vec<f64>>, usize, f64)],
+        tail: &[f64],
+    ) -> Vec<Vec<Vec<f64>>> {
+        blend_outcome_targets(trajectory, self.cfg.gamma, self.outcome_weight, tail)
+    }
+
+    fn uses_episode_tail(&self) -> bool {
+        self.outcome_weight > 0.0
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::Game;
+    use crate::game::{SnakeGame, SnakeState};
     use crate::reward::Reward;
-    use crate::search::Opponent;
+    use crate::search::{selective_search, Opponent};
     use crate::snake::SnakeEnv;
 
     const G: i32 = 8;
@@ -93,6 +129,17 @@ mod tests {
                 survival: 0.0,
             },
             opponent: Opponent::Uniform,
+        }
+    }
+
+    fn snake_game() -> SnakeGame {
+        SnakeGame {
+            grid_size: G,
+            initial_length: 3,
+            play_to_last: false,
+            win_food_lead: None,
+            initial_food_count: 0,
+            reward: params().reward,
         }
     }
 
@@ -123,19 +170,10 @@ mod tests {
     }
 
     #[test]
-    fn act_returns_a_legal_action_matching_a_direct_search() {
-        let game = SnakeGame {
-            grid_size: G,
-            initial_length: 3,
-            play_to_last: false,
-            win_food_lead: None,
-            reward: params().reward,
-        };
-        let planner = SelectiveTreeStrap { params: params() };
+    fn evaluate_wraps_the_pooled_search() {
+        let planner = SelectiveTreeStrap::new(&params(), 0.3, false);
         let st = state();
-        let a = planner.act(&game, &st, 0, 1, &mut infer);
-        assert!(game.legal_actions(&st, 0).contains(&a));
-        // Wraps the search faithfully: same head argmax as calling the search directly.
+        let results = planner.evaluate(&snake_game(), vec![(st.clone(), 0)], &mut infer);
         let (values, _i, _s) = selective_search(
             &params(),
             st.snakes.clone(),
@@ -144,6 +182,22 @@ mod tests {
             false,
             &mut infer,
         );
-        assert_eq!(a, argmax(&values[1]));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, values);
+    }
+
+    #[test]
+    fn targets_z_mix_and_tail_usage_track_outcome_weight() {
+        // targets == blend_outcome_targets at the planner's outcome_weight; uses_episode_tail iff > 0.
+        let traj = vec![(vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]], 1usize, 10.0)];
+        let tail = [0.0, 0.0];
+        let p = SelectiveTreeStrap::new(&params(), 0.25, false);
+        assert_eq!(
+            p.targets(&traj, &tail),
+            blend_outcome_targets(&traj, 0.99, 0.25, &tail)
+        );
+        assert!(p.uses_episode_tail());
+        let p0 = SelectiveTreeStrap::new(&params(), 0.0, false);
+        assert!(!p0.uses_episode_tail());
     }
 }
