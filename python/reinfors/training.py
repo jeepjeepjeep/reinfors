@@ -18,6 +18,7 @@ import math
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import cast
 
 import numpy as np
 import torch
@@ -91,7 +92,7 @@ class BootstrappedQNetwork(nn.Module):
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         features = self.trunk(obs)  # (B, d)
-        heads: list[PriorScaledHead] = list(self.heads)
+        heads = cast("list[PriorScaledHead]", list(self.heads))  # ModuleList iterates as Module
         w_tr = torch.stack([h.trainable.weight for h in heads])
         b_tr = torch.stack([h.trainable.bias for h in heads])
         w_pr = torch.stack([h.prior.weight for h in heads])
@@ -208,7 +209,8 @@ def train(
     net: BootstrappedQNetwork,
     optimizer: Optimizer,
     *,
-    iterations: int,
+    iterations: int | None = None,
+    max_episodes: int | None = None,
     collect_size: int,
     batch_size: int,
     grad_steps_per_collect: int = 1,
@@ -228,6 +230,11 @@ def train(
     from the buffer (per-head masked Huber, gradient-clipped). Because `infer` reads the live `net`,
     the next collect already searches with the updated weights — the actor-learner sync is implicit.
 
+    The loop runs until it has done `iterations` collects and/or completed `max_episodes` finished
+    episodes (whichever bound is hit first); at least one must be set. `max_episodes` is the budget that
+    matches snake_RL's `num_episodes` — the number of *self-play episodes* generated, independent of how
+    many collects or gradient steps that takes (which depend on episode length and `--n-games`).
+
     Reusing buffered records across steps amortises the search (the dominant cost): the reuse factor is
     roughly `grad_steps_per_collect * batch_size / collect_size`, and replay decorrelates updates —
     matching `EnsembleTreeStrapRunner`'s dynamics rather than the single-pass on-policy approximation.
@@ -237,6 +244,8 @@ def train(
     before the buffer fills, so the data-generation curve and throughput start at step 0). A caller
     wires these to a TensorBoard `SummaryWriter`.
     """
+    if iterations is None and max_episodes is None:
+        raise ValueError("set iterations and/or max_episodes")
     net.to(device)
     net.train()  # gradient steps run in train mode; `infer` is mode-neutral (saves/restores)
     obs_dim = math.prod(net.obs_shape)
@@ -246,30 +255,35 @@ def train(
     infer = make_infer(net, device)
     c, h, w = net.obs_shape
     losses: list[float] = []
-    for it in range(iterations):
+    episodes_done = 0
+    it = 0
+    while iterations is None or it < iterations:
         t0 = time.perf_counter()
         obs, target, mask, telemetry = engine.collect(collect_size, infer)  # type: ignore[attr-defined]
         collect_seconds = time.perf_counter() - t0
         buffer.push_batch(obs, target, mask)
+        episodes_done += len(telemetry["episodes"])
         if on_collect is not None:
             on_collect(it, CollectReport(it, int(obs.shape[0]), collect_seconds, telemetry))
-        if buffer.size < min_buffer:
-            continue
-        for _ in range(grad_steps_per_collect):
-            batch = buffer.sample(batch_size).to(device)  # one host->device transfer
-            obs_t = batch[:, :obs_dim].reshape(-1, c, h, w)
-            target_t = batch[:, obs_dim : obs_dim + k * a].reshape(-1, k, a)
-            mask_t = batch[:, obs_dim + k * a :]
-            q = net(obs_t)
-            loss = treestrap_loss(q, target_t, mask_t)
-            optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(net.parameters(), max_norm=grad_clip)
-            optimizer.step()
-            losses.append(float(loss.item()))
-            if on_step is not None:
-                on_step(
-                    len(losses),
-                    StepMetrics(losses[-1], float(q.mean().item()), float(target_t.mean().item())),
-                )
+        if buffer.size >= min_buffer:
+            for _ in range(grad_steps_per_collect):
+                batch = buffer.sample(batch_size).to(device)  # one host->device transfer
+                obs_t = batch[:, :obs_dim].reshape(-1, c, h, w)
+                target_t = batch[:, obs_dim : obs_dim + k * a].reshape(-1, k, a)
+                mask_t = batch[:, obs_dim + k * a :]
+                q = net(obs_t)
+                loss = treestrap_loss(q, target_t, mask_t)
+                optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(net.parameters(), max_norm=grad_clip)
+                optimizer.step()
+                losses.append(float(loss.item()))
+                if on_step is not None:
+                    on_step(
+                        len(losses),
+                        StepMetrics(losses[-1], float(q.mean().item()), float(target_t.mean().item())),
+                    )
+        it += 1
+        if max_episodes is not None and episodes_done >= max_episodes:
+            break
     return losses

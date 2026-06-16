@@ -27,6 +27,7 @@ import argparse
 import os
 import sys
 import time
+from typing import Any
 
 import numpy as np
 import reinfors
@@ -120,7 +121,7 @@ def bench_pooled_search(args: argparse.Namespace) -> float:
     infer = build_infer(args)
     search_args = (0.99, 1.0, args.budget, 4, args.max_depth, _REWARD, "uniform", 1.0, 0.1)
 
-    def fresh_envs() -> list[object]:
+    def fresh_envs() -> list[reinfors._reinfors.SnakeEnv]:
         envs = []
         for _ in range(args.games):
             e = reinfors._reinfors.SnakeEnv(args.grid, 3, True, None)
@@ -144,12 +145,22 @@ def bench_baseline(args: argparse.Namespace) -> float | None:
     if os.path.isdir(src) and src not in sys.path:
         sys.path.insert(0, src)
     try:
-        from snake_rl.agent.model_based.expectimax import UniformOpponent
-        from snake_rl.agent.model_based.selective_expectimax import SelectiveExpectimaxPlanner
-        from snake_rl.agent.shared.observation import EgocentricGridObservation
-        from snake_rl.agent.shared.reward import MinimalReward
-        from snake_rl.environment.base import RELATIVE_ACTIONS, Action, BaseSnakeEnv, Snake, WorldState
-        from snake_rl.environment.clean import CleanSnakeEnv
+        # snake_RL is an optional sibling checkout added to sys.path above, not an installed dependency,
+        # so a type checker can't resolve it; the runtime ImportError guard handles its absence.
+        from snake_rl.agent.model_based.expectimax import UniformOpponent  # type: ignore[import-not-found]
+        from snake_rl.agent.model_based.selective_expectimax import (  # type: ignore[import-not-found]
+            SelectiveExpectimaxPlanner,
+        )
+        from snake_rl.agent.shared.observation import EgocentricGridObservation  # type: ignore[import-not-found]
+        from snake_rl.agent.shared.reward import MinimalReward  # type: ignore[import-not-found]
+        from snake_rl.environment.base import (  # type: ignore[import-not-found]
+            RELATIVE_ACTIONS,
+            Action,
+            BaseSnakeEnv,
+            Snake,
+            WorldState,
+        )
+        from snake_rl.environment.clean import CleanSnakeEnv  # type: ignore[import-not-found]
     except ImportError:
         print("  snake_RL not importable — skipping baseline.")
         return None
@@ -167,13 +178,13 @@ def bench_baseline(args: argparse.Namespace) -> float | None:
         torch.manual_seed(0)
         net = BootstrappedQNetwork((5, args.grid, args.grid), 3, k).to(args.device)
 
-        def q_value_batch(obss: object) -> np.ndarray:
+        def q_value_batch(obss: Any) -> np.ndarray:
             with torch.no_grad():
                 x = torch.from_numpy(np.asarray(obss, dtype=np.float32).reshape(len(obss), 5, args.grid, args.grid))
                 return net(x.to(args.device)).cpu().double().numpy()
     else:
 
-        def q_value_batch(obss: object) -> np.ndarray:
+        def q_value_batch(obss: Any) -> np.ndarray:
             return q_batch(np.asarray(obss).reshape(len(obss), -1), k)
 
     def qf(o: object) -> np.ndarray:

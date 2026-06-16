@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any, cast
 
 import reinfors
 import torch
@@ -63,6 +64,10 @@ LR = 2.5e-4
 BATCH_SIZE = 512
 BUFFER_CAPACITY = 100_000
 MIN_BUFFER_SIZE = 2_000
+# snake_RL trains once per `train_every` env ticks and logs against the env-tick count, so its "step"
+# advances by `train_every` per gradient update. We scale reinfors' gradient-step index by the same
+# factor when logging, so the TensorBoard step axis is directly comparable (no 4x offset to undo).
+TRAIN_EVERY = 4
 
 
 def build_engine(n_games: int, seed: int) -> object:
@@ -107,11 +112,14 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--log-dir", default="runs/reinfors_ensemble")
     parser.add_argument("--output", default=None, help="checkpoint dir (default: <log-dir>/ckpts)")
-    parser.add_argument("--iterations", type=int, default=20_000, help="collect+train cycles")
+    parser.add_argument(
+        "--episodes", type=int, default=20_000, help="self-play episodes to train (snake_RL num_episodes)"
+    )
+    parser.add_argument("--max-iterations", type=int, default=None, help="optional cap on collect+train cycles")
     parser.add_argument("--n-games", type=int, default=16, help="parallel games (reinfors-only knob)")
     parser.add_argument("--collect-size", type=int, default=256, help="record floor per collect")
     parser.add_argument("--grad-steps", type=int, default=1, help="gradient steps per collect")
-    parser.add_argument("--checkpoint-every", type=int, default=500, help="iterations between checkpoints")
+    parser.add_argument("--checkpoint-every", type=int, default=500, help="episodes between checkpoints")
     args = parser.parse_args()
 
     from torch.utils.tensorboard.writer import SummaryWriter
@@ -119,29 +127,33 @@ def main() -> None:
     out_dir = Path(args.output) if args.output else Path(args.log_dir) / "ckpts"
     out_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(log_dir=args.log_dir)
-    print(f"reinfors training — device={args.device} grid={GRID} heads={N_HEADS} log_dir={args.log_dir}")
+    print(
+        f"reinfors training — device={args.device} grid={GRID} heads={N_HEADS} "
+        f"episodes={args.episodes} log_dir={args.log_dir}"
+    )
 
     torch.manual_seed(args.seed)
     net = BootstrappedQNetwork((5, GRID, GRID), 3, N_HEADS, prior_scale=PRIOR_SCALE)
     optimizer = torch.optim.Adam(net.parameters(), lr=LR)
     engine = build_engine(args.n_games, args.seed)
 
-    state = {"episode": 0, "step": 0}
+    state = {"episode": 0, "step": 0, "next_ckpt": args.checkpoint_every}
 
     def on_step(step: int, m: StepMetrics) -> None:
-        state["step"] = step
-        writer.add_scalar("train/loss", m.loss, step)
-        writer.add_scalar("train/mean_q", m.mean_q, step)
-        writer.add_scalar("train/mean_target_q", m.mean_target_q, step)
+        s = step * TRAIN_EVERY  # scale to snake_RL's env-tick step axis (see TRAIN_EVERY)
+        state["step"] = s
+        writer.add_scalar("train/loss", m.loss, s)
+        writer.add_scalar("train/mean_q", m.mean_q, s)
+        writer.add_scalar("train/mean_target_q", m.mean_target_q, s)
 
     def on_collect(it: int, r: CollectReport) -> None:
-        t = r.telemetry
-        for reward_a, reward_b, length in t["episodes"]:  # type: ignore[union-attr]
+        t = cast("dict[str, Any]", r.telemetry)  # heterogeneous telemetry dict from the Rust binding
+        for reward_a, reward_b, length in t["episodes"]:
             writer.add_scalar("episode/reward_A", reward_a, state["episode"])
             writer.add_scalar("episode/reward_B", reward_b, state["episode"])
             writer.add_scalar("episode/length", length, state["episode"])
             state["episode"] += 1
-        s = state["step"]  # log search/throughput against the gradient-step axis (snake_RL parity)
+        s = state["step"]  # search/throughput share the scaled (env-tick) step axis with train/*
         writer.add_scalar("search/max_depth", t["max_depth"], s)
         writer.add_scalar("search/mean_leaves", t["mean_leaves"], s)
         writer.add_scalar("search/mean_rounds", t["mean_rounds"], s)
@@ -149,16 +161,20 @@ def main() -> None:
         writer.add_scalar("search/root_disagreement", t["mean_disagreement"], s)
         writer.add_scalar("throughput/records_per_s", r.records / max(r.seconds, 1e-9), s)
         writer.add_scalar("throughput/collect_seconds", r.seconds, s)
-        if it > 0 and it % args.checkpoint_every == 0:
-            path = out_dir / f"ckpt_{it}.pt"
-            torch.save({"net": net.state_dict(), "iteration": it, "episode": state["episode"]}, path)
-            print(f"  iter {it}: {state['episode']} episodes, {s} steps -> {path}")
+        if state["episode"] >= state["next_ckpt"]:
+            path = out_dir / f"ckpt_ep{state['episode']}.pt"
+            grad_steps = s // TRAIN_EVERY
+            torch.save({"net": net.state_dict(), "episode": state["episode"], "step": grad_steps}, path)
+            print(f"  {state['episode']} episodes, {grad_steps} gradient steps -> {path}")
+            while state["next_ckpt"] <= state["episode"]:
+                state["next_ckpt"] += args.checkpoint_every
 
     train(
         engine,
         net,
         optimizer,
-        iterations=args.iterations,
+        max_episodes=args.episodes,
+        iterations=args.max_iterations,
         collect_size=args.collect_size,
         batch_size=BATCH_SIZE,
         grad_steps_per_collect=args.grad_steps,
@@ -169,11 +185,9 @@ def main() -> None:
         on_step=on_step,
         on_collect=on_collect,
     )
-    torch.save(
-        {"net": net.state_dict(), "iteration": args.iterations, "episode": state["episode"]}, out_dir / "final.pt"
-    )
+    torch.save({"net": net.state_dict(), "episode": state["episode"], "step": state["step"]}, out_dir / "final.pt")
     writer.close()
-    print(f"done — {state['episode']} episodes, {state['step']} gradient steps")
+    print(f"done — {state['episode']} episodes, {state['step'] // TRAIN_EVERY} gradient steps")
 
 
 if __name__ == "__main__":
