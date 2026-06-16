@@ -1,25 +1,18 @@
-//! reinfors-core: the pure-Rust simulation engine (no Python dependency).
+//! reinfors-core: the pure-Rust generic simulation + search + rollout framework (no Python, no game).
 //!
-//! Phase 1 is a concrete snake game (dynamics + egocentric observation) built to match
-//! `snake_RL`'s `CleanSnakeEnv`, so it can be differential-tested against it. Generic game
-//! abstractions come later (Phase 5), once the concrete slice is proven.
+//! It defines the `Game` trait, a best-first selective-expectimax `Search`, the swappable `Planner`
+//! seam (`SelectiveTreeStrap`), and the parallel rollout `Engine`. Concrete games (e.g. snake) live in
+//! the `reinfors-games` crate and implement `Game`; the framework drives them through the trait only.
 
-pub mod action;
 pub mod engine;
-pub mod obs;
-pub mod reward;
+pub mod game;
+pub mod planner;
 pub mod search;
-pub mod snake;
 
-pub use action::{Action, RelativeAction};
-pub use engine::{blend_outcome_targets, CollectStats, Engine, EngineConfig, EpisodeSummary};
-pub use obs::egocentric;
-pub use reward::Reward;
-pub use search::{
-    selective_search, selective_search_many, InteriorTarget, Opponent, SearchParams, SearchResult,
-    SearchStats,
-};
-pub use snake::{Cell, DeathCause, Snake, SnakeEnv, StepEvent};
+pub use engine::{blend_outcome_targets, CollectStats, Engine, EngineParams, EpisodeSummary};
+pub use game::{Actor, Game, Rng, Transition};
+pub use planner::{Planner, SelectiveTreeStrap};
+pub use search::{search_many, InteriorTarget, Opponent, SearchConfig, SearchResult, SearchStats};
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

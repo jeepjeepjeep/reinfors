@@ -12,8 +12,11 @@ use numpy::{IntoPyArray, PyArray1, PyArray2, PyArray3, PyReadonlyArray3};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use reinfors_core::snake::{Cell, DeathCause, Snake, SnakeEnv as CoreEnv};
-use reinfors_core::{Action, Engine as CoreEngine, EngineConfig, Opponent, Reward, SearchParams};
+use reinfors_core::{
+    Engine as CoreEngine, EngineParams, Opponent, SearchConfig, SelectiveTreeStrap,
+};
+use reinfors_games::snake::{Cell, DeathCause, Snake, SnakeEnv as CoreEnv};
+use reinfors_games::{Action, Reward, SearchParams, SnakeGame};
 
 fn action_from_u8(v: u8) -> PyResult<Action> {
     Ok(match v {
@@ -246,7 +249,7 @@ impl SnakeEnv {
 
     /// Egocentric observation for `agent` (0 = A, 1 = B) as a flat [5 * g * g] f32 array.
     fn obs<'py>(&self, py: Python<'py>, agent: usize) -> Bound<'py, PyArray1<f32>> {
-        reinfors_core::egocentric(&self.inner, agent).into_pyarray(py)
+        reinfors_games::egocentric(&self.inner, agent).into_pyarray(py)
     }
 
     /// Overwrite both snakes' full state (body head-first, direction 0..=3, alive) — lets the parity
@@ -340,7 +343,7 @@ impl SnakeEnv {
         let mut callback_err: Option<PyErr> = None;
         let (values, interior, stats) = {
             let mut infer_fn = infer_closure(py, &infer, dim, None, &mut callback_err);
-            reinfors_core::selective_search(
+            reinfors_games::selective_search(
                 &params,
                 snakes,
                 food,
@@ -467,7 +470,7 @@ fn selective_search_many(
     let mut callback_err: Option<PyErr> = None;
     let results = {
         let mut infer_fn = infer_closure(py, &infer, dim, None, &mut callback_err);
-        reinfors_core::selective_search_many(&params, requests, collect_interior, &mut infer_fn)
+        reinfors_games::selective_search_many(&params, requests, collect_interior, &mut infer_fn)
     };
     if let Some(e) = callback_err {
         return Err(e);
@@ -494,7 +497,7 @@ type CollectOutput<'py> = (
 /// Thompson-head, epsilon, and RNG apple spawns give the games diversity.
 #[pyclass]
 struct Engine {
-    inner: CoreEngine,
+    inner: CoreEngine<SnakeGame, SelectiveTreeStrap>,
     dim: usize,
     n_heads: usize,
 }
@@ -550,6 +553,15 @@ impl Engine {
                 )))
             }
         };
+        let reward = Reward {
+            step: reward.0,
+            food: reward.1,
+            loss: reward.2,
+            draw: reward.3,
+            kill: reward.4,
+            win: reward.5,
+            survival: reward.6,
+        };
         let search = SearchParams {
             grid_size,
             initial_length,
@@ -561,36 +573,40 @@ impl Engine {
             top_k,
             max_depth,
             food_samples,
-            reward: Reward {
-                step: reward.0,
-                food: reward.1,
-                loss: reward.2,
-                draw: reward.3,
-                kill: reward.4,
-                win: reward.5,
-                survival: reward.6,
-            },
+            reward,
             opponent,
         };
-        let cfg = EngineConfig {
-            n_games,
+        let game = SnakeGame {
             grid_size,
             initial_length,
             play_to_last,
             win_food_lead,
             initial_food_count,
+            reward,
+        };
+        let engine_params = EngineParams {
+            n_games,
             max_ticks,
             epsilon,
             n_heads,
-            outcome_weight,
-            interior_targets,
             bootstrap_p,
             seed,
-            search,
         };
+        // The TreeStrap planner owns the (game-agnostic) search config + z-mix outcome_weight +
+        // interior-target flag. The snake-specific bits of `search` split onto the `SnakeGame` above.
+        let cfg = SearchConfig {
+            gamma: search.gamma,
+            beta: search.beta,
+            expansion_budget: search.expansion_budget,
+            top_k: search.top_k,
+            max_depth: search.max_depth,
+            food_samples: search.food_samples,
+            opponent: search.opponent,
+        };
+        let planner = SelectiveTreeStrap::new(cfg, outcome_weight, interior_targets);
         let dim = 5 * (grid_size as usize) * (grid_size as usize);
         Ok(Engine {
-            inner: CoreEngine::new(cfg),
+            inner: CoreEngine::new(game, planner, engine_params),
             dim,
             n_heads,
         })
