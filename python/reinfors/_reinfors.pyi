@@ -97,3 +97,59 @@ class Engine:
     # collect returns (obs [M, 5*g*g] f32, targets [M, K, 3] f64, masks [M, K] f32) numpy arrays plus a
     # telemetry dict (finished-episode summaries + per-call search aggregates).
     def collect(self, n_records: int, infer: Any) -> tuple[Any, Any, Any, dict[str, Any]]: ...
+
+class Connect4Engine:
+    def __init__(
+        self,
+        win_reward: float,
+        loss_reward: float,
+        draw_reward: float,
+        gamma: float,
+        beta: float,
+        expansion_budget: int,
+        top_k: int,
+        max_depth: int,
+        opponent: str,
+        opp_temperature: float,
+        opp_floor: float,
+        epsilon: float,
+        max_ticks: int,
+        n_heads: int,
+        outcome_weight: float,
+        interior_targets: bool,
+        bootstrap_p: float,
+        seed: int,
+        n_games: int,
+        food_samples: int = ...,
+    ) -> None: ...
+    # collect returns (obs [M, 2*6*7] f32, targets [M, K, 7] f64, masks [M, K] f32) + telemetry dict.
+    def collect(self, n_records: int, infer: Any) -> tuple[Any, Any, Any, dict[str, Any]]: ...
+
+class GridWorldEngine:
+    def __init__(
+        self,
+        size: int,
+        goal_row: int,
+        goal_col: int,
+        step_reward: float,
+        goal_reward: float,
+        gamma: float,
+        beta: float,
+        expansion_budget: int,
+        top_k: int,
+        max_depth: int,
+        opponent: str,
+        opp_temperature: float,
+        opp_floor: float,
+        epsilon: float,
+        max_ticks: int,
+        n_heads: int,
+        outcome_weight: float,
+        interior_targets: bool,
+        bootstrap_p: float,
+        seed: int,
+        n_games: int,
+        food_samples: int = ...,
+    ) -> None: ...
+    # collect returns (obs [M, 2*size*size] f32, targets [M, K, 4] f64, masks [M, K] f32) + telemetry.
+    def collect(self, n_records: int, infer: Any) -> tuple[Any, Any, Any, dict[str, Any]]: ...
