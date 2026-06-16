@@ -18,6 +18,7 @@ import math
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import cast
 
 import numpy as np
 import torch
@@ -91,7 +92,7 @@ class BootstrappedQNetwork(nn.Module):
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         features = self.trunk(obs)  # (B, d)
-        heads: list[PriorScaledHead] = list(self.heads)
+        heads = cast("list[PriorScaledHead]", list(self.heads))  # ModuleList iterates as Module
         w_tr = torch.stack([h.trainable.weight for h in heads])
         b_tr = torch.stack([h.trainable.bias for h in heads])
         w_pr = torch.stack([h.prior.weight for h in heads])
