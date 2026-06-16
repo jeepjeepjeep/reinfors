@@ -28,8 +28,8 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Test
-        run: cargo test -p reinfors-core  # binding crate is exercised from Python, not cargo test
+      - name: Test  # both pure-Rust crates; the binding crate is exercised from Python, not cargo test
+        run: cargo test -p reinfors-core -p reinfors-games
 
   python:
     runs-on: ubuntu-latest
