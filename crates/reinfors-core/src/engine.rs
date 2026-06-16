@@ -121,7 +121,7 @@ where
     /// Build an engine over `game` driven by `planner` (which owns the search/algorithm config), with
     /// the rollout knobs from `params`. The game owns its reward and rules.
     pub fn new(game: G, planner: P, params: EngineParams) -> Self {
-        debug_assert_eq!(game.num_agents(), 2);
+        debug_assert!((1..=2).contains(&game.num_agents()));
         let n_heads = params.n_heads.max(1);
         let mut rngs: Vec<SplitMix64> = (0..params.n_games)
             .map(|i| {
@@ -206,6 +206,17 @@ where
                     stats.sum_sigma += search_stats.sigma_sum / search_stats.leaves as f64;
                 }
                 stats.sum_disagreement += root_disagreement(values);
+                // A search whose root children are all terminal evaluates no leaves, so the generic
+                // search cannot infer the head count and returns a single (head-agnostic, terminal-
+                // reward) row. Broadcast it to the configured `n_heads` so every emitted record's
+                // target is `[n_heads][A]`. Searches that evaluated leaves already return `[n_heads][A]`,
+                // so this is a no-op for them (e.g. snake).
+                let nh = self.params.n_heads.max(1);
+                let values: Vec<Vec<f64>> = if values.len() < nh {
+                    vec![values[0].clone(); nh]
+                } else {
+                    values.clone()
+                };
                 let k = values.len();
                 for (iobs, ivalues) in interior {
                     let mask = sample_mask(&mut self.rngs[gi], k, self.params.bootstrap_p);
