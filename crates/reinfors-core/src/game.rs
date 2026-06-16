@@ -9,7 +9,14 @@ use std::collections::HashSet;
 use crate::action::{relative_to_absolute, Action, RELATIVE_ACTIONS};
 use crate::obs::{egocentric_parts, N_CHANNELS};
 use crate::reward::Reward;
-use crate::snake::{first_empty_cell, Cell, Snake, SnakeEnv};
+use crate::snake::{empty_cells, first_empty_cell, Cell, Snake, SnakeEnv};
+
+/// Minimal random source the rollout passes to a game's *realized* (non-belief) transitions, so the
+/// game can sample environment chance (e.g. apple placement) from the engine's per-game PRNG.
+pub trait Rng {
+    fn below(&mut self, n: usize) -> usize;
+    fn unit(&mut self) -> f64;
+}
 
 /// Who chooses at a node: one agent (a sequential turn), all agents at once (a simultaneous move), or
 /// nature (a chance node). The game only declares the shape; the planner decides how to expand each.
@@ -61,6 +68,24 @@ pub trait Game {
     }
     /// Egocentric observation for `agent`, a flat `[C*H*W]` f32 buffer.
     fn observe(&self, state: &Self::State, agent: usize) -> Vec<f32>;
+
+    /// A fresh episode's initial state, drawing any initial chance (e.g. apple placement) from `rng`.
+    fn initial_state(&self, rng: &mut dyn Rng) -> Self::State;
+    /// The *realized* environment transition for the rollout: apply the joint action and sample its
+    /// chance (e.g. apple respawn) from `rng` — the true env, as opposed to the search's deterministic
+    /// belief in `chance_outcomes`. The reward vector excludes any horizon-truncation bonus.
+    fn step_env(
+        &self,
+        state: &Self::State,
+        actions: &[usize],
+        rng: &mut dyn Rng,
+    ) -> Transition<Self::State>;
+    /// Extra reward for `agent` on a horizon-truncation tick (reached alive at `max_ticks`), e.g.
+    /// snake's survival bonus. Added by the rollout engine, which owns the horizon. Default: none.
+    fn truncation_bonus(&self, state: &Self::State, agent: usize) -> f64 {
+        let _ = (state, agent);
+        0.0
+    }
 }
 
 /// Snake's dynamic state: the two snakes and the food. Static config (grid size, rules, reward) lives
@@ -78,6 +103,7 @@ pub struct SnakeGame {
     pub initial_length: usize,
     pub play_to_last: bool,
     pub win_food_lead: Option<usize>,
+    pub initial_food_count: usize,
     pub reward: Reward,
 }
 
@@ -91,6 +117,15 @@ impl SnakeGame {
             state.snakes.clone(),
             state.food.clone(),
         )
+    }
+
+    /// Spawn one apple at a uniform-random empty cell (the env's true spawn), or nothing if the grid
+    /// is full — matching the rollout engine's `spawn_food`.
+    fn spawn_one(&self, snakes: &[Snake; 2], food: &mut HashSet<Cell>, rng: &mut dyn Rng) {
+        let empty = empty_cells(snakes, food, self.grid_size);
+        if !empty.is_empty() {
+            food.insert(empty[rng.below(empty.len())]);
+        }
     }
 }
 
@@ -183,6 +218,67 @@ impl Game for SnakeGame {
     fn observe(&self, state: &SnakeState, agent: usize) -> Vec<f32> {
         egocentric_parts(&state.snakes, &state.food, self.grid_size, agent)
     }
+
+    fn initial_state(&self, rng: &mut dyn Rng) -> SnakeState {
+        let env = SnakeEnv::new(
+            self.grid_size,
+            self.initial_length,
+            self.play_to_last,
+            self.win_food_lead,
+        );
+        let mut food = HashSet::new();
+        for _ in 0..self.initial_food_count {
+            self.spawn_one(&env.snakes, &mut food, rng);
+        }
+        SnakeState {
+            snakes: env.snakes,
+            food,
+        }
+    }
+
+    fn step_env(
+        &self,
+        state: &SnakeState,
+        actions: &[usize],
+        rng: &mut dyn Rng,
+    ) -> Transition<SnakeState> {
+        // Same deterministic move as `step` (no in-advance respawn), then the env's TRUE respawn: one
+        // apple at a uniform-random empty cell per eaten apple, in snake order. Reward excludes the
+        // survival/truncation bonus (the engine adds that via `truncation_bonus`).
+        let mut moves: [Option<Action>; 2] = [None, None];
+        for (i, (slot, snake)) in moves.iter_mut().zip(state.snakes.iter()).enumerate() {
+            if snake.alive {
+                *slot = Some(relative_to_absolute(
+                    snake.direction,
+                    RELATIVE_ACTIONS[actions[i]],
+                ));
+            }
+        }
+        let mut env = self.env(state);
+        let events = env.advance(moves, || None);
+        for ev in events.iter() {
+            if ev.ate_food {
+                self.spawn_one(&env.snakes, &mut env.food, rng);
+            }
+        }
+        let rewards = vec![self.reward.eval(&events[0]), self.reward.eval(&events[1])];
+        Transition {
+            next_state: SnakeState {
+                snakes: env.snakes,
+                food: env.food,
+            },
+            rewards,
+            terminal: env.done,
+        }
+    }
+
+    fn truncation_bonus(&self, state: &SnakeState, agent: usize) -> f64 {
+        if state.snakes[agent].alive {
+            self.reward.survival
+        } else {
+            0.0
+        }
+    }
 }
 
 #[cfg(test)]
@@ -211,7 +307,26 @@ mod tests {
             initial_length: 3,
             play_to_last: false,
             win_food_lead: None,
+            initial_food_count: 1,
             reward: reward(),
+        }
+    }
+
+    struct TestRng(u64);
+    impl Rng for TestRng {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 33) as usize) % n.max(1)
+        }
+        fn unit(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 11) as f64 / (1u64 << 53) as f64
         }
     }
 
@@ -341,5 +456,55 @@ mod tests {
         let mut dead = st.clone();
         dead.snakes[1].alive = false;
         assert!(g.legal_actions(&dead, 1).is_empty());
+    }
+
+    #[test]
+    fn initial_state_spawns_the_configured_food_count_deterministically() {
+        let mut g = game();
+        g.initial_food_count = 3;
+        let a = g.initial_state(&mut TestRng(7));
+        let b = g.initial_state(&mut TestRng(7));
+        assert_eq!(a, b, "same seed -> same initial state");
+        assert_eq!(a.food.len(), 3);
+        // Snakes match the env's initial placement; food sits on empty cells.
+        let env = SnakeEnv::new(G, 3, false, None);
+        assert_eq!(a.snakes, env.snakes);
+        let occupied: std::collections::HashSet<Cell> = a
+            .snakes
+            .iter()
+            .flat_map(|s| s.body.iter().copied())
+            .collect();
+        assert!(a.food.iter().all(|c| !occupied.contains(c)));
+    }
+
+    #[test]
+    fn step_env_realizes_the_move_plus_rng_respawn() {
+        // Realized transition: same move as `step`, but the eaten apple respawns at an RNG empty cell
+        // (not the first-empty belief). Reward carries the food bonus; count is restored.
+        let g = game();
+        let st = initial_state(&[(4, 3)]);
+        let t = g.step_env(&st, &[0, 0], &mut TestRng(1));
+        assert!((t.rewards[0] - 1.0).abs() < 1e-12, "A ate -> food reward");
+        assert!(!t.terminal);
+        assert_eq!(
+            t.next_state.food.len(),
+            1,
+            "respawn restored the apple count"
+        );
+        // A coast with no food/death scores the bare step reward, never the survival bonus.
+        let empty = initial_state(&[]);
+        let t2 = g.step_env(&empty, &[0, 0], &mut TestRng(1));
+        assert_eq!(t2.rewards, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn truncation_bonus_is_survival_for_the_living_only() {
+        let mut g = game();
+        g.reward.survival = 0.25;
+        let st = initial_state(&[]);
+        assert!((g.truncation_bonus(&st, 0) - 0.25).abs() < 1e-12);
+        let mut dead = st.clone();
+        dead.snakes[0].alive = false;
+        assert_eq!(g.truncation_bonus(&dead, 0), 0.0);
     }
 }

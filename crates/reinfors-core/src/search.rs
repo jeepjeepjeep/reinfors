@@ -62,7 +62,7 @@ pub struct SearchParams {
 /// Game-agnostic search knobs, derived from `SearchParams` once the game-specific config has been
 /// split off onto the `Game` itself.
 #[derive(Clone, Copy)]
-pub struct SearchConfig {
+pub(crate) struct SearchConfig {
     pub gamma: f64,
     pub beta: f64,
     pub expansion_budget: usize,
@@ -70,6 +70,21 @@ pub struct SearchConfig {
     pub max_depth: i32,
     pub food_samples: usize,
     pub opponent: Opponent,
+}
+
+impl SearchConfig {
+    /// The game-agnostic search knobs carried by `SearchParams` (the rest splits onto the game).
+    pub(crate) fn from_params(p: &SearchParams) -> SearchConfig {
+        SearchConfig {
+            gamma: p.gamma,
+            beta: p.beta,
+            expansion_budget: p.expansion_budget,
+            top_k: p.top_k,
+            max_depth: p.max_depth,
+            food_samples: p.food_samples,
+            opponent: p.opponent,
+        }
+    }
 }
 
 #[derive(Default, Clone, Copy, Debug)]
@@ -231,7 +246,7 @@ where
 /// serial. This is value-neutral: every search is deterministic and reads only its own state, so the
 /// result is bit-identical to a sequential run regardless of thread count. `infer` is never called
 /// off the calling thread, so a Python `infer` callback keeps the GIL on one thread.
-fn search_many<G: Game + Sync, F>(
+pub(crate) fn search_many<G: Game + Sync, F>(
     game: &G,
     cfg: &SearchConfig,
     requests: Vec<(G::State, usize)>,
@@ -362,18 +377,10 @@ fn snake_game_and_config(p: &SearchParams) -> (SnakeGame, SearchConfig) {
         initial_length: p.initial_length,
         play_to_last: p.play_to_last,
         win_food_lead: p.win_food_lead,
+        initial_food_count: 0, // unused on the search path (chance_outcomes derives eaten from the food drop)
         reward: p.reward,
     };
-    let cfg = SearchConfig {
-        gamma: p.gamma,
-        beta: p.beta,
-        expansion_budget: p.expansion_budget,
-        top_k: p.top_k,
-        max_depth: p.max_depth,
-        food_samples: p.food_samples,
-        opponent: p.opponent,
-    };
-    (game, cfg)
+    (game, SearchConfig::from_params(p))
 }
 
 /// Snake wrapper over the generic [`search_many`]: maps each `([Snake;2], HashSet<Cell>)` request to a

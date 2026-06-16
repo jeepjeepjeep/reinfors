@@ -13,7 +13,9 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use reinfors_core::snake::{Cell, DeathCause, Snake, SnakeEnv as CoreEnv};
-use reinfors_core::{Action, Engine as CoreEngine, EngineConfig, Opponent, Reward, SearchParams};
+use reinfors_core::{
+    Action, Engine as CoreEngine, EngineParams, Opponent, Reward, SearchParams, SnakeGame,
+};
 
 fn action_from_u8(v: u8) -> PyResult<Action> {
     Ok(match v {
@@ -494,7 +496,7 @@ type CollectOutput<'py> = (
 /// Thompson-head, epsilon, and RNG apple spawns give the games diversity.
 #[pyclass]
 struct Engine {
-    inner: CoreEngine,
+    inner: CoreEngine<SnakeGame>,
     dim: usize,
     n_heads: usize,
 }
@@ -550,6 +552,15 @@ impl Engine {
                 )))
             }
         };
+        let reward = Reward {
+            step: reward.0,
+            food: reward.1,
+            loss: reward.2,
+            draw: reward.3,
+            kill: reward.4,
+            win: reward.5,
+            survival: reward.6,
+        };
         let search = SearchParams {
             grid_size,
             initial_length,
@@ -561,24 +572,19 @@ impl Engine {
             top_k,
             max_depth,
             food_samples,
-            reward: Reward {
-                step: reward.0,
-                food: reward.1,
-                loss: reward.2,
-                draw: reward.3,
-                kill: reward.4,
-                win: reward.5,
-                survival: reward.6,
-            },
+            reward,
             opponent,
         };
-        let cfg = EngineConfig {
-            n_games,
+        let game = SnakeGame {
             grid_size,
             initial_length,
             play_to_last,
             win_food_lead,
             initial_food_count,
+            reward,
+        };
+        let engine_params = EngineParams {
+            n_games,
             max_ticks,
             epsilon,
             n_heads,
@@ -586,11 +592,10 @@ impl Engine {
             interior_targets,
             bootstrap_p,
             seed,
-            search,
         };
         let dim = 5 * (grid_size as usize) * (grid_size as usize);
         Ok(Engine {
-            inner: CoreEngine::new(cfg),
+            inner: CoreEngine::new(game, &search, engine_params),
             dim,
             n_heads,
         })

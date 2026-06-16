@@ -129,6 +129,7 @@ mod tests {
             initial_length: 3,
             play_to_last: false,
             win_food_lead: None,
+            initial_food_count: 0,
             reward: params().reward,
         };
         let planner = SelectiveTreeStrap { params: params() };
