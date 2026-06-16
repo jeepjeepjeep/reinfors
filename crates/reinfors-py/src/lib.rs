@@ -14,7 +14,8 @@ use pyo3::types::PyDict;
 
 use reinfors_core::snake::{Cell, DeathCause, Snake, SnakeEnv as CoreEnv};
 use reinfors_core::{
-    Action, Engine as CoreEngine, EngineParams, Opponent, Reward, SearchParams, SnakeGame,
+    Action, Engine as CoreEngine, EngineParams, Opponent, Reward, SearchParams, SelectiveTreeStrap,
+    SnakeGame,
 };
 
 fn action_from_u8(v: u8) -> PyResult<Action> {
@@ -496,7 +497,7 @@ type CollectOutput<'py> = (
 /// Thompson-head, epsilon, and RNG apple spawns give the games diversity.
 #[pyclass]
 struct Engine {
-    inner: CoreEngine<SnakeGame>,
+    inner: CoreEngine<SnakeGame, SelectiveTreeStrap>,
     dim: usize,
     n_heads: usize,
 }
@@ -588,14 +589,14 @@ impl Engine {
             max_ticks,
             epsilon,
             n_heads,
-            outcome_weight,
-            interior_targets,
             bootstrap_p,
             seed,
         };
+        // The TreeStrap planner owns the search config + z-mix outcome_weight + interior-target flag.
+        let planner = SelectiveTreeStrap::new(&search, outcome_weight, interior_targets);
         let dim = 5 * (grid_size as usize) * (grid_size as usize);
         Ok(Engine {
-            inner: CoreEngine::new(game, &search, engine_params),
+            inner: CoreEngine::new(game, planner, engine_params),
             dim,
             n_heads,
         })

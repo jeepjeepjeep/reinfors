@@ -27,7 +27,7 @@
 use std::collections::HashMap;
 
 use crate::game::{Game, Rng};
-use crate::search::{search_many, SearchConfig, SearchParams};
+use crate::planner::Planner;
 
 /// One buffered decision, held until its episode ends so the realized return is known for z-mixing.
 struct TrajStep {
@@ -92,22 +92,20 @@ impl crate::game::Rng for SplitMix64 {
     }
 }
 
-/// Engine-level rollout knobs (everything that is not a search or game parameter).
+/// Engine-level rollout knobs (everything that is not a game or *algorithm* parameter — the search
+/// config, z-mix `outcome_weight`, and interior-target flag live on the `Planner`).
 pub struct EngineParams {
     pub n_games: usize,
     pub max_ticks: usize,
     pub epsilon: f64,
     pub n_heads: usize,
-    pub outcome_weight: f64,
-    pub interior_targets: bool,
     pub bootstrap_p: f64,
     pub seed: u64,
 }
 
-pub struct Engine<G: Game + Sync> {
+pub struct Engine<G: Game + Sync, P: Planner> {
     game: G,
-    search_cfg: SearchConfig,
-    gamma: f64,
+    planner: P,
     params: EngineParams,
     states: Vec<G::State>,
     rngs: Vec<SplitMix64>,
@@ -116,13 +114,13 @@ pub struct Engine<G: Game + Sync> {
     traj: Vec<[Vec<TrajStep>; 2]>, // per-game, per-agent decisions awaiting episode-end z-mixing
 }
 
-impl<G: Game + Sync> Engine<G>
+impl<G: Game + Sync, P: Planner> Engine<G, P>
 where
     G::State: Send,
 {
-    /// Build an engine over `game`, taking the game-agnostic search knobs from `search` (the reward
-    /// and other game config already live on `game`) and the rollout knobs from `params`.
-    pub fn new(game: G, search: &SearchParams, params: EngineParams) -> Self {
+    /// Build an engine over `game` driven by `planner` (which owns the search/algorithm config), with
+    /// the rollout knobs from `params`. The game owns its reward and rules.
+    pub fn new(game: G, planner: P, params: EngineParams) -> Self {
         debug_assert_eq!(game.num_agents(), 2);
         let n_heads = params.n_heads.max(1);
         let mut rngs: Vec<SplitMix64> = (0..params.n_games)
@@ -146,8 +144,7 @@ where
             .collect();
         Engine {
             game,
-            search_cfg: SearchConfig::from_params(search),
-            gamma: search.gamma,
+            planner,
             params,
             states,
             rngs,
@@ -192,14 +189,9 @@ where
                 break; // every game dead this instant (resets below normally keep at least one alive)
             }
 
-            // 2. One pooled search for all of them (one batched forward per round, shared across games).
-            let results = search_many(
-                &self.game,
-                &self.search_cfg,
-                requests,
-                self.params.interior_targets,
-                &mut infer,
-            );
+            // 2. The planner evaluates them all in one pooled pass (one batched forward per round,
+            //    shared across games — the throughput win); for TreeStrap this is the selective search.
+            let results = self.planner.evaluate(&self.game, requests, &mut infer);
 
             // 3. Emit interior targets immediately, buffer each executed decision, choose its action.
             //    `acted[gi][si]` records the relative action index for an agent that decided this tick.
@@ -306,8 +298,7 @@ where
                     .iter()
                     .map(|s| (s.values.clone(), s.action, s.reward))
                     .collect();
-                let blended =
-                    blend_outcome_targets(&traj, self.gamma, self.params.outcome_weight, &tail);
+                let blended = self.planner.targets(&traj, &tail);
                 for (step, target) in steps.iter().zip(blended) {
                     let mask = sample_mask(&mut self.rngs[gi], k, self.params.bootstrap_p);
                     out.push((step.obs.clone(), target, mask));
@@ -335,7 +326,7 @@ where
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
         let mut tails: HashMap<(usize, usize), Vec<f64>> = HashMap::new();
-        if self.params.outcome_weight <= 0.0 {
+        if !self.planner.uses_episode_tail() {
             return tails;
         }
         let a = self.game.action_count();
@@ -444,8 +435,9 @@ fn argmax(values: &[f64]) -> usize {
 mod tests {
     use super::*;
     use crate::game::SnakeGame;
+    use crate::planner::SelectiveTreeStrap;
     use crate::reward::Reward;
-    use crate::search::Opponent;
+    use crate::search::{Opponent, SearchParams};
 
     fn params(n_games: usize, n_heads: usize, seed: u64) -> EngineParams {
         EngineParams {
@@ -453,11 +445,13 @@ mod tests {
             max_ticks: 50,
             epsilon: 0.1,
             n_heads,
-            outcome_weight: 0.5,
-            interior_targets: true,
             bootstrap_p: 0.8,
             seed,
         }
+    }
+
+    fn planner(s: &SearchParams, outcome_weight: f64, interior: bool) -> SelectiveTreeStrap {
+        SelectiveTreeStrap::new(s, outcome_weight, interior)
     }
 
     fn search() -> SearchParams {
@@ -496,11 +490,15 @@ mod tests {
         }
     }
 
-    /// Build an engine with the default test config (3 initial apples), allowing per-test tweaks.
-    fn engine(n_games: usize, n_heads: usize, seed: u64) -> Engine<SnakeGame> {
+    /// Build an engine with the default test config (3 initial apples, TreeStrap with outcome_weight
+    /// 0.5 + interior targets), allowing per-test tweaks.
+    fn engine(n_games: usize, n_heads: usize, seed: u64) -> Engine<SnakeGame, SelectiveTreeStrap> {
         let s = search();
-        let g = game(&s, 3);
-        Engine::new(g, &s, params(n_games, n_heads, seed))
+        Engine::new(
+            game(&s, 3),
+            planner(&s, 0.5, true),
+            params(n_games, n_heads, seed),
+        )
     }
 
     // Two disagreeing heads, sum-dependent — flat `(obs[n*dim], n) -> values[n*2*3]` (head-major).
@@ -556,9 +554,7 @@ mod tests {
         // on, the floor is reached in far fewer ticks). The apple count is invariant: eating discards
         // one and respawns one, so every game always holds initial_food_count.
         let s = search();
-        let mut p = params(8, 2, 3);
-        p.interior_targets = false;
-        let mut e = Engine::new(game(&s, 3), &s, p);
+        let mut e = Engine::new(game(&s, 3), planner(&s, 0.5, false), params(8, 2, 3));
         let mut grew = false;
         for _ in 0..4 {
             e.collect(300, infer);
@@ -576,7 +572,10 @@ mod tests {
         let s = search();
         let mut all = params(4, 2, 5); // n_heads matches `infer`'s 2 heads
         all.bootstrap_p = 1.0;
-        for (_, _, mask) in Engine::new(game(&s, 3), &s, all).collect(40, infer).0 {
+        for (_, _, mask) in Engine::new(game(&s, 3), planner(&s, 0.5, true), all)
+            .collect(40, infer)
+            .0
+        {
             assert!(
                 mask.iter().all(|&m| m == 1.0),
                 "p=1 must include every head"
@@ -584,7 +583,10 @@ mod tests {
         }
         let mut none = params(4, 2, 5);
         none.bootstrap_p = 0.0;
-        for (_, _, mask) in Engine::new(game(&s, 3), &s, none).collect(40, infer).0 {
+        for (_, _, mask) in Engine::new(game(&s, 3), planner(&s, 0.5, true), none)
+            .collect(40, infer)
+            .0
+        {
             assert!(mask.iter().all(|&m| m == 0.0), "p=0 must include no head");
         }
     }
@@ -595,14 +597,12 @@ mod tests {
         // values; with weight > 0 some executed-action entry must differ. We can't read the search
         // values here, but determinism lets us assert the two configs diverge.
         let s = search();
-        let mut w0 = params(4, 2, 9);
-        w0.outcome_weight = 0.0;
-        w0.interior_targets = false;
-        let mut w1 = params(4, 2, 9);
-        w1.outcome_weight = 0.9;
-        w1.interior_targets = false;
-        let r0 = Engine::new(game(&s, 3), &s, w0).collect(60, infer).0;
-        let r1 = Engine::new(game(&s, 3), &s, w1).collect(60, infer).0;
+        let r0 = Engine::new(game(&s, 3), planner(&s, 0.0, false), params(4, 2, 9))
+            .collect(60, infer)
+            .0;
+        let r1 = Engine::new(game(&s, 3), planner(&s, 0.9, false), params(4, 2, 9))
+            .collect(60, infer)
+            .0;
         let targets_differ = r0.iter().zip(&r1).any(|((_, t0, _), (_, t1, _))| t0 != t1);
         assert!(
             targets_differ,
@@ -637,10 +637,7 @@ mod tests {
             s.reward.survival = survival;
             let mut p = params(4, 2, 0);
             p.max_ticks = 1;
-            p.outcome_weight = 1.0;
-            p.interior_targets = false;
-            let g = game(&s, 0); // no initial food
-            Engine::new(g, &s, p)
+            Engine::new(game(&s, 0), planner(&s, 1.0, false), p) // no initial food; ow=1, interior off
         };
         let base = mk(0.0).collect(4, infer).0;
         let surv = mk(bonus).collect(4, infer).0;
@@ -668,10 +665,9 @@ mod tests {
         // Interior off so the record floor tracks decisions (with it on, the floor is reached via
         // interior targets before any episode completes).
         let s = search();
-        let mut p = params(4, 2, 11);
-        p.interior_targets = false;
+        let p = params(4, 2, 11);
         let max_ticks = p.max_ticks;
-        let mut e = Engine::new(game(&s, 3), &s, p);
+        let mut e = Engine::new(game(&s, 3), planner(&s, 0.5, false), p);
         let mut episodes = 0usize;
         let (mut decisions, mut max_depth, mut leaves, mut sigma, mut disagree) =
             (0usize, 0i32, 0.0, 0.0, 0.0);
