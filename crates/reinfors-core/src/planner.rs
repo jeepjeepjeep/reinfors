@@ -8,7 +8,7 @@
 
 use crate::engine::blend_outcome_targets;
 use crate::game::Game;
-use crate::search::{search_many, SearchConfig, SearchParams, SearchResult};
+use crate::search::{search_many, SearchConfig, SearchResult};
 
 /// How an algorithm evaluates states and builds training targets, driving the rollout `Engine`. The
 /// trait is game-agnostic: `evaluate` is generic over the game, and the target methods don't touch it.
@@ -54,9 +54,9 @@ pub struct SelectiveTreeStrap {
 }
 
 impl SelectiveTreeStrap {
-    pub fn new(search: &SearchParams, outcome_weight: f64, collect_interior: bool) -> Self {
+    pub fn new(cfg: SearchConfig, outcome_weight: f64, collect_interior: bool) -> Self {
         SelectiveTreeStrap {
-            cfg: SearchConfig::from_params(search),
+            cfg,
             outcome_weight,
             collect_interior,
         }
@@ -100,90 +100,18 @@ impl Planner for SelectiveTreeStrap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::{SnakeGame, SnakeState};
-    use crate::reward::Reward;
-    use crate::search::{selective_search, Opponent};
-    use crate::snake::SnakeEnv;
+    use crate::search::Opponent;
 
-    const G: i32 = 8;
-
-    fn params() -> SearchParams {
-        SearchParams {
-            grid_size: G,
-            initial_length: 3,
-            play_to_last: false,
-            win_food_lead: None,
+    fn cfg() -> SearchConfig {
+        SearchConfig {
             gamma: 0.99,
             beta: 1.0,
             expansion_budget: 24,
             top_k: 4,
             max_depth: 6,
             food_samples: 1,
-            reward: Reward {
-                step: 0.0,
-                food: 1.0,
-                loss: -10.0,
-                draw: -5.0,
-                kill: 5.0,
-                win: 10.0,
-                survival: 0.0,
-            },
             opponent: Opponent::Uniform,
         }
-    }
-
-    fn snake_game() -> SnakeGame {
-        SnakeGame {
-            grid_size: G,
-            initial_length: 3,
-            play_to_last: false,
-            win_food_lead: None,
-            initial_food_count: 0,
-            reward: params().reward,
-        }
-    }
-
-    // Two disagreeing heads, sum-dependent — flat (obs[n*dim], n) -> values[n*2*3], head-major.
-    fn infer(obs: Vec<f32>, n: usize) -> Vec<f64> {
-        let dim = obs.len() / n;
-        let mut out = Vec::with_capacity(n * 2 * 3);
-        for i in 0..n {
-            let s = obs[i * dim..(i + 1) * dim].iter().sum::<f32>() as f64;
-            out.extend_from_slice(&[
-                s.sin(),
-                s.cos(),
-                (s * 0.5).sin(),
-                (s + 1.0).sin(),
-                (s * 0.3).cos(),
-                (s * 0.2).sin(),
-            ]);
-        }
-        out
-    }
-
-    fn state() -> SnakeState {
-        let env = SnakeEnv::new(G, 3, false, None);
-        SnakeState {
-            snakes: env.snakes,
-            food: std::collections::HashSet::new(),
-        }
-    }
-
-    #[test]
-    fn evaluate_wraps_the_pooled_search() {
-        let planner = SelectiveTreeStrap::new(&params(), 0.3, false);
-        let st = state();
-        let results = planner.evaluate(&snake_game(), vec![(st.clone(), 0)], &mut infer);
-        let (values, _i, _s) = selective_search(
-            &params(),
-            st.snakes.clone(),
-            st.food.clone(),
-            0,
-            false,
-            &mut infer,
-        );
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, values);
     }
 
     #[test]
@@ -191,13 +119,13 @@ mod tests {
         // targets == blend_outcome_targets at the planner's outcome_weight; uses_episode_tail iff > 0.
         let traj = vec![(vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]], 1usize, 10.0)];
         let tail = [0.0, 0.0];
-        let p = SelectiveTreeStrap::new(&params(), 0.25, false);
+        let p = SelectiveTreeStrap::new(cfg(), 0.25, false);
         assert_eq!(
             p.targets(&traj, &tail),
             blend_outcome_targets(&traj, 0.99, 0.25, &tail)
         );
         assert!(p.uses_episode_tail());
-        let p0 = SelectiveTreeStrap::new(&params(), 0.0, false);
+        let p0 = SelectiveTreeStrap::new(cfg(), 0.0, false);
         assert!(!p0.uses_episode_tail());
     }
 }

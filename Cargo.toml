@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/reinfors-core", "crates/reinfors-py"]
+members = ["crates/reinfors-core", "crates/reinfors-games", "crates/reinfors-py"]
 resolver = "2"
 
 [workspace.package]
@@ -7,7 +7,15 @@ version = "0.0.0"
 edition = "2021"
 license = "MIT"
 
+# Thin cross-crate LTO for release builds: the hot path (search + rollout) now calls the per-branch
+# `Game` methods across the crate boundary, so this restores the cross-crate inlining the single-crate
+# layout had for free. Cheap insurance — and it matters more as the `Game` methods shrink or games
+# multiply (current perf does not need it; see PR notes).
+[profile.release]
+lto = "thin"
+
 # reinfors: general-purpose gym-style simulation + batching engine.
-#   crates/reinfors-core  — pure Rust engine (no Python); the value, testable on its own.
+#   crates/reinfors-core  — pure Rust generic framework (no Python, no game); the value, testable on its own.
+#   crates/reinfors-games — concrete games (snake) implementing reinfors-core's Game trait.
 #   crates/reinfors-py    — PyO3 bindings, compiled into the `reinfors._reinfors` module.
 # The ergonomic Python API (the declarative game builder) lives in python/reinfors/ as it grows.
