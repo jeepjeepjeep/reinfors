@@ -1,5 +1,5 @@
 //! reinfors-games: concrete games implementing reinfors-core's `Game` trait. Snake is the first —
-//! its dynamics (`SnakeEnv`), egocentric observation, reward shaping, and the `SnakeGame` adapter plus
+//! its dynamics (`SnakeEnv`), egocentric observation, reward shaping, and the `Snake` adapter plus
 //! the selective-search wrappers all live here, leaving reinfors-core a game-free generic framework.
 
 pub mod action;
@@ -17,5 +17,5 @@ pub use gridworld::{GridState, GridWorld};
 pub use obs::{egocentric, N_CHANNELS};
 pub use reward::Reward;
 pub use search::{selective_search, selective_search_many, SearchParams};
-pub use snake::{Cell, DeathCause, Snake, SnakeEnv, StepEvent};
-pub use snake_game::{SnakeGame, SnakeState};
+pub use snake::{Cell, DeathCause, SnakeBody, SnakeEnv, StepEvent};
+pub use snake_game::{Snake, SnakeState};

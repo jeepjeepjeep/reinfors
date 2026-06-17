@@ -1,14 +1,14 @@
 //! Snake wrappers over the generic [`reinfors_core::search_many`]: `SearchParams` bundles the
 //! snake config + the game-agnostic search knobs, and `selective_search`/`selective_search_many` build
-//! a `SnakeGame` + `SnakeState` from it and run the generic engine. The public API is unchanged.
+//! a `Snake` + `SnakeState` from it and run the generic engine. The public API is unchanged.
 
 use std::collections::HashSet;
 
 use reinfors_core::{search_many, Opponent, SearchConfig, SearchResult};
 
 use crate::reward::Reward;
-use crate::snake::{Cell, Snake};
-use crate::snake_game::{SnakeGame, SnakeState};
+use crate::snake::{Cell, SnakeBody};
+use crate::snake_game::{Snake, SnakeState};
 
 pub struct SearchParams {
     pub grid_size: i32,
@@ -28,10 +28,10 @@ pub struct SearchParams {
     pub opponent: Opponent,
 }
 
-/// Build a `SnakeGame` + `SearchConfig` from `SearchParams`. The snake-specific config splits onto
+/// Build a `Snake` + `SearchConfig` from `SearchParams`. The snake-specific config splits onto
 /// the game; the search keeps the game-agnostic knobs.
-fn snake_game_and_config(p: &SearchParams) -> (SnakeGame, SearchConfig) {
-    let game = SnakeGame {
+fn snake_game_and_config(p: &SearchParams) -> (Snake, SearchConfig) {
+    let game = Snake {
         grid_size: p.grid_size,
         initial_length: p.initial_length,
         play_to_last: p.play_to_last,
@@ -51,11 +51,11 @@ fn snake_game_and_config(p: &SearchParams) -> (SnakeGame, SearchConfig) {
     (game, cfg)
 }
 
-/// Snake wrapper over the generic [`search_many`]: maps each `([Snake;2], HashSet<Cell>)` request to a
+/// Snake wrapper over the generic [`search_many`]: maps each `([SnakeBody;2], HashSet<Cell>)` request to a
 /// `SnakeState` and runs the generic engine. The public API is unchanged.
 pub fn selective_search_many<F>(
     p: &SearchParams,
-    requests: Vec<([Snake; 2], HashSet<Cell>, usize)>,
+    requests: Vec<([SnakeBody; 2], HashSet<Cell>, usize)>,
     collect_interior: bool,
     seed: u64,
     infer: F,
@@ -74,7 +74,7 @@ where
 /// Single-request convenience wrapper over [`selective_search_many`].
 pub fn selective_search<F>(
     p: &SearchParams,
-    snakes: [Snake; 2],
+    snakes: [SnakeBody; 2],
     food: HashSet<Cell>,
     agent: usize,
     collect_interior: bool,
@@ -99,11 +99,11 @@ where
 mod tests {
     use super::*;
     use crate::action::Action;
-    use crate::snake::Snake;
+    use crate::snake::SnakeBody;
     use reinfors_core::search_many;
 
-    fn snake(cells: &[Cell], dir: Action) -> Snake {
-        Snake {
+    fn snake(cells: &[Cell], dir: Action) -> SnakeBody {
+        SnakeBody {
             body: cells.iter().copied().collect(),
             direction: dir,
             alive: true,
@@ -200,7 +200,7 @@ mod tests {
         out
     }
 
-    type Request = ([Snake; 2], HashSet<Cell>, usize);
+    type Request = ([SnakeBody; 2], HashSet<Cell>, usize);
 
     fn two_requests() -> (Request, Request) {
         let a = (
@@ -361,7 +361,7 @@ mod tests {
         // into three while Left/Right keep one each: 3 leaves at k=1 -> 5 at k=3.
         let snakes = [
             snake(&[(6, 5), (6, 4), (6, 3)], Action::Right),
-            Snake {
+            SnakeBody {
                 body: [(0, 0), (1, 0)].into_iter().collect(),
                 direction: Action::Down,
                 alive: false,
@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn generic_search_many_matches_snake_wrapper() {
-        // The generic path (SnakeGame + SnakeState fed straight into search_many) must produce
+        // The generic path (Snake + SnakeState fed straight into search_many) must produce
         // bit-identical results to the public snake wrapper on the same state.
         let snakes = [
             snake(&[(6, 5), (6, 4), (6, 3)], Action::Right),

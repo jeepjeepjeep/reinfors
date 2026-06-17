@@ -1,6 +1,6 @@
 //! Model-free bootstrapped DQN — acting half. `evaluate` is a plain batched network forward (no
 //! search), and `select` is a Thompson-head epsilon-greedy choice. Its `QEvaluation` is the seam's
-//! non-search case; the matching `DqnLearner` (in `crate::learners::dqn`) consumes it into transitions.
+//! non-search case; the matching `Dqn` (in `crate::learners::dqn`) consumes it into transitions.
 
 use crate::game::{Game, Rng};
 use crate::policy::{argmax, Policy};
@@ -12,21 +12,21 @@ pub struct QEvaluation {
 }
 
 /// Bootstrapped-DQN acting: a batched forward, then a Thompson-head epsilon-greedy choice.
-pub struct DqnPolicy {
+pub struct EpsilonGreedyQ {
     n_heads: usize,
     epsilon: f64,
 }
 
-impl DqnPolicy {
+impl EpsilonGreedyQ {
     pub fn new(n_heads: usize, epsilon: f64) -> Self {
-        DqnPolicy {
+        EpsilonGreedyQ {
             n_heads: n_heads.max(1),
             epsilon,
         }
     }
 }
 
-impl Policy for DqnPolicy {
+impl Policy for EpsilonGreedyQ {
     type Evaluation = QEvaluation;
     type PolicyState = usize; // the Thompson head for the current episode
 
@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn select_is_thompson_head_argmax_then_epsilon() {
         // No epsilon: pick the argmax of the chosen head. Head 1's best action is index 2.
-        let policy = DqnPolicy::new(2, 0.0);
+        let policy = EpsilonGreedyQ::new(2, 0.0);
         let eval = QEvaluation {
             values: vec![vec![3.0, 1.0, 2.0], vec![0.0, 1.0, 5.0]],
         };

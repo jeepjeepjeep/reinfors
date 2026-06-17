@@ -107,8 +107,7 @@ impl Game for GridWorld {
 mod tests {
     use super::*;
     use reinfors_core::{
-        search_many, Engine, EngineParams, Opponent, SearchConfig, SelectiveExpectimaxPolicy,
-        TreeStrapLearner,
+        search_many, Engine, EngineParams, Opponent, SearchConfig, SelectiveExpectimax, TreeStrap,
     };
 
     fn world() -> GridWorld {
@@ -241,8 +240,8 @@ mod tests {
     fn engine_rolls_out_a_single_agent_game() {
         // The rollout engine drives a 1-agent game end to end: records have the right shape ([K][A=4])
         // and episodes finish (reach the goal or truncate). Exercises num_agents == 1 in the engine.
-        let policy = SelectiveExpectimaxPolicy::new(cfg(), 2, 0.0); // n_heads, epsilon
-        let learner = TreeStrapLearner::new(0.99, 0.3, 1.0, false); // gamma, outcome_weight, bootstrap_p, interior
+        let policy = SelectiveExpectimax::new(cfg(), 2, 0.0); // n_heads, epsilon
+        let learner = TreeStrap::new(0.99, 0.3, 1.0, false); // gamma, outcome_weight, bootstrap_p, interior
         let params = EngineParams {
             n_games: 3,
             max_ticks: 30,
@@ -265,10 +264,10 @@ mod tests {
         // The model-free DQN algorithm (no search) driven through the same generic Engine + GridWorld:
         // it emits off-policy transitions (obs, action, reward, next_obs, terminal, mask) instead of
         // TreeStrap targets — exercising the seam's non-search evaluation + transition-record path.
-        use reinfors_core::{DqnLearner, DqnPolicy};
+        use reinfors_core::{Dqn, EpsilonGreedyQ};
 
-        let policy = DqnPolicy::new(2, 0.0); // 2 heads, no epsilon -> greedy argmax of the head
-        let learner = DqnLearner::new(2, 1.0); // 2 heads, bootstrap_p = 1 -> all-ones masks
+        let policy = EpsilonGreedyQ::new(2, 0.0); // 2 heads, no epsilon -> greedy argmax of the head
+        let learner = Dqn::new(2, 1.0); // 2 heads, bootstrap_p = 1 -> all-ones masks
         let params = EngineParams {
             n_games: 3,
             max_ticks: 10,

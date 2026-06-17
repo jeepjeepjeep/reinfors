@@ -13,11 +13,11 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use reinfors_core::{
-    DqnLearner, DqnPolicy, Engine as CoreEngine, EngineParams, Game, Opponent, SearchConfig,
-    SelectiveExpectimaxPolicy, TreeStrapLearner,
+    Dqn, Engine, EngineParams, EpsilonGreedyQ, Game, Opponent, SearchConfig, SelectiveExpectimax,
+    TreeStrap,
 };
-use reinfors_games::snake::{Cell, DeathCause, Snake, SnakeEnv as CoreEnv};
-use reinfors_games::{Action, Connect4, GridWorld, Reward, SearchParams, SnakeGame};
+use reinfors_games::snake::{Cell, DeathCause, SnakeBody, SnakeEnv as CoreEnv};
+use reinfors_games::{Action, Connect4, GridWorld, Reward, SearchParams, Snake};
 
 fn action_from_u8(v: u8) -> PyResult<Action> {
     Ok(match v {
@@ -266,12 +266,12 @@ impl SnakeEnv {
         b_dir: u8,
         b_alive: bool,
     ) -> PyResult<()> {
-        self.inner.snakes[0] = Snake {
+        self.inner.snakes[0] = SnakeBody {
             body: VecDeque::from(a_body),
             direction: action_from_u8(a_dir)?,
             alive: a_alive,
         };
-        self.inner.snakes[1] = Snake {
+        self.inner.snakes[1] = SnakeBody {
             body: VecDeque::from(b_body),
             direction: action_from_u8(b_dir)?,
             alive: b_alive,
@@ -522,7 +522,7 @@ fn parse_opponent(opponent: &str, opp_temperature: f64, opp_floor: f64) -> PyRes
 /// `(obs[M,dim] f32, targets[M,K,A] f64, masks[M,K] f32, telemetry dict)` `CollectOutput`. The
 /// per-game `collect` methods delegate here; behaviour is identical to the original snake collect.
 fn engine_collect<'py, G: Game + Sync>(
-    inner: &mut CoreEngine<G, SelectiveExpectimaxPolicy, TreeStrapLearner>,
+    inner: &mut Engine<G, SelectiveExpectimax, TreeStrap>,
     py: Python<'py>,
     n_records: usize,
     infer: &Bound<'_, PyAny>,
@@ -592,16 +592,16 @@ where
 /// Parallel rollout collector: drives N games via the pooled selective search and yields TreeStrap
 /// records (z-mixed roots + interior targets), each with a per-head bootstrap mask. Per-game
 /// Thompson-head, epsilon, and RNG apple spawns give the games diversity.
-#[pyclass]
-struct Engine {
-    inner: CoreEngine<SnakeGame, SelectiveExpectimaxPolicy, TreeStrapLearner>,
+#[pyclass(name = "Engine")]
+struct PyEngine {
+    inner: Engine<Snake, SelectiveExpectimax, TreeStrap>,
     dim: usize,
     action_count: usize,
     n_heads: usize,
 }
 
 #[pymethods]
-impl Engine {
+impl PyEngine {
     #[new]
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (n_games, grid_size, initial_length, play_to_last, win_food_lead, initial_food_count, gamma, beta, expansion_budget, top_k, max_depth, reward, opponent, opp_temperature, opp_floor, epsilon, max_ticks, n_heads, outcome_weight, interior_targets, bootstrap_p, seed, food_samples=1))]
@@ -663,7 +663,7 @@ impl Engine {
             reward,
             opponent,
         };
-        let game = SnakeGame {
+        let game = Snake {
             grid_size,
             initial_length,
             play_to_last,
@@ -677,7 +677,7 @@ impl Engine {
             seed,
         };
         // The TreeStrap planner owns the (game-agnostic) search config + z-mix outcome_weight +
-        // interior-target flag. The snake-specific bits of `search` split onto the `SnakeGame` above.
+        // interior-target flag. The snake-specific bits of `search` split onto the `Snake` above.
         let cfg = SearchConfig {
             gamma: search.gamma,
             beta: search.beta,
@@ -687,12 +687,11 @@ impl Engine {
             food_samples: search.food_samples,
             opponent: search.opponent,
         };
-        let policy = SelectiveExpectimaxPolicy::new(cfg, n_heads, epsilon);
-        let learner =
-            TreeStrapLearner::new(search.gamma, outcome_weight, bootstrap_p, interior_targets);
+        let policy = SelectiveExpectimax::new(cfg, n_heads, epsilon);
+        let learner = TreeStrap::new(search.gamma, outcome_weight, bootstrap_p, interior_targets);
         let dim = 5 * (grid_size as usize) * (grid_size as usize);
-        Ok(Engine {
-            inner: CoreEngine::new(game, policy, learner, engine_params),
+        Ok(PyEngine {
+            inner: Engine::new(game, policy, learner, engine_params),
             dim,
             action_count: 3,
             n_heads,
@@ -725,7 +724,7 @@ impl Engine {
 /// builds the game + search config + TreeStrap planner, and `collect` delegates to `engine_collect`.
 #[pyclass]
 struct Connect4Engine {
-    inner: CoreEngine<Connect4, SelectiveExpectimaxPolicy, TreeStrapLearner>,
+    inner: Engine<Connect4, SelectiveExpectimax, TreeStrap>,
     dim: usize,
     action_count: usize,
     n_heads: usize,
@@ -777,8 +776,8 @@ impl Connect4Engine {
             food_samples,
             opponent,
         };
-        let policy = SelectiveExpectimaxPolicy::new(cfg, n_heads, epsilon);
-        let learner = TreeStrapLearner::new(gamma, outcome_weight, bootstrap_p, interior_targets);
+        let policy = SelectiveExpectimax::new(cfg, n_heads, epsilon);
+        let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
         let game = Connect4 {
             win_reward,
             loss_reward,
@@ -790,7 +789,7 @@ impl Connect4Engine {
             seed,
         };
         Ok(Connect4Engine {
-            inner: CoreEngine::new(game, policy, learner, engine_params),
+            inner: Engine::new(game, policy, learner, engine_params),
             dim: 2 * 6 * 7,
             action_count: 7,
             n_heads,
@@ -819,7 +818,7 @@ impl Connect4Engine {
 /// `opponent`/`opp_*` args are unused by this single-agent game but kept for a uniform signature.
 #[pyclass]
 struct GridWorldEngine {
-    inner: CoreEngine<GridWorld, SelectiveExpectimaxPolicy, TreeStrapLearner>,
+    inner: Engine<GridWorld, SelectiveExpectimax, TreeStrap>,
     dim: usize,
     action_count: usize,
     n_heads: usize,
@@ -873,8 +872,8 @@ impl GridWorldEngine {
             food_samples,
             opponent,
         };
-        let policy = SelectiveExpectimaxPolicy::new(cfg, n_heads, epsilon);
-        let learner = TreeStrapLearner::new(gamma, outcome_weight, bootstrap_p, interior_targets);
+        let policy = SelectiveExpectimax::new(cfg, n_heads, epsilon);
+        let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
         let game = GridWorld {
             size,
             goal: (goal_row, goal_col),
@@ -887,7 +886,7 @@ impl GridWorldEngine {
             seed,
         };
         Ok(GridWorldEngine {
-            inner: CoreEngine::new(game, policy, learner, engine_params),
+            inner: Engine::new(game, policy, learner, engine_params),
             dim: 2 * (size as usize) * (size as usize),
             action_count: 4,
             n_heads,
@@ -927,7 +926,7 @@ type DqnCollectOutput<'py> = (
 
 /// Marshal a DQN rollout's `DqnRecord` transitions into numpy arrays for a Python replay buffer.
 fn dqn_engine_collect<'py, G: Game + Sync>(
-    inner: &mut CoreEngine<G, DqnPolicy, DqnLearner>,
+    inner: &mut Engine<G, EpsilonGreedyQ, Dqn>,
     py: Python<'py>,
     n_records: usize,
     infer: &Bound<'_, PyAny>,
@@ -1005,7 +1004,7 @@ where
 /// generic engine with a non-search policy and a transition record. `collect` returns transitions.
 #[pyclass]
 struct DqnGridWorldEngine {
-    inner: CoreEngine<GridWorld, DqnPolicy, DqnLearner>,
+    inner: Engine<GridWorld, EpsilonGreedyQ, Dqn>,
     dim: usize,
     action_count: usize,
     n_heads: usize,
@@ -1046,15 +1045,15 @@ impl DqnGridWorldEngine {
             step_reward,
             goal_reward,
         };
-        let policy = DqnPolicy::new(n_heads, epsilon);
-        let learner = DqnLearner::new(n_heads, bootstrap_p);
+        let policy = EpsilonGreedyQ::new(n_heads, epsilon);
+        let learner = Dqn::new(n_heads, bootstrap_p);
         let engine_params = EngineParams {
             n_games,
             max_ticks,
             seed,
         };
         Ok(DqnGridWorldEngine {
-            inner: CoreEngine::new(game, policy, learner, engine_params),
+            inner: Engine::new(game, policy, learner, engine_params),
             dim: 2 * (size as usize) * (size as usize),
             action_count: 4,
             n_heads,
@@ -1117,12 +1116,8 @@ fn blend_outcome_targets<'py>(
             (values, actions[i], rewards[i])
         })
         .collect();
-    let blended = reinfors_core::TreeStrapLearner::blend_outcome_targets(
-        &trajectory,
-        gamma,
-        outcome_weight,
-        &tail,
-    );
+    let blended =
+        reinfors_core::TreeStrap::blend_outcome_targets(&trajectory, gamma, outcome_weight, &tail);
     let flat: Vec<f64> = blended.into_iter().flatten().flatten().collect();
     Ok(Array3::from_shape_vec((t, k, a), flat)
         .expect("blend shape")
@@ -1135,7 +1130,7 @@ fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(selective_search_many, m)?)?;
     m.add_function(wrap_pyfunction!(blend_outcome_targets, m)?)?;
     m.add_class::<SnakeEnv>()?;
-    m.add_class::<Engine>()?;
+    m.add_class::<PyEngine>()?;
     m.add_class::<Connect4Engine>()?;
     m.add_class::<GridWorldEngine>()?;
     m.add_class::<DqnGridWorldEngine>()?;

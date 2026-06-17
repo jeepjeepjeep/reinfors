@@ -2,7 +2,7 @@
 //! from. The defaults derive from `obs_shape`/`action_count`; these pin the values per game.
 
 use reinfors_core::{Game, Space};
-use reinfors_games::{Connect4, GridWorld, Reward, SnakeGame};
+use reinfors_games::{Connect4, GridWorld, Reward, Snake};
 
 fn unbounded(shape: Vec<usize>) -> Space {
     Space::Box {
@@ -14,7 +14,7 @@ fn unbounded(shape: Vec<usize>) -> Space {
 
 #[test]
 fn snake_advertises_egocentric_box_and_three_actions() {
-    let game = SnakeGame {
+    let game = Snake {
         grid_size: 12,
         initial_length: 3,
         play_to_last: false,
