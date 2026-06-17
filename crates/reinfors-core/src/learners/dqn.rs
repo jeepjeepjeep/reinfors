@@ -11,7 +11,7 @@ use crate::policies::dqn::QEvaluation;
 /// computed in the (Python) learner from `next_obs`/`terminal` against a target net, so the engine
 /// emits raw transitions rather than precomputed targets. `terminal` is true only at a real terminal
 /// (a horizon truncation keeps it false, so the learner bootstraps from `next_obs`).
-pub struct Transition {
+pub struct DqnRecord {
     pub obs: Vec<f32>,
     pub action: usize,
     pub reward: f64,
@@ -36,13 +36,13 @@ impl DqnLearner {
 }
 
 impl Learner<QEvaluation> for DqnLearner {
-    type Record = Transition;
+    type Record = DqnRecord;
 
     fn needs_next_obs(&self) -> bool {
         true
     }
 
-    fn eval_records(&self, _eval: &mut QEvaluation, _rng: &mut dyn Rng) -> Vec<Transition> {
+    fn eval_records(&self, _eval: &mut QEvaluation, _rng: &mut dyn Rng) -> Vec<DqnRecord> {
         Vec::new() // nothing at decision time; transitions need the post-step s', formed at episode end
     }
 
@@ -51,10 +51,10 @@ impl Learner<QEvaluation> for DqnLearner {
         trajectory: &[Step<QEvaluation>],
         _tail: &[f64],
         rng: &mut dyn Rng,
-    ) -> Vec<Transition> {
+    ) -> Vec<DqnRecord> {
         trajectory
             .iter()
-            .map(|s| Transition {
+            .map(|s| DqnRecord {
                 obs: s.obs.clone(),
                 action: s.action,
                 reward: s.reward,

@@ -15,7 +15,7 @@ pub(crate) mod rng;
 pub use engine::{CollectStats, Engine, EngineParams, EpisodeSummary};
 pub use game::{Actor, Game, Rng, Transition};
 pub use learner::{Learner, Step};
-pub use learners::dqn::DqnLearner; // dqn::Transition stays module-qualified (game::Transition owns the root name)
+pub use learners::dqn::{DqnLearner, DqnRecord};
 pub use learners::treestrap::{blend_outcome_targets, TreeStrapLearner, TreeStrapRecord};
 pub use policies::dqn::{DqnPolicy, QEvaluation};
 pub use policies::expectimax::search::{

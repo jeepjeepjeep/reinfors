@@ -924,7 +924,7 @@ type DqnCollectOutput<'py> = (
     Bound<'py, PyDict>,         // telemetry (episodes + decisions; no search stats)
 );
 
-/// Marshal a DQN rollout's `Transition` records into numpy arrays for a Python replay buffer.
+/// Marshal a DQN rollout's `DqnRecord` transitions into numpy arrays for a Python replay buffer.
 fn dqn_engine_collect<'py, G: Game + Sync>(
     inner: &mut CoreEngine<G, DqnPolicy, DqnLearner>,
     py: Python<'py>,
