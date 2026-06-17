@@ -26,20 +26,10 @@
 
 use std::collections::HashMap;
 
+use crate::algo::{Learner, SearchEvaluation, Step};
 use crate::game::{Game, Rng};
 use crate::planner::Planner;
 use crate::rng::SplitMix64;
-
-/// One buffered decision, held until its episode ends so the realized return is known for z-mixing.
-struct TrajStep {
-    obs: Vec<f32>,
-    values: Vec<Vec<f64>>, // per-head searched action values [K][A]
-    action: usize,         // executed relative-action index (after any epsilon override)
-    reward: f64,
-}
-
-/// A collected training record: observation, per-head target `[K][A]`, and per-head bootstrap mask.
-type Record = (Vec<f32>, Vec<Vec<f64>>, Vec<f32>);
 
 /// One finished episode's outcome, for logging: per-agent total realized reward (one entry per
 /// agent) and the episode length in ticks.
@@ -65,19 +55,20 @@ pub struct CollectStats {
 }
 
 /// Engine-level rollout knobs (everything that is not a game or *algorithm* parameter — the search
-/// config, z-mix `outcome_weight`, and interior-target flag live on the `Planner`).
+/// config + interior-target flag live on the `Planner`; the z-mix `outcome_weight` and bootstrap
+/// masking live on the `Learner`).
 pub struct EngineParams {
     pub n_games: usize,
     pub max_ticks: usize,
     pub epsilon: f64,
     pub n_heads: usize,
-    pub bootstrap_p: f64,
     pub seed: u64,
 }
 
-pub struct Engine<G: Game + Sync, P: Planner> {
+pub struct Engine<G: Game + Sync, P: Planner, L: Learner<SearchEvaluation>> {
     game: G,
     planner: P,
+    learner: L,
     params: EngineParams,
     states: Vec<G::State>,
     rngs: Vec<SplitMix64>,
@@ -87,16 +78,16 @@ pub struct Engine<G: Game + Sync, P: Planner> {
     search_rng: SplitMix64,
     heads: Vec<usize>, // per-game Thompson head for the current episode
     ticks: Vec<usize>,
-    traj: Vec<Vec<Vec<TrajStep>>>, // [game][agent] decisions awaiting episode-end z-mixing
+    traj: Vec<Vec<Vec<Step<SearchEvaluation>>>>, // [game][agent] decisions awaiting episode-end records
 }
 
-impl<G: Game + Sync, P: Planner> Engine<G, P>
+impl<G: Game + Sync, P: Planner, L: Learner<SearchEvaluation>> Engine<G, P, L>
 where
     G::State: Send,
 {
-    /// Build an engine over `game` driven by `planner` (which owns the search/algorithm config), with
-    /// the rollout knobs from `params`. The game owns its reward and rules.
-    pub fn new(game: G, planner: P, params: EngineParams) -> Self {
+    /// Build an engine over `game` driven by `planner` (search/evaluation) and `learner` (training
+    /// records), with the rollout knobs from `params`. The game owns its reward and rules.
+    pub fn new(game: G, planner: P, learner: L, params: EngineParams) -> Self {
         debug_assert!((1..=2).contains(&game.num_agents()));
         let n_heads = params.n_heads.max(1);
         let mut rngs: Vec<SplitMix64> = (0..params.n_games)
@@ -123,6 +114,7 @@ where
         Engine {
             game,
             planner,
+            learner,
             params,
             states,
             rngs,
@@ -141,14 +133,14 @@ where
     /// returning each record's observation (a flat `[C*H*W]` buffer), per-head target `[K][A]`,
     /// and per-head bootstrap mask `[K]`. Executed decisions are z-mixed at episode end; interior MAX
     /// nodes (when enabled) are emitted immediately. `infer` is the value-network forward.
-    pub fn collect<F>(&mut self, n_records: usize, mut infer: F) -> (Vec<Record>, CollectStats)
+    pub fn collect<F>(&mut self, n_records: usize, mut infer: F) -> (Vec<L::Record>, CollectStats)
     where
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
         // (The infer head-count check lives in the Python binding, where it can distinguish a real
         // wrong-K output from the error fallback and surface a clean error; here we only consume the
         // values, with the per-game clamp handling the all-terminal single-head case.)
-        let mut out: Vec<Record> = Vec::new();
+        let mut out: Vec<L::Record> = Vec::new();
         let mut stats = CollectStats::default();
         let action_count = self.game.action_count();
         let num_agents = self.game.num_agents();
@@ -180,7 +172,9 @@ where
             //    `acted[gi][si]` records the relative action index for an agent that decided this tick.
             let mut acted: Vec<Vec<Option<usize>>> =
                 vec![vec![None; num_agents]; self.states.len()];
-            for ((values, interior, search_stats), &(gi, si)) in results.iter().zip(meta.iter()) {
+            for ((values, interior, search_stats), &(gi, si)) in
+                results.into_iter().zip(meta.iter())
+            {
                 stats.decisions += 1;
                 stats.max_depth = stats.max_depth.max(search_stats.max_depth);
                 stats.sum_leaves += search_stats.leaves as f64;
@@ -189,7 +183,7 @@ where
                 if search_stats.leaves > 0 {
                     stats.sum_sigma += search_stats.sigma_sum / search_stats.leaves as f64;
                 }
-                stats.sum_disagreement += root_disagreement(values);
+                stats.sum_disagreement += root_disagreement(&values);
                 // A search whose root children are all terminal evaluates no leaves, so the generic
                 // search cannot infer the head count and returns a single (head-agnostic, terminal-
                 // reward) row. Broadcast it to the configured `n_heads` so every emitted record's
@@ -199,23 +193,27 @@ where
                 let values: Vec<Vec<f64>> = if values.len() < nh {
                     vec![values[0].clone(); nh]
                 } else {
-                    values.clone()
+                    values
                 };
-                let k = values.len();
-                for (iobs, ivalues) in interior {
-                    let mask = sample_mask(&mut self.rngs[gi], k, self.params.bootstrap_p);
-                    out.push((iobs.clone(), ivalues.clone(), mask));
-                }
+                // The learner emits its immediate records (TreeStrap interior nodes) now, draining them
+                // out of the evaluation so they are never buffered for the whole episode.
+                let mut eval = SearchEvaluation {
+                    values,
+                    interior,
+                    stats: search_stats,
+                };
+                out.extend(self.learner.eval_records(&mut eval, &mut self.rngs[gi]));
 
+                let k = eval.values.len();
                 let head = self.heads[gi].min(k - 1);
-                let mut rel = argmax(&values[head]);
+                let mut rel = argmax(&eval.values[head]);
                 if self.params.epsilon > 0.0 && self.rngs[gi].unit() < self.params.epsilon {
                     rel = self.rngs[gi].below(action_count);
                 }
                 acted[gi][si] = Some(rel);
-                self.traj[gi][si].push(TrajStep {
+                self.traj[gi][si].push(Step {
                     obs: self.game.observe(&self.states[gi], si),
-                    values: values.clone(),
+                    evaluation: eval,
                     action: rel,
                     reward: 0.0, // filled in from this tick's transition after advancing
                 });
@@ -266,7 +264,7 @@ where
     fn flush_finished<F>(
         &mut self,
         finished: &[(usize, bool)],
-        out: &mut Vec<Record>,
+        out: &mut Vec<L::Record>,
         stats: &mut CollectStats,
         infer: &mut F,
     ) where
@@ -285,20 +283,16 @@ where
                     continue;
                 }
                 *ep_slot = steps.iter().map(|s| s.reward).sum();
-                let k = steps[0].values.len();
+                let k = steps[0].evaluation.values.len();
                 let tail = tails
                     .get(&(gi, si))
                     .cloned()
                     .unwrap_or_else(|| vec![0.0; k]);
-                let traj: Vec<(Vec<Vec<f64>>, usize, f64)> = steps
-                    .iter()
-                    .map(|s| (s.values.clone(), s.action, s.reward))
-                    .collect();
-                let blended = self.planner.targets(&traj, &tail);
-                for (step, target) in steps.iter().zip(blended) {
-                    let mask = sample_mask(&mut self.rngs[gi], k, self.params.bootstrap_p);
-                    out.push((step.obs.clone(), target, mask));
-                }
+                // The learner turns the buffered trajectory into records (TreeStrap z-mixing + masks).
+                out.extend(
+                    self.learner
+                        .episode_records(&steps, &tail, &mut self.rngs[gi]),
+                );
             }
             stats.episodes.push(EpisodeSummary {
                 reward: ep_reward,
@@ -322,7 +316,7 @@ where
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
         let mut tails: HashMap<(usize, usize), Vec<f64>> = HashMap::new();
-        if !self.planner.uses_episode_tail() {
+        if !self.learner.uses_episode_tail() {
             return tails;
         }
         let a = self.game.action_count();
@@ -362,43 +356,6 @@ where
     }
 }
 
-/// AlphaGo-style z-mixing: blend each step's realized discounted return-to-go into the executed
-/// action's entry of every head, `(1 - w) * V + w * z`. `trajectory` is time-ordered
-/// `(searched values [K][A], executed action, reward)`; `tail` (len K) seeds z past the last step
-/// (0 at a terminal, the net's per-head state value at a truncation). Unexecuted entries keep their
-/// pure searched value. Returns the per-step blended `[K][A]` targets in time order.
-pub fn blend_outcome_targets(
-    trajectory: &[(Vec<Vec<f64>>, usize, f64)],
-    gamma: f64,
-    outcome_weight: f64,
-    tail: &[f64],
-) -> Vec<Vec<Vec<f64>>> {
-    let mut z: Vec<f64> = tail.to_vec();
-    let mut out: Vec<Vec<Vec<f64>>> = Vec::with_capacity(trajectory.len());
-    for (values, action, reward) in trajectory.iter().rev() {
-        for zi in z.iter_mut() {
-            *zi = reward + gamma * *zi;
-        }
-        let mut blended = values.clone();
-        if outcome_weight > 0.0 {
-            for (h, row) in blended.iter_mut().enumerate() {
-                row[*action] = (1.0 - outcome_weight) * row[*action] + outcome_weight * z[h];
-            }
-        }
-        out.push(blended);
-    }
-    out.reverse();
-    out
-}
-
-/// A per-head bootstrap mask `[K]`: head `h` trains on this record iff `rng.unit() < p` (Osband et
-/// al. 2016). `p = 1` includes every head (the masks are all-ones).
-fn sample_mask(rng: &mut dyn Rng, n_heads: usize, p: f64) -> Vec<f32> {
-    (0..n_heads)
-        .map(|_| if rng.unit() < p { 1.0 } else { 0.0 })
-        .collect()
-}
-
 /// Root head-disagreement: the per-action population std across heads of the root values `[K][A]`,
 /// averaged over actions (`values.std(axis=0).mean()` in snake_RL). 0 with fewer than two heads.
 fn root_disagreement(values: &[Vec<f64>]) -> f64 {
@@ -431,20 +388,6 @@ fn argmax(values: &[f64]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn blend_outcome_targets_mixes_only_the_executed_action() {
-        // Two heads, three actions, action 1 executed; one step, terminal tail (z = reward).
-        let values = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
-        let traj = vec![(values.clone(), 1usize, 10.0)];
-        let blended = blend_outcome_targets(&traj, 0.9, 0.25, &[0.0, 0.0]);
-        // z = 10 + 0.9*0 = 10; executed entry -> 0.75*v + 0.25*10.
-        assert!((blended[0][0][1] - (0.75 * 2.0 + 0.25 * 10.0)).abs() < 1e-12);
-        assert!((blended[0][1][1] - (0.75 * 5.0 + 0.25 * 10.0)).abs() < 1e-12);
-        // unexecuted entries unchanged.
-        assert_eq!(blended[0][0][0], 1.0);
-        assert_eq!(blended[0][1][2], 6.0);
-    }
 
     #[test]
     fn root_disagreement_matches_population_std_definition() {
