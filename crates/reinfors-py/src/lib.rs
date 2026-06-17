@@ -14,14 +14,14 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use numpy::ndarray::{Array2, Array3};
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyArray3, PyReadonlyArray3};
+use numpy::ndarray::{Array2, Array3, ArrayD, IxDyn};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArray3, PyArrayDyn, PyReadonlyArray3};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyTuple};
 
 use reinfors_core::{
     Dqn, DqnRecord, Engine, EngineParams, EpsilonGreedyQ, Game, Learner, Opponent, Policy,
-    SearchConfig, SelectiveExpectimax, TreeStrap, TreeStrapRecord,
+    SearchConfig, SelectiveExpectimax, Space, TreeStrap, TreeStrapRecord,
 };
 use reinfors_games::snake::{Cell, DeathCause, SnakeBody, SnakeEnv as CoreEnv};
 use reinfors_games::{
@@ -872,6 +872,36 @@ enum GameSpec {
     },
 }
 
+impl GameSpec {
+    /// The game's `(observation, action)` spaces — builds the concrete game and reads the trait
+    /// defaults. Lets a caller size a network from a handle (`game.observation_space()`) without
+    /// hard-coding any game's dimensions.
+    fn spaces(&self) -> (Space, Space) {
+        fn of<G: Game>(game: G) -> (Space, Space) {
+            (game.observation_space(), game.action_space())
+        }
+        match *self {
+            GameSpec::Snake {
+                grid_size,
+                initial_length,
+                initial_food_count,
+                play_to_last,
+                win_food_lead,
+                reward,
+            } => of(Snake {
+                grid_size,
+                initial_length,
+                play_to_last,
+                win_food_lead,
+                initial_food_count,
+                reward,
+            }),
+            GameSpec::Connect4 { reward } => of(Connect4 { reward }),
+            GameSpec::GridWorld { size, goal, reward } => of(GridWorld { size, goal, reward }),
+        }
+    }
+}
+
 /// Acting-policy configuration. `n_heads` (ensemble size) lives here — the single source the learner
 /// composition reads from.
 #[derive(Clone)]
@@ -1084,6 +1114,65 @@ fn resolve_reward(reward: Option<Reward>, schema: &[(&str, f64)]) -> PyResult<Ve
         .collect())
 }
 
+/// `rf.spaces.Box` — a continuous N-d `f32` tensor space. `shape` is the contract; `low`/`high` are
+/// numpy arrays broadcast to `shape` (the Rust side carries one scalar bound — see `Space` docs — but
+/// the public type is per-element-shaped, mirroring Gymnasium, so tighter per-element bounds can land
+/// later without a Python break).
+#[pyclass(name = "Box", module = "reinfors.spaces")]
+struct PyBox {
+    shape: Vec<usize>,
+    #[pyo3(get)]
+    low: Py<PyArrayDyn<f32>>,
+    #[pyo3(get)]
+    high: Py<PyArrayDyn<f32>>,
+}
+
+#[pymethods]
+impl PyBox {
+    #[getter]
+    fn shape<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, &self.shape)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Box(shape={:?})", self.shape)
+    }
+}
+
+/// `rf.spaces.Discrete` — a choice from `0..n`.
+#[pyclass(name = "Discrete", module = "reinfors.spaces")]
+struct PyDiscrete {
+    #[pyo3(get)]
+    n: usize,
+}
+
+#[pymethods]
+impl PyDiscrete {
+    fn __repr__(&self) -> String {
+        format!("Discrete(n={})", self.n)
+    }
+}
+
+/// Convert a core `Space` into its `rf.spaces.*` Python object.
+fn space_to_py(py: Python<'_>, space: Space) -> PyResult<Bound<'_, PyAny>> {
+    match space {
+        Space::Box { shape, low, high } => {
+            let lo = ArrayD::from_elem(IxDyn(&shape), low).into_pyarray(py);
+            let hi = ArrayD::from_elem(IxDyn(&shape), high).into_pyarray(py);
+            Ok(Bound::new(
+                py,
+                PyBox {
+                    shape,
+                    low: lo.unbind(),
+                    high: hi.unbind(),
+                },
+            )?
+            .into_any())
+        }
+        Space::Discrete { n } => Ok(Bound::new(py, PyDiscrete { n })?.into_any()),
+    }
+}
+
 /// Game handle (`rf.games.Snake` / `.Connect4` / `.GridWorld`).
 #[pyclass]
 #[derive(Clone)]
@@ -1172,6 +1261,17 @@ impl GameHandle {
                 },
             },
         })
+    }
+
+    /// The game's observation `Space` (an `rf.spaces.Box`) — its `shape` sizes the value network's
+    /// input, replacing a hard-coded obs shape.
+    fn observation_space<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        space_to_py(py, self.spec.spaces().0)
+    }
+
+    /// The game's action `Space` (an `rf.spaces.Discrete`) — its `n` sizes the network's output head.
+    fn action_space<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        space_to_py(py, self.spec.spaces().1)
     }
 }
 
@@ -1326,5 +1426,7 @@ fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Reward>()?;
     m.add_class::<TreeStrapBatch>()?;
     m.add_class::<DqnBatch>()?;
+    m.add_class::<PyBox>()?;
+    m.add_class::<PyDiscrete>()?;
     Ok(())
 }

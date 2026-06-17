@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import _reinfors, games, learners, policies
+from . import _reinfors, games, learners, policies, spaces
 from ._reinfors import Engine, Reward
 
 
@@ -92,5 +92,6 @@ __all__ = [
     "registered_games",
     "registered_learners",
     "registered_policies",
+    "spaces",
 ]
 __version__ = "0.0.0"
