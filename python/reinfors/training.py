@@ -259,12 +259,12 @@ def train(
     it = 0
     while iterations is None or it < iterations:
         t0 = time.perf_counter()
-        obs, target, mask, telemetry = engine.collect(collect_size, infer)  # type: ignore[attr-defined]
+        collected = engine.collect(collect_size, infer)  # type: ignore[attr-defined]
         collect_seconds = time.perf_counter() - t0
-        buffer.push_batch(obs, target, mask)
-        episodes_done += len(telemetry["episodes"])
+        buffer.push_batch(collected.obs, collected.targets, collected.masks)
+        episodes_done += len(collected.telemetry["episodes"])
         if on_collect is not None:
-            on_collect(it, CollectReport(it, int(obs.shape[0]), collect_seconds, telemetry))
+            on_collect(it, CollectReport(it, int(collected.obs.shape[0]), collect_seconds, collected.telemetry))
         if buffer.size >= min_buffer:
             for _ in range(grad_steps_per_collect):
                 batch = buffer.sample(batch_size).to(device)  # one host->device transfer

@@ -93,6 +93,18 @@ def test_collect_shapes_and_dtypes() -> None:
     assert np.isin(mask, (0.0, 1.0)).all()
 
 
+def test_collect_returns_named_treestrap_batch() -> None:
+    # The TreeStrap family yields a named TreeStrapBatch; named fields mirror the positional unpacking.
+    batch = _engine(0).collect(50, _infer)
+    obs, tgt, mask, telemetry = batch  # still unpacks positionally (back-compat)
+    assert len(batch) == 4
+    assert np.array_equal(batch.obs, obs)
+    assert np.array_equal(batch.targets, tgt)
+    assert np.array_equal(batch.masks, mask)
+    assert batch.telemetry is telemetry
+    assert "episodes" in batch.telemetry
+
+
 def test_collect_is_deterministic_for_a_seed() -> None:
     o1, t1, m1, _ = _engine(7).collect(60, _infer)
     o2, t2, m2, _ = _engine(7).collect(60, _infer)

@@ -5,6 +5,9 @@ Hand-maintained for now; once the API surface grows we can generate these from t
 
 from typing import Any
 
+import numpy as np
+from numpy.typing import NDArray
+
 Cell = tuple[int, int]
 EventTuple = tuple[bool, bool, str | None, bool, bool, bool, bool]
 StatsTuple = tuple[int, int, int, int]
@@ -123,6 +126,31 @@ class LearnerHandle:
     @staticmethod
     def Dqn(bootstrap_p: float = ...) -> LearnerHandle: ...
 
+class TreeStrapBatch:
+    """`Engine.collect` result for the TreeStrap family. Also unpacks positionally as
+    `obs, targets, masks, telemetry = batch`."""
+
+    obs: NDArray[np.float32]
+    targets: NDArray[np.float64]
+    masks: NDArray[np.float32]
+    telemetry: dict[str, Any]
+    def __len__(self) -> int: ...
+    def __getitem__(self, i: int) -> Any: ...
+
+class DqnBatch:
+    """`Engine.collect` result for the DQN family. Also unpacks positionally as
+    `obs, actions, rewards, next_obs, dones, masks, telemetry = batch`."""
+
+    obs: NDArray[np.float32]
+    actions: NDArray[np.int64]
+    rewards: NDArray[np.float64]
+    next_obs: NDArray[np.float32]
+    dones: NDArray[np.bool_]
+    masks: NDArray[np.float32]
+    telemetry: dict[str, Any]
+    def __len__(self) -> int: ...
+    def __getitem__(self, i: int) -> Any: ...
+
 class Engine:
     def __init__(
         self,
@@ -133,6 +161,6 @@ class Engine:
         max_ticks: int,
         seed: int = ...,
     ) -> None: ...
-    # The record batch is learner-shaped: the TreeStrap family yields (obs, targets, masks, telemetry);
-    # the DQN family yields (obs, actions, rewards, next_obs, dones, masks, telemetry).
-    def collect(self, n_records: int, infer: Any) -> Any: ...
+    # The batch is learner-shaped: the TreeStrap family yields a `TreeStrapBatch`, the DQN family a
+    # `DqnBatch`. Both expose named fields and also unpack positionally (back-compat with the old tuple).
+    def collect(self, n_records: int, infer: Any) -> TreeStrapBatch | DqnBatch: ...
