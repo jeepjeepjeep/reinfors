@@ -15,7 +15,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use numpy::ndarray::{Array2, Array3};
-use numpy::{IntoPyArray, PyArray1, PyArray3, PyReadonlyArray3};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArray3, PyReadonlyArray3};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -587,6 +587,83 @@ trait RecordBatch: Sized {
     ) -> PyResult<Bound<'py, PyAny>>;
 }
 
+/// `engine.collect` result for the TreeStrap family: per-head searched targets + a bootstrap mask.
+#[pyclass]
+struct TreeStrapBatch {
+    #[pyo3(get)]
+    obs: Py<PyArray2<f32>>, // (M, C*H*W)
+    #[pyo3(get)]
+    targets: Py<PyArray3<f64>>, // (M, K, A)
+    #[pyo3(get)]
+    masks: Py<PyArray2<f32>>, // (M, K)
+    #[pyo3(get)]
+    telemetry: Py<PyDict>,
+}
+
+/// `engine.collect` result for the DQN family: off-policy transitions + a bootstrap mask.
+#[pyclass]
+struct DqnBatch {
+    #[pyo3(get)]
+    obs: Py<PyArray2<f32>>, // (M, dim)
+    #[pyo3(get)]
+    actions: Py<PyArray1<i64>>, // (M,)
+    #[pyo3(get)]
+    rewards: Py<PyArray1<f64>>, // (M,)
+    #[pyo3(get)]
+    next_obs: Py<PyArray2<f32>>, // (M, dim)
+    #[pyo3(get)]
+    dones: Py<PyArray1<bool>>, // (M,)
+    #[pyo3(get)]
+    masks: Py<PyArray2<f32>>, // (M, K)
+    #[pyo3(get)]
+    telemetry: Py<PyDict>,
+}
+
+#[pymethods]
+impl TreeStrapBatch {
+    fn __len__(&self) -> usize {
+        4
+    }
+    /// Also unpacks positionally: `obs, targets, masks, telemetry = batch`.
+    fn __getitem__<'py>(&self, py: Python<'py>, i: usize) -> PyResult<Bound<'py, PyAny>> {
+        Ok(match i {
+            0 => self.obs.bind(py).clone().into_any(),
+            1 => self.targets.bind(py).clone().into_any(),
+            2 => self.masks.bind(py).clone().into_any(),
+            3 => self.telemetry.bind(py).clone().into_any(),
+            _ => {
+                return Err(pyo3::exceptions::PyIndexError::new_err(
+                    "TreeStrapBatch index out of range",
+                ))
+            }
+        })
+    }
+}
+
+#[pymethods]
+impl DqnBatch {
+    fn __len__(&self) -> usize {
+        7
+    }
+    /// Also unpacks positionally: `obs, actions, rewards, next_obs, dones, masks, telemetry = batch`.
+    fn __getitem__<'py>(&self, py: Python<'py>, i: usize) -> PyResult<Bound<'py, PyAny>> {
+        Ok(match i {
+            0 => self.obs.bind(py).clone().into_any(),
+            1 => self.actions.bind(py).clone().into_any(),
+            2 => self.rewards.bind(py).clone().into_any(),
+            3 => self.next_obs.bind(py).clone().into_any(),
+            4 => self.dones.bind(py).clone().into_any(),
+            5 => self.masks.bind(py).clone().into_any(),
+            6 => self.telemetry.bind(py).clone().into_any(),
+            _ => {
+                return Err(pyo3::exceptions::PyIndexError::new_err(
+                    "DqnBatch index out of range",
+                ))
+            }
+        })
+    }
+}
+
 impl RecordBatch for TreeStrapRecord {
     fn into_py_batch<'py>(
         records: Vec<Self>,
@@ -618,9 +695,16 @@ impl RecordBatch for TreeStrapRecord {
         let mask_arr = Array2::from_shape_vec((m, k), mask_flat)
             .expect("mask shape")
             .into_pyarray(py);
-        Ok((obs_arr, tgt_arr, mask_arr, telemetry)
-            .into_pyobject(py)?
-            .into_any())
+        Ok(Bound::new(
+            py,
+            TreeStrapBatch {
+                obs: obs_arr.unbind(),
+                targets: tgt_arr.unbind(),
+                masks: mask_arr.unbind(),
+                telemetry: telemetry.unbind(),
+            },
+        )?
+        .into_any())
     }
 }
 
@@ -661,17 +745,19 @@ impl RecordBatch for DqnRecord {
         let mask_arr = Array2::from_shape_vec((m, k), mask_flat)
             .expect("mask shape")
             .into_pyarray(py);
-        Ok((
-            obs_arr,
-            actions.into_pyarray(py),
-            rewards.into_pyarray(py),
-            next_arr,
-            dones.into_pyarray(py),
-            mask_arr,
-            telemetry,
-        )
-            .into_pyobject(py)?
-            .into_any())
+        Ok(Bound::new(
+            py,
+            DqnBatch {
+                obs: obs_arr.unbind(),
+                actions: actions.into_pyarray(py).unbind(),
+                rewards: rewards.into_pyarray(py).unbind(),
+                next_obs: next_arr.unbind(),
+                dones: dones.into_pyarray(py).unbind(),
+                masks: mask_arr.unbind(),
+                telemetry: telemetry.unbind(),
+            },
+        )?
+        .into_any())
     }
 }
 
@@ -1238,5 +1324,7 @@ fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PolicyHandle>()?;
     m.add_class::<LearnerHandle>()?;
     m.add_class::<Reward>()?;
+    m.add_class::<TreeStrapBatch>()?;
+    m.add_class::<DqnBatch>()?;
     Ok(())
 }
