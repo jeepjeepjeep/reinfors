@@ -75,29 +75,40 @@ def build_infer(args: argparse.Namespace) -> object:
 
 
 def bench_collect(args: argparse.Namespace) -> None:
-    engine = reinfors._reinfors.Engine(
-        args.games,
-        args.grid,
-        3,
-        False,
-        None,
-        3,  # n_games, grid, initial_length, play_to_last, win_food_lead, initial_food_count
-        0.99,
-        1.0,
-        args.budget,
-        4,
-        args.max_depth,  # gamma, beta, expansion_budget, top_k, max_depth
-        _REWARD,
-        "uniform",
-        1.0,
-        0.1,  # reward, opponent, opp_temperature, opp_floor
-        0.1,
-        200,
-        args.heads,  # epsilon, max_ticks, n_heads
-        0.5,
-        False,
-        1.0,  # outcome_weight, interior_targets (off so records == decisions), bootstrap_p
-        0,
+    engine = reinfors.Engine(
+        reinfors.games.Snake(
+            grid_size=args.grid,
+            initial_length=3,
+            food=3,
+            play_to_last=False,
+            win_food_lead=None,
+            reward=reinfors.Reward(
+                step=_REWARD[0],
+                food=_REWARD[1],
+                loss=_REWARD[2],
+                draw=_REWARD[3],
+                kill=_REWARD[4],
+                win=_REWARD[5],
+                survival=_REWARD[6],
+            ),
+        ),
+        reinfors.policies.SelectiveExpectimax(
+            expansion_budget=args.budget,
+            top_k=4,
+            max_depth=args.max_depth,
+            beta=1.0,
+            food_samples=1,
+            n_heads=args.heads,
+            epsilon=0.1,
+            opponent="uniform",
+            opp_temperature=1.0,
+            opp_floor=0.1,
+        ),
+        # interior off so records == decisions (the quantity the benchmark times)
+        reinfors.learners.TreeStrap(gamma=0.99, outcome_weight=0.5, bootstrap_p=1.0, interior_targets=False),
+        n_games=args.games,
+        max_ticks=200,
+        seed=0,
     )
     infer = build_infer(args)
     engine.collect(args.games * 4, infer)  # warm up

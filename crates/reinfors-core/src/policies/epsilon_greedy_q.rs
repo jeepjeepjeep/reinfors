@@ -1,4 +1,4 @@
-//! Model-free bootstrapped DQN — acting half. `evaluate` is a plain batched network forward (no
+//! Epsilon-greedy acting on per-head Q-values. `evaluate` is a plain batched network forward (no
 //! search), and `select` is a Thompson-head epsilon-greedy choice. Its `QEvaluation` is the seam's
 //! non-search case; the matching `Dqn` (in `crate::learners::dqn`) consumes it into transitions.
 

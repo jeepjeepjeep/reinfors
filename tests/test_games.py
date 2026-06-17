@@ -1,17 +1,14 @@
-"""The non-snake games (Connect-4, GridWorld) driven through the generic core: each engine collects
-TreeStrap records of the game's `(K, action_count)` shape, the registry reports the right
-`(obs_shape, action_count)`, and (torch-gated) end-to-end training runs on a non-snake game.
-
-A dummy numpy `infer` (zeros of the right K/A) keeps the shape/telemetry tests torch-free, so they run
-in CI; the training smoke test is gated on torch.
+"""The non-snake games (Connect-4, GridWorld) and the DQN family driven through the unified `Engine`:
+each composition collects records of the right shape, telemetry carries one reward per agent, and the
+name registries resolve. A dummy numpy `infer` (zeros of the right K/A) keeps the shape/telemetry
+tests torch-free; the training smoke tests are gated on torch.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
-import reinfors
-from reinfors import games
+import reinfors as rf
 
 _K = 2
 _TELEMETRY_KEYS = {
@@ -26,54 +23,55 @@ _TELEMETRY_KEYS = {
 }
 
 
+def _selective() -> object:
+    return rf.policies.SelectiveExpectimax(
+        expansion_budget=24,
+        top_k=4,
+        max_depth=6,
+        beta=1.0,
+        food_samples=1,
+        n_heads=_K,
+        epsilon=0.0,
+        opponent="uniform",
+        opp_temperature=1.0,
+        opp_floor=0.1,
+    )
+
+
+def _treestrap() -> object:
+    return rf.learners.TreeStrap(gamma=0.99, outcome_weight=0.5, bootstrap_p=1.0, interior_targets=False)
+
+
 def _connect4_engine() -> object:
-    # win, loss, draw rewards; then search + rollout knobs.
-    return reinfors._reinfors.Connect4Engine(
-        1.0,
-        -1.0,
-        0.0,  # win, loss, draw
-        0.99,
-        1.0,
-        24,
-        4,
-        6,  # gamma, beta, budget, top_k, max_depth
-        "uniform",
-        1.0,
-        0.1,  # opponent, opp_temperature, opp_floor
-        0.0,
-        30,
-        _K,  # epsilon, max_ticks, n_heads
-        0.5,
-        False,
-        1.0,  # outcome_weight, interior_targets, bootstrap_p
-        0,
-        2,  # seed, n_games
+    return rf.Engine(
+        rf.games.Connect4(reward=rf.Reward(win=1.0, loss=-1.0, draw=0.0)),
+        _selective(),
+        _treestrap(),
+        n_games=2,
+        max_ticks=30,
+        seed=0,
     )
 
 
 def _gridworld_engine() -> object:
-    return reinfors._reinfors.GridWorldEngine(
-        5,
-        0,
-        1,  # size, goal_row, goal_col
-        0.0,
-        1.0,  # step_reward, goal_reward
-        0.99,
-        1.0,
-        24,
-        4,
-        6,  # gamma, beta, budget, top_k, max_depth
-        "uniform",
-        1.0,
-        0.1,  # opponent, opp_temperature, opp_floor
-        0.0,
-        30,
-        _K,  # epsilon, max_ticks, n_heads
-        0.5,
-        False,
-        1.0,  # outcome_weight, interior_targets, bootstrap_p
-        0,
-        2,  # seed, n_games
+    return rf.Engine(
+        rf.games.GridWorld(size=5, goal_row=0, goal_col=1, reward=rf.Reward(step=0.0, goal=1.0)),
+        _selective(),
+        _treestrap(),
+        n_games=2,
+        max_ticks=30,
+        seed=0,
+    )
+
+
+def _dqn_engine() -> object:
+    return rf.Engine(
+        rf.games.GridWorld(size=5, goal_row=0, goal_col=1, reward=rf.Reward(step=0.0, goal=1.0)),
+        rf.policies.EpsilonGreedyQ(n_heads=_K, epsilon=0.1),
+        rf.learners.Dqn(bootstrap_p=1.0),
+        n_games=3,
+        max_ticks=10,
+        seed=0,
     )
 
 
@@ -115,24 +113,68 @@ def test_episode_reward_is_per_agent(make_engine, action_count: int, num_agents:
         assert length >= 1 and all(np.isfinite(r) for r in rewards)
 
 
-@pytest.mark.parametrize(
-    ("name", "kwargs", "obs_shape", "action_count"),
-    [
-        ("snake", {"grid_size": 12}, (5, 12, 12), 3),
-        ("connect4", {}, (2, 6, 7), 7),
-        ("gridworld", {"size": 5}, (2, 5, 5), 4),
-    ],
-)
-def test_registry_net_shape(name: str, kwargs: dict, obs_shape: tuple, action_count: int) -> None:
-    shape, actions = games.net_shape(name, **kwargs)
-    assert shape == obs_shape
-    assert actions == action_count
-    assert games.get(name).engine is not None
+def test_registries_list_the_built_in_names() -> None:
+    assert rf.registered_games() == ["connect4", "gridworld", "snake"]
+    assert rf.registered_policies() == ["epsilon_greedy_q", "selective_expectimax"]
+    assert rf.registered_learners() == ["dqn", "treestrap"]
 
 
-def test_registry_rejects_unknown_game() -> None:
+def test_make_constructs_and_rejects_unknown() -> None:
+    # The name-addressable path builds the same handles the typed constructors do.
+    engine = rf.Engine(
+        rf.make_game("connect4"),
+        rf.make_policy("selective_expectimax", n_heads=_K),
+        rf.make_learner("treestrap"),
+        n_games=2,
+        max_ticks=10,
+    )
+    _, _, _, telemetry = engine.collect(20, _dummy_infer(7))
+    assert telemetry["decisions"] > 0
     with pytest.raises(KeyError):
-        games.get("pong")
+        rf.make_game("pong")
+    with pytest.raises(KeyError):
+        rf.make_policy("a2c")
+
+
+def test_engine_from_config_round_trips_a_yaml_shaped_dict() -> None:
+    # A config shaped like parsed YAML — a nested `reward` mapping, not a pre-built handle — builds a
+    # working engine: engine_from_config wraps the reward dict into rf.Reward automatically.
+    config = {
+        "game": {"name": "snake", "grid_size": 8, "reward": {"food": 1.0, "loss": -10.0}},
+        "policy": {"name": "selective_expectimax", "n_heads": _K, "expansion_budget": 16, "max_depth": 6},
+        "learner": {"name": "treestrap", "gamma": 0.99},
+        "engine": {"n_games": 2, "max_ticks": 10, "seed": 0},
+    }
+    engine = rf.engine_from_config(config)
+    _, _, _, telemetry = engine.collect(20, _dummy_infer(3))
+    assert telemetry["decisions"] > 0
+    # Reward validation still fires through the config path (the wrapped dict isn't trusted blindly).
+    bad = {**config, "game": {"name": "snake", "grid_size": 8, "reward": {"goal": 1.0}}}
+    with pytest.raises(ValueError, match="unknown reward key"):
+        rf.engine_from_config(bad)
+
+
+def test_reward_rejects_keys_not_valid_for_the_game() -> None:
+    # The generic Reward is validated per game: any key the game doesn't define is an error (not
+    # silently ignored). Valid keys still work, and missing ones fall back to the game's default.
+    rf.games.Snake(reward=rf.Reward(food=1.0, loss=-10.0))  # snake keys: ok
+    rf.games.Connect4(reward=rf.Reward(win=1.0))  # connect4 keys: ok
+    with pytest.raises(ValueError, match="unknown reward key"):
+        rf.games.Snake(reward=rf.Reward(goal=1.0))  # 'goal' is gridworld's, not snake's
+    with pytest.raises(ValueError, match="unknown reward key"):
+        rf.games.Connect4(reward=rf.Reward(food=1.0))  # 'food' is snake's, not connect4's
+
+
+def test_incompatible_policy_learner_pairing_is_rejected() -> None:
+    # A search learner with a Q policy (mismatched evaluation type) must fail at Engine construction.
+    with pytest.raises(ValueError):
+        rf.Engine(
+            rf.games.GridWorld(size=5),
+            rf.policies.EpsilonGreedyQ(n_heads=_K),
+            rf.learners.TreeStrap(),
+            n_games=1,
+            max_ticks=10,
+        )
 
 
 def test_connect4_end_to_end_training() -> None:
@@ -140,12 +182,10 @@ def test_connect4_end_to_end_training() -> None:
     import torch
     from reinfors.training import BootstrappedQNetwork, train
 
-    obs_shape, n_actions = games.net_shape("connect4")
-    net = BootstrappedQNetwork(obs_shape, n_actions=n_actions, n_heads=_K)
+    net = BootstrappedQNetwork((2, 6, 7), n_actions=7, n_heads=_K)
     optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
-    engine = _connect4_engine()
     losses = train(
-        engine,
+        _connect4_engine(),
         net,
         optimizer,
         iterations=2,
@@ -156,14 +196,8 @@ def test_connect4_end_to_end_training() -> None:
     assert all(np.isfinite(loss) for loss in losses)
 
 
-# --- Model-free DQN: a second algorithm through the same generic engine, with a different record shape
+# --- Model-free DQN: a second algorithm through the same unified engine, with a different record shape
 # (off-policy transitions instead of TreeStrap targets) — the seam + binding generalization. ---
-
-
-def _dqn_engine() -> object:
-    # size, goal_row, goal_col, step_reward, goal_reward, epsilon, n_heads, bootstrap_p, max_ticks,
-    # seed, n_games
-    return reinfors._reinfors.DqnGridWorldEngine(5, 0, 1, 0.0, 1.0, 0.1, _K, 1.0, 10, 0, 3)
 
 
 def test_dqn_engine_emits_well_formed_transitions() -> None:

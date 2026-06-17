@@ -2,7 +2,7 @@
 //! from. The defaults derive from `obs_shape`/`action_count`; these pin the values per game.
 
 use reinfors_core::{Game, Space};
-use reinfors_games::{Connect4, GridWorld, Reward, Snake};
+use reinfors_games::{Connect4, GridWorld, GridWorldReward, Snake, SnakeReward};
 
 fn unbounded(shape: Vec<usize>) -> Space {
     Space::Box {
@@ -20,7 +20,7 @@ fn snake_advertises_egocentric_box_and_three_actions() {
         play_to_last: false,
         win_food_lead: None,
         initial_food_count: 3,
-        reward: Reward {
+        reward: SnakeReward {
             step: 0.0,
             food: 0.0,
             loss: 0.0,
@@ -46,8 +46,10 @@ fn gridworld_advertises_size_scaled_box_and_four_moves() {
     let game = GridWorld {
         size: 5,
         goal: (4, 4),
-        step_reward: 0.0,
-        goal_reward: 1.0,
+        reward: GridWorldReward {
+            step: 0.0,
+            goal: 1.0,
+        },
     };
     assert_eq!(game.observation_space(), unbounded(vec![2, 5, 5]));
     assert_eq!(game.action_space(), Space::Discrete { n: 4 });

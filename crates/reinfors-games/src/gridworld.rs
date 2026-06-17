@@ -16,14 +16,20 @@ pub struct GridState {
     pub done: bool, // reached the goal
 }
 
-/// A `size x size` grid: one agent navigates to `goal`, earning `goal_reward` on arrival (terminal)
-/// and `step_reward` otherwise. The four moves are always legal; a move into a wall keeps the agent
+/// GridWorld's reward weights: `goal` on reaching the goal (terminal), `step` on every other tick.
+#[derive(Clone, Copy, Debug)]
+pub struct GridWorldReward {
+    pub step: f64,
+    pub goal: f64,
+}
+
+/// A `size x size` grid: one agent navigates to `goal`, earning `reward.goal` on arrival (terminal)
+/// and `reward.step` otherwise. The four moves are always legal; a move into a wall keeps the agent
 /// in place.
 pub struct GridWorld {
     pub size: i32,
     pub goal: Pos,
-    pub step_reward: f64,
-    pub goal_reward: f64,
+    pub reward: GridWorldReward,
 }
 
 impl GridWorld {
@@ -71,9 +77,9 @@ impl Game for GridWorld {
         Transition {
             next_state: GridState { pos, done },
             rewards: vec![if done {
-                self.goal_reward
+                self.reward.goal
             } else {
-                self.step_reward
+                self.reward.step
             }],
             terminal: done,
         }
@@ -114,8 +120,10 @@ mod tests {
         GridWorld {
             size: 5,
             goal: (0, 1),
-            step_reward: 0.0,
-            goal_reward: 1.0,
+            reward: GridWorldReward {
+                step: 0.0,
+                goal: 1.0,
+            },
         }
     }
 
