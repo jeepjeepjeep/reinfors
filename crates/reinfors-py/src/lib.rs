@@ -13,8 +13,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use reinfors_core::{
-    Engine as CoreEngine, EngineParams, Game, Opponent, SearchConfig, SelectiveExpectimaxPolicy,
-    TreeStrapLearner,
+    DqnLearner, DqnPolicy, Engine as CoreEngine, EngineParams, Game, Opponent, SearchConfig,
+    SelectiveExpectimaxPolicy, TreeStrapLearner,
 };
 use reinfors_games::snake::{Cell, DeathCause, Snake, SnakeEnv as CoreEnv};
 use reinfors_games::{Action, Connect4, GridWorld, Reward, SearchParams, SnakeGame};
@@ -911,6 +911,173 @@ impl GridWorldEngine {
     }
 }
 
+/// DQN's `collect` output — a different record shape from TreeStrap's `(obs, targets, masks)`: raw
+/// off-policy transitions `(obs, action, reward, next_obs, done, mask)` for a replay buffer, plus
+/// telemetry. The differently-shaped output is the point — it exercises the binding's record boundary.
+type DqnCollectOutput<'py> = (
+    Bound<'py, PyArray2<f32>>,  // obs [M, dim]
+    Bound<'py, PyArray1<i64>>,  // actions [M]
+    Bound<'py, PyArray1<f64>>,  // rewards [M]
+    Bound<'py, PyArray2<f32>>,  // next_obs [M, dim]
+    Bound<'py, PyArray1<bool>>, // done [M]
+    Bound<'py, PyArray2<f32>>,  // per-head bootstrap masks [M, K]
+    Bound<'py, PyDict>,         // telemetry (episodes + decisions; no search stats)
+);
+
+/// Marshal a DQN rollout's `Transition` records into numpy arrays for a Python replay buffer.
+fn dqn_engine_collect<'py, G: Game + Sync>(
+    inner: &mut CoreEngine<G, DqnPolicy, DqnLearner>,
+    py: Python<'py>,
+    n_records: usize,
+    infer: &Bound<'_, PyAny>,
+    dim: usize,
+    action_count: usize,
+    n_heads: usize,
+) -> PyResult<DqnCollectOutput<'py>>
+where
+    G::State: Send,
+{
+    let mut callback_err: Option<PyErr> = None;
+    let (records, stats) = {
+        let mut infer_fn = infer_closure(
+            py,
+            infer,
+            dim,
+            action_count,
+            Some(n_heads),
+            &mut callback_err,
+        );
+        inner.collect(n_records, &mut infer_fn)
+    };
+    if let Some(e) = callback_err {
+        return Err(e);
+    }
+    let m = records.len();
+    let k = if m > 0 {
+        records[0].mask.len()
+    } else {
+        n_heads
+    };
+    let mut obs_flat: Vec<f32> = Vec::with_capacity(m * dim);
+    let mut next_flat: Vec<f32> = Vec::with_capacity(m * dim);
+    let mut mask_flat: Vec<f32> = Vec::with_capacity(m * k);
+    let mut actions: Vec<i64> = Vec::with_capacity(m);
+    let mut rewards: Vec<f64> = Vec::with_capacity(m);
+    let mut dones: Vec<bool> = Vec::with_capacity(m);
+    for t in records {
+        obs_flat.extend(t.obs);
+        next_flat.extend(t.next_obs); // always `dim`-length for a transition learner (s' of the step)
+        mask_flat.extend(t.mask);
+        actions.push(t.action as i64);
+        rewards.push(t.reward);
+        dones.push(t.terminal);
+    }
+    let obs_arr = Array2::from_shape_vec((m, dim), obs_flat)
+        .expect("obs shape")
+        .into_pyarray(py);
+    let next_arr = Array2::from_shape_vec((m, dim), next_flat)
+        .expect("next_obs shape")
+        .into_pyarray(py);
+    let mask_arr = Array2::from_shape_vec((m, k), mask_flat)
+        .expect("mask shape")
+        .into_pyarray(py);
+    let telemetry = PyDict::new(py);
+    let episodes: Vec<(Vec<f64>, usize)> = stats
+        .episodes
+        .iter()
+        .map(|e| (e.reward.clone(), e.length))
+        .collect();
+    telemetry.set_item("episodes", episodes)?;
+    telemetry.set_item("decisions", stats.decisions)?;
+    Ok((
+        obs_arr,
+        actions.into_pyarray(py),
+        rewards.into_pyarray(py),
+        next_arr,
+        dones.into_pyarray(py),
+        mask_arr,
+        telemetry,
+    ))
+}
+
+/// A model-free bootstrapped-DQN rollout engine over GridWorld — the second algorithm, exercising the
+/// generic engine with a non-search policy and a transition record. `collect` returns transitions.
+#[pyclass]
+struct DqnGridWorldEngine {
+    inner: CoreEngine<GridWorld, DqnPolicy, DqnLearner>,
+    dim: usize,
+    action_count: usize,
+    n_heads: usize,
+}
+
+#[pymethods]
+impl DqnGridWorldEngine {
+    #[new]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (size, goal_row, goal_col, step_reward, goal_reward, epsilon, n_heads, bootstrap_p, max_ticks, seed, n_games))]
+    fn new(
+        size: i32,
+        goal_row: i32,
+        goal_col: i32,
+        step_reward: f64,
+        goal_reward: f64,
+        epsilon: f64,
+        n_heads: usize,
+        bootstrap_p: f64,
+        max_ticks: usize,
+        seed: u64,
+        n_games: usize,
+    ) -> PyResult<Self> {
+        use pyo3::exceptions::PyValueError;
+        if n_games < 1 || max_ticks < 1 || n_heads < 1 {
+            return Err(PyValueError::new_err(
+                "n_games, max_ticks, n_heads must be >= 1",
+            ));
+        }
+        for (name, v) in [("epsilon", epsilon), ("bootstrap_p", bootstrap_p)] {
+            if !(0.0..=1.0).contains(&v) {
+                return Err(PyValueError::new_err(format!("{name} must be in [0, 1]")));
+            }
+        }
+        let game = GridWorld {
+            size,
+            goal: (goal_row, goal_col),
+            step_reward,
+            goal_reward,
+        };
+        let policy = DqnPolicy::new(n_heads, epsilon);
+        let learner = DqnLearner::new(n_heads, bootstrap_p);
+        let engine_params = EngineParams {
+            n_games,
+            max_ticks,
+            seed,
+        };
+        Ok(DqnGridWorldEngine {
+            inner: CoreEngine::new(game, policy, learner, engine_params),
+            dim: 2 * (size as usize) * (size as usize),
+            action_count: 4,
+            n_heads,
+        })
+    }
+
+    fn collect<'py>(
+        &mut self,
+        py: Python<'py>,
+        n_records: usize,
+        infer: Bound<'_, PyAny>,
+    ) -> PyResult<DqnCollectOutput<'py>> {
+        dqn_engine_collect(
+            &mut self.inner,
+            py,
+            n_records,
+            &infer,
+            self.dim,
+            self.action_count,
+            self.n_heads,
+        )
+    }
+}
+
 #[pyfunction]
 fn core_version() -> &'static str {
     reinfors_core::version()
@@ -965,5 +1132,6 @@ fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Engine>()?;
     m.add_class::<Connect4Engine>()?;
     m.add_class::<GridWorldEngine>()?;
+    m.add_class::<DqnGridWorldEngine>()?;
     Ok(())
 }

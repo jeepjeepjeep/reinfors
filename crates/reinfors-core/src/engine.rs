@@ -178,6 +178,8 @@ where
                     evaluation: eval,
                     action: rel,
                     reward: 0.0, // filled in from this tick's transition after advancing
+                    next_obs: Vec::new(), // filled below when the learner needs it
+                    terminal: false,
                 });
             }
 
@@ -198,15 +200,25 @@ where
                 // matching snake_RL's runner setting `survived_to_max_ticks` so it propagates through
                 // z-mixing to earlier steps.
                 let truncated = self.ticks[gi] >= self.params.max_ticks && !terminal;
+                let needs_next_obs = self.learner.needs_next_obs();
                 for (si, action) in agents.iter().enumerate() {
                     if action.is_some() {
                         let mut reward = transition.rewards[si];
                         if truncated {
                             reward += self.game.truncation_bonus(&self.states[gi], si);
                         }
-                        // this agent acted this tick — attach the realized reward to its last decision
+                        // `s'` for a transition learner (DQN): the post-transition observation. Skipped
+                        // (left empty) for return-based learners so they pay no per-step obs cost.
+                        let next_obs = if needs_next_obs {
+                            self.game.observe(&self.states[gi], si)
+                        } else {
+                            Vec::new()
+                        };
+                        // this agent acted this tick — attach the realized transition to its last decision
                         if let Some(step) = self.traj[gi][si].last_mut() {
                             step.reward = reward;
+                            step.next_obs = next_obs;
+                            step.terminal = terminal;
                         }
                     }
                 }

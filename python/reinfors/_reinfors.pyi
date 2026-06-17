@@ -155,3 +155,22 @@ class GridWorldEngine:
     ) -> None: ...
     # collect returns (obs [M, 2*size*size] f32, targets [M, K, 4] f64, masks [M, K] f32) + telemetry.
     def collect(self, n_records: int, infer: Any) -> tuple[Any, Any, Any, dict[str, Any]]: ...
+
+class DqnGridWorldEngine:
+    def __init__(
+        self,
+        size: int,
+        goal_row: int,
+        goal_col: int,
+        step_reward: float,
+        goal_reward: float,
+        epsilon: float,
+        n_heads: int,
+        bootstrap_p: float,
+        max_ticks: int,
+        seed: int,
+        n_games: int,
+    ) -> None: ...
+    # collect returns off-policy transitions: (obs [M, dim] f32, actions [M] i64, rewards [M] f64,
+    # next_obs [M, dim] f32, dones [M] bool, masks [M, K] f32) + telemetry.
+    def collect(self, n_records: int, infer: Any) -> tuple[Any, Any, Any, Any, Any, Any, dict[str, Any]]: ...
