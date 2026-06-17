@@ -18,21 +18,28 @@ pub struct Connect4State {
     done: bool,
 }
 
-/// Standard 7x6 Connect-4 with zero-sum terminal rewards.
-pub struct Connect4 {
-    pub win_reward: f64,
-    pub loss_reward: f64,
-    pub draw_reward: f64,
+/// Connect-4's terminal reward weights (zero-sum: the loser gets `loss`, the winner `win`).
+#[derive(Clone, Copy, Debug)]
+pub struct Connect4Reward {
+    pub win: f64,
+    pub loss: f64,
+    pub draw: f64,
 }
 
-impl Default for Connect4 {
+impl Default for Connect4Reward {
     fn default() -> Self {
-        Connect4 {
-            win_reward: 1.0,
-            loss_reward: -1.0,
-            draw_reward: 0.0,
+        Connect4Reward {
+            win: 1.0,
+            loss: -1.0,
+            draw: 0.0,
         }
     }
+}
+
+/// Standard 7x6 Connect-4 with zero-sum terminal rewards.
+#[derive(Default)]
+pub struct Connect4 {
+    pub reward: Connect4Reward,
 }
 
 impl Connect4 {
@@ -76,13 +83,13 @@ impl Connect4 {
             Some(w) => (0..2)
                 .map(|a| {
                     if a == w {
-                        self.win_reward
+                        self.reward.win
                     } else {
-                        self.loss_reward
+                        self.reward.loss
                     }
                 })
                 .collect(),
-            None => vec![self.draw_reward; 2],
+            None => vec![self.reward.draw; 2],
         }
     }
 }

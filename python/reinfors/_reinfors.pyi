@@ -69,108 +69,70 @@ class SnakeEnv:
         seed: int = ...,
     ) -> SearchOutput: ...
 
+class Reward:
+    # A generic named-weight reward; each game validates the keys it understands (snake: step/food/
+    # loss/draw/kill/win/survival; connect4: win/loss/draw; gridworld: step/goal).
+    def __init__(self, **weights: float) -> None: ...
+
+# Opaque composition handles, built via the staticmethod constructors and passed to `Engine`.
+class GameHandle:
+    @staticmethod
+    def Snake(
+        grid_size: int = ...,
+        initial_length: int = ...,
+        food: int = ...,
+        play_to_last: bool = ...,
+        win_food_lead: int | None = ...,
+        reward: Reward | None = ...,
+    ) -> GameHandle: ...
+    @staticmethod
+    def Connect4(reward: Reward | None = ...) -> GameHandle: ...
+    @staticmethod
+    def GridWorld(
+        size: int = ...,
+        goal_row: int = ...,
+        goal_col: int = ...,
+        reward: Reward | None = ...,
+    ) -> GameHandle: ...
+
+class PolicyHandle:
+    @staticmethod
+    def SelectiveExpectimax(
+        expansion_budget: int = ...,
+        top_k: int = ...,
+        max_depth: int = ...,
+        beta: float = ...,
+        food_samples: int = ...,
+        n_heads: int = ...,
+        epsilon: float = ...,
+        opponent: str = ...,
+        opp_temperature: float = ...,
+        opp_floor: float = ...,
+    ) -> PolicyHandle: ...
+    @staticmethod
+    def EpsilonGreedyQ(n_heads: int = ..., epsilon: float = ...) -> PolicyHandle: ...
+
+class LearnerHandle:
+    @staticmethod
+    def TreeStrap(
+        gamma: float = ...,
+        outcome_weight: float = ...,
+        bootstrap_p: float = ...,
+        interior_targets: bool = ...,
+    ) -> LearnerHandle: ...
+    @staticmethod
+    def Dqn(bootstrap_p: float = ...) -> LearnerHandle: ...
+
 class Engine:
     def __init__(
         self,
+        game: GameHandle,
+        policy: PolicyHandle,
+        learner: LearnerHandle,
         n_games: int,
-        grid_size: int,
-        initial_length: int,
-        play_to_last: bool,
-        win_food_lead: int | None,
-        initial_food_count: int,
-        gamma: float,
-        beta: float,
-        expansion_budget: int,
-        top_k: int,
-        max_depth: int,
-        reward: tuple[float, float, float, float, float, float, float],
-        opponent: str,
-        opp_temperature: float,
-        opp_floor: float,
-        epsilon: float,
         max_ticks: int,
-        n_heads: int,
-        outcome_weight: float,
-        interior_targets: bool,
-        bootstrap_p: float,
-        seed: int,
-        food_samples: int = ...,
+        seed: int = ...,
     ) -> None: ...
-    # collect returns (obs [M, 5*g*g] f32, targets [M, K, 3] f64, masks [M, K] f32) numpy arrays plus a
-    # telemetry dict (finished-episode summaries + per-call search aggregates).
-    def collect(self, n_records: int, infer: Any) -> tuple[Any, Any, Any, dict[str, Any]]: ...
-
-class Connect4Engine:
-    def __init__(
-        self,
-        win_reward: float,
-        loss_reward: float,
-        draw_reward: float,
-        gamma: float,
-        beta: float,
-        expansion_budget: int,
-        top_k: int,
-        max_depth: int,
-        opponent: str,
-        opp_temperature: float,
-        opp_floor: float,
-        epsilon: float,
-        max_ticks: int,
-        n_heads: int,
-        outcome_weight: float,
-        interior_targets: bool,
-        bootstrap_p: float,
-        seed: int,
-        n_games: int,
-        food_samples: int = ...,
-    ) -> None: ...
-    # collect returns (obs [M, 2*6*7] f32, targets [M, K, 7] f64, masks [M, K] f32) + telemetry dict.
-    def collect(self, n_records: int, infer: Any) -> tuple[Any, Any, Any, dict[str, Any]]: ...
-
-class GridWorldEngine:
-    def __init__(
-        self,
-        size: int,
-        goal_row: int,
-        goal_col: int,
-        step_reward: float,
-        goal_reward: float,
-        gamma: float,
-        beta: float,
-        expansion_budget: int,
-        top_k: int,
-        max_depth: int,
-        opponent: str,
-        opp_temperature: float,
-        opp_floor: float,
-        epsilon: float,
-        max_ticks: int,
-        n_heads: int,
-        outcome_weight: float,
-        interior_targets: bool,
-        bootstrap_p: float,
-        seed: int,
-        n_games: int,
-        food_samples: int = ...,
-    ) -> None: ...
-    # collect returns (obs [M, 2*size*size] f32, targets [M, K, 4] f64, masks [M, K] f32) + telemetry.
-    def collect(self, n_records: int, infer: Any) -> tuple[Any, Any, Any, dict[str, Any]]: ...
-
-class DqnGridWorldEngine:
-    def __init__(
-        self,
-        size: int,
-        goal_row: int,
-        goal_col: int,
-        step_reward: float,
-        goal_reward: float,
-        epsilon: float,
-        n_heads: int,
-        bootstrap_p: float,
-        max_ticks: int,
-        seed: int,
-        n_games: int,
-    ) -> None: ...
-    # collect returns off-policy transitions: (obs [M, dim] f32, actions [M] i64, rewards [M] f64,
-    # next_obs [M, dim] f32, dones [M] bool, masks [M, K] f32) + telemetry.
-    def collect(self, n_records: int, infer: Any) -> tuple[Any, Any, Any, Any, Any, Any, dict[str, Any]]: ...
+    # The record batch is learner-shaped: the TreeStrap family yields (obs, targets, masks, telemetry);
+    # the DQN family yields (obs, actions, rewards, next_obs, dones, masks, telemetry).
+    def collect(self, n_records: int, infer: Any) -> Any: ...

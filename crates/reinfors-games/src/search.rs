@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use reinfors_core::{search_many, Opponent, SearchConfig, SearchResult};
 
-use crate::reward::Reward;
+use crate::reward::SnakeReward;
 use crate::snake::{Cell, SnakeBody};
 use crate::snake_game::{Snake, SnakeState};
 
@@ -24,7 +24,7 @@ pub struct SearchParams {
     /// uniform-random respawn drawn from the search's seeded RNG, the same spawn the env uses; 1 keeps
     /// a single sampled branch.
     pub food_samples: usize,
-    pub reward: Reward,
+    pub reward: SnakeReward,
     pub opponent: Opponent,
 }
 
@@ -122,7 +122,7 @@ mod tests {
             top_k: 4,
             max_depth: 6,
             food_samples: 1,
-            reward: Reward {
+            reward: SnakeReward {
                 step: 0.0,
                 food: 0.0,
                 loss: -10.0,

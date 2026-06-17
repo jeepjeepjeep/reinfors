@@ -5,7 +5,7 @@
 
 use reinfors_core::{Engine, EngineParams, SelectiveExpectimax, TreeStrap};
 use reinfors_core::{Opponent, SearchConfig};
-use reinfors_games::{Reward, SearchParams, Snake};
+use reinfors_games::{SearchParams, Snake, SnakeReward};
 
 fn params(n_games: usize, seed: u64) -> EngineParams {
     EngineParams {
@@ -50,7 +50,7 @@ fn search() -> SearchParams {
         top_k: 4,
         max_depth: 6,
         food_samples: 1,
-        reward: Reward {
+        reward: SnakeReward {
             step: 0.0,
             food: 0.0,
             loss: -10.0,

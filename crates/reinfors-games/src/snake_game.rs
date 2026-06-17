@@ -8,7 +8,7 @@ use reinfors_core::game::{Actor, Game, Rng, Transition};
 
 use crate::action::{relative_to_absolute, Action, RELATIVE_ACTIONS};
 use crate::obs::{egocentric_parts, N_CHANNELS};
-use crate::reward::Reward;
+use crate::reward::SnakeReward;
 use crate::snake::{Cell, SnakeBody, SnakeEnv};
 
 /// Snake's dynamic state: the two snakes and the food. Static config (grid size, rules, reward) lives
@@ -27,7 +27,7 @@ pub struct Snake {
     pub play_to_last: bool,
     pub win_food_lead: Option<usize>,
     pub initial_food_count: usize,
-    pub reward: Reward,
+    pub reward: SnakeReward,
 }
 
 impl Snake {
@@ -195,8 +195,8 @@ mod tests {
 
     const G: i32 = 8;
 
-    fn reward() -> Reward {
-        Reward {
+    fn reward() -> SnakeReward {
+        SnakeReward {
             step: 0.0,
             food: 1.0,
             loss: -10.0,
