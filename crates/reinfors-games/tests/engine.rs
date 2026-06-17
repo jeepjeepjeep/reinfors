@@ -5,7 +5,14 @@
 
 use reinfors_core::{Engine, EngineParams, SelectiveExpectimax, TreeStrap};
 use reinfors_core::{Opponent, SearchConfig};
-use reinfors_games::{SearchParams, Snake, SnakeReward};
+use reinfors_games::{EgocentricSnake, SearchParams, Snake, SnakeReward};
+
+/// The default snake encoder for the engine (egocentric, sized from the search's grid).
+fn enc(s: &SearchParams) -> Box<EgocentricSnake> {
+    Box::new(EgocentricSnake {
+        grid_size: s.grid_size,
+    })
+}
 
 fn params(n_games: usize, seed: u64) -> EngineParams {
     EngineParams {
@@ -84,6 +91,7 @@ fn engine(
     let s = search();
     Engine::new(
         game(&s, 3),
+        enc(&s),
         policy(&s, n_heads),
         learner(0.5, true),
         params(n_games, seed),
@@ -145,6 +153,7 @@ fn games_carry_food_so_snakes_can_eat() {
     let s = search();
     let mut e = Engine::new(
         game(&s, 3),
+        enc(&s),
         policy(&s, 2),
         learner(0.5, false),
         params(8, 3),
@@ -161,7 +170,7 @@ fn bootstrap_p_extremes_set_all_or_no_heads() {
     let s = search();
     // bootstrap_p now lives on the learner. n_heads (2) matches `infer`'s 2 heads.
     let all = TreeStrap::new(0.99, 0.5, 1.0, true);
-    for (_, _, mask) in Engine::new(game(&s, 3), policy(&s, 2), all, params(4, 5))
+    for (_, _, mask) in Engine::new(game(&s, 3), enc(&s), policy(&s, 2), all, params(4, 5))
         .collect(40, infer)
         .0
     {
@@ -171,7 +180,7 @@ fn bootstrap_p_extremes_set_all_or_no_heads() {
         );
     }
     let none = TreeStrap::new(0.99, 0.5, 0.0, true);
-    for (_, _, mask) in Engine::new(game(&s, 3), policy(&s, 2), none, params(4, 5))
+    for (_, _, mask) in Engine::new(game(&s, 3), enc(&s), policy(&s, 2), none, params(4, 5))
         .collect(40, infer)
         .0
     {
@@ -187,6 +196,7 @@ fn zero_outcome_weight_leaves_targets_unblended() {
     let s = search();
     let r0 = Engine::new(
         game(&s, 3),
+        enc(&s),
         policy(&s, 2),
         learner(0.0, false),
         params(4, 9),
@@ -195,6 +205,7 @@ fn zero_outcome_weight_leaves_targets_unblended() {
     .0;
     let r1 = Engine::new(
         game(&s, 3),
+        enc(&s),
         policy(&s, 2),
         learner(0.9, false),
         params(4, 9),
@@ -221,7 +232,8 @@ fn survival_bonus_propagates_through_z_mixing_on_truncation() {
         s.reward.survival = survival;
         let mut p = params(4, 0);
         p.max_ticks = 1;
-        Engine::new(game(&s, 0), policy(&s, 2), learner(1.0, false), p) // no initial food; ow=1, interior off
+        Engine::new(game(&s, 0), enc(&s), policy(&s, 2), learner(1.0, false), p)
+        // no initial food; ow=1, interior off
     };
     let base = mk(0.0).collect(4, infer).0;
     let surv = mk(bonus).collect(4, infer).0;
@@ -251,7 +263,7 @@ fn collect_reports_episode_and_search_telemetry() {
     let s = search();
     let p = params(4, 11);
     let max_ticks = p.max_ticks;
-    let mut e = Engine::new(game(&s, 3), policy(&s, 2), learner(0.5, false), p);
+    let mut e = Engine::new(game(&s, 3), enc(&s), policy(&s, 2), learner(0.5, false), p);
     let mut episodes = 0usize;
     let (mut decisions, mut max_depth, mut leaves, mut sigma, mut disagree) =
         (0usize, 0i32, 0.0, 0.0, 0.0);
@@ -310,7 +322,14 @@ fn evaluate_wraps_the_pooled_search() {
         food: std::collections::HashSet::new(),
     };
     let mut infer_fn = infer;
-    let results = p.evaluate(&g, vec![(st.clone(), 0)], 0, false, &mut infer_fn); // collect_interior = false, matching the wrapper below
+    let results = p.evaluate(
+        &g,
+        &*enc(&s),
+        vec![(st.clone(), 0)],
+        0,
+        false,
+        &mut infer_fn,
+    ); // collect_interior = false, matching the wrapper below
     let (values, _i, _stat) = selective_search(
         &s,
         st.snakes.clone(),

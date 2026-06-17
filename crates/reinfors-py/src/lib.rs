@@ -21,11 +21,12 @@ use pyo3::types::{PyDict, PyTuple};
 
 use reinfors_core::{
     Dqn, DqnRecord, Engine, EngineParams, EpsilonGreedyQ, Game, Learner, Opponent, Policy,
-    SearchConfig, SelectiveExpectimax, Space, TreeStrap, TreeStrapRecord,
+    SearchConfig, SelectiveExpectimax, Space, StateEncoder, TreeStrap, TreeStrapRecord,
 };
 use reinfors_games::snake::{Cell, DeathCause, SnakeBody, SnakeEnv as CoreEnv};
 use reinfors_games::{
-    Action, Connect4, Connect4Reward, GridWorld, GridWorldReward, SearchParams, Snake, SnakeReward,
+    Action, Connect4, Connect4Planes, Connect4Reward, EgocentricSnake, GridWorld, GridWorldPlanes,
+    GridWorldReward, SearchParams, Snake, SnakeReward,
 };
 
 // ===========================================================================
@@ -877,8 +878,10 @@ impl GameSpec {
     /// defaults. Lets a caller size a network from a handle (`game.observation_space()`) without
     /// hard-coding any game's dimensions.
     fn spaces(&self) -> (Space, Space) {
-        fn of<G: Game>(game: G) -> (Space, Space) {
-            (game.observation_space(), game.action_space())
+        // Observation space comes from the game's default encoder (representation); the action space
+        // is the game's (rules).
+        fn of<G: Game>(game: G, enc: &dyn StateEncoder<State = G::State>) -> (Space, Space) {
+            (enc.observation_space(), game.action_space())
         }
         match *self {
             GameSpec::Snake {
@@ -888,16 +891,22 @@ impl GameSpec {
                 play_to_last,
                 win_food_lead,
                 reward,
-            } => of(Snake {
-                grid_size,
-                initial_length,
-                play_to_last,
-                win_food_lead,
-                initial_food_count,
-                reward,
-            }),
-            GameSpec::Connect4 { reward } => of(Connect4 { reward }),
-            GameSpec::GridWorld { size, goal, reward } => of(GridWorld { size, goal, reward }),
+            } => of(
+                Snake {
+                    grid_size,
+                    initial_length,
+                    play_to_last,
+                    win_food_lead,
+                    initial_food_count,
+                    reward,
+                },
+                &EgocentricSnake { grid_size },
+            ),
+            GameSpec::Connect4 { reward } => of(Connect4 { reward }, &Connect4Planes),
+            GameSpec::GridWorld { size, goal, reward } => of(
+                GridWorld { size, goal, reward },
+                &GridWorldPlanes { size, goal },
+            ),
         }
     }
 }
@@ -952,6 +961,7 @@ fn check_unit(name: &str, v: f64) -> PyResult<()> {
 /// where the composed params are validated (the handles store them unchecked).
 fn build_for_game<G: Game + Send + Sync + 'static>(
     game: G,
+    enc: Box<dyn StateEncoder<State = G::State>>,
     policy: PolicySpec,
     learner: LearnerSpec,
     engine_params: EngineParams,
@@ -959,7 +969,7 @@ fn build_for_game<G: Game + Send + Sync + 'static>(
 where
     G::State: Send + Sync,
 {
-    let (c, h, w) = game.obs_shape();
+    let (c, h, w) = enc.obs_shape();
     let dim = c * h * w;
     let action_count = game.action_count();
     match (policy, learner) {
@@ -1000,7 +1010,7 @@ where
             let policy = SelectiveExpectimax::new(cfg, n_heads, epsilon);
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
             Ok(Box::new(EngineImpl {
-                inner: Engine::new(game, policy, learner, engine_params),
+                inner: Engine::new(game, enc, policy, learner, engine_params),
                 dim,
                 action_count,
                 n_heads,
@@ -1015,7 +1025,7 @@ where
             let policy = EpsilonGreedyQ::new(n_heads, epsilon);
             let learner = Dqn::new(n_heads, bootstrap_p);
             Ok(Box::new(EngineImpl {
-                inner: Engine::new(game, policy, learner, engine_params),
+                inner: Engine::new(game, enc, policy, learner, engine_params),
                 dim,
                 action_count,
                 n_heads,
@@ -1052,15 +1062,21 @@ fn build_engine(
                 initial_food_count,
                 reward,
             },
+            Box::new(EgocentricSnake { grid_size }),
             policy,
             learner,
             engine_params,
         ),
-        GameSpec::Connect4 { reward } => {
-            build_for_game(Connect4 { reward }, policy, learner, engine_params)
-        }
+        GameSpec::Connect4 { reward } => build_for_game(
+            Connect4 { reward },
+            Box::new(Connect4Planes),
+            policy,
+            learner,
+            engine_params,
+        ),
         GameSpec::GridWorld { size, goal, reward } => build_for_game(
             GridWorld { size, goal, reward },
+            Box::new(GridWorldPlanes { size, goal }),
             policy,
             learner,
             engine_params,

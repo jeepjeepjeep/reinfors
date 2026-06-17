@@ -3,7 +3,7 @@
 //! lookahead, no opponent) end to end through the generic search and rollout engine. Deterministic, so
 //! `sample_chance` is the default (empty).
 
-use reinfors_core::{Actor, Game, Transition};
+use reinfors_core::{Actor, Game, StateEncoder, Transition};
 
 type Pos = (i32, i32);
 
@@ -55,10 +55,6 @@ impl Game for GridWorld {
         DELTAS.len()
     }
 
-    fn obs_shape(&self) -> (usize, usize, usize) {
-        (N_CHANNELS, self.size as usize, self.size as usize)
-    }
-
     fn actor(&self, _state: &GridState) -> Actor {
         Actor::Agent(0)
     }
@@ -85,15 +81,6 @@ impl Game for GridWorld {
         }
     }
 
-    fn observe(&self, state: &GridState, _agent: usize) -> Vec<f32> {
-        let g = self.size as usize;
-        let mut obs = vec![0.0f32; N_CHANNELS * g * g];
-        let at = |r: i32, c: i32| (r as usize) * g + (c as usize);
-        obs[at(state.pos.0, state.pos.1)] = 1.0;
-        obs[g * g + at(self.goal.0, self.goal.1)] = 1.0;
-        obs
-    }
-
     fn initial_state(&self, rng: &mut dyn reinfors_core::Rng) -> GridState {
         // A uniform-random start cell that is not already the goal.
         let cells = (self.size * self.size) as usize;
@@ -107,6 +94,30 @@ impl Game for GridWorld {
     }
 
     // Deterministic: no `sample_chance` / `step_env` override needed (the trait defaults suffice).
+}
+
+/// The default GridWorld observation: an agent-position plane and a goal-position plane. Carries
+/// `size`/`goal` (the goal lives on `GridWorld`, not in `GridState`).
+pub struct GridWorldPlanes {
+    pub size: i32,
+    pub goal: Pos,
+}
+
+impl StateEncoder for GridWorldPlanes {
+    type State = GridState;
+
+    fn encode(&self, state: &GridState, _agent: usize) -> Vec<f32> {
+        let g = self.size as usize;
+        let mut obs = vec![0.0f32; N_CHANNELS * g * g];
+        let at = |r: i32, c: i32| (r as usize) * g + (c as usize);
+        obs[at(state.pos.0, state.pos.1)] = 1.0;
+        obs[g * g + at(self.goal.0, self.goal.1)] = 1.0;
+        obs
+    }
+
+    fn obs_shape(&self) -> (usize, usize, usize) {
+        (N_CHANNELS, self.size as usize, self.size as usize)
+    }
 }
 
 #[cfg(test)]
@@ -124,6 +135,14 @@ mod tests {
                 step: 0.0,
                 goal: 1.0,
             },
+        }
+    }
+
+    fn enc() -> GridWorldPlanes {
+        let w = world();
+        GridWorldPlanes {
+            size: w.size,
+            goal: w.goal,
         }
     }
 
@@ -227,7 +246,7 @@ mod tests {
             pos: (0, 0),
             done: false,
         };
-        let results = search_many(&w, &cfg(), vec![(start, 0)], false, 0, zero_infer);
+        let results = search_many(&w, &enc(), &cfg(), vec![(start, 0)], false, 0, zero_infer);
         let values = &results[0].0; // [K][A]
         for head in values {
             let best = (0..4)
@@ -255,7 +274,7 @@ mod tests {
             max_ticks: 30,
             seed: 0,
         };
-        let mut engine = Engine::new(world(), policy, learner, params);
+        let mut engine = Engine::new(world(), Box::new(enc()), policy, learner, params);
         let (records, stats) = engine.collect(50, zero_infer);
         assert!(records.len() >= 50);
         for (obs, tgt, mask) in &records {
@@ -281,7 +300,7 @@ mod tests {
             max_ticks: 10,
             seed: 0,
         };
-        let mut engine = Engine::new(world(), policy, learner, params);
+        let mut engine = Engine::new(world(), Box::new(enc()), policy, learner, params);
         let dim = N_CHANNELS * 25;
         let (records, stats) = engine.collect(120, zero_infer);
         assert!(records.len() >= 120);

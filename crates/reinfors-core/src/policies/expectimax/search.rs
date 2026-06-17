@@ -22,6 +22,7 @@
 
 use rayon::prelude::*;
 
+use crate::encoder::StateEncoder;
 use crate::game::{Actor, Game, Rng};
 use crate::rng::SplitMix64;
 
@@ -156,7 +157,13 @@ impl<S> Search<S> {
 
 /// One round's build phase for a single search: sort the frontier (after the root round), expand its
 /// top-k nodes one ply each, and stage the new leaves + opponent observations for the pooled forward.
-fn expand_round<G: Game>(s: &mut Search<G::State>, game: &G, cfg: &SearchConfig, first: bool) {
+fn expand_round<G: Game>(
+    s: &mut Search<G::State>,
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    cfg: &SearchConfig,
+    first: bool,
+) {
     if !first {
         sort_frontier(&s.arena, &mut s.frontier, cfg);
     }
@@ -172,6 +179,7 @@ fn expand_round<G: Game>(s: &mut Search<G::State>, game: &G, cfg: &SearchConfig,
         expand_node(
             &mut s.arena,
             game,
+            enc,
             cfg,
             ni,
             agent,
@@ -218,6 +226,7 @@ where
 /// off the calling thread, so a Python `infer` callback keeps the GIL on one thread.
 pub fn search_many<G: Game + Sync, F>(
     game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
     cfg: &SearchConfig,
     requests: Vec<(G::State, usize)>,
     collect_interior: bool,
@@ -261,7 +270,7 @@ where
         // `active` inside is equivalent to the list above (nothing mutates between).
         for_each_search(&mut searches, parallel, |_, s| {
             if s.active(budget) {
-                expand_round(s, game, cfg, first);
+                expand_round(s, game, enc, cfg, first);
                 for k in 0..s.new_leaves.len() {
                     let li = s.new_leaves[k];
                     if s.arena[li].depth < cfg.max_depth {
@@ -434,6 +443,7 @@ fn sort_frontier<S>(arena: &[Node<S>], frontier: &mut [usize], cfg: &SearchConfi
 /// contributes a single placeholder branch.
 fn agent_branching<G: Game>(
     game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
     cfg: &SearchConfig,
     state: &G::State,
     mover: usize,
@@ -453,7 +463,7 @@ fn agent_branching<G: Game>(
         }
         Opponent::Distributional { .. } => {
             let oi = opp_obs.len();
-            opp_obs.push(game.observe(state, mover));
+            opp_obs.push(enc.encode(state, mover));
             legal
                 .iter()
                 .map(|&a| (a, BranchWeight::Deferred(oi, a)))
@@ -472,6 +482,7 @@ fn agent_branching<G: Game>(
 fn push_branches<G: Game>(
     arena: &mut Vec<Node<G::State>>,
     game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
     cfg: &SearchConfig,
     state: &G::State,
     joint: &[usize],
@@ -506,7 +517,7 @@ fn push_branches<G: Game>(
         let child = if terminal {
             push_node(arena, child_state, Vec::new(), depth + 1, true)
         } else {
-            let obs = game.observe(&child_state, agent);
+            let obs = enc.encode(&child_state, agent);
             let idx = push_node(arena, child_state, obs, depth + 1, false);
             new_leaves.push(idx);
             idx
@@ -537,6 +548,7 @@ fn push_branches<G: Game>(
 fn expand_node<G: Game>(
     arena: &mut Vec<Node<G::State>>,
     game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
     cfg: &SearchConfig,
     ni: usize,
     agent: usize,
@@ -551,7 +563,7 @@ fn expand_node<G: Game>(
 
     let (edges, max_node) = match game.actor(&state) {
         Actor::Simultaneous => {
-            let opp_b = agent_branching(game, cfg, &state, opp, opp_obs);
+            let opp_b = agent_branching(game, enc, cfg, &state, opp, opp_obs);
             let agent_legal = game.legal_actions(&state, agent);
             let mut edges = Vec::with_capacity(agent_legal.len());
             for &agent_action in &agent_legal {
@@ -563,6 +575,7 @@ fn expand_node<G: Game>(
                     push_branches(
                         arena,
                         game,
+                        enc,
                         cfg,
                         &state,
                         &joint,
@@ -589,6 +602,7 @@ fn expand_node<G: Game>(
                 push_branches(
                     arena,
                     game,
+                    enc,
                     cfg,
                     &state,
                     &joint,
@@ -605,7 +619,7 @@ fn expand_node<G: Game>(
             (edges, true)
         }
         Actor::Agent(mover) => {
-            let mover_b = agent_branching(game, cfg, &state, mover, opp_obs);
+            let mover_b = agent_branching(game, enc, cfg, &state, mover, opp_obs);
             let mut branches = Vec::with_capacity(mover_b.len());
             for &(action, bw) in &mover_b {
                 let mut joint = vec![0usize; num_agents];
@@ -613,6 +627,7 @@ fn expand_node<G: Game>(
                 push_branches(
                     arena,
                     game,
+                    enc,
                     cfg,
                     &state,
                     &joint,

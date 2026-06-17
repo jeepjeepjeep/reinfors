@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 
+use crate::encoder::StateEncoder;
 use crate::game::Game;
 use crate::learner::{Learner, Step};
 use crate::policy::Policy;
@@ -59,6 +60,7 @@ pub struct EngineParams {
 
 pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     game: G,
+    encoder: Box<dyn StateEncoder<State = G::State>>,
     policy: P,
     learner: L,
     params: EngineParams,
@@ -79,7 +81,13 @@ where
 {
     /// Build an engine over `game` driven by `policy` (evaluation + acting) and `learner` (training
     /// records), with the rollout knobs from `params`. The game owns its reward and rules.
-    pub fn new(game: G, policy: P, learner: L, params: EngineParams) -> Self {
+    pub fn new(
+        game: G,
+        encoder: Box<dyn StateEncoder<State = G::State>>,
+        policy: P,
+        learner: L,
+        params: EngineParams,
+    ) -> Self {
         debug_assert!((1..=2).contains(&game.num_agents()));
         let mut rngs: Vec<SplitMix64> = (0..params.n_games)
             .map(|i| {
@@ -104,6 +112,7 @@ where
         let search_rng = SplitMix64::new(params.seed ^ 0xD1B5_4A32_D192_ED03);
         Engine {
             game,
+            encoder,
             policy,
             learner,
             params,
@@ -159,6 +168,7 @@ where
             let search_seed = self.search_rng.next_u64();
             let evals = self.policy.evaluate(
                 &self.game,
+                &*self.encoder,
                 requests,
                 search_seed,
                 collect_interior,
@@ -181,7 +191,7 @@ where
                         .select(&eval, &mut self.policy_states[gi], &mut self.rngs[gi]);
                 acted[gi][si] = Some(rel);
                 self.traj[gi][si].push(Step {
-                    obs: self.game.observe(&self.states[gi], si),
+                    obs: self.encoder.encode(&self.states[gi], si),
                     evaluation: eval,
                     action: rel,
                     reward: 0.0, // filled in from this tick's transition after advancing
@@ -217,7 +227,7 @@ where
                         // `s'` for a transition learner (DQN): the post-transition observation. Skipped
                         // (left empty) for return-based learners so they pay no per-step obs cost.
                         let next_obs = if needs_next_obs {
-                            self.game.observe(&self.states[gi], si)
+                            self.encoder.encode(&self.states[gi], si)
                         } else {
                             Vec::new()
                         };
@@ -311,7 +321,7 @@ where
             }
             for si in 0..num_agents {
                 if self.agent_active(&self.states[gi], si) && !self.traj[gi][si].is_empty() {
-                    obs_flat.extend(self.game.observe(&self.states[gi], si));
+                    obs_flat.extend(self.encoder.encode(&self.states[gi], si));
                     meta.push((gi, si));
                 }
             }

@@ -8,7 +8,7 @@ use reinfors_core::{search_many, Opponent, SearchConfig, SearchResult};
 
 use crate::reward::SnakeReward;
 use crate::snake::{Cell, SnakeBody};
-use crate::snake_game::{Snake, SnakeState};
+use crate::snake_game::{EgocentricSnake, Snake, SnakeState};
 
 pub struct SearchParams {
     pub grid_size: i32,
@@ -64,11 +64,14 @@ where
     F: FnMut(Vec<f32>, usize) -> Vec<f64>,
 {
     let (game, cfg) = snake_game_and_config(p);
+    let enc = EgocentricSnake {
+        grid_size: game.grid_size,
+    };
     let requests: Vec<(SnakeState, usize)> = requests
         .into_iter()
         .map(|(snakes, food, agent)| (SnakeState { snakes, food }, agent))
         .collect();
-    search_many(&game, &cfg, requests, collect_interior, seed, infer)
+    search_many(&game, &enc, &cfg, requests, collect_interior, seed, infer)
 }
 
 /// Single-request convenience wrapper over [`selective_search_many`].
@@ -398,13 +401,24 @@ mod tests {
         p.expansion_budget = 24;
 
         let (game, cfg) = snake_game_and_config(&p);
+        let enc = EgocentricSnake {
+            grid_size: game.grid_size,
+        };
         let state = SnakeState {
             snakes: snakes.clone(),
             food: food.clone(),
         };
-        let generic = search_many(&game, &cfg, vec![(state, 0usize)], true, 0, two_head_infer)
-            .pop()
-            .unwrap();
+        let generic = search_many(
+            &game,
+            &enc,
+            &cfg,
+            vec![(state, 0usize)],
+            true,
+            0,
+            two_head_infer,
+        )
+        .pop()
+        .unwrap();
         let wrapped = selective_search(&p, snakes, food, 0, true, 0, two_head_infer);
 
         assert_eq!(generic.0, wrapped.0, "root values must match");

@@ -36,19 +36,6 @@ pub trait Game {
     fn num_agents(&self) -> usize;
     /// Net head width: the (homogeneous) per-agent action-space size.
     fn action_count(&self) -> usize;
-    /// Observation tensor shape `(C, H, W)` the value network consumes.
-    fn obs_shape(&self) -> (usize, usize, usize);
-
-    /// The observation `Space` the value network consumes. Defaults to an unbounded `Box` of
-    /// `obs_shape`; a game may override to advertise tighter bounds (e.g. one-hot planes in `[0, 1]`).
-    fn observation_space(&self) -> Space {
-        let (c, h, w) = self.obs_shape();
-        Space::Box {
-            shape: vec![c, h, w],
-            low: f32::NEG_INFINITY,
-            high: f32::INFINITY,
-        }
-    }
     /// The per-agent action `Space`. Defaults to `Discrete(action_count)`. Assumes homogeneous action
     /// spaces across agents (consistent with `action_count`, the single per-agent action count, and the
     /// net's uniform head width); heterogeneous per-agent actions would need a per-agent form here plus
@@ -86,8 +73,6 @@ pub trait Game {
         let _ = (state, transition, rng, n);
         Vec::new()
     }
-    /// Egocentric observation for `agent`, a flat `[C*H*W]` f32 buffer.
-    fn observe(&self, state: &Self::State, agent: usize) -> Vec<f32>;
 
     /// A fresh episode's initial state, drawing any initial chance (e.g. apple placement) from `rng`.
     fn initial_state(&self, rng: &mut dyn Rng) -> Self::State;
