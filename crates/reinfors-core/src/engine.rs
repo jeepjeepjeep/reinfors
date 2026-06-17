@@ -1,34 +1,28 @@
-//! Parallel rollout collector — the data generator that turns the search core into training data.
+//! Parallel rollout collector — the generic data-generation substrate. It is algorithm-agnostic: the
+//! acting algorithm lives behind the [`Policy`] seam (evaluate the options + select an action) and the
+//! training-record production behind the [`Learner`] seam (immediate records + episode-end records);
+//! the Engine owns only what is common to every synchronous rollout.
 //!
-//! An `Engine<G>` holds N independent games of an arbitrary [`Game`]. Each `collect` step runs the
-//! pooled selective search for every active agent across every game in lockstep (one batched `infer`
-//! per round, shared across all games — the throughput win), records each decision's
-//! `(observation, searched per-head values)` as a TreeStrap target, picks an action by Thompson
-//! sampling (one head per game per episode) with an epsilon-greedy override, advances every game, and
-//! resets finished ones.
+//! An `Engine<G, P, L>` holds N independent games of an arbitrary [`Game`]. Each `collect` step gathers
+//! one request per active agent across every game, has the `Policy` evaluate them all in one pooled
+//! pass (one batched `infer` per round — the throughput win), then per decision: folds the policy's
+//! telemetry, lets the `Learner` emit its immediate records, has the `Policy` `select` an action, and
+//! buffers the step; finally it advances every game and flushes finished ones' trajectories through the
+//! `Learner` for their episode-end records.
 //!
-//! Per-game diversity comes from each game drawing its own Thompson head and epsilon noise, plus its
-//! own RNG environment chance (e.g. snake's apple spawns): games start from the same deterministic
-//! placement, so without this they would be identical. The game's `step_env`/`initial_state` draw the
-//! true environment chance from each game's own RNG — the same `sample_chance` the search Monte-Carlos
-//! in-tree (from its own seeded stream), so env and search share one chance model; see `search`.)
-//!
-//! Records carry the full TreeStrap training semantics of `snake_RL`'s `EnsembleTreeStrapRunner`:
-//! - **z-mixing** — each executed decision is held back until its episode ends, then the executed
-//!   action's entry of every head is blended with the realized discounted return (`blend_outcome_targets`),
-//!   so deaths the search failed to foresee still reach the training signal. A truncation tick reached
-//!   alive pays the game's `truncation_bonus` (snake's `survival`), which z-mixing carries to earlier steps.
-//! - **interior targets** — with `interior_targets`, every expanded interior MAX node of the search
-//!   tree is emitted as an extra `(obs, values)` record (true TreeStrap). These are counterfactual
-//!   states with no realized outcome, so they are emitted immediately and never z-blended.
-//! - **bootstrap masks** — every record carries a per-head `(K,)` mask (`rng < bootstrap_p`) so the
-//!   ensemble heads train on different subsets and stay diverse.
+//! Per-game diversity comes from each game's own per-episode policy state (e.g. a Thompson head) and
+//! its own RNG environment chance (snake's apple spawns): games start from the same deterministic
+//! placement, so without this they would be identical. `step_env`/`initial_state` draw the true env
+//! chance from each game's own RNG — the same `sample_chance` the search Monte-Carlos in-tree (from its
+//! own seeded stream), so env and search share one chance model; see `search`. A truncation tick
+//! reached alive pays the game's `truncation_bonus` (snake's `survival`), which the `Learner`'s z-mix
+//! carries back to earlier steps.
 
 use std::collections::HashMap;
 
-use crate::algo::{Learner, SearchEvaluation, Step};
-use crate::game::{Game, Rng};
-use crate::planner::Planner;
+use crate::algo::{Learner, Step};
+use crate::game::Game;
+use crate::policy::Policy;
 use crate::rng::SplitMix64;
 
 /// One finished episode's outcome, for logging: per-agent total realized reward (one entry per
@@ -54,20 +48,18 @@ pub struct CollectStats {
     pub sum_disagreement: f64, // sum over decisions of the root head-disagreement
 }
 
-/// Engine-level rollout knobs (everything that is not a game or *algorithm* parameter — the search
-/// config + interior-target flag live on the `Planner`; the z-mix `outcome_weight` and bootstrap
-/// masking live on the `Learner`).
+/// Engine-level rollout knobs (everything that is not a game or *algorithm* parameter — search config,
+/// interior-target flag, ensemble heads, and epsilon live on the `Policy`; z-mix `outcome_weight` and
+/// bootstrap masking live on the `Learner`).
 pub struct EngineParams {
     pub n_games: usize,
     pub max_ticks: usize,
-    pub epsilon: f64,
-    pub n_heads: usize,
     pub seed: u64,
 }
 
-pub struct Engine<G: Game + Sync, P: Planner, L: Learner<SearchEvaluation>> {
+pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     game: G,
-    planner: P,
+    policy: P,
     learner: L,
     params: EngineParams,
     states: Vec<G::State>,
@@ -76,20 +68,19 @@ pub struct Engine<G: Game + Sync, P: Planner, L: Learner<SearchEvaluation>> {
     // draws never perturbs the env's draw order (deterministic games stay bit-reproducible). A fresh
     // per-decision seed is drawn from it so each search samples with fresh randomness, like the env.
     search_rng: SplitMix64,
-    heads: Vec<usize>, // per-game Thompson head for the current episode
+    policy_states: Vec<P::PolicyState>, // per-game acting state for the current episode (Thompson head)
     ticks: Vec<usize>,
-    traj: Vec<Vec<Vec<Step<SearchEvaluation>>>>, // [game][agent] decisions awaiting episode-end records
+    traj: Vec<Vec<Vec<Step<P::Evaluation>>>>, // [game][agent] decisions awaiting episode-end records
 }
 
-impl<G: Game + Sync, P: Planner, L: Learner<SearchEvaluation>> Engine<G, P, L>
+impl<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> Engine<G, P, L>
 where
     G::State: Send,
 {
-    /// Build an engine over `game` driven by `planner` (search/evaluation) and `learner` (training
+    /// Build an engine over `game` driven by `policy` (evaluation + acting) and `learner` (training
     /// records), with the rollout knobs from `params`. The game owns its reward and rules.
-    pub fn new(game: G, planner: P, learner: L, params: EngineParams) -> Self {
+    pub fn new(game: G, policy: P, learner: L, params: EngineParams) -> Self {
         debug_assert!((1..=2).contains(&game.num_agents()));
-        let n_heads = params.n_heads.max(1);
         let mut rngs: Vec<SplitMix64> = (0..params.n_games)
             .map(|i| {
                 SplitMix64::new(
@@ -100,10 +91,10 @@ where
             })
             .collect();
         let mut states: Vec<G::State> = Vec::with_capacity(params.n_games);
-        let mut heads: Vec<usize> = Vec::with_capacity(params.n_games);
+        let mut policy_states: Vec<P::PolicyState> = Vec::with_capacity(params.n_games);
         for rng in rngs.iter_mut() {
             states.push(game.initial_state(rng));
-            heads.push(rng.below(n_heads));
+            policy_states.push(policy.begin_episode(rng));
         }
         let ticks = vec![0; params.n_games];
         let num_agents = game.num_agents();
@@ -113,13 +104,13 @@ where
         let search_rng = SplitMix64::new(params.seed ^ 0xD1B5_4A32_D192_ED03);
         Engine {
             game,
-            planner,
+            policy,
             learner,
             params,
             states,
             rngs,
             search_rng,
-            heads,
+            policy_states,
             ticks,
             traj,
         }
@@ -142,7 +133,6 @@ where
         // values, with the per-game clamp handling the all-terminal single-head case.)
         let mut out: Vec<L::Record> = Vec::new();
         let mut stats = CollectStats::default();
-        let action_count = self.game.action_count();
         let num_agents = self.game.num_agents();
 
         while out.len() < n_records {
@@ -161,55 +151,27 @@ where
                 break; // every game dead this instant (resets below normally keep at least one alive)
             }
 
-            // 2. The planner evaluates them all in one pooled pass (one batched forward per round,
-            //    shared across games — the throughput win); for TreeStrap this is the selective search.
+            // 2. The policy evaluates them all in one pooled pass (one batched forward per round,
+            //    shared across games — the throughput win); for selective expectimax this is the search.
             let search_seed = self.search_rng.next_u64();
-            let results = self
-                .planner
+            let evals = self
+                .policy
                 .evaluate(&self.game, requests, search_seed, &mut infer);
 
-            // 3. Emit interior targets immediately, buffer each executed decision, choose its action.
-            //    `acted[gi][si]` records the relative action index for an agent that decided this tick.
+            // 3. Per decision: fold its telemetry, emit the learner's immediate records (TreeStrap
+            //    interior nodes), choose the action, and buffer the step. `acted[gi][si]` records the
+            //    chosen action index for an agent that decided this tick.
             let mut acted: Vec<Vec<Option<usize>>> =
                 vec![vec![None; num_agents]; self.states.len()];
-            for ((values, interior, search_stats), &(gi, si)) in
-                results.into_iter().zip(meta.iter())
-            {
+            for (mut eval, &(gi, si)) in evals.into_iter().zip(meta.iter()) {
                 stats.decisions += 1;
-                stats.max_depth = stats.max_depth.max(search_stats.max_depth);
-                stats.sum_leaves += search_stats.leaves as f64;
-                stats.sum_rounds += search_stats.rounds as f64;
-                stats.sum_expansions += search_stats.expansions as f64;
-                if search_stats.leaves > 0 {
-                    stats.sum_sigma += search_stats.sigma_sum / search_stats.leaves as f64;
-                }
-                stats.sum_disagreement += root_disagreement(&values);
-                // A search whose root children are all terminal evaluates no leaves, so the generic
-                // search cannot infer the head count and returns a single (head-agnostic, terminal-
-                // reward) row. Broadcast it to the configured `n_heads` so every emitted record's
-                // target is `[n_heads][A]`. Searches that evaluated leaves already return `[n_heads][A]`,
-                // so this is a no-op for them (e.g. snake).
-                let nh = self.params.n_heads.max(1);
-                let values: Vec<Vec<f64>> = if values.len() < nh {
-                    vec![values[0].clone(); nh]
-                } else {
-                    values
-                };
-                // The learner emits its immediate records (TreeStrap interior nodes) now, draining them
-                // out of the evaluation so they are never buffered for the whole episode.
-                let mut eval = SearchEvaluation {
-                    values,
-                    interior,
-                    stats: search_stats,
-                };
+                self.policy.fold_telemetry(&eval, &mut stats);
+                // The learner drains its immediate records out of the evaluation so interior nodes are
+                // never buffered for the whole episode.
                 out.extend(self.learner.eval_records(&mut eval, &mut self.rngs[gi]));
-
-                let k = eval.values.len();
-                let head = self.heads[gi].min(k - 1);
-                let mut rel = argmax(&eval.values[head]);
-                if self.params.epsilon > 0.0 && self.rngs[gi].unit() < self.params.epsilon {
-                    rel = self.rngs[gi].below(action_count);
-                }
+                let rel =
+                    self.policy
+                        .select(&eval, &mut self.policy_states[gi], &mut self.rngs[gi]);
                 acted[gi][si] = Some(rel);
                 self.traj[gi][si].push(Step {
                     obs: self.game.observe(&self.states[gi], si),
@@ -283,11 +245,10 @@ where
                     continue;
                 }
                 *ep_slot = steps.iter().map(|s| s.reward).sum();
-                let k = steps[0].evaluation.values.len();
-                let tail = tails
-                    .get(&(gi, si))
-                    .cloned()
-                    .unwrap_or_else(|| vec![0.0; k]);
+                // The tail is the truncation bootstrap (one per active agent), or empty for a terminal
+                // episode — the learner seeds a zero tail of the right head count when it is empty (it
+                // knows the head count from its concrete evaluation; the generic engine does not).
+                let tail = tails.get(&(gi, si)).cloned().unwrap_or_default();
                 // The learner turns the buffered trajectory into records (TreeStrap z-mixing + masks).
                 out.extend(
                     self.learner
@@ -300,7 +261,7 @@ where
             });
             self.states[gi] = self.game.initial_state(&mut self.rngs[gi]);
             self.ticks[gi] = 0;
-            self.heads[gi] = self.rngs[gi].below(self.params.n_heads.max(1));
+            self.policy_states[gi] = self.policy.begin_episode(&mut self.rngs[gi]);
         }
     }
 
@@ -353,48 +314,5 @@ where
             }
         }
         tails
-    }
-}
-
-/// Root head-disagreement: the per-action population std across heads of the root values `[K][A]`,
-/// averaged over actions (`values.std(axis=0).mean()` in snake_RL). 0 with fewer than two heads.
-fn root_disagreement(values: &[Vec<f64>]) -> f64 {
-    let k = values.len();
-    if k < 2 || values[0].is_empty() {
-        return 0.0;
-    }
-    let a = values[0].len();
-    let inv_k = 1.0 / k as f64;
-    let total: f64 = (0..a)
-        .map(|ai| {
-            let mean = values.iter().map(|h| h[ai]).sum::<f64>() * inv_k;
-            let var = values.iter().map(|h| (h[ai] - mean).powi(2)).sum::<f64>() * inv_k;
-            var.sqrt()
-        })
-        .sum();
-    total / a as f64
-}
-
-fn argmax(values: &[f64]) -> usize {
-    let mut best = 0;
-    for (i, &v) in values.iter().enumerate() {
-        if v > values[best] {
-            best = i;
-        }
-    }
-    best
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn root_disagreement_matches_population_std_definition() {
-        // Single action so the per-action std is the whole metric: heads [0, 2] -> mean 1, std 1.
-        assert!((root_disagreement(&[vec![0.0], vec![2.0]]) - 1.0).abs() < 1e-12);
-        // Identical heads disagree by zero; a single head has no spread.
-        assert_eq!(root_disagreement(&[vec![5.0, 5.0], vec![5.0, 5.0]]), 0.0);
-        assert_eq!(root_disagreement(&[vec![1.0, 2.0, 3.0]]), 0.0);
     }
 }
