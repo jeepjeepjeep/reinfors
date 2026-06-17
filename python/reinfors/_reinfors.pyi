@@ -77,6 +77,15 @@ class Reward:
     # loss/draw/kill/win/survival; connect4: win/loss/draw; gridworld: step/goal).
     def __init__(self, **weights: float) -> None: ...
 
+# Space descriptors a game advertises (re-exported as rf.spaces.Box / rf.spaces.Discrete).
+class Box:
+    shape: tuple[int, ...]
+    low: NDArray[np.float32]
+    high: NDArray[np.float32]
+
+class Discrete:
+    n: int
+
 # Opaque composition handles, built via the staticmethod constructors and passed to `Engine`.
 class GameHandle:
     @staticmethod
@@ -97,6 +106,8 @@ class GameHandle:
         goal_col: int = ...,
         reward: Reward | None = ...,
     ) -> GameHandle: ...
+    def observation_space(self) -> Box: ...
+    def action_space(self) -> Discrete: ...
 
 class PolicyHandle:
     @staticmethod

@@ -119,6 +119,22 @@ def test_registries_list_the_built_in_names() -> None:
     assert rf.registered_learners() == ["dqn", "treestrap"]
 
 
+def test_game_handles_advertise_spaces() -> None:
+    # A handle reports the observation Box (whose shape sizes the network input) and action Discrete,
+    # so a network can be sized from the game instead of hard-coding its dimensions.
+    obs = rf.games.Snake(grid_size=12).observation_space()
+    assert isinstance(obs, rf.spaces.Box) and obs.shape == (5, 12, 12)
+    assert obs.low.shape == obs.shape == obs.high.shape  # bounds broadcast to the obs shape
+    assert np.isneginf(obs.low).all() and np.isposinf(obs.high).all()
+    act = rf.games.Snake(grid_size=12).action_space()
+    assert isinstance(act, rf.spaces.Discrete) and act.n == 3
+    # The non-snake games advertise their own shapes (mirrors the Rust `spaces` test).
+    assert rf.games.Connect4().observation_space().shape == (2, 6, 7)
+    assert rf.games.Connect4().action_space().n == 7
+    assert rf.games.GridWorld(size=5).observation_space().shape == (2, 5, 5)
+    assert rf.games.GridWorld(size=5).action_space().n == 4
+
+
 def test_make_constructs_and_rejects_unknown() -> None:
     # The name-addressable path builds the same handles the typed constructors do.
     engine = rf.Engine(
