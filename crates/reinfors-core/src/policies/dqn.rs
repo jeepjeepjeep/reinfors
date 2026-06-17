@@ -39,6 +39,7 @@ impl Policy for DqnPolicy {
         game: &G,
         requests: Vec<(G::State, usize)>,
         _seed: u64,
+        _collect_interior: bool, // DQN has no interior targets — a plain forward, nothing to collect
         infer: &mut F,
     ) -> Vec<QEvaluation>
     where

@@ -39,6 +39,14 @@ pub trait Learner<E> {
         false
     }
 
+    /// Whether this learner consumes the policy's auxiliary per-decision targets (TreeStrap interior
+    /// MAX nodes). The engine threads it into `Policy::evaluate` so the *consumer* decides whether they
+    /// are produced — a policy can't independently collect-or-not and silently mismatch the learner.
+    /// Default false (a learner that emits nothing in `eval_records`).
+    fn needs_interior(&self) -> bool {
+        false
+    }
+
     /// Records emitted immediately for one decision (TreeStrap interior MAX nodes). Takes `&mut E` so it
     /// can move out the immediate-only payload (interior nodes), leaving `E` lean enough to buffer for
     /// the whole episode — interior is never retained past the decision that produced it.

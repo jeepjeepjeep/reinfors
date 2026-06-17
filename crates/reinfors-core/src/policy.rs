@@ -21,12 +21,16 @@ pub trait Policy {
     /// Pooled evaluation of a batch of active `(state, agent)` requests with the live net (`infer`):
     /// one batched forward per round, shared across games (the throughput win). `seed` seeds the
     /// search's environment-chance sampling so it is reproducible; the per-game *acting* RNG is not
-    /// touched here (it is used only in `select`). Returns one `Evaluation` per request.
+    /// touched here (it is used only in `select`). `collect_interior` is the paired learner's
+    /// `needs_interior()` — whether to produce its auxiliary per-decision targets (TreeStrap interior
+    /// MAX nodes); policies without such targets (e.g. a plain forward) ignore it. Returns one
+    /// `Evaluation` per request.
     fn evaluate<G, F>(
         &self,
         game: &G,
         requests: Vec<(G::State, usize)>,
         seed: u64,
+        collect_interior: bool,
         infer: &mut F,
     ) -> Vec<Self::Evaluation>
     where

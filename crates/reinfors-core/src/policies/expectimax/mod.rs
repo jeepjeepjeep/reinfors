@@ -12,28 +12,30 @@ use crate::policy::{argmax, Policy};
 use search::{search_many, InteriorTarget, SearchConfig, SearchStats};
 
 /// A search's per-decision evaluation: root per-head values (for acting and the z-mix target),
-/// interior MAX-node targets (immediate records), and search stats (telemetry). Produced by every
-/// expectimax policy and consumed by `TreeStrapLearner`.
+/// interior MAX-node targets, and search stats (telemetry). Produced by every expectimax policy and
+/// consumed by `TreeStrapLearner` (the `learners` → `policies` edge: the producer owns the type).
 pub struct SearchEvaluation {
     pub values: Vec<Vec<f64>>, // [K][A]
+    /// Interior MAX-node targets — a payload for the *consuming* `TreeStrapLearner` (it drains them
+    /// into immediate records), produced here only because the search is what generates them. Empty
+    /// unless the learner asked for them via `needs_interior` (threaded into `evaluate`).
     pub interior: Vec<InteriorTarget>,
     pub stats: SearchStats,
 }
 
-/// Selective expectimax + Thompson/epsilon acting. Holds the search config, the interior-target flag,
-/// the ensemble head count (for Thompson sampling + the all-terminal broadcast), and the epsilon.
+/// Selective expectimax + Thompson/epsilon acting. Holds the search config, the ensemble head count
+/// (for Thompson sampling + the all-terminal broadcast), and the epsilon. Whether to collect interior
+/// TreeStrap targets is the paired learner's call (`needs_interior`), threaded in via `evaluate`.
 pub struct SelectiveExpectimaxPolicy {
     cfg: SearchConfig,
-    collect_interior: bool,
     n_heads: usize,
     epsilon: f64,
 }
 
 impl SelectiveExpectimaxPolicy {
-    pub fn new(cfg: SearchConfig, collect_interior: bool, n_heads: usize, epsilon: f64) -> Self {
+    pub fn new(cfg: SearchConfig, n_heads: usize, epsilon: f64) -> Self {
         SelectiveExpectimaxPolicy {
             cfg,
-            collect_interior,
             n_heads: n_heads.max(1),
             epsilon,
         }
@@ -53,6 +55,7 @@ impl Policy for SelectiveExpectimaxPolicy {
         game: &G,
         requests: Vec<(G::State, usize)>,
         seed: u64,
+        collect_interior: bool,
         infer: &mut F,
     ) -> Vec<SearchEvaluation>
     where
@@ -60,32 +63,25 @@ impl Policy for SelectiveExpectimaxPolicy {
         G::State: Send,
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
-        search_many(
-            game,
-            &self.cfg,
-            requests,
-            self.collect_interior,
-            seed,
-            infer,
-        )
-        .into_iter()
-        .map(|(values, interior, stats)| {
-            // A search whose root children are all terminal evaluates no leaves, so it cannot infer
-            // the head count and returns a single (head-agnostic) row. Broadcast it to `n_heads` so
-            // every emitted target is `[n_heads][A]`. Searches that evaluated leaves already return
-            // `[n_heads][A]`, so this is a no-op for them.
-            let values = if values.len() < self.n_heads {
-                vec![values[0].clone(); self.n_heads]
-            } else {
-                values
-            };
-            SearchEvaluation {
-                values,
-                interior,
-                stats,
-            }
-        })
-        .collect()
+        search_many(game, &self.cfg, requests, collect_interior, seed, infer)
+            .into_iter()
+            .map(|(values, interior, stats)| {
+                // A search whose root children are all terminal evaluates no leaves, so it cannot infer
+                // the head count and returns a single (head-agnostic) row. Broadcast it to `n_heads` so
+                // every emitted target is `[n_heads][A]`. Searches that evaluated leaves already return
+                // `[n_heads][A]`, so this is a no-op for them.
+                let values = if values.len() < self.n_heads {
+                    vec![values[0].clone(); self.n_heads]
+                } else {
+                    values
+                };
+                SearchEvaluation {
+                    values,
+                    interior,
+                    stats,
+                }
+            })
+            .collect()
     }
 
     fn select(&self, eval: &SearchEvaluation, head: &mut usize, rng: &mut dyn Rng) -> usize {
