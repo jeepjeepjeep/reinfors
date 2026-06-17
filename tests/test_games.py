@@ -154,3 +154,59 @@ def test_connect4_end_to_end_training() -> None:
     )
     assert len(losses) >= 1
     assert all(np.isfinite(loss) for loss in losses)
+
+
+# --- Model-free DQN: a second algorithm through the same generic engine, with a different record shape
+# (off-policy transitions instead of TreeStrap targets) — the seam + binding generalization. ---
+
+
+def _dqn_engine() -> object:
+    # size, goal_row, goal_col, step_reward, goal_reward, epsilon, n_heads, bootstrap_p, max_ticks,
+    # seed, n_games
+    return reinfors._reinfors.DqnGridWorldEngine(5, 0, 1, 0.0, 1.0, 0.1, _K, 1.0, 10, 0, 3)
+
+
+def test_dqn_engine_emits_well_formed_transitions() -> None:
+    engine = _dqn_engine()
+    dim = 2 * 5 * 5
+    obs, actions, rewards, next_obs, dones, masks, telemetry = engine.collect(60, _dummy_infer(4))
+    m = obs.shape[0]
+    assert m >= 60
+    assert obs.shape == (m, dim) and obs.dtype == np.float32
+    assert actions.shape == (m,) and actions.dtype == np.int64
+    assert rewards.shape == (m,) and rewards.dtype == np.float64
+    assert next_obs.shape == (m, dim) and next_obs.dtype == np.float32
+    assert dones.shape == (m,) and dones.dtype == bool
+    assert masks.shape == (m, _K) and np.isin(masks, (0.0, 1.0)).all()
+    assert (actions >= 0).all() and (actions < 4).all()
+    assert "episodes" in telemetry and telemetry["decisions"] > 0
+
+
+def test_dqn_transitions_drive_a_td_step() -> None:
+    # Smoke: the binding's transitions feed a bootstrapped-DQN TD update end to end (finite loss). Uses
+    # the online net as its own target — enough to prove the transition record trains, not a full DQN.
+    pytest.importorskip("torch")
+    import torch
+    from reinfors.training import BootstrappedQNetwork, make_infer
+
+    net = BootstrappedQNetwork((2, 5, 5), n_actions=4, n_heads=_K)
+    engine = _dqn_engine()
+    obs, actions, rewards, next_obs, dones, masks, _ = engine.collect(64, make_infer(net))
+
+    o = torch.from_numpy(obs).reshape(-1, 2, 5, 5)
+    no = torch.from_numpy(next_obs).reshape(-1, 2, 5, 5)
+    a = torch.from_numpy(actions).long()
+    r = torch.from_numpy(rewards).float()
+    d = torch.from_numpy(dones).float()
+    mask = torch.from_numpy(masks)
+
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+    q = net(o)  # (M, K, A)
+    with torch.no_grad():
+        target = r[:, None] + 0.99 * (1.0 - d[:, None]) * net(no).max(dim=-1).values  # (M, K)
+    chosen = q.gather(-1, a[:, None, None].expand(-1, _K, 1)).squeeze(-1)  # (M, K)
+    loss = (mask * (chosen - target) ** 2).sum() / mask.sum().clamp(min=1.0)
+    opt.zero_grad()
+    loss.backward()
+    opt.step()
+    assert torch.isfinite(loss)
