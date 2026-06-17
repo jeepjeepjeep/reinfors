@@ -144,7 +144,8 @@ def main() -> None:
 
     def on_collect(it: int, r: CollectReport) -> None:
         t = cast("dict[str, Any]", r.telemetry)  # heterogeneous telemetry dict from the Rust binding
-        for reward_a, reward_b, length in t["episodes"]:
+        for rewards, length in t["episodes"]:
+            reward_a, reward_b = rewards  # snake is 2-agent
             writer.add_scalar("episode/reward_A", reward_a, state["episode"])
             writer.add_scalar("episode/reward_B", reward_b, state["episode"])
             writer.add_scalar("episode/length", length, state["episode"])

@@ -14,6 +14,7 @@ use pyo3::types::PyDict;
 
 use reinfors_core::{
     Engine as CoreEngine, EngineParams, Game, Opponent, SearchConfig, SelectiveTreeStrap,
+    TreeStrapLearner,
 };
 use reinfors_games::snake::{Cell, DeathCause, Snake, SnakeEnv as CoreEnv};
 use reinfors_games::{Action, Connect4, GridWorld, Reward, SearchParams, SnakeGame};
@@ -493,8 +494,8 @@ fn selective_search_many(
 }
 
 /// (observations [M, 5*g*g] f32, per-head targets [M, K, A] f64, per-head bootstrap masks [M, K] f32,
-/// telemetry dict). The dict holds `episodes` (a list of `(reward_a, reward_b, length)` for each
-/// episode that finished during the call) plus the call's `decisions`, `max_depth`, and per-decision
+/// telemetry dict). The dict holds `episodes` (a list of `(rewards, length)` per episode that finished
+/// during the call, `rewards` being the per-agent total) plus the call's `decisions`, `max_depth`, and per-decision
 /// means `mean_leaves`/`mean_rounds`/`mean_expansions`/`mean_sigma`/`mean_disagreement`.
 type CollectOutput<'py> = (
     Bound<'py, PyArray2<f32>>,
@@ -521,7 +522,7 @@ fn parse_opponent(opponent: &str, opp_temperature: f64, opp_floor: f64) -> PyRes
 /// `(obs[M,dim] f32, targets[M,K,A] f64, masks[M,K] f32, telemetry dict)` `CollectOutput`. The
 /// per-game `collect` methods delegate here; behaviour is identical to the original snake collect.
 fn engine_collect<'py, G: Game + Sync>(
-    inner: &mut CoreEngine<G, SelectiveTreeStrap>,
+    inner: &mut CoreEngine<G, SelectiveTreeStrap, TreeStrapLearner>,
     py: Python<'py>,
     n_records: usize,
     infer: &Bound<'_, PyAny>,
@@ -571,10 +572,10 @@ where
         .expect("mask shape")
         .into_pyarray(py);
     let d = (stats.decisions.max(1)) as f64;
-    let episodes: Vec<(f64, f64, usize)> = stats
+    let episodes: Vec<(Vec<f64>, usize)> = stats
         .episodes
         .iter()
-        .map(|e| (e.reward[0], e.reward[1], e.length))
+        .map(|e| (e.reward.clone(), e.length))
         .collect();
     let telemetry = PyDict::new(py);
     telemetry.set_item("episodes", episodes)?;
@@ -593,7 +594,7 @@ where
 /// Thompson-head, epsilon, and RNG apple spawns give the games diversity.
 #[pyclass]
 struct Engine {
-    inner: CoreEngine<SnakeGame, SelectiveTreeStrap>,
+    inner: CoreEngine<SnakeGame, SelectiveTreeStrap, TreeStrapLearner>,
     dim: usize,
     action_count: usize,
     n_heads: usize,
@@ -675,7 +676,6 @@ impl Engine {
             max_ticks,
             epsilon,
             n_heads,
-            bootstrap_p,
             seed,
         };
         // The TreeStrap planner owns the (game-agnostic) search config + z-mix outcome_weight +
@@ -689,10 +689,11 @@ impl Engine {
             food_samples: search.food_samples,
             opponent: search.opponent,
         };
-        let planner = SelectiveTreeStrap::new(cfg, outcome_weight, interior_targets);
+        let planner = SelectiveTreeStrap::new(cfg, interior_targets);
+        let learner = TreeStrapLearner::new(search.gamma, outcome_weight, bootstrap_p);
         let dim = 5 * (grid_size as usize) * (grid_size as usize);
         Ok(Engine {
-            inner: CoreEngine::new(game, planner, engine_params),
+            inner: CoreEngine::new(game, planner, learner, engine_params),
             dim,
             action_count: 3,
             n_heads,
@@ -725,7 +726,7 @@ impl Engine {
 /// builds the game + search config + TreeStrap planner, and `collect` delegates to `engine_collect`.
 #[pyclass]
 struct Connect4Engine {
-    inner: CoreEngine<Connect4, SelectiveTreeStrap>,
+    inner: CoreEngine<Connect4, SelectiveTreeStrap, TreeStrapLearner>,
     dim: usize,
     action_count: usize,
     n_heads: usize,
@@ -777,7 +778,8 @@ impl Connect4Engine {
             food_samples,
             opponent,
         };
-        let planner = SelectiveTreeStrap::new(cfg, outcome_weight, interior_targets);
+        let planner = SelectiveTreeStrap::new(cfg, interior_targets);
+        let learner = TreeStrapLearner::new(gamma, outcome_weight, bootstrap_p);
         let game = Connect4 {
             win_reward,
             loss_reward,
@@ -788,11 +790,10 @@ impl Connect4Engine {
             max_ticks,
             epsilon,
             n_heads,
-            bootstrap_p,
             seed,
         };
         Ok(Connect4Engine {
-            inner: CoreEngine::new(game, planner, engine_params),
+            inner: CoreEngine::new(game, planner, learner, engine_params),
             dim: 2 * 6 * 7,
             action_count: 7,
             n_heads,
@@ -821,7 +822,7 @@ impl Connect4Engine {
 /// `opponent`/`opp_*` args are unused by this single-agent game but kept for a uniform signature.
 #[pyclass]
 struct GridWorldEngine {
-    inner: CoreEngine<GridWorld, SelectiveTreeStrap>,
+    inner: CoreEngine<GridWorld, SelectiveTreeStrap, TreeStrapLearner>,
     dim: usize,
     action_count: usize,
     n_heads: usize,
@@ -875,7 +876,8 @@ impl GridWorldEngine {
             food_samples,
             opponent,
         };
-        let planner = SelectiveTreeStrap::new(cfg, outcome_weight, interior_targets);
+        let planner = SelectiveTreeStrap::new(cfg, interior_targets);
+        let learner = TreeStrapLearner::new(gamma, outcome_weight, bootstrap_p);
         let game = GridWorld {
             size,
             goal: (goal_row, goal_col),
@@ -887,11 +889,10 @@ impl GridWorldEngine {
             max_ticks,
             epsilon,
             n_heads,
-            bootstrap_p,
             seed,
         };
         Ok(GridWorldEngine {
-            inner: CoreEngine::new(game, planner, engine_params),
+            inner: CoreEngine::new(game, planner, learner, engine_params),
             dim: 2 * (size as usize) * (size as usize),
             action_count: 4,
             n_heads,

@@ -150,9 +150,9 @@ def test_collect_returns_telemetry() -> None:
         assert stats["max_depth"] > 0 and stats["mean_leaves"] > 0.0
         assert stats["mean_sigma"] >= 0.0 and stats["mean_disagreement"] >= 0.0
     assert decisions > 0 and len(episodes) > 0
-    for reward_a, reward_b, length in episodes:
+    for rewards, length in episodes:
         assert 1 <= length <= 50  # bounded by max_ticks
-        assert np.isfinite(reward_a) and np.isfinite(reward_b)
+        assert len(rewards) == 2 and all(np.isfinite(r) for r in rewards)
 
 
 def test_telemetry_is_deterministic_for_a_seed() -> None:

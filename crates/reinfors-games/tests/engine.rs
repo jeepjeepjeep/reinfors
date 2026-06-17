@@ -3,7 +3,7 @@
 //! public core API (`Engine`, `EngineParams`, `SelectiveTreeStrap`, `SearchConfig`) and a `SnakeGame`.
 
 use reinfors_core::search::{Opponent, SearchConfig};
-use reinfors_core::{Engine, EngineParams, SelectiveTreeStrap};
+use reinfors_core::{Engine, EngineParams, SelectiveTreeStrap, TreeStrapLearner};
 use reinfors_games::{Reward, SearchParams, SnakeGame};
 
 fn params(n_games: usize, n_heads: usize, seed: u64) -> EngineParams {
@@ -12,9 +12,13 @@ fn params(n_games: usize, n_heads: usize, seed: u64) -> EngineParams {
         max_ticks: 50,
         epsilon: 0.1,
         n_heads,
-        bootstrap_p: 0.8,
         seed,
     }
+}
+
+/// The default test learner: gamma 0.99 (matches `search()`), the given z-mix weight, bootstrap_p 0.8.
+fn learner(outcome_weight: f64) -> TreeStrapLearner {
+    TreeStrapLearner::new(0.99, outcome_weight, 0.8)
 }
 
 fn config(s: &SearchParams) -> SearchConfig {
@@ -29,8 +33,8 @@ fn config(s: &SearchParams) -> SearchConfig {
     }
 }
 
-fn planner(s: &SearchParams, outcome_weight: f64, interior: bool) -> SelectiveTreeStrap {
-    SelectiveTreeStrap::new(config(s), outcome_weight, interior)
+fn planner(s: &SearchParams, interior: bool) -> SelectiveTreeStrap {
+    SelectiveTreeStrap::new(config(s), interior)
 }
 
 fn search() -> SearchParams {
@@ -71,11 +75,16 @@ fn game(search: &SearchParams, initial_food_count: usize) -> SnakeGame {
 
 /// Build an engine with the default test config (3 initial apples, TreeStrap with outcome_weight
 /// 0.5 + interior targets), allowing per-test tweaks.
-fn engine(n_games: usize, n_heads: usize, seed: u64) -> Engine<SnakeGame, SelectiveTreeStrap> {
+fn engine(
+    n_games: usize,
+    n_heads: usize,
+    seed: u64,
+) -> Engine<SnakeGame, SelectiveTreeStrap, TreeStrapLearner> {
     let s = search();
     Engine::new(
         game(&s, 3),
-        planner(&s, 0.5, true),
+        planner(&s, true),
+        learner(0.5),
         params(n_games, n_heads, seed),
     )
 }
@@ -133,7 +142,12 @@ fn games_carry_food_so_snakes_can_eat() {
     // on, the floor is reached in far fewer ticks). The apple count is invariant: eating discards
     // one and respawns one, so every game always holds initial_food_count.
     let s = search();
-    let mut e = Engine::new(game(&s, 3), planner(&s, 0.5, false), params(8, 2, 3));
+    let mut e = Engine::new(
+        game(&s, 3),
+        planner(&s, false),
+        learner(0.5),
+        params(8, 2, 3),
+    );
     for _ in 0..4 {
         e.collect(300, infer);
     }
@@ -144,9 +158,9 @@ fn games_carry_food_so_snakes_can_eat() {
 #[test]
 fn bootstrap_p_extremes_set_all_or_no_heads() {
     let s = search();
-    let mut all = params(4, 2, 5); // n_heads matches `infer`'s 2 heads
-    all.bootstrap_p = 1.0;
-    for (_, _, mask) in Engine::new(game(&s, 3), planner(&s, 0.5, true), all)
+    // bootstrap_p now lives on the learner. n_heads (2) matches `infer`'s 2 heads.
+    let all = TreeStrapLearner::new(0.99, 0.5, 1.0);
+    for (_, _, mask) in Engine::new(game(&s, 3), planner(&s, true), all, params(4, 2, 5))
         .collect(40, infer)
         .0
     {
@@ -155,9 +169,8 @@ fn bootstrap_p_extremes_set_all_or_no_heads() {
             "p=1 must include every head"
         );
     }
-    let mut none = params(4, 2, 5);
-    none.bootstrap_p = 0.0;
-    for (_, _, mask) in Engine::new(game(&s, 3), planner(&s, 0.5, true), none)
+    let none = TreeStrapLearner::new(0.99, 0.5, 0.0);
+    for (_, _, mask) in Engine::new(game(&s, 3), planner(&s, true), none, params(4, 2, 5))
         .collect(40, infer)
         .0
     {
@@ -171,12 +184,22 @@ fn zero_outcome_weight_leaves_targets_unblended() {
     // values; with weight > 0 some executed-action entry must differ. We can't read the search
     // values here, but determinism lets us assert the two configs diverge.
     let s = search();
-    let r0 = Engine::new(game(&s, 3), planner(&s, 0.0, false), params(4, 2, 9))
-        .collect(60, infer)
-        .0;
-    let r1 = Engine::new(game(&s, 3), planner(&s, 0.9, false), params(4, 2, 9))
-        .collect(60, infer)
-        .0;
+    let r0 = Engine::new(
+        game(&s, 3),
+        planner(&s, false),
+        learner(0.0),
+        params(4, 2, 9),
+    )
+    .collect(60, infer)
+    .0;
+    let r1 = Engine::new(
+        game(&s, 3),
+        planner(&s, false),
+        learner(0.9),
+        params(4, 2, 9),
+    )
+    .collect(60, infer)
+    .0;
     let targets_differ = r0.iter().zip(&r1).any(|((_, t0, _), (_, t1, _))| t0 != t1);
     assert!(
         targets_differ,
@@ -197,7 +220,7 @@ fn survival_bonus_propagates_through_z_mixing_on_truncation() {
         s.reward.survival = survival;
         let mut p = params(4, 2, 0);
         p.max_ticks = 1;
-        Engine::new(game(&s, 0), planner(&s, 1.0, false), p) // no initial food; ow=1, interior off
+        Engine::new(game(&s, 0), planner(&s, false), learner(1.0), p) // no initial food; ow=1, interior off
     };
     let base = mk(0.0).collect(4, infer).0;
     let surv = mk(bonus).collect(4, infer).0;
@@ -227,7 +250,7 @@ fn collect_reports_episode_and_search_telemetry() {
     let s = search();
     let p = params(4, 2, 11);
     let max_ticks = p.max_ticks;
-    let mut e = Engine::new(game(&s, 3), planner(&s, 0.5, false), p);
+    let mut e = Engine::new(game(&s, 3), planner(&s, false), learner(0.5), p);
     let mut episodes = 0usize;
     let (mut decisions, mut max_depth, mut leaves, mut sigma, mut disagree) =
         (0usize, 0i32, 0.0, 0.0, 0.0);
@@ -278,7 +301,7 @@ fn evaluate_wraps_the_pooled_search() {
     use reinfors_games::{selective_search, SnakeState};
 
     let s = search();
-    let p = planner(&s, 0.3, false);
+    let p = planner(&s, false);
     let g = game(&s, 0);
     let env = reinfors_games::SnakeEnv::new(s.grid_size, 3, false, None);
     let st = SnakeState {

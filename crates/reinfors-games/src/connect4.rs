@@ -178,6 +178,7 @@ mod tests {
     use super::*;
     use reinfors_core::{
         search_many, Engine, EngineParams, Opponent, SearchConfig, SelectiveTreeStrap,
+        TreeStrapLearner,
     };
 
     fn cfg() -> SearchConfig {
@@ -296,16 +297,16 @@ mod tests {
         // The rollout engine plays full Connect-4 games — turns alternate (only the mover is active
         // each tick), both players' trajectories are z-mixed at game end, and records are [K][A=7].
         // Exercises the Actor::Agent(other) opponent nodes end to end.
-        let planner = SelectiveTreeStrap::new(cfg(), 0.3, false);
+        let planner = SelectiveTreeStrap::new(cfg(), false);
+        let learner = TreeStrapLearner::new(0.99, 0.3, 1.0); // gamma, outcome_weight, bootstrap_p
         let params = EngineParams {
             n_games: 3,
             max_ticks: 50,
             epsilon: 0.0,
             n_heads: 2,
-            bootstrap_p: 1.0,
             seed: 0,
         };
-        let mut engine = Engine::new(Connect4::default(), planner, params);
+        let mut engine = Engine::new(Connect4::default(), planner, learner, params);
         let (records, stats) = engine.collect(60, zero_infer);
         assert!(records.len() >= 60);
         for (obs, tgt, mask) in &records {
