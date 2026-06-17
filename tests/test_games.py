@@ -136,6 +136,24 @@ def test_make_constructs_and_rejects_unknown() -> None:
         rf.make_policy("a2c")
 
 
+def test_engine_from_config_round_trips_a_yaml_shaped_dict() -> None:
+    # A config shaped like parsed YAML — a nested `reward` mapping, not a pre-built handle — builds a
+    # working engine: engine_from_config wraps the reward dict into rf.Reward automatically.
+    config = {
+        "game": {"name": "snake", "grid_size": 8, "reward": {"food": 1.0, "loss": -10.0}},
+        "policy": {"name": "selective_expectimax", "n_heads": _K, "expansion_budget": 16, "max_depth": 6},
+        "learner": {"name": "treestrap", "gamma": 0.99},
+        "engine": {"n_games": 2, "max_ticks": 10, "seed": 0},
+    }
+    engine = rf.engine_from_config(config)
+    _, _, _, telemetry = engine.collect(20, _dummy_infer(3))
+    assert telemetry["decisions"] > 0
+    # Reward validation still fires through the config path (the wrapped dict isn't trusted blindly).
+    bad = {**config, "game": {"name": "snake", "grid_size": 8, "reward": {"goal": 1.0}}}
+    with pytest.raises(ValueError, match="unknown reward key"):
+        rf.engine_from_config(bad)
+
+
 def test_reward_rejects_keys_not_valid_for_the_game() -> None:
     # The generic Reward is validated per game: any key the game doesn't define is an error (not
     # silently ignored). Valid keys still work, and missing ones fall back to the game's default.

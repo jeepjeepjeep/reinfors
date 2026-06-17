@@ -3,7 +3,7 @@
 Compose a rollout `Engine` from three handles — a game, a policy, and a learner:
 
     import reinfors as rf
-    game    = rf.games.Snake(grid_size=20, reward=rf.games.SnakeReward(food=1.0, loss=-10.0))
+    game    = rf.games.Snake(grid_size=20, reward=rf.Reward(food=1.0, loss=-10.0))
     policy  = rf.policies.SelectiveExpectimax(n_heads=10, expansion_budget=64)
     learner = rf.learners.TreeStrap(gamma=0.99, outcome_weight=0.3)
     engine  = rf.Engine(game, policy, learner, n_games=16, max_ticks=750)
@@ -51,17 +51,20 @@ def registered_learners() -> list[str]:
 def engine_from_config(config: dict[str, Any]) -> Engine:
     """Build an `Engine` from a nested config block, e.g.::
 
-        {"game": {"name": "snake", "grid_size": 20, ...},
+        {"game": {"name": "snake", "grid_size": 20, "reward": {"food": 1.0, "loss": -10.0}},
          "policy": {"name": "selective_expectimax", "n_heads": 10, ...},
          "learner": {"name": "treestrap", "gamma": 0.99, ...},
          "engine": {"n_games": 16, "max_ticks": 750, "seed": 0}}
 
-    Each block's `name` selects the handle; the remaining keys are its constructor kwargs (pass
-    pre-built nested handles, e.g. a `SnakeReward`, where a constructor expects one).
+    Each block's `name` selects the handle; the remaining keys are its constructor kwargs. A nested
+    `reward` mapping is wrapped into an `rf.Reward` automatically, so a config parsed straight from
+    YAML (`yaml.safe_load(...)`) works as-is — no pre-built handles required.
     """
 
     def _split(block: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         rest = {k: v for k, v in block.items() if k != "name"}
+        if isinstance(rest.get("reward"), dict):
+            rest["reward"] = Reward(**rest["reward"])  # YAML-friendly: wrap a nested reward block
         return block["name"], rest
 
     g_name, g_kw = _split(config["game"])
