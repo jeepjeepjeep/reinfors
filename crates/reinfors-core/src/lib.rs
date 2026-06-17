@@ -11,8 +11,10 @@ pub mod planner;
 pub(crate) mod rng;
 pub mod search;
 
-pub use algo::{Learner, SearchEvaluation, Step, TreeStrapLearner, TreeStrapRecord};
-pub use engine::{blend_outcome_targets, CollectStats, Engine, EngineParams, EpisodeSummary};
+pub use algo::{
+    blend_outcome_targets, Learner, SearchEvaluation, Step, TreeStrapLearner, TreeStrapRecord,
+};
+pub use engine::{CollectStats, Engine, EngineParams, EpisodeSummary};
 pub use game::{Actor, Game, Rng, Transition};
 pub use planner::{Planner, SelectiveTreeStrap};
 pub use search::{search_many, InteriorTarget, Opponent, SearchConfig, SearchResult, SearchStats};

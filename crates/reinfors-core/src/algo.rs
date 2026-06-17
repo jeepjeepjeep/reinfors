@@ -3,7 +3,6 @@
 //! acting half (a `Policy` trait) follows in PR3. `TreeStrapLearner` is the first impl — the
 //! ensemble-TreeStrap target production lifted out of the rollout engine, unchanged.
 
-use crate::engine::blend_outcome_targets;
 use crate::game::Rng;
 use crate::search::{InteriorTarget, SearchStats};
 
@@ -63,6 +62,35 @@ pub(crate) fn sample_mask(rng: &mut dyn Rng, n_heads: usize, p: f64) -> Vec<f32>
         .collect()
 }
 
+/// AlphaGo-style z-mixing: blend each step's realized discounted return-to-go into the executed
+/// action's entry of every head, `(1 - w) * V + w * z`. `trajectory` is time-ordered
+/// `(searched values [K][A], executed action, reward)`; `tail` (len K) seeds z past the last step
+/// (0 at a terminal, the net's per-head state value at a truncation). Unexecuted entries keep their
+/// pure searched value. Returns the per-step blended `[K][A]` targets in time order.
+pub fn blend_outcome_targets(
+    trajectory: &[(Vec<Vec<f64>>, usize, f64)],
+    gamma: f64,
+    outcome_weight: f64,
+    tail: &[f64],
+) -> Vec<Vec<Vec<f64>>> {
+    let mut z: Vec<f64> = tail.to_vec();
+    let mut out: Vec<Vec<Vec<f64>>> = Vec::with_capacity(trajectory.len());
+    for (values, action, reward) in trajectory.iter().rev() {
+        for zi in z.iter_mut() {
+            *zi = reward + gamma * *zi;
+        }
+        let mut blended = values.clone();
+        if outcome_weight > 0.0 {
+            for (h, row) in blended.iter_mut().enumerate() {
+                row[*action] = (1.0 - outcome_weight) * row[*action] + outcome_weight * z[h];
+            }
+        }
+        out.push(blended);
+    }
+    out.reverse();
+    out
+}
+
 /// Ensemble-TreeStrap target production: episode-end z-mixing of the realized return into the executed
 /// action (`outcome_weight`), interior MAX-node targets, and a per-head bootstrap mask on every record.
 /// The head count `K` is read from the evaluation's value matrix, matching the rollout engine.
@@ -70,6 +98,16 @@ pub struct TreeStrapLearner {
     pub gamma: f64,
     pub outcome_weight: f64,
     pub bootstrap_p: f64,
+}
+
+impl TreeStrapLearner {
+    pub fn new(gamma: f64, outcome_weight: f64, bootstrap_p: f64) -> Self {
+        TreeStrapLearner {
+            gamma,
+            outcome_weight,
+            bootstrap_p,
+        }
+    }
 }
 
 impl Learner<SearchEvaluation> for TreeStrapLearner {
@@ -202,6 +240,20 @@ mod tests {
             assert_eq!(*target, exp_target);
             assert_eq!(*mask, sample_mask(&mut rng, 2, 0.8));
         }
+    }
+
+    #[test]
+    fn blend_outcome_targets_mixes_only_the_executed_action() {
+        // Two heads, three actions, action 1 executed; one step, terminal tail (z = reward).
+        let values = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
+        let traj = vec![(values.clone(), 1usize, 10.0)];
+        let blended = blend_outcome_targets(&traj, 0.9, 0.25, &[0.0, 0.0]);
+        // z = 10 + 0.9*0 = 10; executed entry -> 0.75*v + 0.25*10.
+        assert!((blended[0][0][1] - (0.75 * 2.0 + 0.25 * 10.0)).abs() < 1e-12);
+        assert!((blended[0][1][1] - (0.75 * 5.0 + 0.25 * 10.0)).abs() < 1e-12);
+        // unexecuted entries unchanged.
+        assert_eq!(blended[0][0][0], 1.0);
+        assert_eq!(blended[0][1][2], 6.0);
     }
 
     #[test]
