@@ -20,8 +20,8 @@
 
 use std::collections::HashMap;
 
-use crate::algo::{Learner, Step};
 use crate::game::Game;
+use crate::learner::{Learner, Step};
 use crate::policy::Policy;
 use crate::rng::SplitMix64;
 
@@ -134,6 +134,9 @@ where
         let mut out: Vec<L::Record> = Vec::new();
         let mut stats = CollectStats::default();
         let num_agents = self.game.num_agents();
+        // Whether the policy should collect interior targets is the learner's call (it consumes them),
+        // so the two can't silently disagree — mirrors `needs_next_obs`.
+        let collect_interior = self.learner.needs_interior();
 
         while out.len() < n_records {
             // 1. Gather one search request per active agent across all games.
@@ -154,9 +157,13 @@ where
             // 2. The policy evaluates them all in one pooled pass (one batched forward per round,
             //    shared across games — the throughput win); for selective expectimax this is the search.
             let search_seed = self.search_rng.next_u64();
-            let evals = self
-                .policy
-                .evaluate(&self.game, requests, search_seed, &mut infer);
+            let evals = self.policy.evaluate(
+                &self.game,
+                requests,
+                search_seed,
+                collect_interior,
+                &mut infer,
+            );
 
             // 3. Per decision: fold its telemetry, emit the learner's immediate records (TreeStrap
             //    interior nodes), choose the action, and buffer the step. `acted[gi][si]` records the

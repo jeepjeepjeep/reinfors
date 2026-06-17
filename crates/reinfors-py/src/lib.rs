@@ -687,8 +687,9 @@ impl Engine {
             food_samples: search.food_samples,
             opponent: search.opponent,
         };
-        let policy = SelectiveExpectimaxPolicy::new(cfg, interior_targets, n_heads, epsilon);
-        let learner = TreeStrapLearner::new(search.gamma, outcome_weight, bootstrap_p);
+        let policy = SelectiveExpectimaxPolicy::new(cfg, n_heads, epsilon);
+        let learner =
+            TreeStrapLearner::new(search.gamma, outcome_weight, bootstrap_p, interior_targets);
         let dim = 5 * (grid_size as usize) * (grid_size as usize);
         Ok(Engine {
             inner: CoreEngine::new(game, policy, learner, engine_params),
@@ -776,8 +777,8 @@ impl Connect4Engine {
             food_samples,
             opponent,
         };
-        let policy = SelectiveExpectimaxPolicy::new(cfg, interior_targets, n_heads, epsilon);
-        let learner = TreeStrapLearner::new(gamma, outcome_weight, bootstrap_p);
+        let policy = SelectiveExpectimaxPolicy::new(cfg, n_heads, epsilon);
+        let learner = TreeStrapLearner::new(gamma, outcome_weight, bootstrap_p, interior_targets);
         let game = Connect4 {
             win_reward,
             loss_reward,
@@ -872,8 +873,8 @@ impl GridWorldEngine {
             food_samples,
             opponent,
         };
-        let policy = SelectiveExpectimaxPolicy::new(cfg, interior_targets, n_heads, epsilon);
-        let learner = TreeStrapLearner::new(gamma, outcome_weight, bootstrap_p);
+        let policy = SelectiveExpectimaxPolicy::new(cfg, n_heads, epsilon);
+        let learner = TreeStrapLearner::new(gamma, outcome_weight, bootstrap_p, interior_targets);
         let game = GridWorld {
             size,
             goal: (goal_row, goal_col),
@@ -924,7 +925,7 @@ type DqnCollectOutput<'py> = (
     Bound<'py, PyDict>,         // telemetry (episodes + decisions; no search stats)
 );
 
-/// Marshal a DQN rollout's `Transition` records into numpy arrays for a Python replay buffer.
+/// Marshal a DQN rollout's `DqnRecord` transitions into numpy arrays for a Python replay buffer.
 fn dqn_engine_collect<'py, G: Game + Sync>(
     inner: &mut CoreEngine<G, DqnPolicy, DqnLearner>,
     py: Python<'py>,
@@ -1116,7 +1117,12 @@ fn blend_outcome_targets<'py>(
             (values, actions[i], rewards[i])
         })
         .collect();
-    let blended = reinfors_core::blend_outcome_targets(&trajectory, gamma, outcome_weight, &tail);
+    let blended = reinfors_core::TreeStrapLearner::blend_outcome_targets(
+        &trajectory,
+        gamma,
+        outcome_weight,
+        &tail,
+    );
     let flat: Vec<f64> = blended.into_iter().flatten().flatten().collect();
     Ok(Array3::from_shape_vec((t, k, a), flat)
         .expect("blend shape")
