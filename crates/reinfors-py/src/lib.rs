@@ -1117,7 +1117,12 @@ fn blend_outcome_targets<'py>(
             (values, actions[i], rewards[i])
         })
         .collect();
-    let blended = reinfors_core::blend_outcome_targets(&trajectory, gamma, outcome_weight, &tail);
+    let blended = reinfors_core::TreeStrapLearner::blend_outcome_targets(
+        &trajectory,
+        gamma,
+        outcome_weight,
+        &tail,
+    );
     let flat: Vec<f64> = blended.into_iter().flatten().flatten().collect();
     Ok(Array3::from_shape_vec((t, k, a), flat)
         .expect("blend shape")

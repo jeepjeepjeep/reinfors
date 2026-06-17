@@ -29,6 +29,38 @@ impl TreeStrapLearner {
             interior_targets,
         }
     }
+
+    /// AlphaGo-style z-mixing: blend each step's realized discounted return-to-go into the executed
+    /// action's entry of every head, `(1 - w) * V + w * z`. `trajectory` is time-ordered
+    /// `(searched values [K][A], executed action, reward)`; `tail` (len K) seeds z past the last step
+    /// (0 at a terminal, the net's per-head state value at a truncation). Unexecuted entries keep their
+    /// pure searched value. Returns the per-step blended `[K][A]` targets in time order.
+    ///
+    /// Associated rather than `&self` because it is pure in its args (gamma + outcome_weight, not the
+    /// whole learner): the differential parity binding calls it with free-floating params and no learner.
+    pub fn blend_outcome_targets(
+        trajectory: &[(Vec<Vec<f64>>, usize, f64)],
+        gamma: f64,
+        outcome_weight: f64,
+        tail: &[f64],
+    ) -> Vec<Vec<Vec<f64>>> {
+        let mut z: Vec<f64> = tail.to_vec();
+        let mut out: Vec<Vec<Vec<f64>>> = Vec::with_capacity(trajectory.len());
+        for (values, action, reward) in trajectory.iter().rev() {
+            for zi in z.iter_mut() {
+                *zi = reward + gamma * *zi;
+            }
+            let mut blended = values.clone();
+            if outcome_weight > 0.0 {
+                for (h, row) in blended.iter_mut().enumerate() {
+                    row[*action] = (1.0 - outcome_weight) * row[*action] + outcome_weight * z[h];
+                }
+            }
+            out.push(blended);
+        }
+        out.reverse();
+        out
+    }
 }
 
 impl Learner<SearchEvaluation> for TreeStrapLearner {
@@ -78,7 +110,7 @@ impl Learner<SearchEvaluation> for TreeStrapLearner {
             .iter()
             .map(|s| (s.evaluation.values.clone(), s.action, s.reward))
             .collect();
-        let blended = blend_outcome_targets(&traj, self.gamma, self.outcome_weight, &tail);
+        let blended = Self::blend_outcome_targets(&traj, self.gamma, self.outcome_weight, &tail);
         trajectory
             .iter()
             .zip(blended)
@@ -88,35 +120,6 @@ impl Learner<SearchEvaluation> for TreeStrapLearner {
             })
             .collect()
     }
-}
-
-/// AlphaGo-style z-mixing: blend each step's realized discounted return-to-go into the executed
-/// action's entry of every head, `(1 - w) * V + w * z`. `trajectory` is time-ordered
-/// `(searched values [K][A], executed action, reward)`; `tail` (len K) seeds z past the last step
-/// (0 at a terminal, the net's per-head state value at a truncation). Unexecuted entries keep their
-/// pure searched value. Returns the per-step blended `[K][A]` targets in time order.
-pub fn blend_outcome_targets(
-    trajectory: &[(Vec<Vec<f64>>, usize, f64)],
-    gamma: f64,
-    outcome_weight: f64,
-    tail: &[f64],
-) -> Vec<Vec<Vec<f64>>> {
-    let mut z: Vec<f64> = tail.to_vec();
-    let mut out: Vec<Vec<Vec<f64>>> = Vec::with_capacity(trajectory.len());
-    for (values, action, reward) in trajectory.iter().rev() {
-        for zi in z.iter_mut() {
-            *zi = reward + gamma * *zi;
-        }
-        let mut blended = values.clone();
-        if outcome_weight > 0.0 {
-            for (h, row) in blended.iter_mut().enumerate() {
-                row[*action] = (1.0 - outcome_weight) * row[*action] + outcome_weight * z[h];
-            }
-        }
-        out.push(blended);
-    }
-    out.reverse();
-    out
 }
 
 #[cfg(test)]
@@ -184,7 +187,7 @@ mod tests {
             .iter()
             .map(|s| (s.evaluation.values.clone(), s.action, s.reward))
             .collect();
-        let blended = blend_outcome_targets(&traj, 0.99, 0.3, &tail);
+        let blended = TreeStrapLearner::blend_outcome_targets(&traj, 0.99, 0.3, &tail);
         let mut rng = SplitMix64::new(9);
         assert_eq!(recs.len(), 3);
         for ((obs, target, mask), (step, exp_target)) in recs.iter().zip(steps.iter().zip(blended))
@@ -200,7 +203,7 @@ mod tests {
         // Two heads, three actions, action 1 executed; one step, terminal tail (z = reward).
         let values = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
         let traj = vec![(values.clone(), 1usize, 10.0)];
-        let blended = blend_outcome_targets(&traj, 0.9, 0.25, &[0.0, 0.0]);
+        let blended = TreeStrapLearner::blend_outcome_targets(&traj, 0.9, 0.25, &[0.0, 0.0]);
         // z = 10 + 0.9*0 = 10; executed entry -> 0.75*v + 0.25*10.
         assert!((blended[0][0][1] - (0.75 * 2.0 + 0.25 * 10.0)).abs() < 1e-12);
         assert!((blended[0][1][1] - (0.75 * 5.0 + 0.25 * 10.0)).abs() < 1e-12);
