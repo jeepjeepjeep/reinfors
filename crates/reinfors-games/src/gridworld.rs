@@ -259,4 +259,38 @@ mod tests {
         }
         assert!(stats.decisions > 0);
     }
+
+    #[test]
+    fn dqn_engine_collects_well_formed_transitions() {
+        // The model-free DQN algorithm (no search) driven through the same generic Engine + GridWorld:
+        // it emits off-policy transitions (obs, action, reward, next_obs, terminal, mask) instead of
+        // TreeStrap targets — exercising the seam's non-search evaluation + transition-record path.
+        use reinfors_core::{DqnLearner, DqnPolicy};
+
+        let policy = DqnPolicy::new(2, 0.0); // 2 heads, no epsilon -> greedy argmax of the head
+        let learner = DqnLearner::new(2, 1.0); // 2 heads, bootstrap_p = 1 -> all-ones masks
+        let params = EngineParams {
+            n_games: 3,
+            max_ticks: 10,
+            seed: 0,
+        };
+        let mut engine = Engine::new(world(), policy, learner, params);
+        let dim = N_CHANNELS * 25;
+        let (records, stats) = engine.collect(120, zero_infer);
+        assert!(records.len() >= 120);
+        for t in &records {
+            assert_eq!(t.obs.len(), dim);
+            assert_eq!(
+                t.next_obs.len(),
+                dim,
+                "s' is filled for a transition learner"
+            );
+            assert_eq!(t.mask, vec![1.0, 1.0]); // bootstrap_p = 1
+            assert!(t.action < 4);
+        }
+        assert!(
+            !stats.episodes.is_empty(),
+            "episodes should finish (truncate at max_ticks)"
+        );
+    }
 }

@@ -6,6 +6,7 @@
 //! the trait only.
 
 pub mod algo;
+pub mod dqn;
 pub mod engine;
 pub mod game;
 pub mod policy;
@@ -15,6 +16,7 @@ pub mod search;
 pub use algo::{
     blend_outcome_targets, Learner, SearchEvaluation, Step, TreeStrapLearner, TreeStrapRecord,
 };
+pub use dqn::{DqnLearner, DqnPolicy, QEvaluation}; // dqn::Transition stays module-qualified (game::Transition owns the root name)
 pub use engine::{CollectStats, Engine, EngineParams, EpisodeSummary};
 pub use game::{Actor, Game, Rng, Transition};
 pub use policy::{Policy, SelectiveExpectimaxPolicy};

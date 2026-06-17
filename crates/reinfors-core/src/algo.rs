@@ -14,6 +14,12 @@ pub struct Step<E> {
     pub evaluation: E,
     pub action: usize,
     pub reward: f64,
+    /// The post-transition observation `s'` — filled by the engine only when the learner sets
+    /// `needs_next_obs` (e.g. a DQN transition learner); empty otherwise.
+    pub next_obs: Vec<f32>,
+    /// Whether this step's transition ended the episode by reaching a terminal state (false for a
+    /// horizon truncation, where `s'` is still a real state to bootstrap from).
+    pub terminal: bool,
 }
 
 /// Turns evaluations and finished trajectories into training records. Parameterized by the evaluation
@@ -25,6 +31,13 @@ pub trait Learner<E> {
     /// Whether `episode_records` consumes the per-head bootstrap value of the final state (the z-tail).
     /// When false the engine skips computing it (a forward).
     fn uses_episode_tail(&self) -> bool {
+        false
+    }
+
+    /// Whether the engine should fill each buffered `Step`'s `next_obs` (the post-transition `s'`).
+    /// True for transition learners (DQN); false (default) for return-based learners (TreeStrap), so
+    /// they pay no per-step observation cost.
+    fn needs_next_obs(&self) -> bool {
         false
     }
 
@@ -228,6 +241,8 @@ mod tests {
                 ),
                 action: t % 3,
                 reward: t as f64,
+                next_obs: Vec::new(),
+                terminal: false,
             })
             .collect();
         let tail = [0.5, -0.5];
