@@ -1,10 +1,10 @@
-//! Snake wrappers over the generic [`reinfors_core::search::search_many`]: `SearchParams` bundles the
+//! Snake wrappers over the generic [`reinfors_core::search_many`]: `SearchParams` bundles the
 //! snake config + the game-agnostic search knobs, and `selective_search`/`selective_search_many` build
 //! a `SnakeGame` + `SnakeState` from it and run the generic engine. The public API is unchanged.
 
 use std::collections::HashSet;
 
-use reinfors_core::search::{search_many, Opponent, SearchConfig, SearchResult};
+use reinfors_core::{search_many, Opponent, SearchConfig, SearchResult};
 
 use crate::reward::Reward;
 use crate::snake::{Cell, Snake};
@@ -100,7 +100,7 @@ mod tests {
     use super::*;
     use crate::action::Action;
     use crate::snake::Snake;
-    use reinfors_core::search::search_many;
+    use reinfors_core::search_many;
 
     fn snake(cells: &[Cell], dir: Action) -> Snake {
         Snake {

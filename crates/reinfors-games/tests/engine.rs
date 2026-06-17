@@ -3,8 +3,8 @@
 //! they build the engine via the public core API (`Engine`, `EngineParams`, `SelectiveExpectimaxPolicy`,
 //! `TreeStrapLearner`, `SearchConfig`) and a `SnakeGame`.
 
-use reinfors_core::search::{Opponent, SearchConfig};
 use reinfors_core::{Engine, EngineParams, SelectiveExpectimaxPolicy, TreeStrapLearner};
+use reinfors_core::{Opponent, SearchConfig};
 use reinfors_games::{Reward, SearchParams, SnakeGame};
 
 fn params(n_games: usize, seed: u64) -> EngineParams {

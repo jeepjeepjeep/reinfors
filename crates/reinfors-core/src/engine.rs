@@ -20,8 +20,8 @@
 
 use std::collections::HashMap;
 
-use crate::algo::{Learner, Step};
 use crate::game::Game;
+use crate::learner::{Learner, Step};
 use crate::policy::Policy;
 use crate::rng::SplitMix64;
 
