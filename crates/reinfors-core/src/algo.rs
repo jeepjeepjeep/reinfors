@@ -34,7 +34,8 @@ pub trait Learner<E> {
     fn eval_records(&self, evaluation: &mut E, rng: &mut dyn Rng) -> Vec<Self::Record>;
 
     /// Records from a finished episode's buffered trajectory (TreeStrap z-mixing). `tail` is the final
-    /// state's per-head bootstrap (zeros at a terminal).
+    /// state's per-head bootstrap on a truncation, or **empty** for a terminal episode (the learner
+    /// then seeds a zero tail of the head count it reads from its own evaluation).
     fn episode_records(
         &self,
         trajectory: &[Step<E>],
@@ -143,11 +144,17 @@ impl Learner<SearchEvaluation> for TreeStrapLearner {
             return Vec::new();
         }
         let k = trajectory[0].evaluation.values.len();
+        // An empty tail (a terminal episode) seeds z at zero, per head.
+        let tail = if tail.is_empty() {
+            vec![0.0; k]
+        } else {
+            tail.to_vec()
+        };
         let traj: Vec<(Vec<Vec<f64>>, usize, f64)> = trajectory
             .iter()
             .map(|s| (s.evaluation.values.clone(), s.action, s.reward))
             .collect();
-        let blended = blend_outcome_targets(&traj, self.gamma, self.outcome_weight, tail);
+        let blended = blend_outcome_targets(&traj, self.gamma, self.outcome_weight, &tail);
         trajectory
             .iter()
             .zip(blended)

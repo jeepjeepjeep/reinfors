@@ -1,17 +1,16 @@
-//! Engine integration tests over the concrete `SnakeGame` + `SelectiveTreeStrap` planner. These live
-//! in reinfors-games (not core) so the generic `Engine` stays game-free: they build the engine via the
-//! public core API (`Engine`, `EngineParams`, `SelectiveTreeStrap`, `SearchConfig`) and a `SnakeGame`.
+//! Engine integration tests over the concrete `SnakeGame` + `SelectiveExpectimaxPolicy` +
+//! `TreeStrapLearner`. These live in reinfors-games (not core) so the generic `Engine` stays game-free:
+//! they build the engine via the public core API (`Engine`, `EngineParams`, `SelectiveExpectimaxPolicy`,
+//! `TreeStrapLearner`, `SearchConfig`) and a `SnakeGame`.
 
 use reinfors_core::search::{Opponent, SearchConfig};
-use reinfors_core::{Engine, EngineParams, SelectiveTreeStrap, TreeStrapLearner};
+use reinfors_core::{Engine, EngineParams, SelectiveExpectimaxPolicy, TreeStrapLearner};
 use reinfors_games::{Reward, SearchParams, SnakeGame};
 
-fn params(n_games: usize, n_heads: usize, seed: u64) -> EngineParams {
+fn params(n_games: usize, seed: u64) -> EngineParams {
     EngineParams {
         n_games,
         max_ticks: 50,
-        epsilon: 0.1,
-        n_heads,
         seed,
     }
 }
@@ -33,8 +32,9 @@ fn config(s: &SearchParams) -> SearchConfig {
     }
 }
 
-fn planner(s: &SearchParams, interior: bool) -> SelectiveTreeStrap {
-    SelectiveTreeStrap::new(config(s), interior)
+/// The default test policy: the given interior flag + head count, epsilon 0.1.
+fn policy(s: &SearchParams, interior: bool, n_heads: usize) -> SelectiveExpectimaxPolicy {
+    SelectiveExpectimaxPolicy::new(config(s), interior, n_heads, 0.1)
 }
 
 fn search() -> SearchParams {
@@ -79,13 +79,13 @@ fn engine(
     n_games: usize,
     n_heads: usize,
     seed: u64,
-) -> Engine<SnakeGame, SelectiveTreeStrap, TreeStrapLearner> {
+) -> Engine<SnakeGame, SelectiveExpectimaxPolicy, TreeStrapLearner> {
     let s = search();
     Engine::new(
         game(&s, 3),
-        planner(&s, true),
+        policy(&s, true, n_heads),
         learner(0.5),
-        params(n_games, n_heads, seed),
+        params(n_games, seed),
     )
 }
 
@@ -144,9 +144,9 @@ fn games_carry_food_so_snakes_can_eat() {
     let s = search();
     let mut e = Engine::new(
         game(&s, 3),
-        planner(&s, false),
+        policy(&s, false, 2),
         learner(0.5),
-        params(8, 2, 3),
+        params(8, 3),
     );
     for _ in 0..4 {
         e.collect(300, infer);
@@ -160,7 +160,7 @@ fn bootstrap_p_extremes_set_all_or_no_heads() {
     let s = search();
     // bootstrap_p now lives on the learner. n_heads (2) matches `infer`'s 2 heads.
     let all = TreeStrapLearner::new(0.99, 0.5, 1.0);
-    for (_, _, mask) in Engine::new(game(&s, 3), planner(&s, true), all, params(4, 2, 5))
+    for (_, _, mask) in Engine::new(game(&s, 3), policy(&s, true, 2), all, params(4, 5))
         .collect(40, infer)
         .0
     {
@@ -170,7 +170,7 @@ fn bootstrap_p_extremes_set_all_or_no_heads() {
         );
     }
     let none = TreeStrapLearner::new(0.99, 0.5, 0.0);
-    for (_, _, mask) in Engine::new(game(&s, 3), planner(&s, true), none, params(4, 2, 5))
+    for (_, _, mask) in Engine::new(game(&s, 3), policy(&s, true, 2), none, params(4, 5))
         .collect(40, infer)
         .0
     {
@@ -186,17 +186,17 @@ fn zero_outcome_weight_leaves_targets_unblended() {
     let s = search();
     let r0 = Engine::new(
         game(&s, 3),
-        planner(&s, false),
+        policy(&s, false, 2),
         learner(0.0),
-        params(4, 2, 9),
+        params(4, 9),
     )
     .collect(60, infer)
     .0;
     let r1 = Engine::new(
         game(&s, 3),
-        planner(&s, false),
+        policy(&s, false, 2),
         learner(0.9),
-        params(4, 2, 9),
+        params(4, 9),
     )
     .collect(60, infer)
     .0;
@@ -218,9 +218,9 @@ fn survival_bonus_propagates_through_z_mixing_on_truncation() {
     let mk = |survival: f64| {
         let mut s = search();
         s.reward.survival = survival;
-        let mut p = params(4, 2, 0);
+        let mut p = params(4, 0);
         p.max_ticks = 1;
-        Engine::new(game(&s, 0), planner(&s, false), learner(1.0), p) // no initial food; ow=1, interior off
+        Engine::new(game(&s, 0), policy(&s, false, 2), learner(1.0), p) // no initial food; ow=1, interior off
     };
     let base = mk(0.0).collect(4, infer).0;
     let surv = mk(bonus).collect(4, infer).0;
@@ -248,9 +248,9 @@ fn collect_reports_episode_and_search_telemetry() {
     // Interior off so the record floor tracks decisions (with it on, the floor is reached via
     // interior targets before any episode completes).
     let s = search();
-    let p = params(4, 2, 11);
+    let p = params(4, 11);
     let max_ticks = p.max_ticks;
-    let mut e = Engine::new(game(&s, 3), planner(&s, false), learner(0.5), p);
+    let mut e = Engine::new(game(&s, 3), policy(&s, false, 2), learner(0.5), p);
     let mut episodes = 0usize;
     let (mut decisions, mut max_depth, mut leaves, mut sigma, mut disagree) =
         (0usize, 0i32, 0.0, 0.0, 0.0);
@@ -295,13 +295,13 @@ fn telemetry_is_deterministic_for_a_seed() {
 
 #[test]
 fn evaluate_wraps_the_pooled_search() {
-    // The planner's `evaluate` over a SnakeGame matches the snake `selective_search` wrapper on the
-    // same state (was a planner.rs unit test in core).
-    use reinfors_core::planner::Planner;
+    // The policy's `evaluate` over a SnakeGame matches the snake `selective_search` wrapper on the
+    // same state (n_heads = 2 matches `infer`, so no all-terminal broadcast diverges them).
+    use reinfors_core::policy::Policy;
     use reinfors_games::{selective_search, SnakeState};
 
     let s = search();
-    let p = planner(&s, false);
+    let p = policy(&s, false, 2);
     let g = game(&s, 0);
     let env = reinfors_games::SnakeEnv::new(s.grid_size, 3, false, None);
     let st = SnakeState {
@@ -320,5 +320,5 @@ fn evaluate_wraps_the_pooled_search() {
         &mut infer_fn,
     );
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].0, values);
+    assert_eq!(results[0].values, values);
 }

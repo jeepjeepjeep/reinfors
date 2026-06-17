@@ -107,7 +107,7 @@ impl Game for GridWorld {
 mod tests {
     use super::*;
     use reinfors_core::{
-        search_many, Engine, EngineParams, Opponent, SearchConfig, SelectiveTreeStrap,
+        search_many, Engine, EngineParams, Opponent, SearchConfig, SelectiveExpectimaxPolicy,
         TreeStrapLearner,
     };
 
@@ -241,16 +241,14 @@ mod tests {
     fn engine_rolls_out_a_single_agent_game() {
         // The rollout engine drives a 1-agent game end to end: records have the right shape ([K][A=4])
         // and episodes finish (reach the goal or truncate). Exercises num_agents == 1 in the engine.
-        let planner = SelectiveTreeStrap::new(cfg(), false);
+        let policy = SelectiveExpectimaxPolicy::new(cfg(), false, 2, 0.0); // collect_interior, n_heads, epsilon
         let learner = TreeStrapLearner::new(0.99, 0.3, 1.0); // gamma, outcome_weight, bootstrap_p
         let params = EngineParams {
             n_games: 3,
             max_ticks: 30,
-            epsilon: 0.0,
-            n_heads: 2,
             seed: 0,
         };
-        let mut engine = Engine::new(world(), planner, learner, params);
+        let mut engine = Engine::new(world(), policy, learner, params);
         let (records, stats) = engine.collect(50, zero_infer);
         assert!(records.len() >= 50);
         for (obs, tgt, mask) in &records {
