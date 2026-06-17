@@ -2,6 +2,8 @@
 //! can drive it without knowing the game. The framework consumes a game through this trait only;
 //! nothing here is game-specific. Concrete games (e.g. snake) live in the `reinfors-games` crate.
 
+use crate::space::Space;
+
 /// Minimal random source the rollout passes to a game's *realized* (non-belief) transitions, so the
 /// game can sample environment chance (e.g. apple placement) from the engine's per-game PRNG.
 pub trait Rng {
@@ -36,6 +38,26 @@ pub trait Game {
     fn action_count(&self) -> usize;
     /// Observation tensor shape `(C, H, W)` the value network consumes.
     fn obs_shape(&self) -> (usize, usize, usize);
+
+    /// The observation `Space` the value network consumes. Defaults to an unbounded `Box` of
+    /// `obs_shape`; a game may override to advertise tighter bounds (e.g. one-hot planes in `[0, 1]`).
+    fn observation_space(&self) -> Space {
+        let (c, h, w) = self.obs_shape();
+        Space::Box {
+            shape: vec![c, h, w],
+            low: f32::NEG_INFINITY,
+            high: f32::INFINITY,
+        }
+    }
+    /// The per-agent action `Space`. Defaults to `Discrete(action_count)`. Assumes homogeneous action
+    /// spaces across agents (consistent with `action_count`, the single per-agent action count, and the
+    /// net's uniform head width); heterogeneous per-agent actions would need a per-agent form here plus
+    /// broader changes to `action_count` and the network heads.
+    fn action_space(&self) -> Space {
+        Space::Discrete {
+            n: self.action_count(),
+        }
+    }
 
     /// Who acts at `state`.
     fn actor(&self, state: &Self::State) -> Actor;

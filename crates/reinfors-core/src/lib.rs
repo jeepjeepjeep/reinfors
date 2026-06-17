@@ -11,6 +11,7 @@ pub mod learners;
 pub mod policies;
 pub mod policy;
 pub(crate) mod rng;
+pub mod space;
 
 pub use engine::{CollectStats, Engine, EngineParams, EpisodeSummary};
 pub use game::{Actor, Game, Rng, Transition};
@@ -23,6 +24,7 @@ pub use policies::expectimax::search::{
 };
 pub use policies::expectimax::{SearchEvaluation, SelectiveExpectimaxPolicy};
 pub use policy::Policy;
+pub use space::Space;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
