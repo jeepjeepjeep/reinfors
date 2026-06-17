@@ -67,31 +67,41 @@ TRAIN_EVERY = 4
 
 
 def build_engine(n_games: int, seed: int) -> object:
-    return reinfors._reinfors.Engine(
-        n_games,
-        GRID,
-        INITIAL_LENGTH,
-        PLAY_TO_LAST,
-        WIN_FOOD_LEAD,
-        INITIAL_FOOD,
-        GAMMA,
-        BETA,
-        EXPANSION_BUDGET,
-        TOP_K,
-        MAX_DEPTH,
-        REWARD,
-        OPPONENT,
-        OPP_TEMPERATURE,
-        OPP_FLOOR,
-        EPSILON,
-        MAX_TICKS,
-        N_HEADS,
-        OUTCOME_WEIGHT,
-        INTERIOR_TARGETS,
-        BOOTSTRAP_P,
-        seed,
-        FOOD_SAMPLES,
+    game = reinfors.games.Snake(
+        grid_size=GRID,
+        initial_length=INITIAL_LENGTH,
+        food=INITIAL_FOOD,
+        play_to_last=PLAY_TO_LAST,
+        win_food_lead=WIN_FOOD_LEAD,
+        reward=reinfors.Reward(
+            step=REWARD[0],
+            food=REWARD[1],
+            loss=REWARD[2],
+            draw=REWARD[3],
+            kill=REWARD[4],
+            win=REWARD[5],
+            survival=REWARD[6],
+        ),
     )
+    policy = reinfors.policies.SelectiveExpectimax(
+        expansion_budget=EXPANSION_BUDGET,
+        top_k=TOP_K,
+        max_depth=MAX_DEPTH,
+        beta=BETA,
+        food_samples=FOOD_SAMPLES,
+        n_heads=N_HEADS,
+        epsilon=EPSILON,
+        opponent=OPPONENT,
+        opp_temperature=OPP_TEMPERATURE,
+        opp_floor=OPP_FLOOR,
+    )
+    learner = reinfors.learners.TreeStrap(
+        gamma=GAMMA,
+        outcome_weight=OUTCOME_WEIGHT,
+        bootstrap_p=BOOTSTRAP_P,
+        interior_targets=INTERIOR_TARGETS,
+    )
+    return reinfors.Engine(game, policy, learner, n_games=n_games, max_ticks=MAX_TICKS, seed=seed)
 
 
 def default_device() -> str:

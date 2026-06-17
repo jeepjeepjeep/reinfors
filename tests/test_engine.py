@@ -41,26 +41,45 @@ def _engine(
     n_heads: int = _K,
     epsilon: float = 0.1,
 ) -> object:
-    reward = (*_REWARD[:6], survival)  # (step, food, loss, draw, kill, win, survival)
-    return reinfors._reinfors.Engine(
-        n_games,
-        _G,
-        3,
-        False,
-        None,
-        food,  # n_games, grid, initial_length, play_to_last, win_food_lead, initial_food_count
-        *_SEARCH,
-        reward,
-        "uniform",
-        1.0,
-        0.1,  # reward, opponent, opp_temperature, opp_floor
-        epsilon,
-        max_ticks,
-        n_heads,  # epsilon, max_ticks, n_heads
-        outcome_weight,
-        interior,
-        bootstrap_p,  # outcome_weight, interior_targets, bootstrap_p
-        seed,
+    gamma, beta, budget, top_k, max_depth = _SEARCH
+    return reinfors.Engine(
+        reinfors.games.Snake(
+            grid_size=_G,
+            initial_length=3,
+            food=food,
+            play_to_last=False,
+            win_food_lead=None,
+            reward=reinfors.Reward(
+                step=_REWARD[0],
+                food=_REWARD[1],
+                loss=_REWARD[2],
+                draw=_REWARD[3],
+                kill=_REWARD[4],
+                win=_REWARD[5],
+                survival=survival,
+            ),
+        ),
+        reinfors.policies.SelectiveExpectimax(
+            expansion_budget=budget,
+            top_k=top_k,
+            max_depth=max_depth,
+            beta=beta,
+            food_samples=1,
+            n_heads=n_heads,
+            epsilon=epsilon,
+            opponent="uniform",
+            opp_temperature=1.0,
+            opp_floor=0.1,
+        ),
+        reinfors.learners.TreeStrap(
+            gamma=gamma,
+            outcome_weight=outcome_weight,
+            bootstrap_p=bootstrap_p,
+            interior_targets=interior,
+        ),
+        n_games=n_games,
+        max_ticks=max_ticks,
+        seed=seed,
     )
 
 

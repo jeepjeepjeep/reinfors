@@ -1,23 +1,37 @@
 //! PyO3 bindings for reinfors. The compiled module is `reinfors._reinfors`.
 //!
-//! Phase 1 exposes just enough of the snake core to differential-test it against `CleanSnakeEnv`:
-//! construct an env, inject the initial food, step it with explicit actions + spawn cells (the
-//! agreed Option B — food placement is an injected input, not reproduced from numpy's RNG), and
-//! read back state, per-snake events, and the egocentric observation.
+//! Layout (each section is banner-commented below):
+//!   * SHARED HELPERS (permanent) — `validate_search_params`, `infer_closure`, `parse_opponent`,
+//!     `check_unit`; used by both the unified engine and the parity plumbing.
+//!   * UNIFIED ENGINE (permanent) — the `Engine` pyclass + its type-erased dispatch (`ErasedEngine`,
+//!     `RecordBatch`, `run_collect`, `EngineImpl`) and the `(GameSpec, PolicySpec, LearnerSpec)`
+//!     two-axis factory. One class composes any game/policy/learner.
+//!   * PER-GAME CONFIG (permanent) — the `rf.games`/`rf.policies`/`rf.learners` handles: a game's /
+//!     algorithm's parameter surface. Adding one here + a factory arm is all a new composition needs.
+//!   * SNAKE_RL PARITY PLUMBING (TEMPORARY) — `SnakeEnv`, `selective_search_many`,
+//!     `blend_outcome_targets`, and their snake-specific conversions/types. These exist only to
+//!     differential-test against the snake_RL oracle; they go when that suite is retired.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use numpy::ndarray::{Array2, Array3};
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyArray3, PyReadonlyArray3};
+use numpy::{IntoPyArray, PyArray1, PyArray3, PyReadonlyArray3};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use reinfors_core::{
-    DqnLearner, DqnPolicy, Engine as CoreEngine, EngineParams, Game, Opponent, SearchConfig,
-    SelectiveExpectimaxPolicy, TreeStrapLearner,
+    Dqn, DqnRecord, Engine, EngineParams, EpsilonGreedyQ, Game, Learner, Opponent, Policy,
+    SearchConfig, SelectiveExpectimax, TreeStrap, TreeStrapRecord,
 };
-use reinfors_games::snake::{Cell, DeathCause, Snake, SnakeEnv as CoreEnv};
-use reinfors_games::{Action, Connect4, GridWorld, Reward, SearchParams, SnakeGame};
+use reinfors_games::snake::{Cell, DeathCause, SnakeBody, SnakeEnv as CoreEnv};
+use reinfors_games::{
+    Action, Connect4, Connect4Reward, GridWorld, GridWorldReward, SearchParams, Snake, SnakeReward,
+};
+
+// ===========================================================================
+// SNAKE_RL PARITY PLUMBING (TEMPORARY) — snake action/event conversions + the result types for the
+// `SnakeEnv` / `selective_search_many` differential-parity surface below. Deleted with that surface.
+// ===========================================================================
 
 fn action_from_u8(v: u8) -> PyResult<Action> {
     Ok(match v {
@@ -60,6 +74,10 @@ type InteriorOut = (Vec<f32>, Vec<Vec<f64>>);
 /// (root action values [K][A], interior TreeStrap targets, search stats).
 type SearchOutput = (Vec<Vec<f64>>, Vec<InteriorOut>, StatsTuple);
 
+// ===========================================================================
+// SHARED HELPERS (permanent) — used by both the unified engine and the parity plumbing.
+// ===========================================================================
+
 /// Reject search hyperparameters the core would mishandle (it does not validate them itself).
 fn validate_search_params(
     expansion_budget: usize,
@@ -83,37 +101,6 @@ fn validate_search_params(
     }
     if !(0.0..=1.0).contains(&beta) {
         return Err(PyValueError::new_err("beta must be in [0, 1]"));
-    }
-    Ok(())
-}
-
-/// Reject degenerate `Engine` rollout parameters (the search block is checked separately).
-fn validate_engine_params(
-    n_games: usize,
-    max_ticks: usize,
-    n_heads: usize,
-    epsilon: f64,
-    outcome_weight: f64,
-    bootstrap_p: f64,
-) -> PyResult<()> {
-    use pyo3::exceptions::PyValueError;
-    if n_games < 1 {
-        return Err(PyValueError::new_err("n_games must be >= 1"));
-    }
-    if max_ticks < 1 {
-        return Err(PyValueError::new_err("max_ticks must be >= 1"));
-    }
-    if n_heads < 1 {
-        return Err(PyValueError::new_err("n_heads must be >= 1"));
-    }
-    for (name, v) in [
-        ("epsilon", epsilon),
-        ("outcome_weight", outcome_weight),
-        ("bootstrap_p", bootstrap_p),
-    ] {
-        if !(0.0..=1.0).contains(&v) {
-            return Err(PyValueError::new_err(format!("{name} must be in [0, 1]")));
-        }
     }
     Ok(())
 }
@@ -170,6 +157,12 @@ fn infer_closure<'a, 'py>(
         }
     }
 }
+
+// ===========================================================================
+// SNAKE_RL PARITY PLUMBING (TEMPORARY) — the snake env + pooled selective search exposed so the
+// differential suite can pin reinfors against snake_RL's oracle. Not part of the engine composition;
+// removed when that oracle suite is retired. (`blend_outcome_targets`, near the end, belongs here too.)
+// ===========================================================================
 
 #[pyclass]
 struct SnakeEnv {
@@ -266,12 +259,12 @@ impl SnakeEnv {
         b_dir: u8,
         b_alive: bool,
     ) -> PyResult<()> {
-        self.inner.snakes[0] = Snake {
+        self.inner.snakes[0] = SnakeBody {
             body: VecDeque::from(a_body),
             direction: action_from_u8(a_dir)?,
             alive: a_alive,
         };
-        self.inner.snakes[1] = Snake {
+        self.inner.snakes[1] = SnakeBody {
             body: VecDeque::from(b_body),
             direction: action_from_u8(b_dir)?,
             alive: b_alive,
@@ -330,7 +323,7 @@ impl SnakeEnv {
             top_k,
             max_depth,
             food_samples,
-            reward: Reward {
+            reward: SnakeReward {
                 step: reward.0,
                 food: reward.1,
                 loss: reward.2,
@@ -456,7 +449,7 @@ fn selective_search_many(
         top_k,
         max_depth,
         food_samples,
-        reward: Reward {
+        reward: SnakeReward {
             step: reward.0,
             food: reward.1,
             loss: reward.2,
@@ -493,17 +486,6 @@ fn selective_search_many(
         .collect())
 }
 
-/// (observations [M, 5*g*g] f32, per-head targets [M, K, A] f64, per-head bootstrap masks [M, K] f32,
-/// telemetry dict). The dict holds `episodes` (a list of `(rewards, length)` per episode that finished
-/// during the call, `rewards` being the per-agent total) plus the call's `decisions`, `max_depth`, and per-decision
-/// means `mean_leaves`/`mean_rounds`/`mean_expansions`/`mean_sigma`/`mean_disagreement`.
-type CollectOutput<'py> = (
-    Bound<'py, PyArray2<f32>>,
-    Bound<'py, PyArray3<f64>>,
-    Bound<'py, PyArray2<f32>>,
-    Bound<'py, PyDict>,
-);
-
 /// Map an opponent name ("uniform"/"distributional") to its `Opponent`, rejecting anything else.
 fn parse_opponent(opponent: &str, opp_temperature: f64, opp_floor: f64) -> PyResult<Opponent> {
     match opponent {
@@ -518,20 +500,197 @@ fn parse_opponent(opponent: &str, opp_temperature: f64, opp_floor: f64) -> PyRes
     }
 }
 
-/// Drive a generic rollout `Engine` for at least `n_records` records and build the
-/// `(obs[M,dim] f32, targets[M,K,A] f64, masks[M,K] f32, telemetry dict)` `CollectOutput`. The
-/// per-game `collect` methods delegate here; behaviour is identical to the original snake collect.
-fn engine_collect<'py, G: Game + Sync>(
-    inner: &mut CoreEngine<G, SelectiveExpectimaxPolicy, TreeStrapLearner>,
+/// The unified parallel rollout engine: composes a game + policy + learner handle and drives N games,
+/// yielding the learner's records. Holds the composition type-erased, so one class serves every
+/// `(game, policy, learner)`. Construct the handles via `rf.games.*` / `rf.policies.*` / `rf.learners.*`.
+// ===========================================================================
+// UNIFIED ENGINE (permanent) — the `Engine` pyclass + its type-erased dispatch and two-axis factory.
+// One class composes any game/policy/learner; only a factory arm (+ a `RecordBatch` impl for a new
+// record shape) is needed to extend it — never a per-game/per-family engine type.
+// ===========================================================================
+
+#[pyclass(name = "Engine")]
+struct PyEngine {
+    inner: Box<dyn ErasedEngine>,
+}
+
+#[pymethods]
+impl PyEngine {
+    #[new]
+    #[pyo3(signature = (game, policy, learner, n_games, max_ticks, seed=0))]
+    fn new(
+        game: GameHandle,
+        policy: PolicyHandle,
+        learner: LearnerHandle,
+        n_games: usize,
+        max_ticks: usize,
+        seed: u64,
+    ) -> PyResult<Self> {
+        if n_games < 1 || max_ticks < 1 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "n_games and max_ticks must be >= 1",
+            ));
+        }
+        let engine_params = EngineParams {
+            n_games,
+            max_ticks,
+            seed,
+        };
+        Ok(PyEngine {
+            inner: build_engine(game.spec, policy.spec, learner.spec, engine_params)?,
+        })
+    }
+
+    /// Roll forward until at least `n_records` records are gathered. `infer` maps an (N, C*H*W) float32
+    /// batch to (N, K, A) float64 per-head action values. Returns the learner's record batch (today's
+    /// tuple shape — a typed `Batch` lands in a later step).
+    fn collect<'py>(
+        &mut self,
+        py: Python<'py>,
+        n_records: usize,
+        infer: Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.inner.collect(py, n_records, &infer)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unified engine composition. `Engine<G, P, L>`'s generics live entirely below the `collect`
+// boundary, so a non-generic `collect` is object-safe and one Python `Engine` can hold any
+// composition behind `Box<dyn ErasedEngine>`. Construction is a two-axis factory: `build_for_game`
+// enumerates (policy, learner) families once (generic over the game), `build_engine` enumerates games
+// once — additive `#games + #families`, never the product.
+// ---------------------------------------------------------------------------
+
+/// A rollout engine with its concrete `(Game, Policy, Learner)` types erased, so one Python `Engine`
+/// holds any composition. `collect` returns the learner's record batch as an opaque Python object.
+trait ErasedEngine: Send + Sync {
+    fn collect<'py>(
+        &mut self,
+        py: Python<'py>,
+        n_records: usize,
+        infer: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>>;
+}
+
+/// Marshal a learner's records (with the rollout telemetry) into the Python record batch. One impl per
+/// record *shape* — a new learner adds an impl here, never an engine wrapper. The batch is the
+/// learner's: TreeStrap → `(obs, targets, masks, telemetry)`; DQN → `(obs, actions, rewards, next_obs,
+/// dones, masks, telemetry)`.
+trait RecordBatch: Sized {
+    fn into_py_batch<'py>(
+        records: Vec<Self>,
+        py: Python<'py>,
+        dim: usize,
+        n_heads: usize,
+        telemetry: Bound<'py, PyDict>,
+    ) -> PyResult<Bound<'py, PyAny>>;
+}
+
+impl RecordBatch for TreeStrapRecord {
+    fn into_py_batch<'py>(
+        records: Vec<Self>,
+        py: Python<'py>,
+        dim: usize,
+        _n_heads: usize,
+        telemetry: Bound<'py, PyDict>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let m = records.len();
+        let (k, a) = if m > 0 {
+            (records[0].1.len(), records[0].1[0].len())
+        } else {
+            (0, 0)
+        };
+        let mut obs_flat: Vec<f32> = Vec::with_capacity(m * dim);
+        let mut tgt_flat: Vec<f64> = Vec::with_capacity(m * k * a);
+        let mut mask_flat: Vec<f32> = Vec::with_capacity(m * k);
+        for (obs, tgt, mask) in records {
+            obs_flat.extend(obs);
+            tgt_flat.extend(tgt.into_iter().flatten());
+            mask_flat.extend(mask);
+        }
+        let obs_arr = Array2::from_shape_vec((m, dim), obs_flat)
+            .expect("obs shape")
+            .into_pyarray(py);
+        let tgt_arr = Array3::from_shape_vec((m, k, a), tgt_flat)
+            .expect("target shape")
+            .into_pyarray(py);
+        let mask_arr = Array2::from_shape_vec((m, k), mask_flat)
+            .expect("mask shape")
+            .into_pyarray(py);
+        Ok((obs_arr, tgt_arr, mask_arr, telemetry)
+            .into_pyobject(py)?
+            .into_any())
+    }
+}
+
+impl RecordBatch for DqnRecord {
+    fn into_py_batch<'py>(
+        records: Vec<Self>,
+        py: Python<'py>,
+        dim: usize,
+        n_heads: usize,
+        telemetry: Bound<'py, PyDict>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let m = records.len();
+        let k = if m > 0 {
+            records[0].mask.len()
+        } else {
+            n_heads
+        };
+        let mut obs_flat: Vec<f32> = Vec::with_capacity(m * dim);
+        let mut next_flat: Vec<f32> = Vec::with_capacity(m * dim);
+        let mut mask_flat: Vec<f32> = Vec::with_capacity(m * k);
+        let mut actions: Vec<i64> = Vec::with_capacity(m);
+        let mut rewards: Vec<f64> = Vec::with_capacity(m);
+        let mut dones: Vec<bool> = Vec::with_capacity(m);
+        for t in records {
+            obs_flat.extend(t.obs);
+            next_flat.extend(t.next_obs);
+            mask_flat.extend(t.mask);
+            actions.push(t.action as i64);
+            rewards.push(t.reward);
+            dones.push(t.terminal);
+        }
+        let obs_arr = Array2::from_shape_vec((m, dim), obs_flat)
+            .expect("obs shape")
+            .into_pyarray(py);
+        let next_arr = Array2::from_shape_vec((m, dim), next_flat)
+            .expect("next_obs shape")
+            .into_pyarray(py);
+        let mask_arr = Array2::from_shape_vec((m, k), mask_flat)
+            .expect("mask shape")
+            .into_pyarray(py);
+        Ok((
+            obs_arr,
+            actions.into_pyarray(py),
+            rewards.into_pyarray(py),
+            next_arr,
+            dones.into_pyarray(py),
+            mask_arr,
+            telemetry,
+        )
+            .into_pyobject(py)?
+            .into_any())
+    }
+}
+
+/// Shared rollout: drive any `Engine<G, P, L>` for `n_records`, returning the records and the (uniform)
+/// telemetry dict. Search aggregates are zero for a search-less policy (its `fold_telemetry` is a no-op).
+fn run_collect<'py, G, P, L>(
+    inner: &mut Engine<G, P, L>,
     py: Python<'py>,
     n_records: usize,
     infer: &Bound<'_, PyAny>,
     dim: usize,
     action_count: usize,
     n_heads: usize,
-) -> PyResult<CollectOutput<'py>>
+) -> PyResult<(Vec<L::Record>, Bound<'py, PyDict>)>
 where
+    G: Game + Sync,
     G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
 {
     let mut callback_err: Option<PyErr> = None;
     let (records, stats) = {
@@ -548,29 +707,6 @@ where
     if let Some(e) = callback_err {
         return Err(e);
     }
-    let m = records.len();
-    let (k, a) = if m > 0 {
-        (records[0].1.len(), records[0].1[0].len())
-    } else {
-        (0, 0)
-    };
-    let mut obs_flat: Vec<f32> = Vec::with_capacity(m * dim);
-    let mut tgt_flat: Vec<f64> = Vec::with_capacity(m * k * a);
-    let mut mask_flat: Vec<f32> = Vec::with_capacity(m * k);
-    for (obs, tgt, mask) in records {
-        obs_flat.extend(obs);
-        tgt_flat.extend(tgt.into_iter().flatten());
-        mask_flat.extend(mask);
-    }
-    let obs_arr = Array2::from_shape_vec((m, dim), obs_flat)
-        .expect("obs shape")
-        .into_pyarray(py);
-    let tgt_arr = Array3::from_shape_vec((m, k, a), tgt_flat)
-        .expect("target shape")
-        .into_pyarray(py);
-    let mask_arr = Array2::from_shape_vec((m, k), mask_flat)
-        .expect("mask shape")
-        .into_pyarray(py);
     let d = (stats.decisions.max(1)) as f64;
     let episodes: Vec<(Vec<f64>, usize)> = stats
         .episodes
@@ -586,496 +722,457 @@ where
     telemetry.set_item("mean_expansions", stats.sum_expansions / d)?;
     telemetry.set_item("mean_sigma", stats.sum_sigma / d)?;
     telemetry.set_item("mean_disagreement", stats.sum_disagreement / d)?;
-    Ok((obs_arr, tgt_arr, mask_arr, telemetry))
+    Ok((records, telemetry))
 }
 
-/// Parallel rollout collector: drives N games via the pooled selective search and yields TreeStrap
-/// records (z-mixed roots + interior targets), each with a per-head bootstrap mask. Per-game
-/// Thompson-head, epsilon, and RNG apple spawns give the games diversity.
-#[pyclass]
-struct Engine {
-    inner: CoreEngine<SnakeGame, SelectiveExpectimaxPolicy, TreeStrapLearner>,
+/// One generic wrapper: a composed engine + its sizing metadata, type-erased behind `ErasedEngine`.
+/// A single blanket impl serves *every* `(G, P, L)` whose learner record can marshal to a batch — so a
+/// new game, policy, or learner needs no new wrapper or impl, only a factory arm (and, for a genuinely
+/// new record shape, a `RecordBatch` impl).
+struct EngineImpl<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
+    inner: Engine<G, P, L>,
     dim: usize,
     action_count: usize,
     n_heads: usize,
 }
 
-#[pymethods]
-impl Engine {
-    #[new]
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (n_games, grid_size, initial_length, play_to_last, win_food_lead, initial_food_count, gamma, beta, expansion_budget, top_k, max_depth, reward, opponent, opp_temperature, opp_floor, epsilon, max_ticks, n_heads, outcome_weight, interior_targets, bootstrap_p, seed, food_samples=1))]
-    fn new(
-        n_games: usize,
+impl<G, P, L> ErasedEngine for EngineImpl<G, P, L>
+where
+    G: Game + Send + Sync + 'static,
+    G::State: Send + Sync,
+    P: Policy + Send + Sync + 'static,
+    P::Evaluation: Send + Sync,
+    P::PolicyState: Send + Sync,
+    L: Learner<P::Evaluation> + Send + Sync + 'static,
+    L::Record: RecordBatch,
+{
+    fn collect<'py>(
+        &mut self,
+        py: Python<'py>,
+        n_records: usize,
+        infer: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let (records, telemetry) = run_collect(
+            &mut self.inner,
+            py,
+            n_records,
+            infer,
+            self.dim,
+            self.action_count,
+            self.n_heads,
+        )?;
+        L::Record::into_py_batch(records, py, self.dim, self.n_heads, telemetry)
+    }
+}
+
+/// Game configuration, independent of the acting/learning algorithm.
+#[derive(Clone)]
+enum GameSpec {
+    Snake {
         grid_size: i32,
         initial_length: usize,
+        initial_food_count: usize,
         play_to_last: bool,
         win_food_lead: Option<usize>,
-        initial_food_count: usize,
-        gamma: f64,
-        beta: f64,
-        expansion_budget: usize,
-        top_k: usize,
-        max_depth: i32,
-        reward: (f64, f64, f64, f64, f64, f64, f64),
-        opponent: &str,
-        opp_temperature: f64,
-        opp_floor: f64,
-        epsilon: f64,
-        max_ticks: usize,
-        n_heads: usize,
-        outcome_weight: f64,
-        interior_targets: bool,
-        bootstrap_p: f64,
-        seed: u64,
-        food_samples: usize,
-    ) -> PyResult<Self> {
-        validate_search_params(expansion_budget, top_k, max_depth, beta, food_samples)?;
-        validate_engine_params(
-            n_games,
-            max_ticks,
-            n_heads,
-            epsilon,
-            outcome_weight,
-            bootstrap_p,
-        )?;
-        let opponent = parse_opponent(opponent, opp_temperature, opp_floor)?;
-        let reward = Reward {
-            step: reward.0,
-            food: reward.1,
-            loss: reward.2,
-            draw: reward.3,
-            kill: reward.4,
-            win: reward.5,
-            survival: reward.6,
-        };
-        let search = SearchParams {
-            grid_size,
-            initial_length,
-            play_to_last,
-            win_food_lead,
-            gamma,
-            beta,
-            expansion_budget,
-            top_k,
-            max_depth,
-            food_samples,
-            reward,
-            opponent,
-        };
-        let game = SnakeGame {
-            grid_size,
-            initial_length,
-            play_to_last,
-            win_food_lead,
-            initial_food_count,
-            reward,
-        };
-        let engine_params = EngineParams {
-            n_games,
-            max_ticks,
-            seed,
-        };
-        // The TreeStrap planner owns the (game-agnostic) search config + z-mix outcome_weight +
-        // interior-target flag. The snake-specific bits of `search` split onto the `SnakeGame` above.
-        let cfg = SearchConfig {
-            gamma: search.gamma,
-            beta: search.beta,
-            expansion_budget: search.expansion_budget,
-            top_k: search.top_k,
-            max_depth: search.max_depth,
-            food_samples: search.food_samples,
-            opponent: search.opponent,
-        };
-        let policy = SelectiveExpectimaxPolicy::new(cfg, n_heads, epsilon);
-        let learner =
-            TreeStrapLearner::new(search.gamma, outcome_weight, bootstrap_p, interior_targets);
-        let dim = 5 * (grid_size as usize) * (grid_size as usize);
-        Ok(Engine {
-            inner: CoreEngine::new(game, policy, learner, engine_params),
-            dim,
-            action_count: 3,
-            n_heads,
-        })
-    }
-
-    /// Roll forward until at least `n_records` records are gathered. `infer` maps an (N, 5*g*g)
-    /// float32 batch to (N, K, 3) float64 per-head action values. Returns the records as a flat
-    /// (M, 5*g*g) observation array, an (M, K, 3) per-head target array, and an (M, K) per-head
-    /// bootstrap-mask array.
-    fn collect<'py>(
-        &mut self,
-        py: Python<'py>,
-        n_records: usize,
-        infer: Bound<'_, PyAny>,
-    ) -> PyResult<CollectOutput<'py>> {
-        engine_collect(
-            &mut self.inner,
-            py,
-            n_records,
-            &infer,
-            self.dim,
-            self.action_count,
-            self.n_heads,
-        )
-    }
-}
-
-/// Parallel rollout collector for Connect-4 (sequential 2-player). Mirrors the snake `Engine`:
-/// builds the game + search config + TreeStrap planner, and `collect` delegates to `engine_collect`.
-#[pyclass]
-struct Connect4Engine {
-    inner: CoreEngine<Connect4, SelectiveExpectimaxPolicy, TreeStrapLearner>,
-    dim: usize,
-    action_count: usize,
-    n_heads: usize,
-}
-
-#[pymethods]
-impl Connect4Engine {
-    #[new]
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (win_reward, loss_reward, draw_reward, gamma, beta, expansion_budget, top_k, max_depth, opponent, opp_temperature, opp_floor, epsilon, max_ticks, n_heads, outcome_weight, interior_targets, bootstrap_p, seed, n_games, food_samples=1))]
-    fn new(
-        win_reward: f64,
-        loss_reward: f64,
-        draw_reward: f64,
-        gamma: f64,
-        beta: f64,
-        expansion_budget: usize,
-        top_k: usize,
-        max_depth: i32,
-        opponent: &str,
-        opp_temperature: f64,
-        opp_floor: f64,
-        epsilon: f64,
-        max_ticks: usize,
-        n_heads: usize,
-        outcome_weight: f64,
-        interior_targets: bool,
-        bootstrap_p: f64,
-        seed: u64,
-        n_games: usize,
-        food_samples: usize,
-    ) -> PyResult<Self> {
-        validate_search_params(expansion_budget, top_k, max_depth, beta, food_samples)?;
-        validate_engine_params(
-            n_games,
-            max_ticks,
-            n_heads,
-            epsilon,
-            outcome_weight,
-            bootstrap_p,
-        )?;
-        let opponent = parse_opponent(opponent, opp_temperature, opp_floor)?;
-        let cfg = SearchConfig {
-            gamma,
-            beta,
-            expansion_budget,
-            top_k,
-            max_depth,
-            food_samples,
-            opponent,
-        };
-        let policy = SelectiveExpectimaxPolicy::new(cfg, n_heads, epsilon);
-        let learner = TreeStrapLearner::new(gamma, outcome_weight, bootstrap_p, interior_targets);
-        let game = Connect4 {
-            win_reward,
-            loss_reward,
-            draw_reward,
-        };
-        let engine_params = EngineParams {
-            n_games,
-            max_ticks,
-            seed,
-        };
-        Ok(Connect4Engine {
-            inner: CoreEngine::new(game, policy, learner, engine_params),
-            dim: 2 * 6 * 7,
-            action_count: 7,
-            n_heads,
-        })
-    }
-
-    fn collect<'py>(
-        &mut self,
-        py: Python<'py>,
-        n_records: usize,
-        infer: Bound<'_, PyAny>,
-    ) -> PyResult<CollectOutput<'py>> {
-        engine_collect(
-            &mut self.inner,
-            py,
-            n_records,
-            &infer,
-            self.dim,
-            self.action_count,
-            self.n_heads,
-        )
-    }
-}
-
-/// Parallel rollout collector for GridWorld (single-agent). Mirrors the snake `Engine`. The
-/// `opponent`/`opp_*` args are unused by this single-agent game but kept for a uniform signature.
-#[pyclass]
-struct GridWorldEngine {
-    inner: CoreEngine<GridWorld, SelectiveExpectimaxPolicy, TreeStrapLearner>,
-    dim: usize,
-    action_count: usize,
-    n_heads: usize,
-}
-
-#[pymethods]
-impl GridWorldEngine {
-    #[new]
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (size, goal_row, goal_col, step_reward, goal_reward, gamma, beta, expansion_budget, top_k, max_depth, opponent, opp_temperature, opp_floor, epsilon, max_ticks, n_heads, outcome_weight, interior_targets, bootstrap_p, seed, n_games, food_samples=1))]
-    fn new(
+        reward: SnakeReward,
+    },
+    Connect4 {
+        reward: Connect4Reward,
+    },
+    GridWorld {
         size: i32,
-        goal_row: i32,
-        goal_col: i32,
-        step_reward: f64,
-        goal_reward: f64,
-        gamma: f64,
+        goal: (i32, i32),
+        reward: GridWorldReward,
+    },
+}
+
+/// Acting-policy configuration. `n_heads` (ensemble size) lives here — the single source the learner
+/// composition reads from.
+#[derive(Clone)]
+enum PolicySpec {
+    SelectiveExpectimax {
         beta: f64,
         expansion_budget: usize,
         top_k: usize,
         max_depth: i32,
-        opponent: &str,
-        opp_temperature: f64,
-        opp_floor: f64,
-        epsilon: f64,
-        max_ticks: usize,
-        n_heads: usize,
-        outcome_weight: f64,
-        interior_targets: bool,
-        bootstrap_p: f64,
-        seed: u64,
-        n_games: usize,
         food_samples: usize,
-    ) -> PyResult<Self> {
-        validate_search_params(expansion_budget, top_k, max_depth, beta, food_samples)?;
-        validate_engine_params(
-            n_games,
-            max_ticks,
-            n_heads,
-            epsilon,
-            outcome_weight,
-            bootstrap_p,
-        )?;
-        let opponent = parse_opponent(opponent, opp_temperature, opp_floor)?;
-        let cfg = SearchConfig {
-            gamma,
-            beta,
-            expansion_budget,
-            top_k,
-            max_depth,
-            food_samples,
-            opponent,
-        };
-        let policy = SelectiveExpectimaxPolicy::new(cfg, n_heads, epsilon);
-        let learner = TreeStrapLearner::new(gamma, outcome_weight, bootstrap_p, interior_targets);
-        let game = GridWorld {
-            size,
-            goal: (goal_row, goal_col),
-            step_reward,
-            goal_reward,
-        };
-        let engine_params = EngineParams {
-            n_games,
-            max_ticks,
-            seed,
-        };
-        Ok(GridWorldEngine {
-            inner: CoreEngine::new(game, policy, learner, engine_params),
-            dim: 2 * (size as usize) * (size as usize),
-            action_count: 4,
-            n_heads,
-        })
-    }
-
-    fn collect<'py>(
-        &mut self,
-        py: Python<'py>,
-        n_records: usize,
-        infer: Bound<'_, PyAny>,
-    ) -> PyResult<CollectOutput<'py>> {
-        engine_collect(
-            &mut self.inner,
-            py,
-            n_records,
-            &infer,
-            self.dim,
-            self.action_count,
-            self.n_heads,
-        )
-    }
+        opponent: Opponent,
+        n_heads: usize,
+        epsilon: f64,
+    },
+    EpsilonGreedyQ {
+        n_heads: usize,
+        epsilon: f64,
+    },
 }
 
-/// DQN's `collect` output — a different record shape from TreeStrap's `(obs, targets, masks)`: raw
-/// off-policy transitions `(obs, action, reward, next_obs, done, mask)` for a replay buffer, plus
-/// telemetry. The differently-shaped output is the point — it exercises the binding's record boundary.
-type DqnCollectOutput<'py> = (
-    Bound<'py, PyArray2<f32>>,  // obs [M, dim]
-    Bound<'py, PyArray1<i64>>,  // actions [M]
-    Bound<'py, PyArray1<f64>>,  // rewards [M]
-    Bound<'py, PyArray2<f32>>,  // next_obs [M, dim]
-    Bound<'py, PyArray1<bool>>, // done [M]
-    Bound<'py, PyArray2<f32>>,  // per-head bootstrap masks [M, K]
-    Bound<'py, PyDict>,         // telemetry (episodes + decisions; no search stats)
-);
+/// Learning-algorithm configuration. TreeStrap's `gamma` is also threaded into the search config by
+/// the factory, so the search and the z-mix share one discount.
+#[derive(Clone)]
+enum LearnerSpec {
+    TreeStrap {
+        gamma: f64,
+        outcome_weight: f64,
+        bootstrap_p: f64,
+        interior_targets: bool,
+    },
+    Dqn {
+        bootstrap_p: f64,
+    },
+}
 
-/// Marshal a DQN rollout's `DqnRecord` transitions into numpy arrays for a Python replay buffer.
-fn dqn_engine_collect<'py, G: Game + Sync>(
-    inner: &mut CoreEngine<G, DqnPolicy, DqnLearner>,
-    py: Python<'py>,
-    n_records: usize,
-    infer: &Bound<'_, PyAny>,
-    dim: usize,
-    action_count: usize,
-    n_heads: usize,
-) -> PyResult<DqnCollectOutput<'py>>
+/// Reject a probability/weight outside `[0, 1]`.
+fn check_unit(name: &str, v: f64) -> PyResult<()> {
+    if !(0.0..=1.0).contains(&v) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{name} must be in [0, 1]"
+        )));
+    }
+    Ok(())
+}
+
+/// Family axis: given a concrete game, build the engine for a valid (policy, learner) pair. Written
+/// once, generic over `G`, so a new family applies to every game; invalid pairings error here. Also
+/// where the composed params are validated (the handles store them unchecked).
+fn build_for_game<G: Game + Send + Sync + 'static>(
+    game: G,
+    policy: PolicySpec,
+    learner: LearnerSpec,
+    engine_params: EngineParams,
+) -> PyResult<Box<dyn ErasedEngine>>
 where
-    G::State: Send,
+    G::State: Send + Sync,
 {
-    let mut callback_err: Option<PyErr> = None;
-    let (records, stats) = {
-        let mut infer_fn = infer_closure(
-            py,
-            infer,
-            dim,
-            action_count,
-            Some(n_heads),
-            &mut callback_err,
-        );
-        inner.collect(n_records, &mut infer_fn)
-    };
-    if let Some(e) = callback_err {
-        return Err(e);
+    let (c, h, w) = game.obs_shape();
+    let dim = c * h * w;
+    let action_count = game.action_count();
+    match (policy, learner) {
+        (
+            PolicySpec::SelectiveExpectimax {
+                beta,
+                expansion_budget,
+                top_k,
+                max_depth,
+                food_samples,
+                opponent,
+                n_heads,
+                epsilon,
+            },
+            LearnerSpec::TreeStrap {
+                gamma,
+                outcome_weight,
+                bootstrap_p,
+                interior_targets,
+            },
+        ) => {
+            validate_search_params(expansion_budget, top_k, max_depth, beta, food_samples)?;
+            if n_heads < 1 {
+                return Err(pyo3::exceptions::PyValueError::new_err("n_heads must be >= 1"));
+            }
+            check_unit("epsilon", epsilon)?;
+            check_unit("outcome_weight", outcome_weight)?;
+            check_unit("bootstrap_p", bootstrap_p)?;
+            let cfg = SearchConfig {
+                gamma,
+                beta,
+                expansion_budget,
+                top_k,
+                max_depth,
+                food_samples,
+                opponent,
+            };
+            let policy = SelectiveExpectimax::new(cfg, n_heads, epsilon);
+            let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
+            Ok(Box::new(EngineImpl {
+                inner: Engine::new(game, policy, learner, engine_params),
+                dim,
+                action_count,
+                n_heads,
+            }))
+        }
+        (PolicySpec::EpsilonGreedyQ { n_heads, epsilon }, LearnerSpec::Dqn { bootstrap_p }) => {
+            if n_heads < 1 {
+                return Err(pyo3::exceptions::PyValueError::new_err("n_heads must be >= 1"));
+            }
+            check_unit("epsilon", epsilon)?;
+            check_unit("bootstrap_p", bootstrap_p)?;
+            let policy = EpsilonGreedyQ::new(n_heads, epsilon);
+            let learner = Dqn::new(n_heads, bootstrap_p);
+            Ok(Box::new(EngineImpl {
+                inner: Engine::new(game, policy, learner, engine_params),
+                dim,
+                action_count,
+                n_heads,
+            }))
+        }
+        _ => Err(pyo3::exceptions::PyValueError::new_err(
+            "incompatible policy/learner: TreeStrap pairs with SelectiveExpectimax, Dqn with EpsilonGreedyQ",
+        )),
     }
-    let m = records.len();
-    let k = if m > 0 {
-        records[0].mask.len()
-    } else {
-        n_heads
-    };
-    let mut obs_flat: Vec<f32> = Vec::with_capacity(m * dim);
-    let mut next_flat: Vec<f32> = Vec::with_capacity(m * dim);
-    let mut mask_flat: Vec<f32> = Vec::with_capacity(m * k);
-    let mut actions: Vec<i64> = Vec::with_capacity(m);
-    let mut rewards: Vec<f64> = Vec::with_capacity(m);
-    let mut dones: Vec<bool> = Vec::with_capacity(m);
-    for t in records {
-        obs_flat.extend(t.obs);
-        next_flat.extend(t.next_obs); // always `dim`-length for a transition learner (s' of the step)
-        mask_flat.extend(t.mask);
-        actions.push(t.action as i64);
-        rewards.push(t.reward);
-        dones.push(t.terminal);
-    }
-    let obs_arr = Array2::from_shape_vec((m, dim), obs_flat)
-        .expect("obs shape")
-        .into_pyarray(py);
-    let next_arr = Array2::from_shape_vec((m, dim), next_flat)
-        .expect("next_obs shape")
-        .into_pyarray(py);
-    let mask_arr = Array2::from_shape_vec((m, k), mask_flat)
-        .expect("mask shape")
-        .into_pyarray(py);
-    let telemetry = PyDict::new(py);
-    let episodes: Vec<(Vec<f64>, usize)> = stats
-        .episodes
-        .iter()
-        .map(|e| (e.reward.clone(), e.length))
-        .collect();
-    telemetry.set_item("episodes", episodes)?;
-    telemetry.set_item("decisions", stats.decisions)?;
-    Ok((
-        obs_arr,
-        actions.into_pyarray(py),
-        rewards.into_pyarray(py),
-        next_arr,
-        dones.into_pyarray(py),
-        mask_arr,
-        telemetry,
-    ))
 }
 
-/// A model-free bootstrapped-DQN rollout engine over GridWorld — the second algorithm, exercising the
-/// generic engine with a non-search policy and a transition record. `collect` returns transitions.
+/// Game axis: pick the concrete game from `GameSpec`, then dispatch to `build_for_game`. One arm per
+/// game; each instantly works with every family.
+fn build_engine(
+    game: GameSpec,
+    policy: PolicySpec,
+    learner: LearnerSpec,
+    engine_params: EngineParams,
+) -> PyResult<Box<dyn ErasedEngine>> {
+    match game {
+        GameSpec::Snake {
+            grid_size,
+            initial_length,
+            initial_food_count,
+            play_to_last,
+            win_food_lead,
+            reward,
+        } => build_for_game(
+            Snake {
+                grid_size,
+                initial_length,
+                play_to_last,
+                win_food_lead,
+                initial_food_count,
+                reward,
+            },
+            policy,
+            learner,
+            engine_params,
+        ),
+        GameSpec::Connect4 { reward } => {
+            build_for_game(Connect4 { reward }, policy, learner, engine_params)
+        }
+        GameSpec::GridWorld { size, goal, reward } => build_for_game(
+            GridWorld { size, goal, reward },
+            policy,
+            learner,
+            engine_params,
+        ),
+    }
+}
+
+// ===========================================================================
+// PER-GAME CONFIG (permanent) — the `rf.games.*` / `rf.policies.*` / `rf.learners.*` handles: a
+// game's / algorithm's parameter surface, which has to be expressed somewhere. One handle pyclass per
+// axis, each carrying a spec, with a staticmethod per variant. The Python layer binds those
+// staticmethods into namespaces (rf.games.Snake = GameHandle.Snake) and adds the name registry +
+// make_* glue. The unified `Engine` extracts the specs and composes them via the factory above.
+// ===========================================================================
+
+/// `rf.Reward` — a generic named-weight reward: a `{component: weight}` map that a game interprets.
+/// Each game declares the components it understands; an unrecognized key is an error (see
+/// `resolve_reward`), so `rf.Reward(food=1.0)` for a non-snake game is rejected rather than ignored.
 #[pyclass]
-struct DqnGridWorldEngine {
-    inner: CoreEngine<GridWorld, DqnPolicy, DqnLearner>,
-    dim: usize,
-    action_count: usize,
-    n_heads: usize,
+#[derive(Clone, Default)]
+struct Reward {
+    weights: HashMap<String, f64>,
 }
 
 #[pymethods]
-impl DqnGridWorldEngine {
+impl Reward {
     #[new]
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (size, goal_row, goal_col, step_reward, goal_reward, epsilon, n_heads, bootstrap_p, max_ticks, seed, n_games))]
-    fn new(
-        size: i32,
-        goal_row: i32,
-        goal_col: i32,
-        step_reward: f64,
-        goal_reward: f64,
-        epsilon: f64,
-        n_heads: usize,
-        bootstrap_p: f64,
-        max_ticks: usize,
-        seed: u64,
-        n_games: usize,
+    #[pyo3(signature = (**weights))]
+    fn new(weights: Option<HashMap<String, f64>>) -> Self {
+        Reward {
+            weights: weights.unwrap_or_default(),
+        }
+    }
+}
+
+/// Resolve a generic `Reward` for a game whose components + defaults are `schema`: every key the
+/// caller passed must be one of the schema's components (any unknown key is an error listing the valid
+/// set), and each component reads its weight, falling back to its schema default. Returns the resolved
+/// weights in schema order.
+fn resolve_reward(reward: Option<Reward>, schema: &[(&str, f64)]) -> PyResult<Vec<f64>> {
+    let weights = reward.map(|r| r.weights).unwrap_or_default();
+    if let Some(bad) = weights.keys().find(|k| !schema.iter().any(|(s, _)| s == k)) {
+        let valid: Vec<&str> = schema.iter().map(|(s, _)| *s).collect();
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown reward key {bad:?}; valid keys for this game: {valid:?}"
+        )));
+    }
+    Ok(schema
+        .iter()
+        .map(|(k, default)| weights.get(*k).copied().unwrap_or(*default))
+        .collect())
+}
+
+/// Game handle (`rf.games.Snake` / `.Connect4` / `.GridWorld`).
+#[pyclass]
+#[derive(Clone)]
+struct GameHandle {
+    spec: GameSpec,
+}
+
+#[pymethods]
+impl GameHandle {
+    #[staticmethod]
+    #[pyo3(signature = (grid_size=20, initial_length=3, food=3, play_to_last=true, win_food_lead=None, reward=None))]
+    #[pyo3(name = "Snake")]
+    fn snake(
+        grid_size: i32,
+        initial_length: usize,
+        food: usize,
+        play_to_last: bool,
+        win_food_lead: Option<usize>,
+        reward: Option<Reward>,
     ) -> PyResult<Self> {
-        use pyo3::exceptions::PyValueError;
-        if n_games < 1 || max_ticks < 1 || n_heads < 1 {
-            return Err(PyValueError::new_err(
-                "n_games, max_ticks, n_heads must be >= 1",
-            ));
-        }
-        for (name, v) in [("epsilon", epsilon), ("bootstrap_p", bootstrap_p)] {
-            if !(0.0..=1.0).contains(&v) {
-                return Err(PyValueError::new_err(format!("{name} must be in [0, 1]")));
-            }
-        }
-        let game = GridWorld {
-            size,
-            goal: (goal_row, goal_col),
-            step_reward,
-            goal_reward,
-        };
-        let policy = DqnPolicy::new(n_heads, epsilon);
-        let learner = DqnLearner::new(n_heads, bootstrap_p);
-        let engine_params = EngineParams {
-            n_games,
-            max_ticks,
-            seed,
-        };
-        Ok(DqnGridWorldEngine {
-            inner: CoreEngine::new(game, policy, learner, engine_params),
-            dim: 2 * (size as usize) * (size as usize),
-            action_count: 4,
-            n_heads,
+        let r = resolve_reward(
+            reward,
+            &[
+                ("step", 0.0),
+                ("food", 0.0),
+                ("loss", 0.0),
+                ("draw", 0.0),
+                ("kill", 0.0),
+                ("win", 0.0),
+                ("survival", 0.0),
+            ],
+        )?;
+        Ok(GameHandle {
+            spec: GameSpec::Snake {
+                grid_size,
+                initial_length,
+                initial_food_count: food,
+                play_to_last,
+                win_food_lead,
+                reward: SnakeReward {
+                    step: r[0],
+                    food: r[1],
+                    loss: r[2],
+                    draw: r[3],
+                    kill: r[4],
+                    win: r[5],
+                    survival: r[6],
+                },
+            },
         })
     }
 
-    fn collect<'py>(
-        &mut self,
-        py: Python<'py>,
-        n_records: usize,
-        infer: Bound<'_, PyAny>,
-    ) -> PyResult<DqnCollectOutput<'py>> {
-        dqn_engine_collect(
-            &mut self.inner,
-            py,
-            n_records,
-            &infer,
-            self.dim,
-            self.action_count,
-            self.n_heads,
-        )
+    #[staticmethod]
+    #[pyo3(signature = (reward=None))]
+    #[pyo3(name = "Connect4")]
+    fn connect4(reward: Option<Reward>) -> PyResult<Self> {
+        let r = resolve_reward(reward, &[("win", 1.0), ("loss", -1.0), ("draw", 0.0)])?;
+        Ok(GameHandle {
+            spec: GameSpec::Connect4 {
+                reward: Connect4Reward {
+                    win: r[0],
+                    loss: r[1],
+                    draw: r[2],
+                },
+            },
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (size=5, goal_row=4, goal_col=4, reward=None))]
+    #[pyo3(name = "GridWorld")]
+    fn gridworld(
+        size: i32,
+        goal_row: i32,
+        goal_col: i32,
+        reward: Option<Reward>,
+    ) -> PyResult<Self> {
+        let r = resolve_reward(reward, &[("step", 0.0), ("goal", 1.0)])?;
+        Ok(GameHandle {
+            spec: GameSpec::GridWorld {
+                size,
+                goal: (goal_row, goal_col),
+                reward: GridWorldReward {
+                    step: r[0],
+                    goal: r[1],
+                },
+            },
+        })
+    }
+}
+
+/// Policy handle (`rf.policies.SelectiveExpectimax` / `.EpsilonGreedyQ`).
+#[pyclass]
+#[derive(Clone)]
+struct PolicyHandle {
+    spec: PolicySpec,
+}
+
+#[pymethods]
+impl PolicyHandle {
+    #[staticmethod]
+    #[pyo3(signature = (expansion_budget=64, top_k=8, max_depth=12, beta=1.0, food_samples=1, n_heads=1, epsilon=0.0, opponent="uniform", opp_temperature=1.0, opp_floor=0.0))]
+    #[pyo3(name = "SelectiveExpectimax")]
+    #[allow(clippy::too_many_arguments)]
+    fn selective_expectimax(
+        expansion_budget: usize,
+        top_k: usize,
+        max_depth: i32,
+        beta: f64,
+        food_samples: usize,
+        n_heads: usize,
+        epsilon: f64,
+        opponent: &str,
+        opp_temperature: f64,
+        opp_floor: f64,
+    ) -> PyResult<Self> {
+        Ok(PolicyHandle {
+            spec: PolicySpec::SelectiveExpectimax {
+                beta,
+                expansion_budget,
+                top_k,
+                max_depth,
+                food_samples,
+                opponent: parse_opponent(opponent, opp_temperature, opp_floor)?,
+                n_heads,
+                epsilon,
+            },
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (n_heads=1, epsilon=0.1))]
+    #[pyo3(name = "EpsilonGreedyQ")]
+    fn epsilon_greedy_q(n_heads: usize, epsilon: f64) -> Self {
+        PolicyHandle {
+            spec: PolicySpec::EpsilonGreedyQ { n_heads, epsilon },
+        }
+    }
+}
+
+/// Learner handle (`rf.learners.TreeStrap` / `.Dqn`).
+#[pyclass]
+#[derive(Clone)]
+struct LearnerHandle {
+    spec: LearnerSpec,
+}
+
+#[pymethods]
+impl LearnerHandle {
+    #[staticmethod]
+    #[pyo3(signature = (gamma=0.99, outcome_weight=0.0, bootstrap_p=1.0, interior_targets=false))]
+    #[pyo3(name = "TreeStrap")]
+    fn treestrap(
+        gamma: f64,
+        outcome_weight: f64,
+        bootstrap_p: f64,
+        interior_targets: bool,
+    ) -> Self {
+        LearnerHandle {
+            spec: LearnerSpec::TreeStrap {
+                gamma,
+                outcome_weight,
+                bootstrap_p,
+                interior_targets,
+            },
+        }
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (bootstrap_p=1.0))]
+    #[pyo3(name = "Dqn")]
+    fn dqn(bootstrap_p: f64) -> Self {
+        LearnerHandle {
+            spec: LearnerSpec::Dqn { bootstrap_p },
+        }
     }
 }
 
@@ -1083,6 +1180,11 @@ impl DqnGridWorldEngine {
 fn core_version() -> &'static str {
     reinfors_core::version()
 }
+
+// ===========================================================================
+// SNAKE_RL PARITY PLUMBING (TEMPORARY) — z-mix helper exposed only for the differential test; removed
+// with the rest of the parity surface.
+// ===========================================================================
 
 /// AlphaGo-style z-mixing applied to a single trajectory: blend the realized discounted return into
 /// each step's executed-action entry of every head. `search_values` is (T, K, A); `actions`/`rewards`
@@ -1117,12 +1219,8 @@ fn blend_outcome_targets<'py>(
             (values, actions[i], rewards[i])
         })
         .collect();
-    let blended = reinfors_core::TreeStrapLearner::blend_outcome_targets(
-        &trajectory,
-        gamma,
-        outcome_weight,
-        &tail,
-    );
+    let blended =
+        reinfors_core::TreeStrap::blend_outcome_targets(&trajectory, gamma, outcome_weight, &tail);
     let flat: Vec<f64> = blended.into_iter().flatten().flatten().collect();
     Ok(Array3::from_shape_vec((t, k, a), flat)
         .expect("blend shape")
@@ -1135,9 +1233,10 @@ fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(selective_search_many, m)?)?;
     m.add_function(wrap_pyfunction!(blend_outcome_targets, m)?)?;
     m.add_class::<SnakeEnv>()?;
-    m.add_class::<Engine>()?;
-    m.add_class::<Connect4Engine>()?;
-    m.add_class::<GridWorldEngine>()?;
-    m.add_class::<DqnGridWorldEngine>()?;
+    m.add_class::<PyEngine>()?;
+    m.add_class::<GameHandle>()?;
+    m.add_class::<PolicyHandle>()?;
+    m.add_class::<LearnerHandle>()?;
+    m.add_class::<Reward>()?;
     Ok(())
 }

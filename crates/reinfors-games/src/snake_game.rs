@@ -1,4 +1,4 @@
-//! `SnakeGame` — the two-player simultaneous-move snake implementing `reinfors_core::Game`. It
+//! `Snake` — the two-player simultaneous-move snake implementing `reinfors_core::Game`. It
 //! reproduces the concrete `SnakeEnv`/search behavior exactly (the snake↔snake_RL differential suite
 //! is the guard). The framework consumes a game through the `Game` trait only.
 
@@ -8,29 +8,29 @@ use reinfors_core::game::{Actor, Game, Rng, Transition};
 
 use crate::action::{relative_to_absolute, Action, RELATIVE_ACTIONS};
 use crate::obs::{egocentric_parts, N_CHANNELS};
-use crate::reward::Reward;
-use crate::snake::{Cell, Snake, SnakeEnv};
+use crate::reward::SnakeReward;
+use crate::snake::{Cell, SnakeBody, SnakeEnv};
 
 /// Snake's dynamic state: the two snakes and the food. Static config (grid size, rules, reward) lives
-/// on `SnakeGame`, so the search/engine can carry just this around per node.
+/// on `Snake`, so the search/engine can carry just this around per node.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SnakeState {
-    pub snakes: [Snake; 2],
+    pub snakes: [SnakeBody; 2],
     pub food: HashSet<Cell>,
 }
 
 /// Two-player simultaneous-move snake with environment chance (apple respawn) — the concrete `SnakeEnv`
 /// dynamics behind the `Game` trait.
-pub struct SnakeGame {
+pub struct Snake {
     pub grid_size: i32,
     pub initial_length: usize,
     pub play_to_last: bool,
     pub win_food_lead: Option<usize>,
     pub initial_food_count: usize,
-    pub reward: Reward,
+    pub reward: SnakeReward,
 }
 
-impl SnakeGame {
+impl Snake {
     fn env(&self, state: &SnakeState) -> SnakeEnv {
         SnakeEnv::from_parts(
             self.grid_size,
@@ -47,7 +47,7 @@ impl SnakeGame {
     /// `g² − occupied.len()` (no count pass) and lookups are O(1); then walk to the k-th empty cell in
     /// row-major order. A single `rng.below(n)` indexing the row-major empties is identical to
     /// materializing the empties `Vec` and indexing it — same cell, same RNG — but without that `Vec`.
-    fn spawn_one(&self, snakes: &[Snake; 2], food: &mut HashSet<Cell>, rng: &mut dyn Rng) {
+    fn spawn_one(&self, snakes: &[SnakeBody; 2], food: &mut HashSet<Cell>, rng: &mut dyn Rng) {
         let g = self.grid_size;
         let mut occupied: HashSet<Cell> = food.clone();
         for s in snakes {
@@ -74,7 +74,7 @@ impl SnakeGame {
     }
 }
 
-impl Game for SnakeGame {
+impl Game for Snake {
     type State = SnakeState;
 
     fn num_agents(&self) -> usize {
@@ -195,8 +195,8 @@ mod tests {
 
     const G: i32 = 8;
 
-    fn reward() -> Reward {
-        Reward {
+    fn reward() -> SnakeReward {
+        SnakeReward {
             step: 0.0,
             food: 1.0,
             loss: -10.0,
@@ -207,8 +207,8 @@ mod tests {
         }
     }
 
-    fn game() -> SnakeGame {
-        SnakeGame {
+    fn game() -> Snake {
+        Snake {
             grid_size: G,
             initial_length: 3,
             play_to_last: false,

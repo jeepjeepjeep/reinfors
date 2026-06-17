@@ -388,30 +388,31 @@ def test_survival_reward_matches_oracle_minimal_reward(survival: float) -> None:
     delta = mr(StepEvent(survived_to_max_ticks=True)) - mr(StepEvent())
 
     def engine(surv: float) -> object:
-        reward = (0.0, 0.0, -10.0, -6.0, 20.0, 20.0, surv)
-        return reinfors._reinfors.Engine(
-            2,
-            _GRID,
-            3,
-            False,
-            None,
-            0,  # 2 games, food-free
-            _GAMMA,
-            1.0,
-            24,
-            4,
-            6,  # gamma, beta, budget, top_k, max_depth
-            reward,
-            "uniform",
-            _TEMP,
-            _FLOOR,
-            0.1,
-            1,
-            2,  # epsilon, max_ticks=1, n_heads=2
-            1.0,
-            False,
-            1.0,  # outcome_weight=1, interior off, bootstrap_p=1
-            0,
+        return reinfors.Engine(
+            reinfors.games.Snake(
+                grid_size=_GRID,
+                initial_length=3,
+                food=0,  # food-free
+                play_to_last=False,
+                win_food_lead=None,
+                reward=reinfors.Reward(step=0.0, food=0.0, loss=-10.0, draw=-6.0, kill=20.0, win=20.0, survival=surv),
+            ),
+            reinfors.policies.SelectiveExpectimax(
+                expansion_budget=24,
+                top_k=4,
+                max_depth=6,
+                beta=1.0,
+                food_samples=1,
+                n_heads=2,
+                epsilon=0.1,
+                opponent="uniform",
+                opp_temperature=_TEMP,
+                opp_floor=_FLOOR,
+            ),
+            reinfors.learners.TreeStrap(gamma=_GAMMA, outcome_weight=1.0, bootstrap_p=1.0, interior_targets=False),
+            n_games=2,
+            max_ticks=1,
+            seed=0,
         )
 
     _, t0, _, _ = engine(0.0).collect(2, _infer_k2)

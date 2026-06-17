@@ -24,13 +24,13 @@ pub enum DeathCause {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Snake {
+pub struct SnakeBody {
     pub body: VecDeque<Cell>, // body[0] is the head, body[len-1] the tail
     pub direction: Action,
     pub alive: bool,
 }
 
-impl Snake {
+impl SnakeBody {
     pub fn head(&self) -> Cell {
         self.body[0]
     }
@@ -64,7 +64,7 @@ pub struct SnakeEnv {
     pub initial_length: usize,
     pub play_to_last: bool,
     pub win_food_lead: Option<usize>,
-    pub snakes: [Snake; 2],
+    pub snakes: [SnakeBody; 2],
     pub food: HashSet<Cell>,
     pub done: bool,
 }
@@ -95,7 +95,7 @@ impl SnakeEnv {
         initial_length: usize,
         play_to_last: bool,
         win_food_lead: Option<usize>,
-        snakes: [Snake; 2],
+        snakes: [SnakeBody; 2],
         food: HashSet<Cell>,
     ) -> Self {
         SnakeEnv {
@@ -111,7 +111,7 @@ impl SnakeEnv {
 
     /// Heads at one-third / two-thirds along the middle row, bodies trailing to the nearer wall and
     /// wrapping (matches `_initial_snakes` / `_trace_body`).
-    fn initial_snakes(grid_size: i32, length: usize) -> [Snake; 2] {
+    fn initial_snakes(grid_size: i32, length: usize) -> [SnakeBody; 2] {
         let g = grid_size;
         let mid = g / 2;
         let a_body = Self::trace_body(
@@ -127,12 +127,12 @@ impl SnakeEnv {
             length,
         );
         [
-            Snake {
+            SnakeBody {
                 body: a_body,
                 direction: Action::Right,
                 alive: true,
             },
-            Snake {
+            SnakeBody {
                 body: b_body,
                 direction: Action::Left,
                 alive: true,
@@ -328,7 +328,7 @@ impl SnakeEnv {
 
 /// Unoccupied cells in row-major order — the apple-spawn candidates (occupied = both snake bodies and
 /// existing food, matching the oracle's `_spawn_cells` / `_sample_spawn`).
-pub fn empty_cells(snakes: &[Snake; 2], food: &HashSet<Cell>, grid_size: i32) -> Vec<Cell> {
+pub fn empty_cells(snakes: &[SnakeBody; 2], food: &HashSet<Cell>, grid_size: i32) -> Vec<Cell> {
     let mut occupied: HashSet<Cell> = food.clone();
     for s in snakes {
         occupied.extend(s.body.iter().copied());

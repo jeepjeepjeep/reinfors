@@ -16,13 +16,13 @@ pub mod space;
 pub use engine::{CollectStats, Engine, EngineParams, EpisodeSummary};
 pub use game::{Actor, Game, Rng, Transition};
 pub use learner::{Learner, Step};
-pub use learners::dqn::{DqnLearner, DqnRecord};
-pub use learners::treestrap::{TreeStrapLearner, TreeStrapRecord};
-pub use policies::dqn::{DqnPolicy, QEvaluation};
+pub use learners::dqn::{Dqn, DqnRecord};
+pub use learners::treestrap::{TreeStrap, TreeStrapRecord};
+pub use policies::epsilon_greedy_q::{EpsilonGreedyQ, QEvaluation};
 pub use policies::expectimax::search::{
     search_many, InteriorTarget, Opponent, SearchConfig, SearchResult, SearchStats,
 };
-pub use policies::expectimax::{SearchEvaluation, SelectiveExpectimaxPolicy};
+pub use policies::expectimax::{SearchEvaluation, SelectiveExpectimax};
 pub use policy::Policy;
 pub use space::Space;
 

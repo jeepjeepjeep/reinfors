@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use crate::snake::{Cell, Snake, SnakeEnv};
+use crate::snake::{Cell, SnakeBody, SnakeEnv};
 
 pub const N_CHANNELS: usize = 5;
 const CH_OWN_HEAD: usize = 0;
@@ -23,7 +23,7 @@ pub fn egocentric(env: &SnakeEnv, agent: usize) -> Vec<f32> {
 /// Same as [`egocentric`], operating directly on a (snakes, food) state — used by the search, which
 /// builds observations for simulated child states without constructing a full `SnakeEnv`.
 pub fn egocentric_parts(
-    snakes: &[Snake; 2],
+    snakes: &[SnakeBody; 2],
     food: &HashSet<Cell>,
     grid_size: i32,
     agent: usize,

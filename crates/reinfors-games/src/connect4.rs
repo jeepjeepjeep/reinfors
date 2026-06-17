@@ -18,21 +18,28 @@ pub struct Connect4State {
     done: bool,
 }
 
-/// Standard 7x6 Connect-4 with zero-sum terminal rewards.
-pub struct Connect4 {
-    pub win_reward: f64,
-    pub loss_reward: f64,
-    pub draw_reward: f64,
+/// Connect-4's terminal reward weights (zero-sum: the loser gets `loss`, the winner `win`).
+#[derive(Clone, Copy, Debug)]
+pub struct Connect4Reward {
+    pub win: f64,
+    pub loss: f64,
+    pub draw: f64,
 }
 
-impl Default for Connect4 {
+impl Default for Connect4Reward {
     fn default() -> Self {
-        Connect4 {
-            win_reward: 1.0,
-            loss_reward: -1.0,
-            draw_reward: 0.0,
+        Connect4Reward {
+            win: 1.0,
+            loss: -1.0,
+            draw: 0.0,
         }
     }
+}
+
+/// Standard 7x6 Connect-4 with zero-sum terminal rewards.
+#[derive(Default)]
+pub struct Connect4 {
+    pub reward: Connect4Reward,
 }
 
 impl Connect4 {
@@ -76,13 +83,13 @@ impl Connect4 {
             Some(w) => (0..2)
                 .map(|a| {
                     if a == w {
-                        self.win_reward
+                        self.reward.win
                     } else {
-                        self.loss_reward
+                        self.reward.loss
                     }
                 })
                 .collect(),
-            None => vec![self.draw_reward; 2],
+            None => vec![self.reward.draw; 2],
         }
     }
 }
@@ -177,8 +184,7 @@ impl Game for Connect4 {
 mod tests {
     use super::*;
     use reinfors_core::{
-        search_many, Engine, EngineParams, Opponent, SearchConfig, SelectiveExpectimaxPolicy,
-        TreeStrapLearner,
+        search_many, Engine, EngineParams, Opponent, SearchConfig, SelectiveExpectimax, TreeStrap,
     };
 
     fn cfg() -> SearchConfig {
@@ -297,8 +303,8 @@ mod tests {
         // The rollout engine plays full Connect-4 games — turns alternate (only the mover is active
         // each tick), both players' trajectories are z-mixed at game end, and records are [K][A=7].
         // Exercises the Actor::Agent(other) opponent nodes end to end.
-        let policy = SelectiveExpectimaxPolicy::new(cfg(), 2, 0.0); // n_heads, epsilon
-        let learner = TreeStrapLearner::new(0.99, 0.3, 1.0, false); // gamma, outcome_weight, bootstrap_p, interior
+        let policy = SelectiveExpectimax::new(cfg(), 2, 0.0); // n_heads, epsilon
+        let learner = TreeStrap::new(0.99, 0.3, 1.0, false); // gamma, outcome_weight, bootstrap_p, interior
         let params = EngineParams {
             n_games: 3,
             max_ticks: 50,
