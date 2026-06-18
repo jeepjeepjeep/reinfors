@@ -27,27 +27,26 @@ The concrete snake slice is in place, differential-tested against `snake_RL` (th
   `EnsembleTreeStrapRunner` semantics: episode-end **z-mixing** of the realized return into the
   executed action, optional **interior** MAX-node targets (true TreeStrap), and a per-head
   **bootstrap mask** on every record.
-- **trainer** (`reinfors.training`) — the end-to-end actor-learner loop: an ensemble Q-network (a
-  faithful port of the oracle's, so checkpoints are interchangeable) whose forward is the search's
-  `infer` callback. Each iteration pushes `collect`'s records into a ring `ReplayBuffer` (a port of
-  the oracle's `EnsembleTreeStrapBuffer`) and takes several gradient steps on sampled minibatches with
-  the per-head masked-Huber loss — off-policy replay that reuses each (expensive) searched record many
-  times and decorrelates updates. Because `infer` reads the live network, each `collect` searches with
-  the current weights — the weight sync is implicit. Optional `torch` dependency (`pip install reinfors[train]`).
+- **training is the consumer's** — reinfors ships *no* model, loss, or training loop: learning is
+  yours, in PyTorch/JAX. The only seam is the `infer` callback (an `(N, C*H*W) f32 -> (N, K, A) f64`
+  forward), which the search calls once per pooled round, so each `collect` automatically searches with
+  the live weights — the actor-learner sync is implicit. `scripts/train_example.py` is a tiny,
+  self-contained reference for wiring a torch model to the engine (optional `torch`:
+  `pip install reinfors[train]`); snake_RL's `scripts/train_reinfors.py` is a full production trainer
+  on the same contract.
 - **parallel search + flat marshalling + benchmark** (this stage) — the per-search CPU work (expand,
   evaluate, back up) runs in parallel across the pooled requests via rayon, with only the pooled-obs
   gather and the one `infer` call per round serial; this is value-neutral (bit-identical regardless of
   thread count). The `infer` boundary passes obs in and values out as single contiguous row-major
   buffers (obs moved straight into numpy, no copy) instead of nested `Vec`s. On a **release** build
-  (CPU value function, grid 20 / 16 games / 10 heads / budget 64) `scripts/benchmark.py` measures
+  (CPU value function, grid 20 / 16 games / 10 heads / budget 64) benchmarking measured
   ~2.4 ms per searched decision — about **6x faster than the pure-Python oracle**, with the flat
   boundary worth ~1.6x over nested-`Vec` marshalling and rayon ~1.3x from 1→10 threads. (Benchmark
   only a release build — a debug extension inflates reinfors' per-search cost several-fold and is
   meaningless.)
-- **GPU validation** (this stage) — the pipeline runs end to end on a real `BootstrappedQNetwork` on
-  the GPU (MPS): `make_infer(net, "mps")` serves the search, gradient steps run on-device, and the
-  forward matches CPU within float tolerance (all MPS-gated tests). `scripts/benchmark.py --net
-  --device mps` confirms the founding premise — **pooling is what makes the GPU win**: with the real
+- **GPU validation** (this stage) — the pipeline runs end to end on a real conv net on the GPU (MPS):
+  a no-grad forward on MPS serves the search and gradient steps run on-device. Benchmarking with the
+  real net on MPS confirmed the founding premise — **pooling is what makes the GPU win**: with the real
   10-head conv net (grid 20, budget 64) a solo search ties CPU vs MPS (~30 ms/decision, MPS launch
   overhead cancels its compute edge), but the pooled per-round batch grows MPS to **~3.9x at 8 games
   and ~6.1x at 32** (≈4 ms/decision) over CPU inference, and rising with pool size. Against snake_RL's
@@ -63,32 +62,30 @@ Generic game abstractions and the declarative builder come later, once the concr
 
 ## Multiple games through one generic core
 
-The search and rollout engine are generic over a `Game` trait, so the same core now drives three
+The search and rollout engine are generic over a `Game` trait, so one unified `Engine` drives three
 games — **snake** (2-player simultaneous), **Connect-4** (sequential 2-player, alternating MAX vs
-modeled-opponent-chance nodes), and **GridWorld** (single-agent, pure MAX + lookahead). Each is
-exposed as its own PyO3 rollout engine — `reinfors._reinfors.Engine` (snake),
-`Connect4Engine`, and `GridWorldEngine` — all with the same `collect(n_records, infer) -> (obs, targets,
-masks, telemetry)` contract, differing only in their `#[new]` (the game's rules/rewards) and their
-observation/action dimensions.
-
-`reinfors.games` is a small registry that ties a game name to its engine class and shape metadata, so
-a caller can size a `BootstrappedQNetwork` and pick an engine without hard-coding dimensions:
+modeled-opponent-chance nodes), and **GridWorld** (single-agent, pure MAX + lookahead). You compose an
+`Engine` from three handles — a game, a policy, and a learner — and every game exposes the same
+`observation_space()` / `action_space()` so a network can be sized from the game, not hard-coded:
 
 ```python
-import reinfors
-from reinfors import games
-from reinfors.training import BootstrappedQNetwork
+import reinfors as rf
 
-obs_shape, n_actions = games.net_shape("connect4")  # ((2, 6, 7), 7); pass size kwargs for
-                                                     # variable-shape games, e.g. games.net_shape("gridworld", size=5)
-net = BootstrappedQNetwork(obs_shape, n_actions=n_actions, n_heads=4)
-engine = reinfors._reinfors.Connect4Engine(1.0, -1.0, 0.0, ...)  # win/loss/draw rewards + search/rollout knobs
-reinfors.training.train(engine, net, optimizer, iterations=..., collect_size=..., batch_size=...)
+game = rf.make_game("connect4")             # or rf.games.Connect4(...); pass size kwargs to variable-shape
+obs_shape = game.observation_space().shape  # (2, 6, 7);  e.g. rf.make_game("gridworld", size=5)
+n_actions = game.action_space().n           # 7
+# size your own torch/JAX net from (obs_shape, n_actions) — reinfors ships no model
+engine = rf.Engine(
+    game,
+    rf.make_policy("selective_expectimax", n_heads=4),
+    rf.make_learner("treestrap"),
+    n_games=16, max_ticks=200,
+)
+obs, targets, masks, telemetry = engine.collect(2048, infer)  # `infer`: (N, C*H*W) f32 -> (N, K, A) f64
 ```
 
-`games.get(name)` returns the full `GameSpec` (engine class, `action_count`, and an `obs_shape` that is
-a fixed tuple for snake/Connect-4 and a callable for size-parameterized GridWorld); `games.net_shape`
-is the convenience that returns just `(obs_shape, action_count)`.
+`rf.registered_games()` / `registered_policies()` / `registered_learners()` list the names;
+`rf.engine_from_config(...)` builds the same `Engine` from a (YAML-shaped) config dict.
 
 ## Build
 
@@ -98,33 +95,21 @@ uvx maturin develop                # or: install into the active venv for iterat
 cargo test -p reinfors-core        # pure-Rust unit tests (no Python)
 ```
 
-## Training a model + comparing to snake_RL
+## Training a model
 
-`scripts/train.py` runs a config-driven training loop whose hyperparameters mirror snake_RL's
-`configs/ensemble_treestrap.yaml`, logging the same TensorBoard scalars snake_RL's
-`EnsembleTreeStrapRunner` does (`train/loss`, `train/mean_q`, `episode/reward_*`, `episode/length`,
-`search/*`) plus `throughput/*`. Every scalar carries wall-clock, so TensorBoard's Relative/Wall
-x-axis gives the time-based learning curve and the step axis gives the per-step one — both axes of the
-comparison from one run.
+reinfors generates data; you train. `scripts/train_example.py` is a minimal, self-contained reference
+— a tiny conv net, the `infer` callback, and a short `collect` -> gradient-step loop — showing how a
+torch model plugs into the engine:
 
 ```sh
 maturin develop --release                                   # release build (see benchmark note)
-python scripts/train.py --device mps --log-dir runs/reinfors_ensemble
-# snake_RL side, same config (in the sibling checkout):
-python scripts/train.py configs/ensemble_treestrap.yaml --device mps --log-dir runs/snake_rl
-tensorboard --logdir runs                                   # both runs overlaid
+uv run --with torch python scripts/train_example.py --iterations 20 --device mps
 ```
 
-Reading the comparison honestly:
-
-- **Train speed** (the unconfounded axis): reinfors generates data in parallel Rust with one pooled
-  GPU forward per round across `--n-games` games; snake_RL runs a single Python self-play env. Compare
-  `throughput/*` and any curve on the Wall x-axis.
-- **Quality per step** has known confounds in this phase, surfaced in the script's header: the
-  `--n-games` **parallelism** (changes the replay mix) and the **train cadence** mapping (snake_RL's
-  per-tick `train_every` vs reinfors' `collect_size / grad_steps`). The search's apple respawn is now a
-  uniform-random draw shared by the env and the search (matching snake_RL), so spawning is no longer a
-  confound.
+For a full production run — config-driven, replay buffer, TensorBoard logging, checkpoint/resume, and a
+like-for-like speed/quality comparison against the pure-Python oracle — see snake_RL's
+`scripts/train_reinfors.py`, which drives this same `Engine` + `infer` contract while keeping the
+network and gradient step entirely on the snake_RL side.
 
 ## Git hooks
 

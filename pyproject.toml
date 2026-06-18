@@ -9,8 +9,8 @@ description = "General-purpose gym-style simulation + batching engine (Rust core
 requires-python = ">=3.10"
 dependencies = ["numpy"]
 
-# torch powers only the optional training layer (`reinfors.training`); the core/search/engine need
-# just numpy. Install with `pip install reinfors[train]`.
+# torch is needed only to run the example trainer (`scripts/train_example.py`) and its smoke test; the
+# reinfors package itself (core/search/engine) needs just numpy. Install with `pip install reinfors[train]`.
 [project.optional-dependencies]
 train = ["torch"]
 
@@ -48,15 +48,6 @@ python_version = "3.10"
 strict = true
 warn_unused_configs = true
 
-# torch is an optional dep not installed in the (uvx) type-check env, so it has no stubs here; treat
-# its symbols as Any and allow subclassing nn.Module. The training layer is exercised by the local
-# torch tests, not the type checker.
-[[tool.mypy.overrides]]
-module = "torch.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "reinfors.training"
-disallow_subclassing_any = false
-disallow_any_decorated = false
-warn_return_any = false
+# The type checker only covers the `python/` package, which is torch-free (numpy only). The torch-using
+# code — `scripts/train_example.py` and `tests/test_example.py` — is exercised by the local torch tests,
+# not mypy, so no torch override is needed here.

@@ -1,7 +1,7 @@
 """The non-snake games (Connect-4, GridWorld) and the DQN family driven through the unified `Engine`:
 each composition collects records of the right shape, telemetry carries one reward per agent, and the
-name registries resolve. A dummy numpy `infer` (zeros of the right K/A) keeps the shape/telemetry
-tests torch-free; the training smoke tests are gated on torch.
+name registries resolve. These are engine-contract tests: a dummy numpy `infer` (zeros of the right
+K/A) keeps them torch-free — the model and gradient step live in the consumer, not reinfors.
 """
 
 from __future__ import annotations
@@ -216,25 +216,6 @@ def test_engine_rejects_degenerate_search_params(bad: dict) -> None:
         )
 
 
-def test_connect4_end_to_end_training() -> None:
-    pytest.importorskip("torch")
-    import torch
-    from reinfors.training import BootstrappedQNetwork, train
-
-    net = BootstrappedQNetwork((2, 6, 7), n_actions=7, n_heads=_K)
-    optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
-    losses = train(
-        _connect4_engine(),
-        net,
-        optimizer,
-        iterations=2,
-        collect_size=20,
-        batch_size=8,
-    )
-    assert len(losses) >= 1
-    assert all(np.isfinite(loss) for loss in losses)
-
-
 # --- Model-free DQN: a second algorithm through the same unified engine, with a different record shape
 # (off-policy transitions instead of TreeStrap targets) — the seam + binding generalization. ---
 
@@ -253,33 +234,3 @@ def test_dqn_engine_emits_well_formed_transitions() -> None:
     assert masks.shape == (m, _K) and np.isin(masks, (0.0, 1.0)).all()
     assert (actions >= 0).all() and (actions < 4).all()
     assert "episodes" in telemetry and telemetry["decisions"] > 0
-
-
-def test_dqn_transitions_drive_a_td_step() -> None:
-    # Smoke: the binding's transitions feed a bootstrapped-DQN TD update end to end (finite loss). Uses
-    # the online net as its own target — enough to prove the transition record trains, not a full DQN.
-    pytest.importorskip("torch")
-    import torch
-    from reinfors.training import BootstrappedQNetwork, make_infer
-
-    net = BootstrappedQNetwork((2, 5, 5), n_actions=4, n_heads=_K)
-    engine = _dqn_engine()
-    obs, actions, rewards, next_obs, dones, masks, _ = engine.collect(64, make_infer(net))
-
-    o = torch.from_numpy(obs).reshape(-1, 2, 5, 5)
-    no = torch.from_numpy(next_obs).reshape(-1, 2, 5, 5)
-    a = torch.from_numpy(actions).long()
-    r = torch.from_numpy(rewards).float()
-    d = torch.from_numpy(dones).float()
-    mask = torch.from_numpy(masks)
-
-    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
-    q = net(o)  # (M, K, A)
-    with torch.no_grad():
-        target = r[:, None] + 0.99 * (1.0 - d[:, None]) * net(no).max(dim=-1).values  # (M, K)
-    chosen = q.gather(-1, a[:, None, None].expand(-1, _K, 1)).squeeze(-1)  # (M, K)
-    loss = (mask * (chosen - target) ** 2).sum() / mask.sum().clamp(min=1.0)
-    opt.zero_grad()
-    loss.backward()
-    opt.step()
-    assert torch.isfinite(loss)
