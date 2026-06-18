@@ -20,6 +20,22 @@ def test_connect4_played_to_a_win() -> None:
     assert env.active_agents() == []
 
 
+def test_native_state_is_renderable_per_game() -> None:
+    # The native state() exposes interpretable, game-specific structure (for rendering / human play).
+    c4 = rf.Env(rf.games.Connect4(), seed=0)
+    s = c4.state()
+    assert s["turn"] == 0 and s["done"] is False
+    assert len(s["board"]) == 6 and len(s["board"][0]) == 7
+    assert all(cell == 0 for row in s["board"] for cell in row)  # empty board
+    c4.step({0: 3})
+    assert c4.state()["board"][0][3] == 1  # P0's piece at the bottom of column 3
+
+    st = rf.Env(rf.games.Snake(grid_size=8, initial_length=3, food=2), seed=0).state()
+    assert len(st["bodies"]) == 2 and len(st["bodies"][0]) == 3  # two snakes, length 3
+    assert len(st["food"]) == 2 and st["alive"] == [True, True]
+    assert len(st["directions"]) == 2
+
+
 def test_snake_steps_both_agents_simultaneously() -> None:
     env = rf.Env(rf.games.Snake(grid_size=8, initial_length=3, food=1), seed=0)
     assert env.num_agents() == 2 and env.action_count() == 3
