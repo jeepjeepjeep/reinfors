@@ -65,24 +65,6 @@ pub struct StepEvent {
 // a working `(snakes, food)` state, mirroring how `Connect4` keeps its dynamics in private methods.
 // These live in the `impl Snake` block alongside the `Game` adapter, further down the file.
 
-/// Unoccupied cells in row-major order — the apple-spawn candidates (occupied = both snake bodies and
-/// existing food, matching the oracle's `_spawn_cells` / `_sample_spawn`).
-pub fn empty_cells(snakes: &[SnakeBody; 2], food: &HashSet<Cell>, grid_size: i32) -> Vec<Cell> {
-    let mut occupied: HashSet<Cell> = food.clone();
-    for s in snakes {
-        occupied.extend(s.body.iter().copied());
-    }
-    let mut out = Vec::new();
-    for r in 0..grid_size {
-        for c in 0..grid_size {
-            if !occupied.contains(&(r, c)) {
-                out.push((r, c));
-            }
-        }
-    }
-    out
-}
-
 // ============================ Grid actions ============================
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -703,6 +685,18 @@ mod game_tests {
             snakes: game().initial_snakes(),
             food: food.iter().copied().collect(),
         }
+    }
+
+    /// The unoccupied cells in row-major order — the oracle for what `spawn_one` may pick.
+    fn empty_cells(snakes: &[SnakeBody; 2], food: &HashSet<Cell>, grid_size: i32) -> Vec<Cell> {
+        let mut occupied: HashSet<Cell> = food.clone();
+        for s in snakes {
+            occupied.extend(s.body.iter().copied());
+        }
+        (0..grid_size)
+            .flat_map(|r| (0..grid_size).map(move |c| (r, c)))
+            .filter(|cell| !occupied.contains(cell))
+            .collect()
     }
 
     #[test]
