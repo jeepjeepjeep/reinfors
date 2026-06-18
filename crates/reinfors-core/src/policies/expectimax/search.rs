@@ -813,3 +813,159 @@ fn softmax_floor(q: &[f64], temperature: f64, floor: f64) -> Vec<f64> {
         .map(|&zi| (1.0 - floor) * zi / zsum + floor / n)
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encoder::StateEncoder;
+    use crate::game::{Actor, Game, Rng, Transition};
+    use std::cell::Cell;
+
+    // A 1-agent deterministic line walk: action 0 stays, 1 advances; reward = the action; never
+    // terminal (so the frontier is always real leaves). No chance node, so a search is seed-independent
+    // — which makes pooled-vs-solo bit-identity trivial to assert and the backup hand-computable.
+    struct Line;
+    impl Game for Line {
+        type State = i32;
+        fn num_agents(&self) -> usize {
+            1
+        }
+        fn action_count(&self) -> usize {
+            2
+        }
+        fn actor(&self, _: &i32) -> Actor {
+            Actor::Agent(0)
+        }
+        fn legal_actions(&self, _: &i32, agent: usize) -> Vec<usize> {
+            if agent == 0 {
+                vec![0, 1]
+            } else {
+                Vec::new()
+            }
+        }
+        fn step(&self, pos: &i32, actions: &[usize]) -> Transition<i32> {
+            let a = actions[0] as i32;
+            Transition {
+                next_state: pos + a,
+                rewards: vec![a as f64],
+                terminal: false,
+            }
+        }
+        fn initial_state(&self, _: &mut dyn Rng) -> i32 {
+            0
+        }
+    }
+
+    struct LineEnc;
+    impl StateEncoder for LineEnc {
+        type State = i32;
+        fn encode(&self, pos: &i32, _: usize) -> Vec<f32> {
+            vec![*pos as f32]
+        }
+        fn obs_shape(&self) -> (usize, usize, usize) {
+            (1, 1, 1)
+        }
+    }
+
+    fn cfg(expansion_budget: usize) -> SearchConfig {
+        SearchConfig {
+            gamma: 0.9,
+            beta: 1.0,
+            expansion_budget,
+            top_k: 2,
+            max_depth: 4,
+            food_samples: 1,
+            opponent: Opponent::Uniform,
+        }
+    }
+
+    // Two-head infer, deterministic in the position; counts its calls so pooling can be observed.
+    fn counting_infer(calls: &Cell<usize>) -> impl FnMut(Vec<f32>, usize) -> Vec<f64> + '_ {
+        move |obs: Vec<f32>, n: usize| {
+            calls.set(calls.get() + 1);
+            let dim = obs.len() / n;
+            let mut out = Vec::with_capacity(n * 2 * 2);
+            for i in 0..n {
+                let p = obs[i * dim] as f64;
+                out.extend_from_slice(&[
+                    (p * 0.5).sin(),
+                    (p * 0.3).cos(),
+                    (p * 0.2).sin(),
+                    (p * 0.7).cos(),
+                ]);
+            }
+            out // K=2, A=2
+        }
+    }
+
+    #[test]
+    fn pooled_search_matches_solo_and_issues_fewer_forwards() {
+        // Pooling batches each round's leaf evaluations across all active searches. It must not change
+        // any search's result (the throughput optimisation is value-neutral) — only cut `infer` calls.
+        let states = [0i32, 5, 10];
+        let pooled_calls = Cell::new(0);
+        let pooled = search_many(
+            &Line,
+            &LineEnc,
+            &cfg(8),
+            states.iter().map(|&s| (s, 0)).collect(),
+            false,
+            0,
+            counting_infer(&pooled_calls),
+        );
+
+        let mut solo_calls = 0usize;
+        for (i, &s) in states.iter().enumerate() {
+            let c = Cell::new(0);
+            let solo = search_many(
+                &Line,
+                &LineEnc,
+                &cfg(8),
+                vec![(s, 0)],
+                false,
+                0,
+                counting_infer(&c),
+            );
+            assert_eq!(
+                pooled[i].0, solo[0].0,
+                "pooled values must match solo for state {s}"
+            );
+            let (p, q) = (pooled[i].2, solo[0].2);
+            assert_eq!(
+                (p.max_depth, p.expansions, p.leaves, p.rounds),
+                (q.max_depth, q.expansions, q.leaves, q.rounds),
+                "pooled stats must match solo for state {s}"
+            );
+            solo_calls += c.get();
+        }
+        assert!(
+            pooled_calls.get() < solo_calls,
+            "pooling should issue fewer forwards: {} vs {}",
+            pooled_calls.get(),
+            solo_calls
+        );
+    }
+
+    #[test]
+    fn backed_up_root_values_match_a_hand_computed_tree() {
+        // Budget 1 expands only the root; its two children are evaluated leaves. With K=1 and a known
+        // Q, the backup is exactly `reward_a + gamma * max_a' Q(child_a)`. Root at pos 0:
+        //   action 0 -> child pos 0, reward 0;  action 1 -> child pos 1, reward 1.
+        //   Q(pos) = [pos*10, pos*10 + 1]  ->  max Q(0) = 1, max Q(1) = 11.
+        //   root[0][0] = 0 + 0.9*1 = 0.9;   root[0][1] = 1 + 0.9*11 = 10.9.
+        let infer = |obs: Vec<f32>, n: usize| {
+            let dim = obs.len() / n;
+            let mut out = Vec::with_capacity(n * 2);
+            for i in 0..n {
+                let p = obs[i * dim] as f64;
+                out.extend_from_slice(&[p * 10.0, p * 10.0 + 1.0]); // K=1, A=2
+            }
+            out
+        };
+        let results = search_many(&Line, &LineEnc, &cfg(1), vec![(0, 0)], false, 0, infer);
+        let values = &results[0].0; // [K=1][A=2]
+        assert_eq!(values.len(), 1);
+        assert!((values[0][0] - 0.9).abs() < 1e-9, "{values:?}");
+        assert!((values[0][1] - 10.9).abs() < 1e-9, "{values:?}");
+    }
+}
