@@ -424,4 +424,41 @@ mod tests {
         assert_eq!(events[A].death_cause, Some(DeathCause::Wall));
         assert!(!env.snakes[A].alive);
     }
+
+    #[test]
+    fn self_body_collision_is_a_death() {
+        let mut env = SnakeEnv::new(20, 3, false, None);
+        // A folds back on itself: head (5,5) facing Right; turning Up steps onto its own body at (4,5).
+        env.snakes[A].body = VecDeque::from([(5, 5), (5, 4), (4, 4), (4, 5), (4, 6)]);
+        env.snakes[A].direction = Action::Right;
+        let events = env.advance([Some(Action::Up), None], || None);
+        assert_eq!(events[A].death_cause, Some(DeathCause::SelfBody));
+        assert!(!env.snakes[A].alive);
+    }
+
+    #[test]
+    fn opponent_body_collision_is_a_kill_and_win() {
+        let mut env = SnakeEnv::new(20, 3, false, None);
+        // A lies along row 10; B drives its head down into A's body. B dies (OppBody), A is credited
+        // the kill and — as the sole survivor — wins; B loses and the game ends (play_to_last = false).
+        env.snakes[A].body = VecDeque::from([(10, 5), (10, 4), (10, 3)]);
+        env.snakes[A].direction = Action::Right;
+        env.snakes[B].body = VecDeque::from([(9, 5), (8, 5), (7, 5)]);
+        env.snakes[B].direction = Action::Down;
+        let events = env.advance([Some(Action::Right), Some(Action::Down)], || None);
+        assert_eq!(events[B].death_cause, Some(DeathCause::OppBody));
+        assert!(events[A].killed_opponent && events[A].won && events[B].lost);
+        assert!(env.done);
+    }
+
+    #[test]
+    fn food_lead_wins_outright() {
+        let mut env = SnakeEnv::new(20, 3, false, Some(2));
+        // A is two apples (length) ahead of B, both alive; the lead triggers an outright win this tick.
+        env.snakes[A].body = VecDeque::from([(2, 5), (2, 4), (2, 3), (2, 2), (2, 1)]); // length 5 vs B's 3
+        env.snakes[A].direction = Action::Right;
+        let events = env.advance([Some(Action::Right), None], || None);
+        assert!(events[A].won && events[B].lost);
+        assert!(env.done);
+    }
 }
