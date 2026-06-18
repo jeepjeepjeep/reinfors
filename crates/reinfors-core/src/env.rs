@@ -7,6 +7,7 @@
 use crate::encoder::StateEncoder;
 use crate::game::Game;
 use crate::rng::SplitMix64;
+use crate::space::Space;
 
 pub struct Env<G: Game> {
     game: G,
@@ -70,9 +71,22 @@ impl<G: Game> Env<G> {
         self.encoder.encode(&self.state, agent)
     }
 
+    /// The observation `Space` (from the encoder) — so a caller can size/validate a network from the
+    /// `Env` alone.
+    pub fn observation_space(&self) -> Space {
+        self.encoder.observation_space()
+    }
+
     /// Apply a joint action (one index per agent; entries for inactive agents are ignored), advancing
-    /// the episode through the env transition. Returns this tick's per-agent reward vector.
+    /// the episode through the env transition. Returns this tick's per-agent reward vector. Stepping a
+    /// finished episode is a misuse — `active_agents()` is empty once `done()`; `reset()` first.
     pub fn step(&mut self, actions: &[usize]) -> Vec<f64> {
+        debug_assert!(!self.done, "step() after done — call reset() first");
+        debug_assert_eq!(
+            actions.len(),
+            self.game.num_agents(),
+            "step() expects one action per agent"
+        );
         let t = self.game.step_env(&self.state, actions, &mut self.rng);
         self.state = t.next_state;
         self.done = t.terminal;
@@ -157,5 +171,27 @@ mod tests {
         e.step(&[1]);
         e.reset();
         assert!(!e.done() && *e.state() == 0 && e.observe(0) == vec![0.0]);
+    }
+
+    #[test]
+    fn surfaces_the_encoder_observation_space() {
+        assert_eq!(
+            env().observation_space(),
+            Space::Box {
+                shape: vec![1, 1, 1],
+                low: f32::NEG_INFINITY,
+                high: f32::INFINITY,
+            }
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "step() after done")]
+    fn stepping_after_done_is_a_misuse() {
+        let mut e = env();
+        for _ in 0..3 {
+            e.step(&[1]); // reaches the goal -> done
+        }
+        e.step(&[1]); // misuse: should trip the debug assert
     }
 }
