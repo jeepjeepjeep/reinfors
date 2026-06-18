@@ -6,6 +6,7 @@
 
 pub mod encoder;
 pub mod engine;
+pub mod env;
 pub mod game;
 pub mod learner;
 pub mod learners;
@@ -16,6 +17,7 @@ pub mod space;
 
 pub use encoder::StateEncoder;
 pub use engine::{CollectStats, Engine, EngineParams, EpisodeSummary};
+pub use env::Env;
 pub use game::{Actor, Game, Rng, Transition};
 pub use learner::{Learner, Step};
 pub use learners::dqn::{Dqn, DqnRecord};
