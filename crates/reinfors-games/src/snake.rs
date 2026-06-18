@@ -1,6 +1,7 @@
 //! The two-player snake game, in one self-contained module (mirroring `connect4.rs`): grid actions,
-//! the egocentric observation encoder, reward shaping, the deterministic `SnakeEnv` dynamics, and the
-//! `Snake` adapter implementing `reinfors_core::Game` (+ the `EgocentricSnake` state encoder).
+//! the egocentric observation encoder, reward shaping, and the `Snake` adapter implementing
+//! `reinfors_core::Game` (its deterministic dynamics live in private methods, alongside the
+//! `EgocentricSnake` state encoder).
 //!
 //! The dynamics are deterministic integer arithmetic with food placement injected, so a given set of
 //! actions + spawns yields bit-identical trajectories — the basis for the native regression tests.
@@ -60,272 +61,9 @@ pub struct StepEvent {
     pub survived_to_max_ticks: bool,
 }
 
-pub struct SnakeEnv {
-    pub grid_size: i32,
-    pub initial_length: usize,
-    pub play_to_last: bool,
-    pub win_food_lead: Option<usize>,
-    pub snakes: [SnakeBody; 2],
-    pub food: HashSet<Cell>,
-    pub done: bool,
-}
-
-impl SnakeEnv {
-    pub fn new(
-        grid_size: i32,
-        initial_length: usize,
-        play_to_last: bool,
-        win_food_lead: Option<usize>,
-    ) -> Self {
-        let snakes = Self::initial_snakes(grid_size, initial_length);
-        SnakeEnv {
-            grid_size,
-            initial_length,
-            play_to_last,
-            win_food_lead,
-            snakes,
-            food: HashSet::new(),
-            done: false,
-        }
-    }
-
-    /// Build an env from an explicit (snakes, food) state, bypassing initial placement — used by the
-    /// search to simulate a tick from an arbitrary node.
-    pub fn from_parts(
-        grid_size: i32,
-        initial_length: usize,
-        play_to_last: bool,
-        win_food_lead: Option<usize>,
-        snakes: [SnakeBody; 2],
-        food: HashSet<Cell>,
-    ) -> Self {
-        SnakeEnv {
-            grid_size,
-            initial_length,
-            play_to_last,
-            win_food_lead,
-            snakes,
-            food,
-            done: false,
-        }
-    }
-
-    /// Heads at one-third / two-thirds along the middle row, bodies trailing to the nearer wall and
-    /// wrapping (matches `_initial_snakes` / `_trace_body`).
-    fn initial_snakes(grid_size: i32, length: usize) -> [SnakeBody; 2] {
-        let g = grid_size;
-        let mid = g / 2;
-        let a_body = Self::trace_body(
-            g,
-            (mid, g / 3),
-            &[Action::Left, Action::Down, Action::Right, Action::Up],
-            length,
-        );
-        let b_body = Self::trace_body(
-            g,
-            (mid, g - g / 3),
-            &[Action::Right, Action::Up, Action::Left, Action::Down],
-            length,
-        );
-        [
-            SnakeBody {
-                body: a_body,
-                direction: Action::Right,
-                alive: true,
-            },
-            SnakeBody {
-                body: b_body,
-                direction: Action::Left,
-                alive: true,
-            },
-        ]
-    }
-
-    fn trace_body(grid_size: i32, head: Cell, dirs: &[Action], length: usize) -> VecDeque<Cell> {
-        let g = grid_size;
-        let mut cells = VecDeque::from([head]);
-        let (mut r, mut c) = head;
-        let mut d = 0usize;
-        while cells.len() < length {
-            let (dr, dc) = dirs[d].delta();
-            let (nr, nc) = (r + dr, c + dc);
-            if !(0 <= nr && nr < g && 0 <= nc && nc < g) {
-                d += 1;
-                assert!(
-                    d < dirs.len(),
-                    "initial_length {length} too long for grid_size {g}"
-                );
-                continue;
-            }
-            r = nr;
-            c = nc;
-            cells.push_back((r, c));
-        }
-        cells
-    }
-
-    fn in_bounds(&self, (r, c): Cell) -> bool {
-        0 <= r && r < self.grid_size && 0 <= c && c < self.grid_size
-    }
-
-    /// Advance one tick in place. `actions[i]` is an absolute move for snake `i` (None = coast in its
-    /// current heading; a reverse move is treated as coast, as in the Python env). `next_food` is
-    /// called once per eaten apple to supply its replacement cell (None = no room / no replacement).
-    /// Returns the per-snake events; `self.done` is also updated.
-    pub fn advance(
-        &mut self,
-        actions: [Option<Action>; 2],
-        mut next_food: impl FnMut() -> Option<Cell>,
-    ) -> [StepEvent; 2] {
-        let mut events = [StepEvent::default(), StepEvent::default()];
-
-        // Stage 1: move every living snake. Eating intent keeps the tail; survival is settled below.
-        let mut ate_intent = [false, false];
-        let mut moved = [false, false];
-        for i in 0..2 {
-            if !self.snakes[i].alive {
-                continue;
-            }
-            moved[i] = true;
-            let mut action = actions[i].unwrap_or(self.snakes[i].direction);
-            if action.opposite() == self.snakes[i].direction {
-                action = self.snakes[i].direction; // reverse is a no-op; coast straight
-            }
-            self.snakes[i].direction = action;
-            let (dr, dc) = action.delta();
-            let (hr, hc) = self.snakes[i].head();
-            let new_head = (hr + dr, hc + dc);
-            ate_intent[i] = self.food.contains(&new_head);
-            self.snakes[i].body.push_front(new_head);
-            if !ate_intent[i] {
-                self.snakes[i].body.pop_back();
-            }
-        }
-
-        // Stage 2: resolve collisions against the post-move world.
-        let causes = self.resolve_collisions(&moved);
-        let mut fatal_heads = [None, None];
-        for i in 0..2 {
-            if causes[i].is_some() {
-                fatal_heads[i] = Some(self.snakes[i].head());
-            }
-        }
-        for i in 0..2 {
-            if let Some(cause) = causes[i] {
-                self.snakes[i].alive = false;
-                self.snakes[i].body.pop_front(); // corpse vacates the collision cell
-                events[i].died = true;
-                events[i].death_cause = Some(cause);
-            }
-        }
-
-        // Eating: survivors whose new head landed on food eat it and trigger a replacement spawn.
-        for i in 0..2 {
-            if ate_intent[i] && causes[i].is_none() {
-                let head = self.snakes[i].head();
-                self.food.remove(&head);
-                events[i].ate_food = true;
-                if let Some(cell) = next_food() {
-                    self.food.insert(cell);
-                }
-            }
-        }
-
-        // Kill credit: a snake whose body occupies the cell an opponent fatally moved into.
-        for i in 0..2 {
-            if causes[i] == Some(DeathCause::OppBody) {
-                if let Some(killer) = self.find_killer(fatal_heads[i].unwrap(), i) {
-                    events[killer].killed_opponent = true;
-                }
-            }
-        }
-
-        // Outcomes.
-        let alive_ids: Vec<usize> = (0..2).filter(|&i| self.snakes[i].alive).collect();
-        let n_causes = causes.iter().filter(|c| c.is_some()).count();
-        if alive_ids.len() == 1 && n_causes > 0 {
-            events[alive_ids[0]].won = true;
-        }
-        for i in 0..2 {
-            if causes[i].is_some() {
-                if !alive_ids.is_empty() {
-                    events[i].lost = true;
-                } else if n_causes >= 2 {
-                    events[i].drew = true;
-                }
-            }
-        }
-        let mut done = alive_ids.len() <= if self.play_to_last { 0 } else { 1 };
-
-        // Food-lead win: both alive, leader `win_food_lead` apples (length) ahead wins outright.
-        if let Some(lead) = self.win_food_lead {
-            if !done && alive_ids.len() >= 2 {
-                let (i0, i1) = (alive_ids[0], alive_ids[1]);
-                let (leader, runner) = if self.snakes[i0].len() >= self.snakes[i1].len() {
-                    (i0, i1)
-                } else {
-                    (i1, i0)
-                };
-                if self.snakes[leader].len() - self.snakes[runner].len() >= lead {
-                    events[leader].won = true;
-                    events[runner].lost = true;
-                    done = true;
-                }
-            }
-        }
-
-        self.done = done;
-        events
-    }
-
-    fn resolve_collisions(&self, moved: &[bool; 2]) -> [Option<DeathCause>; 2] {
-        let mut causes = [None, None];
-
-        // Two heads on one cell die together, whatever else is on it.
-        let mut by_head: HashMap<Cell, Vec<usize>> = HashMap::new();
-        for (i, &m) in moved.iter().enumerate() {
-            if m {
-                by_head.entry(self.snakes[i].head()).or_default().push(i);
-            }
-        }
-        for ids in by_head.values() {
-            if ids.len() >= 2 {
-                for &i in ids {
-                    causes[i] = Some(DeathCause::HeadOn);
-                }
-            }
-        }
-
-        for i in 0..2 {
-            if !moved[i] || causes[i].is_some() {
-                continue;
-            }
-            let head = self.snakes[i].head();
-            if !self.in_bounds(head) {
-                causes[i] = Some(DeathCause::Wall);
-            } else if self.snakes[i].body.iter().skip(1).any(|&c| c == head) {
-                causes[i] = Some(DeathCause::SelfBody);
-            } else {
-                for j in 0..2 {
-                    if j == i || !self.snakes[j].alive {
-                        continue;
-                    }
-                    if self.snakes[j].body.contains(&head) {
-                        causes[i] = Some(DeathCause::OppBody);
-                        break;
-                    }
-                }
-            }
-        }
-        causes
-    }
-
-    fn find_killer(&self, fatal_head: Cell, victim: usize) -> Option<usize> {
-        (0..2).find(|&j| {
-            j != victim && self.snakes[j].alive && self.snakes[j].body.contains(&fatal_head)
-        })
-    }
-}
+// `SnakeEnv` is gone: snake's dynamics are methods on `Snake` (which holds the config), operating on
+// a working `(snakes, food)` state, mirroring how `Connect4` keeps its dynamics in private methods.
+// These live in the `impl Snake` block alongside the `Game` adapter, further down the file.
 
 /// Unoccupied cells in row-major order — the apple-spawn candidates (occupied = both snake bodies and
 /// existing food, matching the oracle's `_spawn_cells` / `_sample_spawn`).
@@ -343,125 +81,6 @@ pub fn empty_cells(snakes: &[SnakeBody; 2], food: &HashSet<Cell>, grid_size: i32
         }
     }
     out
-}
-
-#[cfg(test)]
-mod env_tests {
-    use super::*;
-
-    #[test]
-    fn initial_placement_matches_oracle() {
-        let env = SnakeEnv::new(20, 3, false, None);
-        assert_eq!(
-            Vec::from(env.snakes[A].body.clone()),
-            vec![(10, 6), (10, 5), (10, 4)]
-        );
-        assert_eq!(env.snakes[A].direction, Action::Right);
-        assert_eq!(
-            Vec::from(env.snakes[B].body.clone()),
-            vec![(10, 14), (10, 15), (10, 16)]
-        );
-        assert_eq!(env.snakes[B].direction, Action::Left);
-    }
-
-    #[test]
-    fn coast_step_moves_head_and_pops_tail() {
-        let mut env = SnakeEnv::new(20, 3, false, None);
-        let events = env.advance([Some(Action::Right), Some(Action::Left)], || None);
-        assert_eq!(
-            Vec::from(env.snakes[A].body.clone()),
-            vec![(10, 7), (10, 6), (10, 5)]
-        );
-        assert_eq!(
-            Vec::from(env.snakes[B].body.clone()),
-            vec![(10, 13), (10, 14), (10, 15)]
-        );
-        assert!(!events[A].died && !events[B].died && !env.done);
-    }
-
-    #[test]
-    fn reverse_action_coasts() {
-        let mut env = SnakeEnv::new(20, 3, false, None);
-        // A heads Right; commanding Left (reverse) must coast Right, not reverse into itself.
-        env.advance([Some(Action::Left), None], || None);
-        assert_eq!(env.snakes[A].head(), (10, 7));
-        assert_eq!(env.snakes[A].direction, Action::Right);
-    }
-
-    #[test]
-    fn head_on_collision_is_a_draw() {
-        let mut env = SnakeEnv::new(20, 3, false, None);
-        let mut events = [StepEvent::default(), StepEvent::default()];
-        for _ in 0..4 {
-            events = env.advance([Some(Action::Right), Some(Action::Left)], || None);
-        }
-        // A and B meet at (10,10) on the 4th tick.
-        assert_eq!(events[A].death_cause, Some(DeathCause::HeadOn));
-        assert_eq!(events[B].death_cause, Some(DeathCause::HeadOn));
-        assert!(events[A].drew && events[B].drew);
-        assert!(env.done);
-    }
-
-    #[test]
-    fn eating_grows_snake_and_spawns_replacement() {
-        let mut env = SnakeEnv::new(20, 3, false, None);
-        env.food.insert((10, 7)); // directly ahead of A
-        let mut replacement = vec![(0, 0)];
-        let events = env.advance([Some(Action::Right), Some(Action::Left)], || {
-            replacement.pop()
-        });
-        assert!(events[A].ate_food);
-        assert_eq!(env.snakes[A].len(), 4); // tail kept
-        assert!(env.food.contains(&(0, 0)) && !env.food.contains(&(10, 7)));
-    }
-
-    #[test]
-    fn wall_death_when_running_off_grid() {
-        let mut env = SnakeEnv::new(20, 3, false, None);
-        // Place A against the right wall (row 0, clear of B at row 10) so one Right step runs off-grid.
-        env.snakes[A].body = VecDeque::from([(0, 19), (0, 18), (0, 17)]);
-        env.snakes[A].direction = Action::Right;
-        let events = env.advance([Some(Action::Right), None], || None);
-        assert_eq!(events[A].death_cause, Some(DeathCause::Wall));
-        assert!(!env.snakes[A].alive);
-    }
-
-    #[test]
-    fn self_body_collision_is_a_death() {
-        let mut env = SnakeEnv::new(20, 3, false, None);
-        // A folds back on itself: head (5,5) facing Right; turning Up steps onto its own body at (4,5).
-        env.snakes[A].body = VecDeque::from([(5, 5), (5, 4), (4, 4), (4, 5), (4, 6)]);
-        env.snakes[A].direction = Action::Right;
-        let events = env.advance([Some(Action::Up), None], || None);
-        assert_eq!(events[A].death_cause, Some(DeathCause::SelfBody));
-        assert!(!env.snakes[A].alive);
-    }
-
-    #[test]
-    fn opponent_body_collision_is_a_kill_and_win() {
-        let mut env = SnakeEnv::new(20, 3, false, None);
-        // A lies along row 10; B drives its head down into A's body. B dies (OppBody), A is credited
-        // the kill and — as the sole survivor — wins; B loses and the game ends (play_to_last = false).
-        env.snakes[A].body = VecDeque::from([(10, 5), (10, 4), (10, 3)]);
-        env.snakes[A].direction = Action::Right;
-        env.snakes[B].body = VecDeque::from([(9, 5), (8, 5), (7, 5)]);
-        env.snakes[B].direction = Action::Down;
-        let events = env.advance([Some(Action::Right), Some(Action::Down)], || None);
-        assert_eq!(events[B].death_cause, Some(DeathCause::OppBody));
-        assert!(events[A].killed_opponent && events[A].won && events[B].lost);
-        assert!(env.done);
-    }
-
-    #[test]
-    fn food_lead_wins_outright() {
-        let mut env = SnakeEnv::new(20, 3, false, Some(2));
-        // A is two apples (length) ahead of B, both alive; the lead triggers an outright win this tick.
-        env.snakes[A].body = VecDeque::from([(2, 5), (2, 4), (2, 3), (2, 2), (2, 1)]); // length 5 vs B's 3
-        env.snakes[A].direction = Action::Right;
-        let events = env.advance([Some(Action::Right), None], || None);
-        assert!(events[A].won && events[B].lost);
-        assert!(env.done);
-    }
 }
 
 // ============================ Grid actions ============================
@@ -558,13 +177,8 @@ const CH_OPP_HEAD: usize = 2;
 const CH_OPP_BODY: usize = 3;
 const CH_FOOD: usize = 4;
 
-/// Build the egocentric observation for `agent` (0 = A, 1 = B) as a flat `[5 * g * g]` f32 buffer.
-pub fn egocentric(env: &SnakeEnv, agent: usize) -> Vec<f32> {
-    egocentric_parts(&env.snakes, &env.food, env.grid_size, agent)
-}
-
-/// Same as [`egocentric`], operating directly on a (snakes, food) state — used by the search, which
-/// builds observations for simulated child states without constructing a full `SnakeEnv`.
+/// Build the egocentric observation for `agent` (0 = A, 1 = B) as a flat `[5 * g * g]` f32 buffer,
+/// from a `(snakes, food)` state. Coordinates are pre-rotated so the queried snake faces "up".
 pub fn egocentric_parts(
     snakes: &[SnakeBody; 2],
     food: &HashSet<Cell>,
@@ -611,44 +225,6 @@ pub fn egocentric_parts(
     obs
 }
 
-#[cfg(test)]
-mod obs_tests {
-    use super::*;
-
-    fn at(obs: &[f32], g: i32, ch: usize, r: i32, c: i32) -> f32 {
-        obs[ch * (g * g) as usize + (r as usize) * (g as usize) + (c as usize)]
-    }
-
-    #[test]
-    fn egocentric_rotates_by_heading() {
-        // A faces Right -> k=1 -> (r,c) maps to (edge-c, r). Head (10,6) -> (19-6, 10) = (13,10).
-        let env = SnakeEnv::new(20, 3, false, None);
-        let obs = egocentric(&env, A);
-        assert_eq!(at(&obs, 20, CH_OWN_HEAD, 13, 10), 1.0);
-        // Body cells (10,5),(10,4) -> (14,10),(15,10) in the own-body channel.
-        assert_eq!(at(&obs, 20, CH_OWN_BODY, 14, 10), 1.0);
-        assert_eq!(at(&obs, 20, CH_OWN_BODY, 15, 10), 1.0);
-        // The head cell must not also be flagged as body.
-        assert_eq!(at(&obs, 20, CH_OWN_BODY, 13, 10), 0.0);
-        // Opponent B head (10,14) -> (19-14,10) = (5,10) in the opp-head channel.
-        assert_eq!(at(&obs, 20, CH_OPP_HEAD, 5, 10), 1.0);
-    }
-
-    #[test]
-    fn food_lands_in_food_channel_rotated() {
-        let mut env = SnakeEnv::new(20, 3, false, None);
-        env.food.insert((10, 6)); // same transform as A's head -> (13,10)
-        let obs = egocentric(&env, A);
-        assert_eq!(at(&obs, 20, CH_FOOD, 13, 10), 1.0);
-    }
-
-    #[test]
-    fn buffer_has_expected_length() {
-        let env = SnakeEnv::new(20, 3, false, None);
-        assert_eq!(egocentric(&env, A).len(), N_CHANNELS * 20 * 20);
-    }
-}
-
 // ========================= Reward shaping =========================
 #[derive(Clone, Copy, Debug)]
 pub struct SnakeReward {
@@ -692,47 +268,6 @@ impl SnakeReward {
     }
 }
 
-#[cfg(test)]
-mod reward_tests {
-    use super::*;
-
-    fn reward() -> SnakeReward {
-        SnakeReward {
-            step: 0.0,
-            food: 0.1,
-            loss: -0.5,
-            draw: -0.25,
-            kill: 0.5,
-            win: 0.0,
-            survival: 0.25,
-        }
-    }
-
-    #[test]
-    fn survival_fires_only_when_survived_to_max_ticks() {
-        let r = reward();
-        assert_eq!(r.eval(&StepEvent::default()), 0.0); // alive, nothing happened
-        let survived = StepEvent {
-            survived_to_max_ticks: true,
-            ..Default::default()
-        };
-        assert!((r.eval(&survived) - 0.25).abs() < 1e-12);
-    }
-
-    #[test]
-    fn a_dead_snake_never_collects_survival() {
-        // The died branch returns before the survival term, mirroring MinimalReward's early return.
-        let r = reward();
-        let dead = StepEvent {
-            died: true,
-            lost: true,
-            survived_to_max_ticks: true,
-            ..Default::default()
-        };
-        assert!((r.eval(&dead) - (-0.5)).abs() < 1e-12); // loss only
-    }
-}
-
 // ========= The `Snake` Game adapter + `EgocentricSnake` encoder =========
 
 /// Snake's dynamic state: the two snakes and the food. Static config (grid size, rules, reward) lives
@@ -761,8 +296,8 @@ impl StateEncoder for EgocentricSnake {
     }
 }
 
-/// Two-player simultaneous-move snake with environment chance (apple respawn) — the concrete `SnakeEnv`
-/// dynamics behind the `Game` trait.
+/// Two-player simultaneous-move snake with environment chance (apple respawn). Its deterministic
+/// dynamics live in the private `impl Snake` methods below, behind the `Game` trait.
 pub struct Snake {
     pub grid_size: i32,
     pub initial_length: usize,
@@ -773,15 +308,220 @@ pub struct Snake {
 }
 
 impl Snake {
-    fn env(&self, state: &SnakeState) -> SnakeEnv {
-        SnakeEnv::from_parts(
-            self.grid_size,
+    fn in_bounds(&self, (r, c): Cell) -> bool {
+        0 <= r && r < self.grid_size && 0 <= c && c < self.grid_size
+    }
+
+    /// Initial placement: heads at one-third / two-thirds along the middle row, bodies trailing to the
+    /// nearer wall and wrapping (matches snake_RL's `_initial_snakes` / `_trace_body`).
+    fn initial_snakes(&self) -> [SnakeBody; 2] {
+        let g = self.grid_size;
+        let mid = g / 2;
+        let a_body = Self::trace_body(
+            g,
+            (mid, g / 3),
+            &[Action::Left, Action::Down, Action::Right, Action::Up],
             self.initial_length,
-            self.play_to_last,
-            self.win_food_lead,
-            state.snakes.clone(),
-            state.food.clone(),
-        )
+        );
+        let b_body = Self::trace_body(
+            g,
+            (mid, g - g / 3),
+            &[Action::Right, Action::Up, Action::Left, Action::Down],
+            self.initial_length,
+        );
+        [
+            SnakeBody {
+                body: a_body,
+                direction: Action::Right,
+                alive: true,
+            },
+            SnakeBody {
+                body: b_body,
+                direction: Action::Left,
+                alive: true,
+            },
+        ]
+    }
+
+    fn trace_body(grid_size: i32, head: Cell, dirs: &[Action], length: usize) -> VecDeque<Cell> {
+        let g = grid_size;
+        let mut cells = VecDeque::from([head]);
+        let (mut r, mut c) = head;
+        let mut d = 0usize;
+        while cells.len() < length {
+            let (dr, dc) = dirs[d].delta();
+            let (nr, nc) = (r + dr, c + dc);
+            if !(0 <= nr && nr < g && 0 <= nc && nc < g) {
+                d += 1;
+                assert!(
+                    d < dirs.len(),
+                    "initial_length {length} too long for grid_size {g}"
+                );
+                continue;
+            }
+            r = nr;
+            c = nc;
+            cells.push_back((r, c));
+        }
+        cells
+    }
+
+    /// Advance one tick over `(snakes, food)` in place. `actions[i]` is an absolute move for snake `i`
+    /// (None = coast in its current heading; a reverse move coasts, as in snake_RL). `next_food` is
+    /// called once per eaten apple to supply its replacement cell. Returns the per-snake events and
+    /// whether the episode is now over.
+    fn advance(
+        &self,
+        snakes: &mut [SnakeBody; 2],
+        food: &mut HashSet<Cell>,
+        actions: [Option<Action>; 2],
+        mut next_food: impl FnMut() -> Option<Cell>,
+    ) -> ([StepEvent; 2], bool) {
+        let mut events = [StepEvent::default(), StepEvent::default()];
+
+        // Stage 1: move every living snake. Eating intent keeps the tail; survival is settled below.
+        let mut ate_intent = [false, false];
+        let mut moved = [false, false];
+        for i in 0..2 {
+            if !snakes[i].alive {
+                continue;
+            }
+            moved[i] = true;
+            let mut action = actions[i].unwrap_or(snakes[i].direction);
+            if action.opposite() == snakes[i].direction {
+                action = snakes[i].direction; // reverse is a no-op; coast straight
+            }
+            snakes[i].direction = action;
+            let (dr, dc) = action.delta();
+            let (hr, hc) = snakes[i].head();
+            let new_head = (hr + dr, hc + dc);
+            ate_intent[i] = food.contains(&new_head);
+            snakes[i].body.push_front(new_head);
+            if !ate_intent[i] {
+                snakes[i].body.pop_back();
+            }
+        }
+
+        // Stage 2: resolve collisions against the post-move world.
+        let causes = self.resolve_collisions(snakes, &moved);
+        let mut fatal_heads = [None, None];
+        for i in 0..2 {
+            if causes[i].is_some() {
+                fatal_heads[i] = Some(snakes[i].head());
+            }
+        }
+        for i in 0..2 {
+            if let Some(cause) = causes[i] {
+                snakes[i].alive = false;
+                snakes[i].body.pop_front(); // corpse vacates the collision cell
+                events[i].died = true;
+                events[i].death_cause = Some(cause);
+            }
+        }
+
+        // Eating: survivors whose new head landed on food eat it and trigger a replacement spawn.
+        for i in 0..2 {
+            if ate_intent[i] && causes[i].is_none() {
+                let head = snakes[i].head();
+                food.remove(&head);
+                events[i].ate_food = true;
+                if let Some(cell) = next_food() {
+                    food.insert(cell);
+                }
+            }
+        }
+
+        // Kill credit: a snake whose body occupies the cell an opponent fatally moved into.
+        for i in 0..2 {
+            if causes[i] == Some(DeathCause::OppBody) {
+                if let Some(killer) = self.find_killer(snakes, fatal_heads[i].unwrap(), i) {
+                    events[killer].killed_opponent = true;
+                }
+            }
+        }
+
+        // Outcomes.
+        let alive_ids: Vec<usize> = (0..2).filter(|&i| snakes[i].alive).collect();
+        let n_causes = causes.iter().filter(|c| c.is_some()).count();
+        if alive_ids.len() == 1 && n_causes > 0 {
+            events[alive_ids[0]].won = true;
+        }
+        for i in 0..2 {
+            if causes[i].is_some() {
+                if !alive_ids.is_empty() {
+                    events[i].lost = true;
+                } else if n_causes >= 2 {
+                    events[i].drew = true;
+                }
+            }
+        }
+        let mut done = alive_ids.len() <= if self.play_to_last { 0 } else { 1 };
+
+        // Food-lead win: both alive, leader `win_food_lead` apples (length) ahead wins outright.
+        if let Some(lead) = self.win_food_lead {
+            if !done && alive_ids.len() >= 2 {
+                let (i0, i1) = (alive_ids[0], alive_ids[1]);
+                let (leader, runner) = if snakes[i0].len() >= snakes[i1].len() {
+                    (i0, i1)
+                } else {
+                    (i1, i0)
+                };
+                if snakes[leader].len() - snakes[runner].len() >= lead {
+                    events[leader].won = true;
+                    events[runner].lost = true;
+                    done = true;
+                }
+            }
+        }
+
+        (events, done)
+    }
+
+    fn resolve_collisions(
+        &self,
+        snakes: &[SnakeBody; 2],
+        moved: &[bool; 2],
+    ) -> [Option<DeathCause>; 2] {
+        let mut causes = [None, None];
+
+        // Two heads on one cell die together, whatever else is on it.
+        let mut by_head: HashMap<Cell, Vec<usize>> = HashMap::new();
+        for (i, &m) in moved.iter().enumerate() {
+            if m {
+                by_head.entry(snakes[i].head()).or_default().push(i);
+            }
+        }
+        for ids in by_head.values() {
+            if ids.len() >= 2 {
+                for &i in ids {
+                    causes[i] = Some(DeathCause::HeadOn);
+                }
+            }
+        }
+
+        for i in 0..2 {
+            if !moved[i] || causes[i].is_some() {
+                continue;
+            }
+            let head = snakes[i].head();
+            if !self.in_bounds(head) {
+                causes[i] = Some(DeathCause::Wall);
+            } else if snakes[i].body.iter().skip(1).any(|&c| c == head) {
+                causes[i] = Some(DeathCause::SelfBody);
+            } else if self.find_killer(snakes, head, i).is_some() {
+                causes[i] = Some(DeathCause::OppBody);
+            }
+        }
+        causes
+    }
+
+    fn find_killer(
+        &self,
+        snakes: &[SnakeBody; 2],
+        fatal_head: Cell,
+        victim: usize,
+    ) -> Option<usize> {
+        (0..2).find(|&j| j != victim && snakes[j].alive && snakes[j].body.contains(&fatal_head))
     }
 
     /// Spawn one apple at a uniform-random empty cell (the env's true spawn), or nothing if the grid is
@@ -851,17 +591,15 @@ impl Game for Snake {
             }
         }
         // `|| None` = no in-advance respawn; the respawn is the chance step (`sample_chance`), so the
-        // deterministic part and the sampled spawn stay separable and are shared by the env and search.
-        let mut env = self.env(state);
-        let events = env.advance(moves, || None);
+        // deterministic part and the sampled spawn stay separable and are shared by the rollout and search.
+        let mut snakes = state.snakes.clone();
+        let mut food = state.food.clone();
+        let (events, done) = self.advance(&mut snakes, &mut food, moves, || None);
         let rewards = vec![self.reward.eval(&events[0]), self.reward.eval(&events[1])];
         Transition {
-            next_state: SnakeState {
-                snakes: env.snakes,
-                food: env.food,
-            },
+            next_state: SnakeState { snakes, food },
             rewards,
-            terminal: env.done,
+            terminal: done,
         }
     }
 
@@ -896,20 +634,12 @@ impl Game for Snake {
     }
 
     fn initial_state(&self, rng: &mut dyn Rng) -> SnakeState {
-        let env = SnakeEnv::new(
-            self.grid_size,
-            self.initial_length,
-            self.play_to_last,
-            self.win_food_lead,
-        );
+        let snakes = self.initial_snakes();
         let mut food = HashSet::new();
         for _ in 0..self.initial_food_count {
-            self.spawn_one(&env.snakes, &mut food, rng);
+            self.spawn_one(&snakes, &mut food, rng);
         }
-        SnakeState {
-            snakes: env.snakes,
-            food,
-        }
+        SnakeState { snakes, food }
     }
 
     fn truncation_bonus(&self, state: &SnakeState, agent: usize) -> f64 {
@@ -969,9 +699,8 @@ mod game_tests {
     }
 
     fn initial_state(food: &[Cell]) -> SnakeState {
-        let env = SnakeEnv::new(G, 3, false, None);
         SnakeState {
-            snakes: env.snakes,
+            snakes: game().initial_snakes(),
             food: food.iter().copied().collect(),
         }
     }
@@ -1117,9 +846,8 @@ mod game_tests {
         let b = g.initial_state(&mut TestRng(7));
         assert_eq!(a, b, "same seed -> same initial state");
         assert_eq!(a.food.len(), 3);
-        // Snakes match the env's initial placement; food sits on empty cells.
-        let env = SnakeEnv::new(G, 3, false, None);
-        assert_eq!(a.snakes, env.snakes);
+        // Snakes match the initial placement; food sits on empty cells.
+        assert_eq!(a.snakes, game().initial_snakes());
         let occupied: std::collections::HashSet<Cell> = a
             .snakes
             .iter()
@@ -1157,5 +885,276 @@ mod game_tests {
         let mut dead = st.clone();
         dead.snakes[0].alive = false;
         assert_eq!(g.truncation_bonus(&dead, 0), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::*;
+
+    // A Snake config for driving the dynamics directly; the reward is irrelevant here (these assert
+    // events, not rewards). `advance` takes a working `(snakes, food)` and mutates it.
+    fn game(grid_size: i32, win_food_lead: Option<usize>) -> Snake {
+        Snake {
+            grid_size,
+            initial_length: 3,
+            play_to_last: false,
+            win_food_lead,
+            initial_food_count: 0,
+            reward: SnakeReward {
+                step: 0.0,
+                food: 0.0,
+                loss: 0.0,
+                draw: 0.0,
+                kill: 0.0,
+                win: 0.0,
+                survival: 0.0,
+            },
+        }
+    }
+
+    #[test]
+    fn initial_placement_matches_oracle() {
+        let snakes = game(20, None).initial_snakes();
+        assert_eq!(
+            Vec::from(snakes[A].body.clone()),
+            vec![(10, 6), (10, 5), (10, 4)]
+        );
+        assert_eq!(snakes[A].direction, Action::Right);
+        assert_eq!(
+            Vec::from(snakes[B].body.clone()),
+            vec![(10, 14), (10, 15), (10, 16)]
+        );
+        assert_eq!(snakes[B].direction, Action::Left);
+    }
+
+    #[test]
+    fn coast_step_moves_head_and_pops_tail() {
+        let g = game(20, None);
+        let mut snakes = g.initial_snakes();
+        let mut food = HashSet::new();
+        let (events, done) = g.advance(
+            &mut snakes,
+            &mut food,
+            [Some(Action::Right), Some(Action::Left)],
+            || None,
+        );
+        assert_eq!(
+            Vec::from(snakes[A].body.clone()),
+            vec![(10, 7), (10, 6), (10, 5)]
+        );
+        assert_eq!(
+            Vec::from(snakes[B].body.clone()),
+            vec![(10, 13), (10, 14), (10, 15)]
+        );
+        assert!(!events[A].died && !events[B].died && !done);
+    }
+
+    #[test]
+    fn reverse_action_coasts() {
+        let g = game(20, None);
+        let mut snakes = g.initial_snakes();
+        let mut food = HashSet::new();
+        // A heads Right; commanding Left (reverse) must coast Right, not reverse into itself.
+        g.advance(&mut snakes, &mut food, [Some(Action::Left), None], || None);
+        assert_eq!(snakes[A].head(), (10, 7));
+        assert_eq!(snakes[A].direction, Action::Right);
+    }
+
+    #[test]
+    fn head_on_collision_is_a_draw() {
+        let g = game(20, None);
+        let mut snakes = g.initial_snakes();
+        let mut food = HashSet::new();
+        let (mut events, mut done) = (Default::default(), false);
+        for _ in 0..4 {
+            (events, done) = g.advance(
+                &mut snakes,
+                &mut food,
+                [Some(Action::Right), Some(Action::Left)],
+                || None,
+            );
+        }
+        // A and B meet at (10,10) on the 4th tick.
+        assert_eq!(events[A].death_cause, Some(DeathCause::HeadOn));
+        assert_eq!(events[B].death_cause, Some(DeathCause::HeadOn));
+        assert!(events[A].drew && events[B].drew && done);
+    }
+
+    #[test]
+    fn eating_grows_snake_and_spawns_replacement() {
+        let g = game(20, None);
+        let mut snakes = g.initial_snakes();
+        let mut food = HashSet::from([(10, 7)]); // directly ahead of A
+        let mut replacement = vec![(0, 0)];
+        let (events, _) = g.advance(
+            &mut snakes,
+            &mut food,
+            [Some(Action::Right), Some(Action::Left)],
+            || replacement.pop(),
+        );
+        assert!(events[A].ate_food);
+        assert_eq!(snakes[A].len(), 4); // tail kept
+        assert!(food.contains(&(0, 0)) && !food.contains(&(10, 7)));
+    }
+
+    #[test]
+    fn wall_death_when_running_off_grid() {
+        let g = game(20, None);
+        let mut snakes = g.initial_snakes();
+        let mut food = HashSet::new();
+        // Place A against the right wall (row 0, clear of B at row 10) so one Right step runs off-grid.
+        snakes[A].body = VecDeque::from([(0, 19), (0, 18), (0, 17)]);
+        snakes[A].direction = Action::Right;
+        let (events, _) = g.advance(&mut snakes, &mut food, [Some(Action::Right), None], || None);
+        assert_eq!(events[A].death_cause, Some(DeathCause::Wall));
+        assert!(!snakes[A].alive);
+    }
+
+    #[test]
+    fn self_body_collision_is_a_death() {
+        let g = game(20, None);
+        let mut snakes = g.initial_snakes();
+        let mut food = HashSet::new();
+        // A folds back on itself: head (5,5) facing Right; turning Up steps onto its own body at (4,5).
+        snakes[A].body = VecDeque::from([(5, 5), (5, 4), (4, 4), (4, 5), (4, 6)]);
+        snakes[A].direction = Action::Right;
+        let (events, _) = g.advance(&mut snakes, &mut food, [Some(Action::Up), None], || None);
+        assert_eq!(events[A].death_cause, Some(DeathCause::SelfBody));
+        assert!(!snakes[A].alive);
+    }
+
+    #[test]
+    fn opponent_body_collision_is_a_kill_and_win() {
+        let g = game(20, None);
+        let mut snakes = g.initial_snakes();
+        let mut food = HashSet::new();
+        // A lies along row 10; B drives its head down into A's body. B dies (OppBody), A is credited
+        // the kill and — as the sole survivor — wins; B loses and the game ends (play_to_last = false).
+        snakes[A].body = VecDeque::from([(10, 5), (10, 4), (10, 3)]);
+        snakes[A].direction = Action::Right;
+        snakes[B].body = VecDeque::from([(9, 5), (8, 5), (7, 5)]);
+        snakes[B].direction = Action::Down;
+        let (events, done) = g.advance(
+            &mut snakes,
+            &mut food,
+            [Some(Action::Right), Some(Action::Down)],
+            || None,
+        );
+        assert_eq!(events[B].death_cause, Some(DeathCause::OppBody));
+        assert!(events[A].killed_opponent && events[A].won && events[B].lost && done);
+    }
+
+    #[test]
+    fn food_lead_wins_outright() {
+        let g = game(20, Some(2));
+        let mut snakes = g.initial_snakes();
+        let mut food = HashSet::new();
+        // A is two apples (length) ahead of B, both alive; the lead triggers an outright win this tick.
+        snakes[A].body = VecDeque::from([(2, 5), (2, 4), (2, 3), (2, 2), (2, 1)]); // length 5 vs B's 3
+        snakes[A].direction = Action::Right;
+        let (events, done) =
+            g.advance(&mut snakes, &mut food, [Some(Action::Right), None], || None);
+        assert!(events[A].won && events[B].lost && done);
+    }
+}
+
+#[cfg(test)]
+mod obs_tests {
+    use super::*;
+
+    fn at(obs: &[f32], g: i32, ch: usize, r: i32, c: i32) -> f32 {
+        obs[ch * (g * g) as usize + (r as usize) * (g as usize) + (c as usize)]
+    }
+
+    // The default initial placement on a 20-grid (heads at (10,6) / (10,14)).
+    fn snakes() -> [SnakeBody; 2] {
+        Snake {
+            grid_size: 20,
+            initial_length: 3,
+            play_to_last: false,
+            win_food_lead: None,
+            initial_food_count: 0,
+            reward: SnakeReward {
+                step: 0.0,
+                food: 0.0,
+                loss: 0.0,
+                draw: 0.0,
+                kill: 0.0,
+                win: 0.0,
+                survival: 0.0,
+            },
+        }
+        .initial_snakes()
+    }
+
+    #[test]
+    fn egocentric_rotates_by_heading() {
+        // A faces Right -> k=1 -> (r,c) maps to (edge-c, r). Head (10,6) -> (19-6, 10) = (13,10).
+        let obs = egocentric_parts(&snakes(), &HashSet::new(), 20, A);
+        assert_eq!(at(&obs, 20, CH_OWN_HEAD, 13, 10), 1.0);
+        // Body cells (10,5),(10,4) -> (14,10),(15,10) in the own-body channel.
+        assert_eq!(at(&obs, 20, CH_OWN_BODY, 14, 10), 1.0);
+        assert_eq!(at(&obs, 20, CH_OWN_BODY, 15, 10), 1.0);
+        // The head cell must not also be flagged as body.
+        assert_eq!(at(&obs, 20, CH_OWN_BODY, 13, 10), 0.0);
+        // Opponent B head (10,14) -> (19-14,10) = (5,10) in the opp-head channel.
+        assert_eq!(at(&obs, 20, CH_OPP_HEAD, 5, 10), 1.0);
+    }
+
+    #[test]
+    fn food_lands_in_food_channel_rotated() {
+        let food = HashSet::from([(10, 6)]); // same transform as A's head -> (13,10)
+        let obs = egocentric_parts(&snakes(), &food, 20, A);
+        assert_eq!(at(&obs, 20, CH_FOOD, 13, 10), 1.0);
+    }
+
+    #[test]
+    fn buffer_has_expected_length() {
+        assert_eq!(
+            egocentric_parts(&snakes(), &HashSet::new(), 20, A).len(),
+            N_CHANNELS * 20 * 20
+        );
+    }
+}
+
+#[cfg(test)]
+mod reward_tests {
+    use super::*;
+
+    fn reward() -> SnakeReward {
+        SnakeReward {
+            step: 0.0,
+            food: 0.1,
+            loss: -0.5,
+            draw: -0.25,
+            kill: 0.5,
+            win: 0.0,
+            survival: 0.25,
+        }
+    }
+
+    #[test]
+    fn survival_fires_only_when_survived_to_max_ticks() {
+        let r = reward();
+        assert_eq!(r.eval(&StepEvent::default()), 0.0); // alive, nothing happened
+        let survived = StepEvent {
+            survived_to_max_ticks: true,
+            ..Default::default()
+        };
+        assert!((r.eval(&survived) - 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_dead_snake_never_collects_survival() {
+        // The died branch returns before the survival term, mirroring MinimalReward's early return.
+        let r = reward();
+        let dead = StepEvent {
+            died: true,
+            lost: true,
+            survived_to_max_ticks: true,
+            ..Default::default()
+        };
+        assert!((r.eval(&dead) - (-0.5)).abs() < 1e-12); // loss only
     }
 }
