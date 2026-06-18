@@ -7,6 +7,7 @@
 pub mod encoder;
 pub mod engine;
 pub mod env;
+pub(crate) mod episode;
 pub mod game;
 pub mod learner;
 pub mod learners;

@@ -5,35 +5,32 @@
 //! `Env` drives one game move-by-move for play, evaluation, and debugging.
 
 use crate::encoder::StateEncoder;
+use crate::episode::Episode;
 use crate::game::Game;
-use crate::rng::SplitMix64;
 use crate::space::Space;
 
 pub struct Env<G: Game> {
     game: G,
     encoder: Box<dyn StateEncoder<State = G::State>>,
-    rng: SplitMix64,
-    state: G::State,
+    episode: Episode<G>,
     done: bool,
 }
 
 impl<G: Game> Env<G> {
     /// Start a fresh episode of `game` (initial chance drawn from `seed`), observed through `encoder`.
     pub fn new(game: G, encoder: Box<dyn StateEncoder<State = G::State>>, seed: u64) -> Self {
-        let mut rng = SplitMix64::new(seed);
-        let state = game.initial_state(&mut rng);
+        let episode = Episode::new(&game, seed);
         Env {
             game,
             encoder,
-            rng,
-            state,
+            episode,
             done: false,
         }
     }
 
     /// Begin a new episode, drawing fresh initial chance from the (continuing) RNG stream.
     pub fn reset(&mut self) {
-        self.state = self.game.initial_state(&mut self.rng);
+        self.episode.reset(&self.game);
         self.done = false;
     }
 
@@ -47,28 +44,25 @@ impl<G: Game> Env<G> {
 
     /// The native game state, for rendering/inspection (the encoder is for the net's view).
     pub fn state(&self) -> &G::State {
-        &self.state
+        &self.episode.state
     }
 
     pub fn done(&self) -> bool {
         self.done
     }
 
-    /// Agents that must supply an action this tick: a single mover for a sequential game, all live
-    /// agents for a simultaneous one. Empty once the episode is over.
+    /// Agents that must supply an action this tick (empty once the episode is over).
     pub fn active_agents(&self) -> Vec<usize> {
-        (0..self.game.num_agents())
-            .filter(|&a| !self.game.legal_actions(&self.state, a).is_empty())
-            .collect()
+        self.episode.active_agents(&self.game)
     }
 
     pub fn legal_actions(&self, agent: usize) -> Vec<usize> {
-        self.game.legal_actions(&self.state, agent)
+        self.game.legal_actions(&self.episode.state, agent)
     }
 
     /// The encoded observation for `agent` (the value-network view of the current state).
     pub fn observe(&self, agent: usize) -> Vec<f32> {
-        self.encoder.encode(&self.state, agent)
+        self.episode.observe(&*self.encoder, agent)
     }
 
     /// The observation `Space` (from the encoder) — so a caller can size/validate a network from the
@@ -87,10 +81,9 @@ impl<G: Game> Env<G> {
             self.game.num_agents(),
             "step() expects one action per agent"
         );
-        let t = self.game.step_env(&self.state, actions, &mut self.rng);
-        self.state = t.next_state;
-        self.done = t.terminal;
-        t.rewards
+        let (rewards, terminal) = self.episode.advance(&self.game, actions);
+        self.done = terminal;
+        rewards
     }
 }
 
