@@ -5,7 +5,24 @@
 
 use reinfors_core::{Engine, EngineParams, SelectiveExpectimax, TreeStrap};
 use reinfors_core::{Opponent, SearchConfig};
-use reinfors_games::{EgocentricSnake, SearchParams, Snake, SnakeReward};
+use reinfors_games::{EgocentricSnake, Snake, SnakeReward};
+
+/// Test config bundle: the snake + search knobs the helpers below read (was `reinfors_games::
+/// SearchParams`, which only the retired parity wrappers needed).
+struct SearchParams {
+    grid_size: i32,
+    initial_length: usize,
+    play_to_last: bool,
+    win_food_lead: Option<usize>,
+    gamma: f64,
+    beta: f64,
+    expansion_budget: usize,
+    top_k: usize,
+    max_depth: i32,
+    food_samples: usize,
+    reward: SnakeReward,
+    opponent: Opponent,
+}
 
 /// The default snake encoder for the engine (egocentric, sized from the search's grid).
 fn enc(s: &SearchParams) -> Box<EgocentricSnake> {
@@ -307,38 +324,54 @@ fn telemetry_is_deterministic_for_a_seed() {
 }
 
 #[test]
-fn evaluate_wraps_the_pooled_search() {
-    // The policy's `evaluate` over a Snake matches the snake `selective_search` wrapper on the
-    // same state (n_heads = 2 matches `infer`, so no all-terminal broadcast diverges them).
-    use reinfors_core::policy::Policy;
-    use reinfors_games::{selective_search, SnakeState};
+fn collected_targets_equal_a_direct_search() {
+    // The engine collects each decision's raw searched values as its target (z-mix is a no-op at
+    // outcome_weight 0). With no food the search has no chance node, so it is seed-independent — a
+    // direct `search_many` on the food-free initial state reproduces the engine's first targets,
+    // pinning that `collect` feeds through exactly what the search computes.
+    use reinfors_core::{search_many, Game, Rng};
+    use reinfors_games::EgocentricSnake;
+
+    // A dummy RNG: with food = 0, `initial_state` spawns nothing, so it is never consulted.
+    struct NoRng;
+    impl Rng for NoRng {
+        fn below(&mut self, _: usize) -> usize {
+            0
+        }
+        fn unit(&mut self) -> f64 {
+            0.0
+        }
+    }
 
     let s = search();
-    let p = policy(&s, 2);
-    let g = game(&s, 0);
-    let env = reinfors_games::SnakeEnv::new(s.grid_size, 3, false, None);
-    let st = SnakeState {
-        snakes: env.snakes,
-        food: std::collections::HashSet::new(),
-    };
-    let mut infer_fn = infer;
-    let results = p.evaluate(
-        &g,
-        &*enc(&s),
-        vec![(st.clone(), 0)],
-        0,
-        false,
-        &mut infer_fn,
-    ); // collect_interior = false, matching the wrapper below
-    let (values, _i, _stat) = selective_search(
-        &s,
-        st.snakes.clone(),
-        st.food.clone(),
-        0,
+    let mut p = params(1, 0);
+    p.max_ticks = 1; // truncate after one decision per agent
+    let (records, _) =
+        Engine::new(game(&s, 0), enc(&s), policy(&s, 2), learner(0.0, false), p).collect(2, infer);
+
+    // The engine's deterministic food-free initial state (placement, no food) — same as episode 0's.
+    let state = game(&s, 0).initial_state(&mut NoRng);
+    let direct = search_many(
+        &game(&s, 0),
+        &EgocentricSnake {
+            grid_size: s.grid_size,
+        },
+        &config(&s),
+        vec![(state.clone(), 0), (state, 1)],
         false,
         0,
-        &mut infer_fn,
+        infer,
     );
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].values, values);
+
+    assert_eq!(records.len(), 2);
+    for (rec, d) in records.iter().zip(direct.iter()) {
+        for (rh, dh) in rec.1.iter().zip(d.0.iter()) {
+            for (rv, dv) in rh.iter().zip(dh.iter()) {
+                assert!(
+                    (rv - dv).abs() < 1e-9,
+                    "collected target != direct search: {rv} vs {dv}"
+                );
+            }
+        }
+    }
 }

@@ -193,6 +193,29 @@ def test_incompatible_policy_learner_pairing_is_rejected() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"expansion_budget": 0},
+        {"top_k": 0},
+        {"max_depth": 0},
+        {"food_samples": 0},
+        {"beta": 1.5},
+    ],
+)
+def test_engine_rejects_degenerate_search_params(bad: dict) -> None:
+    # SelectiveExpectimax search knobs are validated at Engine construction (the core does not).
+    kw = {"expansion_budget": 24, "top_k": 4, "max_depth": 6, "beta": 1.0, "food_samples": 1, "n_heads": _K, **bad}
+    with pytest.raises(ValueError):
+        rf.Engine(
+            rf.games.Snake(grid_size=8),
+            rf.policies.SelectiveExpectimax(**kw),
+            rf.learners.TreeStrap(),
+            n_games=1,
+            max_ticks=10,
+        )
+
+
 def test_connect4_end_to_end_training() -> None:
     pytest.importorskip("torch")
     import torch
