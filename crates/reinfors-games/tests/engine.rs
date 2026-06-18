@@ -329,8 +329,19 @@ fn collected_targets_equal_a_direct_search() {
     // outcome_weight 0). With no food the search has no chance node, so it is seed-independent — a
     // direct `search_many` on the food-free initial state reproduces the engine's first targets,
     // pinning that `collect` feeds through exactly what the search computes.
-    use reinfors_core::search_many;
-    use reinfors_games::{EgocentricSnake, SnakeEnv, SnakeState};
+    use reinfors_core::{search_many, Game, Rng};
+    use reinfors_games::EgocentricSnake;
+
+    // A dummy RNG: with food = 0, `initial_state` spawns nothing, so it is never consulted.
+    struct NoRng;
+    impl Rng for NoRng {
+        fn below(&mut self, _: usize) -> usize {
+            0
+        }
+        fn unit(&mut self) -> f64 {
+            0.0
+        }
+    }
 
     let s = search();
     let mut p = params(1, 0);
@@ -338,10 +349,8 @@ fn collected_targets_equal_a_direct_search() {
     let (records, _) =
         Engine::new(game(&s, 0), enc(&s), policy(&s, 2), learner(0.0, false), p).collect(2, infer);
 
-    let state = SnakeState {
-        snakes: SnakeEnv::new(s.grid_size, 3, false, None).snakes,
-        food: std::collections::HashSet::new(),
-    };
+    // The engine's deterministic food-free initial state (placement, no food) — same as episode 0's.
+    let state = game(&s, 0).initial_state(&mut NoRng);
     let direct = search_many(
         &game(&s, 0),
         &EgocentricSnake {
