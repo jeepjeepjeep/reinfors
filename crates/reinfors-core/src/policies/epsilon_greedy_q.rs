@@ -2,6 +2,7 @@
 //! search), and `select` is a Thompson-head epsilon-greedy choice. Its `QEvaluation` is the seam's
 //! non-search case; the matching `Dqn` (in `crate::learners::dqn`) consumes it into transitions.
 
+use crate::encoder::StateEncoder;
 use crate::game::{Game, Rng};
 use crate::policy::{argmax, Policy};
 
@@ -37,6 +38,7 @@ impl Policy for EpsilonGreedyQ {
     fn evaluate<G, F>(
         &self,
         game: &G,
+        enc: &dyn StateEncoder<State = G::State>,
         requests: Vec<(G::State, usize)>,
         _seed: u64,
         _collect_interior: bool, // DQN has no interior targets — a plain forward, nothing to collect
@@ -54,7 +56,7 @@ impl Policy for EpsilonGreedyQ {
         let a = game.action_count();
         let mut obs_flat: Vec<f32> = Vec::new();
         for (state, agent) in &requests {
-            obs_flat.extend(game.observe(state, *agent));
+            obs_flat.extend(enc.encode(state, *agent));
         }
         let q = infer(obs_flat, n); // flat [n, K, A]
         let k = q.len() / (n * a);

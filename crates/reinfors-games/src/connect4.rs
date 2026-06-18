@@ -5,7 +5,7 @@
 //! (empty). Action legality is fixed — all 7 columns are always selectable; a move into a full column
 //! is an immediate loss for the mover — so the framework needs no action masking here.
 
-use reinfors_core::{Actor, Game, Rng, Transition};
+use reinfors_core::{Actor, Game, Rng, StateEncoder, Transition};
 
 const COLS: usize = 7;
 const ROWS: usize = 6;
@@ -16,6 +16,25 @@ pub struct Connect4State {
     cells: [u8; COLS * ROWS], // 0 empty, 1 player-0, 2 player-1; index = row*COLS + col, row 0 = bottom
     turn: usize,              // whose move it is (0 or 1)
     done: bool,
+}
+
+impl Connect4State {
+    /// The board as `[row][col]` cell codes (0 empty, 1 player-0, 2 player-1), row 0 = bottom — for
+    /// rendering / inspection (the encoder owns the network view).
+    pub fn board(&self) -> Vec<Vec<u8>> {
+        (0..ROWS)
+            .map(|r| (0..COLS).map(|c| self.cells[r * COLS + c]).collect())
+            .collect()
+    }
+
+    /// Whose move it is (0 or 1).
+    pub fn turn(&self) -> usize {
+        self.turn
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.done
+    }
 }
 
 /// Connect-4's terminal reward weights (zero-sum: the loser gets `loss`, the winner `win`).
@@ -105,10 +124,6 @@ impl Game for Connect4 {
         COLS
     }
 
-    fn obs_shape(&self) -> (usize, usize, usize) {
-        (2, ROWS, COLS) // channel 0 = own pieces, 1 = opponent's
-    }
-
     fn actor(&self, state: &Connect4State) -> Actor {
         Actor::Agent(state.turn)
     }
@@ -155,7 +170,24 @@ impl Game for Connect4 {
         }
     }
 
-    fn observe(&self, state: &Connect4State, agent: usize) -> Vec<f32> {
+    fn initial_state(&self, _rng: &mut dyn Rng) -> Connect4State {
+        Connect4State {
+            cells: [0; COLS * ROWS],
+            turn: 0,
+            done: false,
+        }
+    }
+
+    // Deterministic: no `sample_chance` / `step_env` override needed (the trait defaults suffice).
+}
+
+/// The default Connect-4 observation: two own/opponent piece planes from the mover's perspective.
+pub struct Connect4Planes;
+
+impl StateEncoder for Connect4Planes {
+    type State = Connect4State;
+
+    fn encode(&self, state: &Connect4State, agent: usize) -> Vec<f32> {
         let mine = (agent + 1) as u8;
         let plane = ROWS * COLS;
         let mut obs = vec![0.0f32; 2 * plane];
@@ -169,15 +201,9 @@ impl Game for Connect4 {
         obs
     }
 
-    fn initial_state(&self, _rng: &mut dyn Rng) -> Connect4State {
-        Connect4State {
-            cells: [0; COLS * ROWS],
-            turn: 0,
-            done: false,
-        }
+    fn obs_shape(&self) -> (usize, usize, usize) {
+        (2, ROWS, COLS) // channel 0 = own pieces, 1 = opponent's
     }
-
-    // Deterministic: no `sample_chance` / `step_env` override needed (the trait defaults suffice).
 }
 
 #[cfg(test)]
@@ -284,7 +310,15 @@ mod tests {
             turn: 0,
             done: false,
         };
-        let results = search_many(&g, &cfg(), vec![(state, 0)], false, 0, zero_infer);
+        let results = search_many(
+            &g,
+            &Connect4Planes,
+            &cfg(),
+            vec![(state, 0)],
+            false,
+            0,
+            zero_infer,
+        );
         let values = &results[0].0; // [K][7]
         for head in values {
             let best = (0..7)
@@ -310,7 +344,13 @@ mod tests {
             max_ticks: 50,
             seed: 0,
         };
-        let mut engine = Engine::new(Connect4::default(), policy, learner, params);
+        let mut engine = Engine::new(
+            Connect4::default(),
+            Box::new(Connect4Planes),
+            policy,
+            learner,
+            params,
+        );
         let (records, stats) = engine.collect(60, zero_infer);
         assert!(records.len() >= 60);
         for (obs, tgt, mask) in &records {

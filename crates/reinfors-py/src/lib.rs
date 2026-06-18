@@ -20,12 +20,13 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
 use reinfors_core::{
-    Dqn, DqnRecord, Engine, EngineParams, EpsilonGreedyQ, Game, Learner, Opponent, Policy,
-    SearchConfig, SelectiveExpectimax, Space, TreeStrap, TreeStrapRecord,
+    Dqn, DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game, Learner, Opponent, Policy,
+    SearchConfig, SelectiveExpectimax, Space, StateEncoder, TreeStrap, TreeStrapRecord,
 };
 use reinfors_games::snake::{Cell, DeathCause, SnakeBody, SnakeEnv as CoreEnv};
 use reinfors_games::{
-    Action, Connect4, Connect4Reward, GridWorld, GridWorldReward, SearchParams, Snake, SnakeReward,
+    Action, Connect4, Connect4Planes, Connect4Reward, Connect4State, EgocentricSnake, GridState,
+    GridWorld, GridWorldPlanes, GridWorldReward, SearchParams, Snake, SnakeReward, SnakeState,
 };
 
 // ===========================================================================
@@ -877,8 +878,10 @@ impl GameSpec {
     /// defaults. Lets a caller size a network from a handle (`game.observation_space()`) without
     /// hard-coding any game's dimensions.
     fn spaces(&self) -> (Space, Space) {
-        fn of<G: Game>(game: G) -> (Space, Space) {
-            (game.observation_space(), game.action_space())
+        // Observation space comes from the game's default encoder (representation); the action space
+        // is the game's (rules).
+        fn of<G: Game>(game: G, enc: &dyn StateEncoder<State = G::State>) -> (Space, Space) {
+            (enc.observation_space(), game.action_space())
         }
         match *self {
             GameSpec::Snake {
@@ -888,16 +891,22 @@ impl GameSpec {
                 play_to_last,
                 win_food_lead,
                 reward,
-            } => of(Snake {
-                grid_size,
-                initial_length,
-                play_to_last,
-                win_food_lead,
-                initial_food_count,
-                reward,
-            }),
-            GameSpec::Connect4 { reward } => of(Connect4 { reward }),
-            GameSpec::GridWorld { size, goal, reward } => of(GridWorld { size, goal, reward }),
+            } => of(
+                Snake {
+                    grid_size,
+                    initial_length,
+                    play_to_last,
+                    win_food_lead,
+                    initial_food_count,
+                    reward,
+                },
+                &EgocentricSnake { grid_size },
+            ),
+            GameSpec::Connect4 { reward } => of(Connect4 { reward }, &Connect4Planes),
+            GameSpec::GridWorld { size, goal, reward } => of(
+                GridWorld { size, goal, reward },
+                &GridWorldPlanes { size, goal },
+            ),
         }
     }
 }
@@ -952,6 +961,7 @@ fn check_unit(name: &str, v: f64) -> PyResult<()> {
 /// where the composed params are validated (the handles store them unchecked).
 fn build_for_game<G: Game + Send + Sync + 'static>(
     game: G,
+    enc: Box<dyn StateEncoder<State = G::State>>,
     policy: PolicySpec,
     learner: LearnerSpec,
     engine_params: EngineParams,
@@ -959,7 +969,7 @@ fn build_for_game<G: Game + Send + Sync + 'static>(
 where
     G::State: Send + Sync,
 {
-    let (c, h, w) = game.obs_shape();
+    let (c, h, w) = enc.obs_shape();
     let dim = c * h * w;
     let action_count = game.action_count();
     match (policy, learner) {
@@ -1000,7 +1010,7 @@ where
             let policy = SelectiveExpectimax::new(cfg, n_heads, epsilon);
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
             Ok(Box::new(EngineImpl {
-                inner: Engine::new(game, policy, learner, engine_params),
+                inner: Engine::new(game, enc, policy, learner, engine_params),
                 dim,
                 action_count,
                 n_heads,
@@ -1015,7 +1025,7 @@ where
             let policy = EpsilonGreedyQ::new(n_heads, epsilon);
             let learner = Dqn::new(n_heads, bootstrap_p);
             Ok(Box::new(EngineImpl {
-                inner: Engine::new(game, policy, learner, engine_params),
+                inner: Engine::new(game, enc, policy, learner, engine_params),
                 dim,
                 action_count,
                 n_heads,
@@ -1052,19 +1062,275 @@ fn build_engine(
                 initial_food_count,
                 reward,
             },
+            Box::new(EgocentricSnake { grid_size }),
             policy,
             learner,
             engine_params,
         ),
-        GameSpec::Connect4 { reward } => {
-            build_for_game(Connect4 { reward }, policy, learner, engine_params)
-        }
+        GameSpec::Connect4 { reward } => build_for_game(
+            Connect4 { reward },
+            Box::new(Connect4Planes),
+            policy,
+            learner,
+            engine_params,
+        ),
         GameSpec::GridWorld { size, goal, reward } => build_for_game(
             GridWorld { size, goal, reward },
+            Box::new(GridWorldPlanes { size, goal }),
             policy,
             learner,
             engine_params,
         ),
+    }
+}
+
+// ===========================================================================
+// UNIFIED ENV (permanent) — `rf.Env`, the caller-driven single-game instance. Mirrors the engine's
+// type-erasure: one `Env` pyclass holds any game behind `Box<dyn ErasedEnv>`, built via a per-game
+// arm that pairs the game with its default encoder. Drives one game move-by-move (play / eval).
+// ===========================================================================
+
+#[pyclass(name = "Env")]
+struct PyEnv {
+    inner: Box<dyn ErasedEnv>,
+}
+
+#[pymethods]
+impl PyEnv {
+    #[new]
+    #[pyo3(signature = (game, seed=0))]
+    fn new(game: GameHandle, seed: u64) -> Self {
+        PyEnv {
+            inner: build_env(game.spec, seed),
+        }
+    }
+
+    /// Start a new episode.
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    /// Whether the current episode has ended.
+    fn done(&self) -> bool {
+        self.inner.done()
+    }
+
+    fn num_agents(&self) -> usize {
+        self.inner.num_agents()
+    }
+
+    fn action_count(&self) -> usize {
+        self.inner.action_count()
+    }
+
+    /// Agents that must supply an action this tick (one mover for a sequential game, all live agents
+    /// for a simultaneous one); empty once the episode is over.
+    fn active_agents(&self) -> Vec<usize> {
+        self.inner.active_agents()
+    }
+
+    fn legal_actions(&self, agent: usize) -> Vec<usize> {
+        self.inner.legal_actions(agent)
+    }
+
+    /// The encoded observation for `agent` as a `(C, H, W)` float32 array (the value-network view).
+    fn observe<'py>(&self, py: Python<'py>, agent: usize) -> Bound<'py, PyArray3<f32>> {
+        self.inner.observe(py, agent)
+    }
+
+    /// The observation `Space` — so a net can be sized/validated from the env alone.
+    fn observation_space<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.inner.observation_space(py)
+    }
+
+    /// The native game state as an interpretable dict (game-specific: snake → bodies/food/directions/
+    /// alive; connect4 → board/turn/done; gridworld → pos/done) — for rendering and human play.
+    fn state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.inner.state(py)
+    }
+
+    /// Advance one tick with `actions`, a `{agent: action}` map naming exactly the agents that act
+    /// this tick (see `active_agents()`). Returns this tick's per-agent reward vector.
+    fn step(&mut self, actions: HashMap<usize, usize>) -> PyResult<Vec<f64>> {
+        // `actions` must name exactly the active agents — reject anything else loudly, since a missing
+        // active agent or a stray inactive one would let an unintended default move silently advance
+        // (and corrupt) the episode.
+        let active = self.inner.active_agents();
+        if active.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "no agents to act — the episode is over; call reset()",
+            ));
+        }
+        if let Some(&agent) = actions.keys().find(|a| !active.contains(a)) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "agent {agent} is not active this tick; active agents: {active:?}"
+            )));
+        }
+        if let Some(&agent) = active.iter().find(|a| !actions.contains_key(a)) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "missing action for active agent {agent}; active agents: {active:?}"
+            )));
+        }
+        let mut joint = vec![0usize; self.inner.num_agents()];
+        for (agent, action) in actions {
+            joint[agent] = action;
+        }
+        Ok(self.inner.step(joint))
+    }
+}
+
+/// Marshal a game's native `State` into an interpretable Python object (for rendering / observers,
+/// e.g. an interactive game). One impl per game state — the genuinely game-specific part of the `Env`
+/// binding (the rest is generic). A binding-local trait over the foreign state types.
+trait NativeState {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>>;
+}
+
+impl NativeState for SnakeState {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        let bodies: Vec<Vec<Cell>> = self
+            .snakes
+            .iter()
+            .map(|s| s.body.iter().copied().collect())
+            .collect();
+        d.set_item("bodies", bodies)?;
+        d.set_item("food", self.food.iter().copied().collect::<Vec<Cell>>())?;
+        let directions: Vec<u8> = self
+            .snakes
+            .iter()
+            .map(|s| action_to_u8(s.direction))
+            .collect();
+        d.set_item("directions", directions)?;
+        let alive: Vec<bool> = self.snakes.iter().map(|s| s.alive).collect();
+        d.set_item("alive", alive)?;
+        Ok(d)
+    }
+}
+
+impl NativeState for Connect4State {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("board", self.board())?; // [row][col] cell codes, row 0 = bottom
+        d.set_item("turn", self.turn())?;
+        d.set_item("done", self.is_done())?;
+        Ok(d)
+    }
+}
+
+impl NativeState for GridState {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("pos", self.pos)?;
+        d.set_item("done", self.done)?;
+        Ok(d)
+    }
+}
+
+/// A single-game `Env` with its concrete `Game` erased, so one Python `Env` holds any game.
+trait ErasedEnv: Send + Sync {
+    fn reset(&mut self);
+    fn done(&self) -> bool;
+    fn num_agents(&self) -> usize;
+    fn action_count(&self) -> usize;
+    fn active_agents(&self) -> Vec<usize>;
+    fn legal_actions(&self, agent: usize) -> Vec<usize>;
+    fn observe<'py>(&self, py: Python<'py>, agent: usize) -> Bound<'py, PyArray3<f32>>;
+    fn observation_space<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>>;
+    fn state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>>;
+    fn step(&mut self, actions: Vec<usize>) -> Vec<f64>;
+}
+
+struct EnvImpl<G: Game> {
+    inner: Env<G>,
+    obs_shape: (usize, usize, usize),
+}
+
+impl<G> ErasedEnv for EnvImpl<G>
+where
+    G: Game + Send + Sync + 'static,
+    G::State: Send + Sync + NativeState,
+{
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+    fn done(&self) -> bool {
+        self.inner.done()
+    }
+    fn num_agents(&self) -> usize {
+        self.inner.num_agents()
+    }
+    fn action_count(&self) -> usize {
+        self.inner.action_count()
+    }
+    fn active_agents(&self) -> Vec<usize> {
+        self.inner.active_agents()
+    }
+    fn legal_actions(&self, agent: usize) -> Vec<usize> {
+        self.inner.legal_actions(agent)
+    }
+    fn observe<'py>(&self, py: Python<'py>, agent: usize) -> Bound<'py, PyArray3<f32>> {
+        let (c, h, w) = self.obs_shape;
+        Array3::from_shape_vec((c, h, w), self.inner.observe(agent))
+            .expect("obs shape")
+            .into_pyarray(py)
+    }
+    fn observation_space<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        space_to_py(py, self.inner.observation_space())
+    }
+    fn state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        Ok(self.inner.state().to_py(py)?.into_any())
+    }
+    fn step(&mut self, actions: Vec<usize>) -> Vec<f64> {
+        self.inner.step(&actions)
+    }
+}
+
+/// Build a type-erased `Env` from a `GameSpec`, pairing the game with its default encoder. One arm per
+/// game (mirrors `build_engine`'s game axis).
+fn build_env(game: GameSpec, seed: u64) -> Box<dyn ErasedEnv> {
+    match game {
+        GameSpec::Snake {
+            grid_size,
+            initial_length,
+            initial_food_count,
+            play_to_last,
+            win_food_lead,
+            reward,
+        } => {
+            let enc = EgocentricSnake { grid_size };
+            let obs_shape = enc.obs_shape();
+            Box::new(EnvImpl {
+                inner: Env::new(
+                    Snake {
+                        grid_size,
+                        initial_length,
+                        play_to_last,
+                        win_food_lead,
+                        initial_food_count,
+                        reward,
+                    },
+                    Box::new(enc),
+                    seed,
+                ),
+                obs_shape,
+            })
+        }
+        GameSpec::Connect4 { reward } => {
+            let obs_shape = Connect4Planes.obs_shape();
+            Box::new(EnvImpl {
+                inner: Env::new(Connect4 { reward }, Box::new(Connect4Planes), seed),
+                obs_shape,
+            })
+        }
+        GameSpec::GridWorld { size, goal, reward } => {
+            let enc = GridWorldPlanes { size, goal };
+            let obs_shape = enc.obs_shape();
+            Box::new(EnvImpl {
+                inner: Env::new(GridWorld { size, goal, reward }, Box::new(enc), seed),
+                obs_shape,
+            })
+        }
     }
 }
 
@@ -1420,6 +1686,7 @@ fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(blend_outcome_targets, m)?)?;
     m.add_class::<SnakeEnv>()?;
     m.add_class::<PyEngine>()?;
+    m.add_class::<PyEnv>()?;
     m.add_class::<GameHandle>()?;
     m.add_class::<PolicyHandle>()?;
     m.add_class::<LearnerHandle>()?;

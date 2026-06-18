@@ -20,6 +20,8 @@
 
 use std::collections::HashMap;
 
+use crate::encoder::StateEncoder;
+use crate::episode::Episode;
 use crate::game::Game;
 use crate::learner::{Learner, Step};
 use crate::policy::Policy;
@@ -59,12 +61,12 @@ pub struct EngineParams {
 
 pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     game: G,
+    encoder: Box<dyn StateEncoder<State = G::State>>,
     policy: P,
     learner: L,
     params: EngineParams,
-    states: Vec<G::State>,
-    rngs: Vec<SplitMix64>,
-    // The search's chance-sampling stream — independent of the per-game env `rngs` so adding search
+    episodes: Vec<Episode<G>>, // per-game live state + env-chance RNG (shared mechanics with `Env`)
+    // The search's chance-sampling stream — independent of the per-game env RNGs so adding search
     // draws never perturbs the env's draw order (deterministic games stay bit-reproducible). A fresh
     // per-decision seed is drawn from it so each search samples with fresh randomness, like the env.
     search_rng: SplitMix64,
@@ -79,23 +81,31 @@ where
 {
     /// Build an engine over `game` driven by `policy` (evaluation + acting) and `learner` (training
     /// records), with the rollout knobs from `params`. The game owns its reward and rules.
-    pub fn new(game: G, policy: P, learner: L, params: EngineParams) -> Self {
+    pub fn new(
+        game: G,
+        encoder: Box<dyn StateEncoder<State = G::State>>,
+        policy: P,
+        learner: L,
+        params: EngineParams,
+    ) -> Self {
         debug_assert!((1..=2).contains(&game.num_agents()));
-        let mut rngs: Vec<SplitMix64> = (0..params.n_games)
+        // Each game gets its own env-chance stream, seeded deterministically from the game index. The
+        // episode draws its initial state from that stream, then the policy draws its episode state —
+        // same per-game RNG order as before, so the rollout stays bit-reproducible.
+        let mut episodes: Vec<Episode<G>> = (0..params.n_games)
             .map(|i| {
-                SplitMix64::new(
+                Episode::new(
+                    &game,
                     params
                         .seed
                         .wrapping_add((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
                 )
             })
             .collect();
-        let mut states: Vec<G::State> = Vec::with_capacity(params.n_games);
-        let mut policy_states: Vec<P::PolicyState> = Vec::with_capacity(params.n_games);
-        for rng in rngs.iter_mut() {
-            states.push(game.initial_state(rng));
-            policy_states.push(policy.begin_episode(rng));
-        }
+        let policy_states: Vec<P::PolicyState> = episodes
+            .iter_mut()
+            .map(|ep| policy.begin_episode(&mut ep.rng))
+            .collect();
         let ticks = vec![0; params.n_games];
         let num_agents = game.num_agents();
         let traj = (0..params.n_games)
@@ -104,20 +114,16 @@ where
         let search_rng = SplitMix64::new(params.seed ^ 0xD1B5_4A32_D192_ED03);
         Engine {
             game,
+            encoder,
             policy,
             learner,
             params,
-            states,
-            rngs,
+            episodes,
             search_rng,
             policy_states,
             ticks,
             traj,
         }
-    }
-
-    fn agent_active(&self, state: &G::State, agent: usize) -> bool {
-        !self.game.legal_actions(state, agent).is_empty()
     }
 
     /// Roll the games forward until at least `n_records` training records have been collected,
@@ -142,10 +148,10 @@ where
             // 1. Gather one search request per active agent across all games.
             let mut requests: Vec<(G::State, usize)> = Vec::new();
             let mut meta: Vec<(usize, usize)> = Vec::new(); // (game index, agent index)
-            for (gi, state) in self.states.iter().enumerate() {
+            for (gi, ep) in self.episodes.iter().enumerate() {
                 for si in 0..num_agents {
-                    if self.agent_active(state, si) {
-                        requests.push((state.clone(), si));
+                    if ep.agent_active(&self.game, si) {
+                        requests.push((ep.state.clone(), si));
                         meta.push((gi, si));
                     }
                 }
@@ -159,6 +165,7 @@ where
             let search_seed = self.search_rng.next_u64();
             let evals = self.policy.evaluate(
                 &self.game,
+                &*self.encoder,
                 requests,
                 search_seed,
                 collect_interior,
@@ -169,19 +176,24 @@ where
             //    interior nodes), choose the action, and buffer the step. `acted[gi][si]` records the
             //    chosen action index for an agent that decided this tick.
             let mut acted: Vec<Vec<Option<usize>>> =
-                vec![vec![None; num_agents]; self.states.len()];
+                vec![vec![None; num_agents]; self.episodes.len()];
             for (mut eval, &(gi, si)) in evals.into_iter().zip(meta.iter()) {
                 stats.decisions += 1;
                 self.policy.fold_telemetry(&eval, &mut stats);
                 // The learner drains its immediate records out of the evaluation so interior nodes are
                 // never buffered for the whole episode.
-                out.extend(self.learner.eval_records(&mut eval, &mut self.rngs[gi]));
-                let rel =
-                    self.policy
-                        .select(&eval, &mut self.policy_states[gi], &mut self.rngs[gi]);
+                out.extend(
+                    self.learner
+                        .eval_records(&mut eval, &mut self.episodes[gi].rng),
+                );
+                let rel = self.policy.select(
+                    &eval,
+                    &mut self.policy_states[gi],
+                    &mut self.episodes[gi].rng,
+                );
                 acted[gi][si] = Some(rel);
                 self.traj[gi][si].push(Step {
-                    obs: self.game.observe(&self.states[gi], si),
+                    obs: self.episodes[gi].observe(&*self.encoder, si),
                     evaluation: eval,
                     action: rel,
                     reward: 0.0, // filled in from this tick's transition after advancing
@@ -196,11 +208,7 @@ where
             let mut finished: Vec<(usize, bool)> = Vec::new(); // (game index, terminal?)
             for (gi, agents) in acted.into_iter().enumerate() {
                 let joint: Vec<usize> = agents.iter().map(|a| a.unwrap_or(0)).collect();
-                let transition = self
-                    .game
-                    .step_env(&self.states[gi], &joint, &mut self.rngs[gi]);
-                let terminal = transition.terminal;
-                self.states[gi] = transition.next_state;
+                let (rewards, terminal) = self.episodes[gi].advance(&self.game, &joint);
                 self.ticks[gi] += 1;
                 // A truncation tick — max_ticks reached while the game is still playing — pays the
                 // game's truncation bonus to agents that acted (snake's survival bonus to the living),
@@ -210,14 +218,14 @@ where
                 let needs_next_obs = self.learner.needs_next_obs();
                 for (si, action) in agents.iter().enumerate() {
                     if action.is_some() {
-                        let mut reward = transition.rewards[si];
+                        let mut reward = rewards[si];
                         if truncated {
-                            reward += self.game.truncation_bonus(&self.states[gi], si);
+                            reward += self.game.truncation_bonus(&self.episodes[gi].state, si);
                         }
                         // `s'` for a transition learner (DQN): the post-transition observation. Skipped
                         // (left empty) for return-based learners so they pay no per-step obs cost.
                         let next_obs = if needs_next_obs {
-                            self.game.observe(&self.states[gi], si)
+                            self.episodes[gi].observe(&*self.encoder, si)
                         } else {
                             Vec::new()
                         };
@@ -271,16 +279,16 @@ where
                 // The learner turns the buffered trajectory into records (TreeStrap z-mixing + masks).
                 out.extend(
                     self.learner
-                        .episode_records(&steps, &tail, &mut self.rngs[gi]),
+                        .episode_records(&steps, &tail, &mut self.episodes[gi].rng),
                 );
             }
             stats.episodes.push(EpisodeSummary {
                 reward: ep_reward,
                 length: self.ticks[gi],
             });
-            self.states[gi] = self.game.initial_state(&mut self.rngs[gi]);
+            self.episodes[gi].reset(&self.game);
             self.ticks[gi] = 0;
-            self.policy_states[gi] = self.policy.begin_episode(&mut self.rngs[gi]);
+            self.policy_states[gi] = self.policy.begin_episode(&mut self.episodes[gi].rng);
         }
     }
 
@@ -310,8 +318,8 @@ where
                 continue;
             }
             for si in 0..num_agents {
-                if self.agent_active(&self.states[gi], si) && !self.traj[gi][si].is_empty() {
-                    obs_flat.extend(self.game.observe(&self.states[gi], si));
+                if self.episodes[gi].agent_active(&self.game, si) && !self.traj[gi][si].is_empty() {
+                    obs_flat.extend(self.episodes[gi].observe(&*self.encoder, si));
                     meta.push((gi, si));
                 }
             }

@@ -2,6 +2,7 @@
 //! then *selects* an action from it. Concrete policies live in `crate::policies`; the `Engine` drives
 //! any of them, and a `Learner` consuming the matching `Evaluation` produces the training records.
 
+use crate::encoder::StateEncoder;
 use crate::engine::CollectStats;
 use crate::game::{Game, Rng};
 
@@ -28,6 +29,7 @@ pub trait Policy {
     fn evaluate<G, F>(
         &self,
         game: &G,
+        enc: &dyn StateEncoder<State = G::State>,
         requests: Vec<(G::State, usize)>,
         seed: u64,
         collect_interior: bool,

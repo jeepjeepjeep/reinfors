@@ -6,6 +6,7 @@
 
 pub mod search;
 
+use crate::encoder::StateEncoder;
 use crate::engine::CollectStats;
 use crate::game::{Game, Rng};
 use crate::policy::{argmax, Policy};
@@ -53,6 +54,7 @@ impl Policy for SelectiveExpectimax {
     fn evaluate<G, F>(
         &self,
         game: &G,
+        enc: &dyn StateEncoder<State = G::State>,
         requests: Vec<(G::State, usize)>,
         seed: u64,
         collect_interior: bool,
@@ -63,25 +65,33 @@ impl Policy for SelectiveExpectimax {
         G::State: Send,
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
-        search_many(game, &self.cfg, requests, collect_interior, seed, infer)
-            .into_iter()
-            .map(|(values, interior, stats)| {
-                // A search whose root children are all terminal evaluates no leaves, so it cannot infer
-                // the head count and returns a single (head-agnostic) row. Broadcast it to `n_heads` so
-                // every emitted target is `[n_heads][A]`. Searches that evaluated leaves already return
-                // `[n_heads][A]`, so this is a no-op for them.
-                let values = if values.len() < self.n_heads {
-                    vec![values[0].clone(); self.n_heads]
-                } else {
-                    values
-                };
-                SearchEvaluation {
-                    values,
-                    interior,
-                    stats,
-                }
-            })
-            .collect()
+        search_many(
+            game,
+            enc,
+            &self.cfg,
+            requests,
+            collect_interior,
+            seed,
+            infer,
+        )
+        .into_iter()
+        .map(|(values, interior, stats)| {
+            // A search whose root children are all terminal evaluates no leaves, so it cannot infer
+            // the head count and returns a single (head-agnostic) row. Broadcast it to `n_heads` so
+            // every emitted target is `[n_heads][A]`. Searches that evaluated leaves already return
+            // `[n_heads][A]`, so this is a no-op for them.
+            let values = if values.len() < self.n_heads {
+                vec![values[0].clone(); self.n_heads]
+            } else {
+                values
+            };
+            SearchEvaluation {
+                values,
+                interior,
+                stats,
+            }
+        })
+        .collect()
     }
 
     fn select(&self, eval: &SearchEvaluation, head: &mut usize, rng: &mut dyn Rng) -> usize {

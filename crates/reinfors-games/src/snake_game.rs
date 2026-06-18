@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 
 use reinfors_core::game::{Actor, Game, Rng, Transition};
+use reinfors_core::StateEncoder;
 
 use crate::action::{relative_to_absolute, Action, RELATIVE_ACTIONS};
 use crate::obs::{egocentric_parts, N_CHANNELS};
@@ -17,6 +18,24 @@ use crate::snake::{Cell, SnakeBody, SnakeEnv};
 pub struct SnakeState {
     pub snakes: [SnakeBody; 2],
     pub food: HashSet<Cell>,
+}
+
+/// The default snake observation: an egocentric 5-channel grid, the searching snake always facing up
+/// (see [`egocentric_parts`]). Carries `grid_size` (which lives on `Snake`, not in `SnakeState`).
+pub struct EgocentricSnake {
+    pub grid_size: i32,
+}
+
+impl StateEncoder for EgocentricSnake {
+    type State = SnakeState;
+
+    fn encode(&self, state: &SnakeState, agent: usize) -> Vec<f32> {
+        egocentric_parts(&state.snakes, &state.food, self.grid_size, agent)
+    }
+
+    fn obs_shape(&self) -> (usize, usize, usize) {
+        (N_CHANNELS, self.grid_size as usize, self.grid_size as usize)
+    }
 }
 
 /// Two-player simultaneous-move snake with environment chance (apple respawn) — the concrete `SnakeEnv`
@@ -85,10 +104,6 @@ impl Game for Snake {
         RELATIVE_ACTIONS.len()
     }
 
-    fn obs_shape(&self) -> (usize, usize, usize) {
-        (N_CHANNELS, self.grid_size as usize, self.grid_size as usize)
-    }
-
     fn actor(&self, _state: &SnakeState) -> Actor {
         Actor::Simultaneous
     }
@@ -155,10 +170,6 @@ impl Game for Snake {
                 }
             })
             .collect()
-    }
-
-    fn observe(&self, state: &SnakeState, agent: usize) -> Vec<f32> {
-        egocentric_parts(&state.snakes, &state.food, self.grid_size, agent)
     }
 
     fn initial_state(&self, rng: &mut dyn Rng) -> SnakeState {
@@ -348,12 +359,12 @@ mod tests {
     }
 
     #[test]
-    fn observe_matches_egocentric() {
-        let g = game();
+    fn encoder_matches_egocentric() {
+        let enc = EgocentricSnake { grid_size: G };
         let st = initial_state(&[(4, 3)]);
         for agent in 0..2 {
             assert_eq!(
-                g.observe(&st, agent),
+                enc.encode(&st, agent),
                 egocentric_parts(&st.snakes, &st.food, G, agent)
             );
         }
@@ -365,7 +376,10 @@ mod tests {
         let st = initial_state(&[(4, 3)]);
         assert_eq!(g.num_agents(), 2);
         assert_eq!(g.action_count(), 3);
-        assert_eq!(g.obs_shape(), (N_CHANNELS, G as usize, G as usize));
+        assert_eq!(
+            EgocentricSnake { grid_size: G }.obs_shape(),
+            (N_CHANNELS, G as usize, G as usize)
+        );
         assert_eq!(g.actor(&st), Actor::Simultaneous);
         assert_eq!(g.legal_actions(&st, 0), vec![0, 1, 2]);
         // A dead snake has no legal actions (the planner reads activeness from this).

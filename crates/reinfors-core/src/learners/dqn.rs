@@ -139,9 +139,6 @@ mod tests {
         fn action_count(&self) -> usize {
             2
         }
-        fn obs_shape(&self) -> (usize, usize, usize) {
-            (1, 1, 1)
-        }
         fn actor(&self, _: &()) -> crate::game::Actor {
             crate::game::Actor::Agent(0)
         }
@@ -150,9 +147,6 @@ mod tests {
         }
         fn step(&self, _: &(), _: &[usize]) -> crate::game::Transition<()> {
             unimplemented!()
-        }
-        fn observe(&self, _: &(), _: usize) -> Vec<f32> {
-            vec![0.0]
         }
         fn initial_state(&self, _: &mut dyn Rng) {}
     }

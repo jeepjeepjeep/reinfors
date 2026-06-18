@@ -4,7 +4,10 @@
 //! drives, and concrete algorithm impls under `policies`/`learners`. Concrete games (e.g. snake) live
 //! in the `reinfors-games` crate and implement `Game`; the framework drives them through the trait only.
 
+pub mod encoder;
 pub mod engine;
+pub mod env;
+pub(crate) mod episode;
 pub mod game;
 pub mod learner;
 pub mod learners;
@@ -13,7 +16,9 @@ pub mod policy;
 pub(crate) mod rng;
 pub mod space;
 
+pub use encoder::StateEncoder;
 pub use engine::{CollectStats, Engine, EngineParams, EpisodeSummary};
+pub use env::Env;
 pub use game::{Actor, Game, Rng, Transition};
 pub use learner::{Learner, Step};
 pub use learners::dqn::{Dqn, DqnRecord};
