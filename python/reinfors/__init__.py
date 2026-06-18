@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import _reinfors, games, learners, policies, spaces
-from ._reinfors import Engine, Reward
+from ._reinfors import Engine, Env, Reward
 
 
 def make_game(name: str, **kwargs: Any) -> Any:
@@ -80,6 +80,7 @@ def engine_from_config(config: dict[str, Any]) -> Engine:
 
 __all__ = [
     "Engine",
+    "Env",
     "Reward",
     "_reinfors",
     "engine_from_config",
