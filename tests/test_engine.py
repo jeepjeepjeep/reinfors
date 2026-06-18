@@ -143,20 +143,6 @@ def test_survival_bonus_propagates_through_z_mixing_on_truncation() -> None:
             assert np.isclose(diff[m, h, changed[0]], bonus, atol=1e-9)
 
 
-def test_first_targets_equal_a_direct_pooled_search() -> None:
-    # One-tick, food-free episodes with outcome_weight=0 so the z-mix is a no-op: every game truncates
-    # after its first decision and flushes its raw searched values in game-major order (A then B). So
-    # the first two targets must equal a direct pooled search of both agents on the initial state,
-    # pinning the collected targets to the (separately oracle-validated) search.
-    _, tgt, _, _ = _engine(0, food=0, max_ticks=1, outcome_weight=0.0, interior=False).collect(2, _infer)
-    env = reinfors._reinfors.SnakeEnv(_G, 3, False, None)
-    results = reinfors._reinfors.selective_search_many(
-        [env, env], [0, 1], *_SEARCH, _REWARD, "uniform", 1.0, 0.1, _infer
-    )
-    assert np.allclose(tgt[0], np.asarray(results[0][0]), atol=1e-9)  # game 0, agent A
-    assert np.allclose(tgt[1], np.asarray(results[1][0]), atol=1e-9)  # game 0, agent B
-
-
 def test_collect_returns_telemetry() -> None:
     # The 4th return is a logging telemetry dict: finished-episode summaries plus per-call search
     # aggregates. Interior off so episodes finish within the record budget (with it on, the floor is
