@@ -25,8 +25,8 @@ use reinfors_core::{
 };
 use reinfors_games::snake::{Cell, DeathCause, SnakeBody, SnakeEnv as CoreEnv};
 use reinfors_games::{
-    Action, Connect4, Connect4Planes, Connect4Reward, EgocentricSnake, GridWorld, GridWorldPlanes,
-    GridWorldReward, SearchParams, Snake, SnakeReward,
+    Action, Connect4, Connect4Planes, Connect4Reward, Connect4State, EgocentricSnake, GridState,
+    GridWorld, GridWorldPlanes, GridWorldReward, SearchParams, Snake, SnakeReward, SnakeState,
 };
 
 // ===========================================================================
@@ -1143,6 +1143,12 @@ impl PyEnv {
         self.inner.observation_space(py)
     }
 
+    /// The native game state as an interpretable dict (game-specific: snake → bodies/food/directions/
+    /// alive; connect4 → board/turn/done; gridworld → pos/done) — for rendering and human play.
+    fn state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.inner.state(py)
+    }
+
     /// Advance one tick with `actions`, a `{agent: action}` map naming exactly the agents that act
     /// this tick (see `active_agents()`). Returns this tick's per-agent reward vector.
     fn step(&mut self, actions: HashMap<usize, usize>) -> PyResult<Vec<f64>> {
@@ -1173,6 +1179,54 @@ impl PyEnv {
     }
 }
 
+/// Marshal a game's native `State` into an interpretable Python object (for rendering / observers,
+/// e.g. an interactive game). One impl per game state — the genuinely game-specific part of the `Env`
+/// binding (the rest is generic). A binding-local trait over the foreign state types.
+trait NativeState {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>>;
+}
+
+impl NativeState for SnakeState {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        let bodies: Vec<Vec<Cell>> = self
+            .snakes
+            .iter()
+            .map(|s| s.body.iter().copied().collect())
+            .collect();
+        d.set_item("bodies", bodies)?;
+        d.set_item("food", self.food.iter().copied().collect::<Vec<Cell>>())?;
+        let directions: Vec<u8> = self
+            .snakes
+            .iter()
+            .map(|s| action_to_u8(s.direction))
+            .collect();
+        d.set_item("directions", directions)?;
+        let alive: Vec<bool> = self.snakes.iter().map(|s| s.alive).collect();
+        d.set_item("alive", alive)?;
+        Ok(d)
+    }
+}
+
+impl NativeState for Connect4State {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("board", self.board())?; // [row][col] cell codes, row 0 = bottom
+        d.set_item("turn", self.turn())?;
+        d.set_item("done", self.is_done())?;
+        Ok(d)
+    }
+}
+
+impl NativeState for GridState {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("pos", self.pos)?;
+        d.set_item("done", self.done)?;
+        Ok(d)
+    }
+}
+
 /// A single-game `Env` with its concrete `Game` erased, so one Python `Env` holds any game.
 trait ErasedEnv: Send + Sync {
     fn reset(&mut self);
@@ -1183,6 +1237,7 @@ trait ErasedEnv: Send + Sync {
     fn legal_actions(&self, agent: usize) -> Vec<usize>;
     fn observe<'py>(&self, py: Python<'py>, agent: usize) -> Bound<'py, PyArray3<f32>>;
     fn observation_space<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>>;
+    fn state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>>;
     fn step(&mut self, actions: Vec<usize>) -> Vec<f64>;
 }
 
@@ -1194,7 +1249,7 @@ struct EnvImpl<G: Game> {
 impl<G> ErasedEnv for EnvImpl<G>
 where
     G: Game + Send + Sync + 'static,
-    G::State: Send + Sync,
+    G::State: Send + Sync + NativeState,
 {
     fn reset(&mut self) {
         self.inner.reset();
@@ -1222,6 +1277,9 @@ where
     }
     fn observation_space<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         space_to_py(py, self.inner.observation_space())
+    }
+    fn state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        Ok(self.inner.state().to_py(py)?.into_any())
     }
     fn step(&mut self, actions: Vec<usize>) -> Vec<f64> {
         self.inner.step(&actions)

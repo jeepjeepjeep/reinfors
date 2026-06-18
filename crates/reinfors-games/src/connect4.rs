@@ -18,6 +18,25 @@ pub struct Connect4State {
     done: bool,
 }
 
+impl Connect4State {
+    /// The board as `[row][col]` cell codes (0 empty, 1 player-0, 2 player-1), row 0 = bottom — for
+    /// rendering / inspection (the encoder owns the network view).
+    pub fn board(&self) -> Vec<Vec<u8>> {
+        (0..ROWS)
+            .map(|r| (0..COLS).map(|c| self.cells[r * COLS + c]).collect())
+            .collect()
+    }
+
+    /// Whose move it is (0 or 1).
+    pub fn turn(&self) -> usize {
+        self.turn
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.done
+    }
+}
+
 /// Connect-4's terminal reward weights (zero-sum: the loser gets `loss`, the winner `win`).
 #[derive(Clone, Copy, Debug)]
 pub struct Connect4Reward {
