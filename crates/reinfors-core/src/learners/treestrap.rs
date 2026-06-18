@@ -13,16 +13,16 @@ pub type TreeStrapRecord = (Vec<f32>, Vec<Vec<f64>>, Vec<f32>);
 /// to collect interior MAX-node targets (`interior_targets`, reported via `needs_interior` so the
 /// policy collects them iff this learner wants them). The head count `K` is read from the evaluation's
 /// value matrix, matching the rollout engine.
-pub struct TreeStrapLearner {
+pub struct TreeStrap {
     pub gamma: f64,
     pub outcome_weight: f64,
     pub bootstrap_p: f64,
     pub interior_targets: bool,
 }
 
-impl TreeStrapLearner {
+impl TreeStrap {
     pub fn new(gamma: f64, outcome_weight: f64, bootstrap_p: f64, interior_targets: bool) -> Self {
-        TreeStrapLearner {
+        TreeStrap {
             gamma,
             outcome_weight,
             bootstrap_p,
@@ -63,7 +63,7 @@ impl TreeStrapLearner {
     }
 }
 
-impl Learner<SearchEvaluation> for TreeStrapLearner {
+impl Learner<SearchEvaluation> for TreeStrap {
     type Record = TreeStrapRecord;
 
     fn uses_episode_tail(&self) -> bool {
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn eval_records_drains_interior_and_masks_each() {
-        let learner = TreeStrapLearner::new(0.99, 0.3, 0.7, true);
+        let learner = TreeStrap::new(0.99, 0.3, 0.7, true);
         let interior = vec![
             (
                 vec![1.0f32, 2.0],
@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn episode_records_match_blend_plus_mask() {
-        let learner = TreeStrapLearner::new(0.99, 0.3, 0.8, false);
+        let learner = TreeStrap::new(0.99, 0.3, 0.8, false);
         let steps: Vec<Step<SearchEvaluation>> = (0..3)
             .map(|t| Step {
                 obs: vec![t as f32; 4],
@@ -187,7 +187,7 @@ mod tests {
             .iter()
             .map(|s| (s.evaluation.values.clone(), s.action, s.reward))
             .collect();
-        let blended = TreeStrapLearner::blend_outcome_targets(&traj, 0.99, 0.3, &tail);
+        let blended = TreeStrap::blend_outcome_targets(&traj, 0.99, 0.3, &tail);
         let mut rng = SplitMix64::new(9);
         assert_eq!(recs.len(), 3);
         for ((obs, target, mask), (step, exp_target)) in recs.iter().zip(steps.iter().zip(blended))
@@ -203,7 +203,7 @@ mod tests {
         // Two heads, three actions, action 1 executed; one step, terminal tail (z = reward).
         let values = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
         let traj = vec![(values.clone(), 1usize, 10.0)];
-        let blended = TreeStrapLearner::blend_outcome_targets(&traj, 0.9, 0.25, &[0.0, 0.0]);
+        let blended = TreeStrap::blend_outcome_targets(&traj, 0.9, 0.25, &[0.0, 0.0]);
         // z = 10 + 0.9*0 = 10; executed entry -> 0.75*v + 0.25*10.
         assert!((blended[0][0][1] - (0.75 * 2.0 + 0.25 * 10.0)).abs() < 1e-12);
         assert!((blended[0][1][1] - (0.75 * 5.0 + 0.25 * 10.0)).abs() < 1e-12);
@@ -214,14 +214,14 @@ mod tests {
 
     #[test]
     fn uses_episode_tail_tracks_outcome_weight() {
-        assert!(TreeStrapLearner::new(0.99, 0.3, 1.0, false).uses_episode_tail());
-        assert!(!TreeStrapLearner::new(0.99, 0.0, 1.0, false).uses_episode_tail());
+        assert!(TreeStrap::new(0.99, 0.3, 1.0, false).uses_episode_tail());
+        assert!(!TreeStrap::new(0.99, 0.0, 1.0, false).uses_episode_tail());
     }
 
     #[test]
     fn needs_interior_tracks_the_flag() {
         // The learner is authoritative over interior collection; the engine threads this to the policy.
-        assert!(TreeStrapLearner::new(0.99, 0.3, 1.0, true).needs_interior());
-        assert!(!TreeStrapLearner::new(0.99, 0.3, 1.0, false).needs_interior());
+        assert!(TreeStrap::new(0.99, 0.3, 1.0, true).needs_interior());
+        assert!(!TreeStrap::new(0.99, 0.3, 1.0, false).needs_interior());
     }
 }

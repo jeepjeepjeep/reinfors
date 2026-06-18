@@ -1,11 +1,11 @@
-//! Engine integration tests over the concrete `SnakeGame` + `SelectiveExpectimaxPolicy` +
-//! `TreeStrapLearner`. These live in reinfors-games (not core) so the generic `Engine` stays game-free:
-//! they build the engine via the public core API (`Engine`, `EngineParams`, `SelectiveExpectimaxPolicy`,
-//! `TreeStrapLearner`, `SearchConfig`) and a `SnakeGame`.
+//! Engine integration tests over the concrete `Snake` + `SelectiveExpectimax` +
+//! `TreeStrap`. These live in reinfors-games (not core) so the generic `Engine` stays game-free:
+//! they build the engine via the public core API (`Engine`, `EngineParams`, `SelectiveExpectimax`,
+//! `TreeStrap`, `SearchConfig`) and a `Snake`.
 
-use reinfors_core::{Engine, EngineParams, SelectiveExpectimaxPolicy, TreeStrapLearner};
+use reinfors_core::{Engine, EngineParams, SelectiveExpectimax, TreeStrap};
 use reinfors_core::{Opponent, SearchConfig};
-use reinfors_games::{Reward, SearchParams, SnakeGame};
+use reinfors_games::{SearchParams, Snake, SnakeReward};
 
 fn params(n_games: usize, seed: u64) -> EngineParams {
     EngineParams {
@@ -17,8 +17,8 @@ fn params(n_games: usize, seed: u64) -> EngineParams {
 
 /// The default test learner: gamma 0.99 (matches `search()`), the given z-mix weight + interior flag,
 /// bootstrap_p 0.8.
-fn learner(outcome_weight: f64, interior: bool) -> TreeStrapLearner {
-    TreeStrapLearner::new(0.99, outcome_weight, 0.8, interior)
+fn learner(outcome_weight: f64, interior: bool) -> TreeStrap {
+    TreeStrap::new(0.99, outcome_weight, 0.8, interior)
 }
 
 fn config(s: &SearchParams) -> SearchConfig {
@@ -34,8 +34,8 @@ fn config(s: &SearchParams) -> SearchConfig {
 }
 
 /// The default test policy: the given head count, epsilon 0.1. (Interior collection is the learner's.)
-fn policy(s: &SearchParams, n_heads: usize) -> SelectiveExpectimaxPolicy {
-    SelectiveExpectimaxPolicy::new(config(s), n_heads, 0.1)
+fn policy(s: &SearchParams, n_heads: usize) -> SelectiveExpectimax {
+    SelectiveExpectimax::new(config(s), n_heads, 0.1)
 }
 
 fn search() -> SearchParams {
@@ -50,7 +50,7 @@ fn search() -> SearchParams {
         top_k: 4,
         max_depth: 6,
         food_samples: 1,
-        reward: Reward {
+        reward: SnakeReward {
             step: 0.0,
             food: 0.0,
             loss: -10.0,
@@ -63,8 +63,8 @@ fn search() -> SearchParams {
     }
 }
 
-fn game(search: &SearchParams, initial_food_count: usize) -> SnakeGame {
-    SnakeGame {
+fn game(search: &SearchParams, initial_food_count: usize) -> Snake {
+    Snake {
         grid_size: search.grid_size,
         initial_length: search.initial_length,
         play_to_last: search.play_to_last,
@@ -80,7 +80,7 @@ fn engine(
     n_games: usize,
     n_heads: usize,
     seed: u64,
-) -> Engine<SnakeGame, SelectiveExpectimaxPolicy, TreeStrapLearner> {
+) -> Engine<Snake, SelectiveExpectimax, TreeStrap> {
     let s = search();
     Engine::new(
         game(&s, 3),
@@ -153,14 +153,14 @@ fn games_carry_food_so_snakes_can_eat() {
         e.collect(300, infer);
     }
     // The engine's internal state is private; a long rollout exercising eating is enough here — the
-    // detailed growth/apple-count invariants are covered by the SnakeGame unit tests.
+    // detailed growth/apple-count invariants are covered by the Snake unit tests.
 }
 
 #[test]
 fn bootstrap_p_extremes_set_all_or_no_heads() {
     let s = search();
     // bootstrap_p now lives on the learner. n_heads (2) matches `infer`'s 2 heads.
-    let all = TreeStrapLearner::new(0.99, 0.5, 1.0, true);
+    let all = TreeStrap::new(0.99, 0.5, 1.0, true);
     for (_, _, mask) in Engine::new(game(&s, 3), policy(&s, 2), all, params(4, 5))
         .collect(40, infer)
         .0
@@ -170,7 +170,7 @@ fn bootstrap_p_extremes_set_all_or_no_heads() {
             "p=1 must include every head"
         );
     }
-    let none = TreeStrapLearner::new(0.99, 0.5, 0.0, true);
+    let none = TreeStrap::new(0.99, 0.5, 0.0, true);
     for (_, _, mask) in Engine::new(game(&s, 3), policy(&s, 2), none, params(4, 5))
         .collect(40, infer)
         .0
@@ -296,7 +296,7 @@ fn telemetry_is_deterministic_for_a_seed() {
 
 #[test]
 fn evaluate_wraps_the_pooled_search() {
-    // The policy's `evaluate` over a SnakeGame matches the snake `selective_search` wrapper on the
+    // The policy's `evaluate` over a Snake matches the snake `selective_search` wrapper on the
     // same state (n_heads = 2 matches `infer`, so no all-terminal broadcast diverges them).
     use reinfors_core::policy::Policy;
     use reinfors_games::{selective_search, SnakeState};

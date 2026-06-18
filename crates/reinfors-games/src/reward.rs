@@ -1,4 +1,4 @@
-//! Reward shaping, ported to match `snake_RL`'s `MinimalReward`.
+//! Snake reward shaping, ported to match `snake_RL`'s `MinimalReward`.
 //!
 //! `survived_to_max_ticks` is set only by the rollout engine on a truncation tick, never during
 //! search/`advance`, so the `survival` term fires for truncated rollout episodes (and propagates
@@ -8,7 +8,7 @@
 use crate::snake::StepEvent;
 
 #[derive(Clone, Copy, Debug)]
-pub struct Reward {
+pub struct SnakeReward {
     pub step: f64,
     pub food: f64,
     pub loss: f64,
@@ -18,7 +18,7 @@ pub struct Reward {
     pub survival: f64,
 }
 
-impl Reward {
+impl SnakeReward {
     pub fn eval(&self, e: &StepEvent) -> f64 {
         let mut reward = self.step;
         if e.died {
@@ -54,8 +54,8 @@ mod tests {
     use super::*;
     use crate::snake::StepEvent;
 
-    fn reward() -> Reward {
-        Reward {
+    fn reward() -> SnakeReward {
+        SnakeReward {
             step: 0.0,
             food: 0.1,
             loss: -0.5,

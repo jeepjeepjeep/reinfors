@@ -1,5 +1,5 @@
 //! The expectimax policy family: a shared search engine (`search`) and the evaluation type it
-//! produces (`SearchEvaluation`), with one expansion strategy today — `SelectiveExpectimaxPolicy`
+//! produces (`SearchEvaluation`), with one expansion strategy today — `SelectiveExpectimax`
 //! (best-first, budget-limited). A future exhaustive `ExpectimaxPolicy` would live alongside,
 //! reusing `search`'s primitives and the same `SearchEvaluation` (at which point the shared vs
 //! selective-specific split inside `search` gets drawn — driven by that second consumer).
@@ -13,10 +13,10 @@ use search::{search_many, InteriorTarget, SearchConfig, SearchStats};
 
 /// A search's per-decision evaluation: root per-head values (for acting and the z-mix target),
 /// interior MAX-node targets, and search stats (telemetry). Produced by every expectimax policy and
-/// consumed by `TreeStrapLearner` (the `learners` → `policies` edge: the producer owns the type).
+/// consumed by `TreeStrap` (the `learners` → `policies` edge: the producer owns the type).
 pub struct SearchEvaluation {
     pub values: Vec<Vec<f64>>, // [K][A]
-    /// Interior MAX-node targets — a payload for the *consuming* `TreeStrapLearner` (it drains them
+    /// Interior MAX-node targets — a payload for the *consuming* `TreeStrap` (it drains them
     /// into immediate records), produced here only because the search is what generates them. Empty
     /// unless the learner asked for them via `needs_interior` (threaded into `evaluate`).
     pub interior: Vec<InteriorTarget>,
@@ -26,15 +26,15 @@ pub struct SearchEvaluation {
 /// Selective expectimax + Thompson/epsilon acting. Holds the search config, the ensemble head count
 /// (for Thompson sampling + the all-terminal broadcast), and the epsilon. Whether to collect interior
 /// TreeStrap targets is the paired learner's call (`needs_interior`), threaded in via `evaluate`.
-pub struct SelectiveExpectimaxPolicy {
+pub struct SelectiveExpectimax {
     cfg: SearchConfig,
     n_heads: usize,
     epsilon: f64,
 }
 
-impl SelectiveExpectimaxPolicy {
+impl SelectiveExpectimax {
     pub fn new(cfg: SearchConfig, n_heads: usize, epsilon: f64) -> Self {
-        SelectiveExpectimaxPolicy {
+        SelectiveExpectimax {
             cfg,
             n_heads: n_heads.max(1),
             epsilon,
@@ -42,7 +42,7 @@ impl SelectiveExpectimaxPolicy {
     }
 }
 
-impl Policy for SelectiveExpectimaxPolicy {
+impl Policy for SelectiveExpectimax {
     type Evaluation = SearchEvaluation;
     type PolicyState = usize; // the Thompson head for the current episode
 

@@ -16,14 +16,20 @@ pub struct GridState {
     pub done: bool, // reached the goal
 }
 
-/// A `size x size` grid: one agent navigates to `goal`, earning `goal_reward` on arrival (terminal)
-/// and `step_reward` otherwise. The four moves are always legal; a move into a wall keeps the agent
+/// GridWorld's reward weights: `goal` on reaching the goal (terminal), `step` on every other tick.
+#[derive(Clone, Copy, Debug)]
+pub struct GridWorldReward {
+    pub step: f64,
+    pub goal: f64,
+}
+
+/// A `size x size` grid: one agent navigates to `goal`, earning `reward.goal` on arrival (terminal)
+/// and `reward.step` otherwise. The four moves are always legal; a move into a wall keeps the agent
 /// in place.
 pub struct GridWorld {
     pub size: i32,
     pub goal: Pos,
-    pub step_reward: f64,
-    pub goal_reward: f64,
+    pub reward: GridWorldReward,
 }
 
 impl GridWorld {
@@ -71,9 +77,9 @@ impl Game for GridWorld {
         Transition {
             next_state: GridState { pos, done },
             rewards: vec![if done {
-                self.goal_reward
+                self.reward.goal
             } else {
-                self.step_reward
+                self.reward.step
             }],
             terminal: done,
         }
@@ -107,16 +113,17 @@ impl Game for GridWorld {
 mod tests {
     use super::*;
     use reinfors_core::{
-        search_many, Engine, EngineParams, Opponent, SearchConfig, SelectiveExpectimaxPolicy,
-        TreeStrapLearner,
+        search_many, Engine, EngineParams, Opponent, SearchConfig, SelectiveExpectimax, TreeStrap,
     };
 
     fn world() -> GridWorld {
         GridWorld {
             size: 5,
             goal: (0, 1),
-            step_reward: 0.0,
-            goal_reward: 1.0,
+            reward: GridWorldReward {
+                step: 0.0,
+                goal: 1.0,
+            },
         }
     }
 
@@ -241,8 +248,8 @@ mod tests {
     fn engine_rolls_out_a_single_agent_game() {
         // The rollout engine drives a 1-agent game end to end: records have the right shape ([K][A=4])
         // and episodes finish (reach the goal or truncate). Exercises num_agents == 1 in the engine.
-        let policy = SelectiveExpectimaxPolicy::new(cfg(), 2, 0.0); // n_heads, epsilon
-        let learner = TreeStrapLearner::new(0.99, 0.3, 1.0, false); // gamma, outcome_weight, bootstrap_p, interior
+        let policy = SelectiveExpectimax::new(cfg(), 2, 0.0); // n_heads, epsilon
+        let learner = TreeStrap::new(0.99, 0.3, 1.0, false); // gamma, outcome_weight, bootstrap_p, interior
         let params = EngineParams {
             n_games: 3,
             max_ticks: 30,
@@ -265,10 +272,10 @@ mod tests {
         // The model-free DQN algorithm (no search) driven through the same generic Engine + GridWorld:
         // it emits off-policy transitions (obs, action, reward, next_obs, terminal, mask) instead of
         // TreeStrap targets — exercising the seam's non-search evaluation + transition-record path.
-        use reinfors_core::{DqnLearner, DqnPolicy};
+        use reinfors_core::{Dqn, EpsilonGreedyQ};
 
-        let policy = DqnPolicy::new(2, 0.0); // 2 heads, no epsilon -> greedy argmax of the head
-        let learner = DqnLearner::new(2, 1.0); // 2 heads, bootstrap_p = 1 -> all-ones masks
+        let policy = EpsilonGreedyQ::new(2, 0.0); // 2 heads, no epsilon -> greedy argmax of the head
+        let learner = Dqn::new(2, 1.0); // 2 heads, bootstrap_p = 1 -> all-ones masks
         let params = EngineParams {
             n_games: 3,
             max_ticks: 10,

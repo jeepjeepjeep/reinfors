@@ -1,11 +1,11 @@
 //! Model-free bootstrapped DQN — records half. Emits off-policy transitions `(s, a, r, s', done)`,
 //! bootstrapped by the (Python) learner against a target net rather than episode-end z-mixed. Consumes
-//! `QEvaluation` from `crate::policies::dqn`. Together these exercise the seam's two hardest cases: a
+//! `QEvaluation` from `crate::policies::epsilon_greedy_q`. Together these exercise the seam's two hardest cases: a
 //! non-search evaluation and a transition record (a different shape from TreeStrap's targets).
 
 use crate::game::Rng;
 use crate::learner::{sample_mask, Learner, Step};
-use crate::policies::dqn::QEvaluation;
+use crate::policies::epsilon_greedy_q::QEvaluation;
 
 /// One off-policy transition: `(obs, action, reward, next_obs, terminal, mask[K])`. The TD target is
 /// computed in the (Python) learner from `next_obs`/`terminal` against a target net, so the engine
@@ -21,21 +21,21 @@ pub struct DqnRecord {
 }
 
 /// Bootstrapped-DQN record production: one per-head-masked transition per step, no episode-end mixing.
-pub struct DqnLearner {
+pub struct Dqn {
     n_heads: usize,
     bootstrap_p: f64,
 }
 
-impl DqnLearner {
+impl Dqn {
     pub fn new(n_heads: usize, bootstrap_p: f64) -> Self {
-        DqnLearner {
+        Dqn {
             n_heads: n_heads.max(1),
             bootstrap_p,
         }
     }
 }
 
-impl Learner<QEvaluation> for DqnLearner {
+impl Learner<QEvaluation> for Dqn {
     type Record = DqnRecord;
 
     fn needs_next_obs(&self) -> bool {
@@ -69,7 +69,7 @@ impl Learner<QEvaluation> for DqnLearner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policies::dqn::DqnPolicy;
+    use crate::policies::epsilon_greedy_q::EpsilonGreedyQ;
     use crate::rng::SplitMix64;
 
     fn step(
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn episode_records_emit_one_masked_transition_per_step() {
-        let learner = DqnLearner::new(3, 1.0); // bootstrap_p = 1 -> all-ones masks
+        let learner = Dqn::new(3, 1.0); // bootstrap_p = 1 -> all-ones masks
         let traj = vec![
             step(vec![1.0], 0, 0.5, vec![2.0], false),
             step(vec![2.0], 1, -1.0, vec![], true), // terminal: next_obs unused
@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn learner_declares_transition_needs() {
-        let learner = DqnLearner::new(2, 0.5);
+        let learner = Dqn::new(2, 0.5);
         assert!(learner.needs_next_obs());
         assert!(!learner.uses_episode_tail());
         assert!(learner
@@ -125,7 +125,7 @@ mod tests {
     }
 
     // Compile-only: a DQN policy + learner share QEvaluation, so they satisfy the engine coupling.
-    fn _assert_seam_composes() -> Option<crate::engine::Engine<DummyGame, DqnPolicy, DqnLearner>> {
+    fn _assert_seam_composes() -> Option<crate::engine::Engine<DummyGame, EpsilonGreedyQ, Dqn>> {
         None
     }
 
