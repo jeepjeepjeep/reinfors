@@ -6,13 +6,12 @@
 //!   * UNIFIED ENGINE (permanent) — the `Engine` pyclass + its type-erased dispatch (`ErasedEngine`,
 //!     `RecordBatch`, `run_collect`, `EngineImpl`) and the `(GameSpec, PolicySpec, LearnerSpec)`
 //!     two-axis factory. One class composes any game/policy/learner.
+//!   * UNIFIED ENV (permanent) — the `Env` pyclass: a caller-driven single-game instance for play /
+//!     evaluation, mirroring the engine's type-erasure.
 //!   * PER-GAME CONFIG (permanent) — the `rf.games`/`rf.policies`/`rf.learners` handles: a game's /
 //!     algorithm's parameter surface. Adding one here + a factory arm is all a new composition needs.
-//!   * SNAKE_RL PARITY PLUMBING (TEMPORARY) — `SnakeEnv`, `selective_search_many`,
-//!     `blend_outcome_targets`, and their snake-specific conversions/types. These exist only to
-//!     differential-test against the snake_RL oracle; they go when that suite is retired.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use numpy::ndarray::{Array2, Array3, ArrayD, IxDyn};
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArray3, PyArrayDyn, PyReadonlyArray3};
@@ -23,31 +22,13 @@ use reinfors_core::{
     Dqn, DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game, Learner, Opponent, Policy,
     SearchConfig, SelectiveExpectimax, Space, StateEncoder, TreeStrap, TreeStrapRecord,
 };
-use reinfors_games::snake::{Cell, DeathCause, SnakeBody, SnakeEnv as CoreEnv};
+use reinfors_games::snake::Cell;
 use reinfors_games::{
     Action, Connect4, Connect4Planes, Connect4Reward, Connect4State, EgocentricSnake, GridState,
-    GridWorld, GridWorldPlanes, GridWorldReward, SearchParams, Snake, SnakeReward, SnakeState,
+    GridWorld, GridWorldPlanes, GridWorldReward, Snake, SnakeReward, SnakeState,
 };
 
-// ===========================================================================
-// SNAKE_RL PARITY PLUMBING (TEMPORARY) — snake action/event conversions + the result types for the
-// `SnakeEnv` / `selective_search_many` differential-parity surface below. Deleted with that surface.
-// ===========================================================================
-
-fn action_from_u8(v: u8) -> PyResult<Action> {
-    Ok(match v {
-        0 => Action::Up,
-        1 => Action::Down,
-        2 => Action::Left,
-        3 => Action::Right,
-        _ => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "invalid action {v}"
-            )))
-        }
-    })
-}
-
+/// Absolute `Action` -> its `u8` code (Up/Down/Left/Right = 0/1/2/3), for native-state marshalling.
 fn action_to_u8(a: Action) -> u8 {
     match a {
         Action::Up => 0,
@@ -57,26 +38,8 @@ fn action_to_u8(a: Action) -> u8 {
     }
 }
 
-fn cause_str(c: DeathCause) -> &'static str {
-    match c {
-        DeathCause::Wall => "wall",
-        DeathCause::SelfBody => "self_body",
-        DeathCause::OppBody => "opp_body",
-        DeathCause::HeadOn => "head_on",
-    }
-}
-
-/// Per-snake tick outcome, mirroring `snake_RL`'s `StepEvent` fields.
-type EventTuple = (bool, bool, Option<String>, bool, bool, bool, bool);
-/// (max_depth, expansions, leaves, rounds).
-type StatsTuple = (i32, usize, usize, usize);
-/// One interior TreeStrap target returned to Python: (observation [5*g*g], per-head values [K][A]).
-type InteriorOut = (Vec<f32>, Vec<Vec<f64>>);
-/// (root action values [K][A], interior TreeStrap targets, search stats).
-type SearchOutput = (Vec<Vec<f64>>, Vec<InteriorOut>, StatsTuple);
-
 // ===========================================================================
-// SHARED HELPERS (permanent) — used by both the unified engine and the parity plumbing.
+// SHARED HELPERS (permanent) — used by the unified engine + env.
 // ===========================================================================
 
 /// Reject search hyperparameters the core would mishandle (it does not validate them itself).
@@ -159,335 +122,7 @@ fn infer_closure<'a, 'py>(
     }
 }
 
-// ===========================================================================
-// SNAKE_RL PARITY PLUMBING (TEMPORARY) — the snake env + pooled selective search exposed so the
-// differential suite can pin reinfors against snake_RL's oracle. Not part of the engine composition;
-// removed when that oracle suite is retired. (`blend_outcome_targets`, near the end, belongs here too.)
-// ===========================================================================
-
-#[pyclass]
-struct SnakeEnv {
-    inner: CoreEnv,
-}
-
-#[pymethods]
-impl SnakeEnv {
-    #[new]
-    fn new(
-        grid_size: i32,
-        initial_length: usize,
-        play_to_last: bool,
-        win_food_lead: Option<usize>,
-    ) -> Self {
-        SnakeEnv {
-            inner: CoreEnv::new(grid_size, initial_length, play_to_last, win_food_lead),
-        }
-    }
-
-    /// Replace the food set (used to inject the oracle's initial food before stepping).
-    fn set_food(&mut self, cells: Vec<Cell>) {
-        self.inner.food = cells.into_iter().collect();
-    }
-
-    /// Advance one tick. `actions` is (A, B), each 0..=3 (Up/Down/Left/Right) or None to coast.
-    /// `spawns` are the replacement food cells to use, in order, as apples are eaten this tick.
-    /// Returns a per-snake [A, B] list of (ate_food, died, death_cause|None, killed, won, lost, drew).
-    fn step(
-        &mut self,
-        actions: (Option<u8>, Option<u8>),
-        spawns: Vec<Cell>,
-    ) -> PyResult<Vec<EventTuple>> {
-        let a0 = actions.0.map(action_from_u8).transpose()?;
-        let a1 = actions.1.map(action_from_u8).transpose()?;
-        let mut q = spawns.into_iter();
-        let events = self.inner.advance([a0, a1], || q.next());
-        Ok(events
-            .iter()
-            .map(|e| {
-                (
-                    e.ate_food,
-                    e.died,
-                    e.death_cause.map(|c| cause_str(c).to_string()),
-                    e.killed_opponent,
-                    e.won,
-                    e.lost,
-                    e.drew,
-                )
-            })
-            .collect())
-    }
-
-    /// (A body, B body), each head-first (matches `list(snake.body)`).
-    fn bodies(&self) -> (Vec<Cell>, Vec<Cell>) {
-        (
-            self.inner.snakes[0].body.iter().copied().collect(),
-            self.inner.snakes[1].body.iter().copied().collect(),
-        )
-    }
-
-    fn directions(&self) -> (u8, u8) {
-        (
-            action_to_u8(self.inner.snakes[0].direction),
-            action_to_u8(self.inner.snakes[1].direction),
-        )
-    }
-
-    fn alive(&self) -> (bool, bool) {
-        (self.inner.snakes[0].alive, self.inner.snakes[1].alive)
-    }
-
-    fn food(&self) -> Vec<Cell> {
-        self.inner.food.iter().copied().collect()
-    }
-
-    fn is_done(&self) -> bool {
-        self.inner.done
-    }
-
-    /// Egocentric observation for `agent` (0 = A, 1 = B) as a flat [5 * g * g] f32 array.
-    fn obs<'py>(&self, py: Python<'py>, agent: usize) -> Bound<'py, PyArray1<f32>> {
-        reinfors_games::egocentric(&self.inner, agent).into_pyarray(py)
-    }
-
-    /// Overwrite both snakes' full state (body head-first, direction 0..=3, alive) — lets the parity
-    /// test mirror an arbitrary oracle WorldState into reinfors before searching.
-    fn set_snakes(
-        &mut self,
-        a_body: Vec<Cell>,
-        a_dir: u8,
-        a_alive: bool,
-        b_body: Vec<Cell>,
-        b_dir: u8,
-        b_alive: bool,
-    ) -> PyResult<()> {
-        self.inner.snakes[0] = SnakeBody {
-            body: VecDeque::from(a_body),
-            direction: action_from_u8(a_dir)?,
-            alive: a_alive,
-        };
-        self.inner.snakes[1] = SnakeBody {
-            body: VecDeque::from(b_body),
-            direction: action_from_u8(b_dir)?,
-            alive: b_alive,
-        };
-        Ok(())
-    }
-
-    /// Run a best-first selective-expectimax search from the current state for `agent` (0 or 1).
-    /// `reward` is (step, food, loss, draw, kill, win, survival). `opponent` is "uniform" or
-    /// "distributional" (the latter using `opp_temperature`/`opp_floor`). `infer` is a callable
-    /// mapping an (N, 5*g*g) float32 batch to an (N, K, 3) float64 array of per-head action values.
-    /// Returns (action_values[K][3], (max_depth, expansions, leaves, rounds)).
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (agent, gamma, beta, expansion_budget, top_k, max_depth, reward, opponent, opp_temperature, opp_floor, infer, collect_interior=false, food_samples=1, seed=0))]
-    fn selective_search(
-        &self,
-        py: Python<'_>,
-        agent: usize,
-        gamma: f64,
-        beta: f64,
-        expansion_budget: usize,
-        top_k: usize,
-        max_depth: i32,
-        reward: (f64, f64, f64, f64, f64, f64, f64),
-        opponent: &str,
-        opp_temperature: f64,
-        opp_floor: f64,
-        infer: Bound<'_, PyAny>,
-        collect_interior: bool,
-        food_samples: usize,
-        seed: u64,
-    ) -> PyResult<SearchOutput> {
-        validate_search_params(expansion_budget, top_k, max_depth, beta, food_samples)?;
-        let g = self.inner.grid_size;
-        let dim = 5 * (g as usize) * (g as usize);
-        let opp_model = match opponent {
-            "uniform" => Opponent::Uniform,
-            "distributional" => Opponent::Distributional {
-                temperature: opp_temperature,
-                floor: opp_floor,
-            },
-            other => {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "unknown opponent {other}"
-                )))
-            }
-        };
-        let params = SearchParams {
-            grid_size: g,
-            initial_length: self.inner.initial_length,
-            play_to_last: self.inner.play_to_last,
-            win_food_lead: self.inner.win_food_lead,
-            gamma,
-            beta,
-            expansion_budget,
-            top_k,
-            max_depth,
-            food_samples,
-            reward: SnakeReward {
-                step: reward.0,
-                food: reward.1,
-                loss: reward.2,
-                draw: reward.3,
-                kill: reward.4,
-                win: reward.5,
-                survival: reward.6,
-            },
-            opponent: opp_model,
-        };
-        let snakes = self.inner.snakes.clone();
-        let food = self.inner.food.clone();
-
-        let mut callback_err: Option<PyErr> = None;
-        let (values, interior, stats) = {
-            let mut infer_fn = infer_closure(py, &infer, dim, 3, None, &mut callback_err);
-            reinfors_games::selective_search(
-                &params,
-                snakes,
-                food,
-                agent,
-                collect_interior,
-                seed,
-                &mut infer_fn,
-            )
-        };
-        if let Some(e) = callback_err {
-            return Err(e);
-        }
-        Ok((
-            values,
-            interior,
-            (
-                stats.max_depth,
-                stats.expansions,
-                stats.leaves,
-                stats.rounds,
-            ),
-        ))
-    }
-}
-
-/// Pooled cross-game selective search: run a search for each `(env, agent)` in lockstep, batching
-/// every round's observations across all of them into a single `infer` call (the throughput win).
-/// Env config (grid/play_to_last/win_food_lead) is taken from the first env. Returns a per-request
-/// list of (action_values[K][3], (max_depth, expansions, leaves, rounds)), in input order.
-#[pyfunction]
-#[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (envs, agents, gamma, beta, expansion_budget, top_k, max_depth, reward, opponent, opp_temperature, opp_floor, infer, collect_interior=false, food_samples=1, seed=0))]
-fn selective_search_many(
-    py: Python<'_>,
-    envs: Vec<Py<SnakeEnv>>,
-    agents: Vec<usize>,
-    gamma: f64,
-    beta: f64,
-    expansion_budget: usize,
-    top_k: usize,
-    max_depth: i32,
-    reward: (f64, f64, f64, f64, f64, f64, f64),
-    opponent: &str,
-    opp_temperature: f64,
-    opp_floor: f64,
-    infer: Bound<'_, PyAny>,
-    collect_interior: bool,
-    food_samples: usize,
-    seed: u64,
-) -> PyResult<Vec<SearchOutput>> {
-    if envs.len() != agents.len() {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "envs and agents must have equal length",
-        ));
-    }
-    if envs.is_empty() {
-        return Ok(Vec::new());
-    }
-    validate_search_params(expansion_budget, top_k, max_depth, beta, food_samples)?;
-    let opp_model = match opponent {
-        "uniform" => Opponent::Uniform,
-        "distributional" => Opponent::Distributional {
-            temperature: opp_temperature,
-            floor: opp_floor,
-        },
-        other => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "unknown opponent {other}"
-            )))
-        }
-    };
-    let (g, init_len, play_to_last, win_food_lead) = {
-        let e0 = envs[0].borrow(py);
-        (
-            e0.inner.grid_size,
-            e0.inner.initial_length,
-            e0.inner.play_to_last,
-            e0.inner.win_food_lead,
-        )
-    };
-    // The pooled search applies one shared config (taken from envs[0]) to all requests; a differing
-    // grid_size in particular would feed wrong-dimension observations into the search. Require them equal.
-    for e in &envs[1..] {
-        let r = e.borrow(py);
-        if (
-            r.inner.grid_size,
-            r.inner.initial_length,
-            r.inner.play_to_last,
-            r.inner.win_food_lead,
-        ) != (g, init_len, play_to_last, win_food_lead)
-        {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "all envs must share grid_size/initial_length/play_to_last/win_food_lead for a pooled search",
-            ));
-        }
-    }
-    let dim = 5 * (g as usize) * (g as usize);
-    let params = SearchParams {
-        grid_size: g,
-        initial_length: init_len,
-        play_to_last,
-        win_food_lead,
-        gamma,
-        beta,
-        expansion_budget,
-        top_k,
-        max_depth,
-        food_samples,
-        reward: SnakeReward {
-            step: reward.0,
-            food: reward.1,
-            loss: reward.2,
-            draw: reward.3,
-            kill: reward.4,
-            win: reward.5,
-            survival: reward.6,
-        },
-        opponent: opp_model,
-    };
-    let mut requests = Vec::with_capacity(envs.len());
-    for (e, &a) in envs.iter().zip(agents.iter()) {
-        let r = e.borrow(py);
-        requests.push((r.inner.snakes.clone(), r.inner.food.clone(), a));
-    }
-
-    let mut callback_err: Option<PyErr> = None;
-    let results = {
-        let mut infer_fn = infer_closure(py, &infer, dim, 3, None, &mut callback_err);
-        reinfors_games::selective_search_many(
-            &params,
-            requests,
-            collect_interior,
-            seed,
-            &mut infer_fn,
-        )
-    };
-    if let Some(e) = callback_err {
-        return Err(e);
-    }
-    Ok(results
-        .into_iter()
-        .map(|(v, interior, s)| (v, interior, (s.max_depth, s.expansions, s.leaves, s.rounds)))
-        .collect())
-}
-
-/// Map an opponent name ("uniform"/"distributional") to its `Opponent`, rejecting anything else.
+/// Parse the opponent-model string a policy handle carries into the core `Opponent`.
 fn parse_opponent(opponent: &str, opp_temperature: f64, opp_floor: f64) -> PyResult<Opponent> {
     match opponent {
         "uniform" => Ok(Opponent::Uniform),
@@ -1633,58 +1268,9 @@ fn core_version() -> &'static str {
     reinfors_core::version()
 }
 
-// ===========================================================================
-// SNAKE_RL PARITY PLUMBING (TEMPORARY) — z-mix helper exposed only for the differential test; removed
-// with the rest of the parity surface.
-// ===========================================================================
-
-/// AlphaGo-style z-mixing applied to a single trajectory: blend the realized discounted return into
-/// each step's executed-action entry of every head. `search_values` is (T, K, A); `actions`/`rewards`
-/// are length T; `tail` is (K,) — z's seed past the last step. Returns the blended (T, K, A) targets.
-/// Exposed so the differential test can pin this against `EnsembleTreeStrapRunner._blend_outcome_targets`.
-#[pyfunction]
-fn blend_outcome_targets<'py>(
-    py: Python<'py>,
-    search_values: PyReadonlyArray3<f64>,
-    actions: Vec<usize>,
-    rewards: Vec<f64>,
-    gamma: f64,
-    outcome_weight: f64,
-    tail: Vec<f64>,
-) -> PyResult<Bound<'py, PyArray3<f64>>> {
-    use pyo3::exceptions::PyValueError;
-    let sv = search_values.as_array();
-    let (t, k, a) = (sv.shape()[0], sv.shape()[1], sv.shape()[2]);
-    if actions.len() != t || rewards.len() != t {
-        return Err(PyValueError::new_err(
-            "actions and rewards must have length T",
-        ));
-    }
-    if tail.len() != k {
-        return Err(PyValueError::new_err("tail must have length K"));
-    }
-    let trajectory: Vec<(Vec<Vec<f64>>, usize, f64)> = (0..t)
-        .map(|i| {
-            let values = (0..k)
-                .map(|h| (0..a).map(|j| sv[[i, h, j]]).collect())
-                .collect();
-            (values, actions[i], rewards[i])
-        })
-        .collect();
-    let blended =
-        reinfors_core::TreeStrap::blend_outcome_targets(&trajectory, gamma, outcome_weight, &tail);
-    let flat: Vec<f64> = blended.into_iter().flatten().flatten().collect();
-    Ok(Array3::from_shape_vec((t, k, a), flat)
-        .expect("blend shape")
-        .into_pyarray(py))
-}
-
 #[pymodule]
 fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
-    m.add_function(wrap_pyfunction!(selective_search_many, m)?)?;
-    m.add_function(wrap_pyfunction!(blend_outcome_targets, m)?)?;
-    m.add_class::<SnakeEnv>()?;
     m.add_class::<PyEngine>()?;
     m.add_class::<PyEnv>()?;
     m.add_class::<GameHandle>()?;

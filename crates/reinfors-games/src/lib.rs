@@ -7,7 +7,6 @@ pub mod connect4;
 pub mod gridworld;
 pub mod obs;
 pub mod reward;
-pub mod search;
 pub mod snake;
 pub mod snake_game;
 
@@ -16,6 +15,5 @@ pub use connect4::{Connect4, Connect4Planes, Connect4Reward, Connect4State};
 pub use gridworld::{GridState, GridWorld, GridWorldPlanes, GridWorldReward};
 pub use obs::{egocentric, N_CHANNELS};
 pub use reward::SnakeReward;
-pub use search::{selective_search, selective_search_many, SearchParams};
 pub use snake::{Cell, DeathCause, SnakeBody, SnakeEnv, StepEvent};
 pub use snake_game::{EgocentricSnake, Snake, SnakeState};

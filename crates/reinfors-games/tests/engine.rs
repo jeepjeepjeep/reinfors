@@ -5,7 +5,24 @@
 
 use reinfors_core::{Engine, EngineParams, SelectiveExpectimax, TreeStrap};
 use reinfors_core::{Opponent, SearchConfig};
-use reinfors_games::{EgocentricSnake, SearchParams, Snake, SnakeReward};
+use reinfors_games::{EgocentricSnake, Snake, SnakeReward};
+
+/// Test config bundle: the snake + search knobs the helpers below read (was `reinfors_games::
+/// SearchParams`, which only the retired parity wrappers needed).
+struct SearchParams {
+    grid_size: i32,
+    initial_length: usize,
+    play_to_last: bool,
+    win_food_lead: Option<usize>,
+    gamma: f64,
+    beta: f64,
+    expansion_budget: usize,
+    top_k: usize,
+    max_depth: i32,
+    food_samples: usize,
+    reward: SnakeReward,
+    opponent: Opponent,
+}
 
 /// The default snake encoder for the engine (egocentric, sized from the search's grid).
 fn enc(s: &SearchParams) -> Box<EgocentricSnake> {
