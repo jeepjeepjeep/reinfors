@@ -234,3 +234,39 @@ def test_dqn_engine_emits_well_formed_transitions() -> None:
     assert masks.shape == (m, _K) and np.isin(masks, (0.0, 1.0)).all()
     assert (actions >= 0).all() and (actions < 4).all()
     assert "episodes" in telemetry and telemetry["decisions"] > 0
+
+
+def test_dqn_transitions_drive_a_td_step() -> None:
+    # The transition record is usable in a gradient update end to end (finite loss) — the seam's *other*
+    # record shape + loss, which the TreeStrap example can't cover. Uses a tiny inline net (reinfors
+    # ships none) as its own TD target: enough to prove the records train, not a full DQN.
+    pytest.importorskip("torch")
+    import torch
+
+    class TinyQ(torch.nn.Module):
+        def __init__(self, dim: int, n_heads: int, n_actions: int) -> None:
+            super().__init__()
+            self.n_heads, self.n_actions = n_heads, n_actions
+            self.fc = torch.nn.Linear(dim, n_heads * n_actions)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.fc(x).view(-1, self.n_heads, self.n_actions)
+
+    dim, n_actions = 2 * 5 * 5, 4
+    obs, actions, rewards, next_obs, dones, masks, _ = _dqn_engine().collect(64, _dummy_infer(n_actions))
+    net = TinyQ(dim, _K, n_actions)
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+
+    q = net(torch.from_numpy(obs))  # (M, K, A)
+    a = torch.from_numpy(actions).long()
+    r = torch.from_numpy(rewards).float()
+    d = torch.from_numpy(dones).float()
+    mask = torch.from_numpy(masks).float()
+    with torch.no_grad():
+        target = r[:, None] + 0.99 * (1.0 - d[:, None]) * net(torch.from_numpy(next_obs)).max(dim=-1).values  # (M, K)
+    chosen = q.gather(-1, a[:, None, None].expand(-1, _K, 1)).squeeze(-1)  # (M, K)
+    loss = (mask * (chosen - target) ** 2).sum() / mask.sum().clamp(min=1.0)
+    opt.zero_grad()
+    loss.backward()
+    opt.step()
+    assert torch.isfinite(loss)
