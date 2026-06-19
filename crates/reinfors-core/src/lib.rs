@@ -1,8 +1,7 @@
 //! reinfors-core: the pure-Rust generic simulation + search + rollout framework (no Python, no game).
 //!
 //! It defines the `Game` trait, the `Policy` (acting) + `Learner` (records) seams the rollout `Engine`
-//! drives, and concrete algorithm impls under `policies`/`learners`. Concrete games (e.g. snake) live
-//! in the `reinfors-games` crate and implement `Game`; the framework drives them through the trait only.
+//! drives, and concrete algorithm impls under `policies`/`learners`.
 
 pub mod encoder;
 pub mod engine;

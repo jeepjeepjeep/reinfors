@@ -14,25 +14,20 @@ pub(crate) struct Episode<G: Game> {
 }
 
 impl<G: Game> Episode<G> {
-    /// A fresh episode, drawing initial chance from `seed`.
     pub(crate) fn new(game: &G, seed: u64) -> Self {
         let mut rng = SplitMix64::new(seed);
         let state = game.initial_state(&mut rng);
         Episode { state, rng }
     }
 
-    /// Begin a new episode, drawing fresh initial chance from the continuing RNG stream.
     pub(crate) fn reset(&mut self, game: &G) {
         self.state = game.initial_state(&mut self.rng);
     }
 
-    /// Whether `agent` has a move at the current state (the rollout reads activeness from this).
     pub(crate) fn agent_active(&self, game: &G, agent: usize) -> bool {
         !game.legal_actions(&self.state, agent).is_empty()
     }
 
-    /// Agents that must act this tick: a single mover for a sequential game, all live agents for a
-    /// simultaneous one. Empty once the episode is over.
     pub(crate) fn active_agents(&self, game: &G) -> Vec<usize> {
         (0..game.num_agents())
             .filter(|&a| self.agent_active(game, a))

@@ -17,7 +17,6 @@ pub struct Env<G: Game> {
 }
 
 impl<G: Game> Env<G> {
-    /// Start a fresh episode of `game` (initial chance drawn from `seed`), observed through `encoder`.
     pub fn new(game: G, encoder: Box<dyn StateEncoder<State = G::State>>, seed: u64) -> Self {
         let episode = Episode::new(&game, seed);
         Env {
@@ -28,7 +27,6 @@ impl<G: Game> Env<G> {
         }
     }
 
-    /// Begin a new episode, drawing fresh initial chance from the (continuing) RNG stream.
     pub fn reset(&mut self) {
         self.episode.reset(&self.game);
         self.done = false;
@@ -42,7 +40,6 @@ impl<G: Game> Env<G> {
         self.game.action_count()
     }
 
-    /// The native game state, for rendering/inspection (the encoder is for the net's view).
     pub fn state(&self) -> &G::State {
         &self.episode.state
     }
@@ -51,7 +48,6 @@ impl<G: Game> Env<G> {
         self.done
     }
 
-    /// Agents that must supply an action this tick (empty once the episode is over).
     pub fn active_agents(&self) -> Vec<usize> {
         self.episode.active_agents(&self.game)
     }
@@ -65,15 +61,12 @@ impl<G: Game> Env<G> {
         self.episode.observe(&*self.encoder, agent)
     }
 
-    /// The observation `Space` (from the encoder) — so a caller can size/validate a network from the
-    /// `Env` alone.
     pub fn observation_space(&self) -> Space {
         self.encoder.observation_space()
     }
 
     /// Apply a joint action (one index per agent; entries for inactive agents are ignored), advancing
-    /// the episode through the env transition. Returns this tick's per-agent reward vector. Stepping a
-    /// finished episode is a misuse — `active_agents()` is empty once `done()`; `reset()` first.
+    /// the episode through the env transition. Returns this tick's per-agent reward vector.
     pub fn step(&mut self, actions: &[usize]) -> Vec<f64> {
         debug_assert!(!self.done, "step() after done — call reset() first");
         debug_assert_eq!(

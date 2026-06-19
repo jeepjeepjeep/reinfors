@@ -5,17 +5,17 @@
 //!
 //! An `Engine<G, P, L>` holds N independent games of an arbitrary [`Game`]. Each `collect` step gathers
 //! one request per active agent across every game, has the `Policy` evaluate them all in one pooled
-//! pass (one batched `infer` per round — the throughput win), then per decision: folds the policy's
+//! pass (one batched `infer` per round), then per decision: folds the policy's
 //! telemetry, lets the `Learner` emit its immediate records, has the `Policy` `select` an action, and
 //! buffers the step; finally it advances every game and flushes finished ones' trajectories through the
 //! `Learner` for their episode-end records.
 //!
-//! Per-game diversity comes from each game's own per-episode policy state (e.g. a Thompson head) and
-//! its own RNG environment chance (snake's apple spawns): games start from the same deterministic
+//! Per-game diversity comes from each game's own per-episode policy state and
+//! its own RNG environment chance: games start from the same deterministic
 //! placement, so without this they would be identical. `step_env`/`initial_state` draw the true env
 //! chance from each game's own RNG — the same `sample_chance` the search Monte-Carlos in-tree (from its
 //! own seeded stream), so env and search share one chance model; see `search`. A truncation tick
-//! reached alive pays the game's `truncation_bonus` (snake's `survival`), which the `Learner`'s z-mix
+//! reached alive pays the game's `truncation_bonus`, which the `Learner`'s z-mix
 //! carries back to earlier steps.
 
 use std::collections::HashMap;
@@ -36,8 +36,6 @@ pub struct EpisodeSummary {
 }
 
 /// Telemetry for one `collect` call: finished-episode summaries and aggregated search diagnostics.
-/// Search fields are sums over the call's `decisions`; the caller divides to get means (mirroring the
-/// per-step scalars `snake_RL`'s `EnsembleTreeStrapRunner` logs).
 #[derive(Default, Clone)]
 pub struct CollectStats {
     pub episodes: Vec<EpisodeSummary>,
@@ -46,13 +44,11 @@ pub struct CollectStats {
     pub sum_leaves: f64,
     pub sum_rounds: f64,
     pub sum_expansions: f64,
-    pub sum_sigma: f64, // sum over decisions of the search's mean leaf sigma
-    pub sum_disagreement: f64, // sum over decisions of the root head-disagreement
+    pub sum_sigma: f64,
+    pub sum_disagreement: f64,
 }
 
-/// Engine-level rollout knobs (everything that is not a game or *algorithm* parameter — search config,
-/// interior-target flag, ensemble heads, and epsilon live on the `Policy`; z-mix `outcome_weight` and
-/// bootstrap masking live on the `Learner`).
+/// Engine-level rollout knobs.
 pub struct EngineParams {
     pub n_games: usize,
     pub max_ticks: usize,
@@ -65,10 +61,7 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     policy: P,
     learner: L,
     params: EngineParams,
-    episodes: Vec<Episode<G>>, // per-game live state + env-chance RNG (shared mechanics with `Env`)
-    // The search's chance-sampling stream — independent of the per-game env RNGs so adding search
-    // draws never perturbs the env's draw order (deterministic games stay bit-reproducible). A fresh
-    // per-decision seed is drawn from it so each search samples with fresh randomness, like the env.
+    episodes: Vec<Episode<G>>,
     search_rng: SplitMix64,
     policy_states: Vec<P::PolicyState>, // per-game acting state for the current episode (Thompson head)
     ticks: Vec<usize>,
@@ -79,8 +72,6 @@ impl<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> Engine<G, P, L>
 where
     G::State: Send,
 {
-    /// Build an engine over `game` driven by `policy` (evaluation + acting) and `learner` (training
-    /// records), with the rollout knobs from `params`. The game owns its reward and rules.
     pub fn new(
         game: G,
         encoder: Box<dyn StateEncoder<State = G::State>>,
@@ -89,9 +80,6 @@ where
         params: EngineParams,
     ) -> Self {
         debug_assert!((1..=2).contains(&game.num_agents()));
-        // Each game gets its own env-chance stream, seeded deterministically from the game index. The
-        // episode draws its initial state from that stream, then the policy draws its episode state —
-        // same per-game RNG order as before, so the rollout stays bit-reproducible.
         let mut episodes: Vec<Episode<G>> = (0..params.n_games)
             .map(|i| {
                 Episode::new(
@@ -134,14 +122,9 @@ where
     where
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
-        // (The infer head-count check lives in the Python binding, where it can distinguish a real
-        // wrong-K output from the error fallback and surface a clean error; here we only consume the
-        // values, with the per-game clamp handling the all-terminal single-head case.)
         let mut out: Vec<L::Record> = Vec::new();
         let mut stats = CollectStats::default();
         let num_agents = self.game.num_agents();
-        // Whether the policy should collect interior targets is the learner's call (it consumes them),
-        // so the two can't silently disagree — mirrors `needs_next_obs`.
         let collect_interior = self.learner.needs_interior();
 
         while out.len() < n_records {
@@ -157,11 +140,10 @@ where
                 }
             }
             if requests.is_empty() {
-                break; // every game dead this instant (resets below normally keep at least one alive)
+                break;
             }
 
-            // 2. The policy evaluates them all in one pooled pass (one batched forward per round,
-            //    shared across games — the throughput win); for selective expectimax this is the search.
+            // 2. The policy evaluates them all in one pooled pass
             let search_seed = self.search_rng.next_u64();
             let evals = self.policy.evaluate(
                 &self.game,
@@ -172,16 +154,14 @@ where
                 &mut infer,
             );
 
-            // 3. Per decision: fold its telemetry, emit the learner's immediate records (TreeStrap
-            //    interior nodes), choose the action, and buffer the step. `acted[gi][si]` records the
+            // 3. Per decision: fold its telemetry, emit the learner's immediate records,
+            //    choose the action, and buffer the step. `acted[gi][si]` records the
             //    chosen action index for an agent that decided this tick.
             let mut acted: Vec<Vec<Option<usize>>> =
                 vec![vec![None; num_agents]; self.episodes.len()];
             for (mut eval, &(gi, si)) in evals.into_iter().zip(meta.iter()) {
                 stats.decisions += 1;
                 self.policy.fold_telemetry(&eval, &mut stats);
-                // The learner drains its immediate records out of the evaluation so interior nodes are
-                // never buffered for the whole episode.
                 out.extend(
                     self.learner
                         .eval_records(&mut eval, &mut self.episodes[gi].rng),
@@ -210,10 +190,6 @@ where
                 let joint: Vec<usize> = agents.iter().map(|a| a.unwrap_or(0)).collect();
                 let (rewards, terminal) = self.episodes[gi].advance(&self.game, &joint);
                 self.ticks[gi] += 1;
-                // A truncation tick — max_ticks reached while the game is still playing — pays the
-                // game's truncation bonus to agents that acted (snake's survival bonus to the living),
-                // matching snake_RL's runner setting `survived_to_max_ticks` so it propagates through
-                // z-mixing to earlier steps.
                 let truncated = self.ticks[gi] >= self.params.max_ticks && !terminal;
                 let needs_next_obs = self.learner.needs_next_obs();
                 for (si, action) in agents.iter().enumerate() {
@@ -222,14 +198,11 @@ where
                         if truncated {
                             reward += self.game.truncation_bonus(&self.episodes[gi].state, si);
                         }
-                        // `s'` for a transition learner (DQN): the post-transition observation. Skipped
-                        // (left empty) for return-based learners so they pay no per-step obs cost.
                         let next_obs = if needs_next_obs {
                             self.episodes[gi].observe(&*self.encoder, si)
                         } else {
                             Vec::new()
                         };
-                        // this agent acted this tick — attach the realized transition to its last decision
                         if let Some(step) = self.traj[gi][si].last_mut() {
                             step.reward = reward;
                             step.next_obs = next_obs;
@@ -259,8 +232,6 @@ where
     ) where
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
-        // On truncation (alive, not terminal) z is seeded by the net's per-head state value, so early
-        // decisions of long episodes are not systematically undervalued. Batch those into one forward.
         let tails = self.tail_values(finished, infer);
         let num_agents = self.game.num_agents();
 
@@ -272,11 +243,7 @@ where
                     continue;
                 }
                 *ep_slot = steps.iter().map(|s| s.reward).sum();
-                // The tail is the truncation bootstrap (one per active agent), or empty for a terminal
-                // episode — the learner seeds a zero tail of the right head count when it is empty (it
-                // knows the head count from its concrete evaluation; the generic engine does not).
                 let tail = tails.get(&(gi, si)).cloned().unwrap_or_default();
-                // The learner turns the buffered trajectory into records (TreeStrap z-mixing + masks).
                 out.extend(
                     self.learner
                         .episode_records(&steps, &tail, &mut self.episodes[gi].rng),
@@ -312,8 +279,6 @@ where
         let mut obs_flat: Vec<f32> = Vec::new();
         let mut meta: Vec<(usize, usize)> = Vec::new();
         for &(gi, terminal) in finished {
-            // A terminal episode seeds the tail with 0; only a truncation (an episode that ended
-            // because the horizon was reached, with an agent still active) gets a net-value tail.
             if terminal {
                 continue;
             }
