@@ -6,26 +6,16 @@ use crate::encoder::StateEncoder;
 use crate::engine::CollectStats;
 use crate::game::{Game, Rng};
 
-/// How an algorithm evaluates states and acts. Non-generic so `evaluate` can be method-generic over
-/// the game, avoiding inference ambiguity.
+/// How an algorithm evaluates states and acts.
 pub trait Policy {
-    /// The per-decision evaluation `evaluate` produces (the assessment of the options — *not* a chosen
-    /// action). Consumed by `select` and by the paired `Learner`.
     type Evaluation;
-    /// The policy's transient per-episode state, freshly drawn at episode start (e.g. the Thompson
-    /// head it acts greedily under). `()` for stateless policies.
+
     type PolicyState;
 
-    /// Fresh per-episode policy state at a game's episode start (redrawn on reset).
     fn begin_episode(&self, rng: &mut dyn Rng) -> Self::PolicyState;
 
     /// Pooled evaluation of a batch of active `(state, agent)` requests with the live net (`infer`):
-    /// one batched forward per round, shared across games (the throughput win). `seed` seeds the
-    /// search's environment-chance sampling so it is reproducible; the per-game *acting* RNG is not
-    /// touched here (it is used only in `select`). `collect_interior` is the paired learner's
-    /// `needs_interior()` — whether to produce its auxiliary per-decision targets (TreeStrap interior
-    /// MAX nodes); policies without such targets (e.g. a plain forward) ignore it. Returns one
-    /// `Evaluation` per request.
+    /// one batched forward per round, shared across games.
     fn evaluate<G, F>(
         &self,
         game: &G,
@@ -48,14 +38,12 @@ pub trait Policy {
         rng: &mut dyn Rng,
     ) -> usize;
 
-    /// Fold this decision's diagnostics into the rollout telemetry. Default: nothing (a policy with no
-    /// search stats); a search policy contributes depth/leaves/sigma/disagreement.
+    /// Fold this decision's diagnostics into the rollout telemetry.
     fn fold_telemetry(&self, eval: &Self::Evaluation, stats: &mut CollectStats) {
         let _ = (eval, stats);
     }
 }
 
-/// First index of the maximum value (ties to the earliest). Shared by the policies' `select`.
 pub(crate) fn argmax(values: &[f64]) -> usize {
     let mut best = 0;
     for (i, &v) in values.iter().enumerate() {
