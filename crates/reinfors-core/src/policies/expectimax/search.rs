@@ -15,10 +15,11 @@
 //! [`SearchConfig`] are game-agnostic; concrete games (e.g. the snake `selective_search` wrappers in
 //! reinfors-games) build a `SearchConfig` and a `Game` and call [`search_many`].
 //!
-//! A game's `sample_chance` draws the (stochastic) successors of an eating-style transition — the same
-//! sampler the rollout env uses, so search and env never diverge. `food_samples > 1` fans the chance
-//! node into that many independent Monte-Carlo draws; a deterministic transition (empty `sample_chance`)
-//! keeps a single child. Each search owns a seeded RNG, so results are reproducible from a seed.
+//! A game's `sample_chance` draws one (stochastic) successor of an eating-style transition — the same
+//! sampler the rollout env uses, so search and env never diverge. The search calls it `food_samples`
+//! times to fan the chance node into that many independent Monte-Carlo draws; a deterministic
+//! transition (`sample_chance` returns `None`) keeps a single child. Each search owns a seeded RNG, so
+//! results are reproducible from a seed.
 
 use rayon::prelude::*;
 
@@ -496,14 +497,16 @@ fn push_branches<G: Game>(
 ) {
     let t = game.step(state, joint);
     let reward = t.rewards[agent];
-    // Draw the chance children: an empty result means the transition is deterministic (one child from
-    // `t.next_state`); otherwise `food_samples` independent realizations, each a distinct sampled state.
-    let outcomes = game.sample_chance(state, &t, rng, cfg.food_samples.max(1));
-    let children: Vec<G::State> = if outcomes.is_empty() {
-        vec![t.next_state]
-    } else {
-        outcomes
-    };
+    // Draw the chance children: the search owns the `food_samples` fan-out, calling `sample_chance`
+    // once per Monte-Carlo draw. `None` means the transition is deterministic — and since determinism
+    // is invariant across draws, the first `None` ends the fan-out, leaving a single `t.next_state`
+    // child. A stochastic transition yields `food_samples` distinct sampled states.
+    let mut children: Vec<G::State> = (0..cfg.food_samples.max(1))
+        .map_while(|_| game.sample_chance(state, &t, rng))
+        .collect();
+    if children.is_empty() {
+        children.push(t.next_state);
+    }
     let n = children.len();
     let (weight, deferred, scale) = match bw {
         BranchWeight::Fixed(f) => (f / n as f64, None, 1.0),

@@ -44,7 +44,10 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.mypy]
-python_version = "3.10"
+# Type-check against 3.12 (the CI/dev interpreter — see `--interpreter python3.12` in the build): recent
+# numpy stubs use PEP 695 `type` statements that mypy refuses to parse under an older target. Runtime
+# still supports 3.10+ (`requires-python`), and ruff's py310 target guards against newer syntax slipping in.
+python_version = "3.12"
 strict = true
 warn_unused_configs = true
 
