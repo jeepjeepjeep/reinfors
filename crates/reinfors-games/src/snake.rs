@@ -507,34 +507,31 @@ impl Snake {
     }
 
     /// Spawn one apple at a uniform-random empty cell (the env's true spawn), or nothing if the grid is
-    /// full. Build the occupancy set once (food + both bodies, deduped), so the empty count is
-    /// `g² − occupied.len()` (no count pass) and lookups are O(1); then walk to the k-th empty cell in
-    /// row-major order. A single `rng.below(n)` indexing the row-major empties is identical to
-    /// materializing the empties `Vec` and indexing it — same cell, same RNG — but without that `Vec`.
+    /// full. A single `rng.below(n)` picks `k`, the index of the chosen cell among the empties in
+    /// row-major order; the cell itself is found analytically from the sorted occupied indices (each
+    /// occupied cell at or below the running target shifts it one further on), so there is no O(g²)
+    /// scan over the grid. This selects the same cell a linear walk would for the same `k`.
     fn spawn_one(&self, snakes: &[SnakeBody; 2], food: &mut HashSet<Cell>, rng: &mut dyn Rng) {
         let g = self.grid_size;
-        let mut occupied: HashSet<Cell> = food.clone();
+        let mut occupied: Vec<usize> = food.iter().map(|&(r, c)| (r * g + c) as usize).collect();
         for s in snakes {
-            occupied.extend(s.body.iter().copied());
+            occupied.extend(s.body.iter().map(|&(r, c)| (r * g + c) as usize));
         }
+        occupied.sort_unstable();
+        occupied.dedup();
         let n = (g * g) as usize - occupied.len();
         if n == 0 {
             return;
         }
-        let mut k = rng.below(n);
-        for r in 0..g {
-            for c in 0..g {
-                let cell = (r, c);
-                if occupied.contains(&cell) {
-                    continue;
-                }
-                if k == 0 {
-                    food.insert(cell);
-                    return;
-                }
-                k -= 1;
+        let mut idx = rng.below(n);
+        for &o in &occupied {
+            if o <= idx {
+                idx += 1;
+            } else {
+                break;
             }
         }
+        food.insert((idx as i32 / g, idx as i32 % g));
     }
 }
 
