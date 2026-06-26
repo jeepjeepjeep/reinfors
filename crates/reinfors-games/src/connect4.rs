@@ -2,7 +2,7 @@
 //! validates the search's sequential path: alternating `Actor::Agent(0)` / `Actor::Agent(1)` nodes
 //! (the searching agent's MAX turns vs the opponent's modeled-chance turns), driven through the same
 //! generic search + rollout engine as snake. Deterministic, so `sample_chance` is the default
-//! (empty). Action legality is fixed — all 7 columns are always selectable; a move into a full column
+//! (`None`). Action legality is fixed — all 7 columns are always selectable; a move into a full column
 //! is an immediate loss for the mover — so the framework needs no action masking here.
 
 use reinfors_core::{Actor, Game, Rng, StateEncoder, Transition};

@@ -48,18 +48,19 @@ pub trait Game {
 
     fn step(&self, state: &Self::State, actions: &[usize]) -> Transition<Self::State>;
 
-    /// Sample `n` independent realizations of the transition's environment chance. An **empty**
-    /// result means the transition is deterministic (no chance node); callers then use
-    /// `transition.next_state` directly. The default is deterministic.
+    /// Draw one realization of the transition's environment chance. `None` means the transition is
+    /// deterministic (no chance node), so callers use `transition.next_state` directly. Determinism is
+    /// a property of the transition, not the draw, so a stochastic transition always returns `Some`.
+    /// Callers wanting several independent realizations (e.g. the search's `food_samples` Monte-Carlo
+    /// fan-out) call this `n` times. The default is deterministic.
     fn sample_chance(
         &self,
         state: &Self::State,
         transition: &Transition<Self::State>,
         rng: &mut dyn Rng,
-        n: usize,
-    ) -> Vec<Self::State> {
-        let _ = (state, transition, rng, n);
-        Vec::new()
+    ) -> Option<Self::State> {
+        let _ = (state, transition, rng);
+        None
     }
 
     fn initial_state(&self, rng: &mut dyn Rng) -> Self::State;
@@ -71,12 +72,7 @@ pub trait Game {
         rng: &mut dyn Rng,
     ) -> Transition<Self::State> {
         let t = self.step(state, actions);
-        let mut outcomes = self.sample_chance(state, &t, rng, 1);
-        let next_state = if outcomes.is_empty() {
-            t.next_state
-        } else {
-            outcomes.swap_remove(0)
-        };
+        let next_state = self.sample_chance(state, &t, rng).unwrap_or(t.next_state);
         Transition {
             next_state,
             rewards: t.rewards,

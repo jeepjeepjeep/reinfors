@@ -590,29 +590,24 @@ impl Game for Snake {
         state: &SnakeState,
         transition: &Transition<SnakeState>,
         rng: &mut dyn Rng,
-        n: usize,
-    ) -> Vec<SnakeState> {
+    ) -> Option<SnakeState> {
         // An eaten apple is the only stochastic event: `step` removed it without respawning, so the
-        // count drop = apples eaten. None eaten -> deterministic (empty). Otherwise draw `n` independent
-        // realizations, each respawning one uniform-random apple per eaten apple via `spawn_one` — the
-        // same spawn the env rollout uses, so search and env share one chance model.
+        // count drop = apples eaten. None eaten -> deterministic (`None`). Otherwise draw one
+        // realization, respawning one uniform-random apple per eaten apple via `spawn_one` — the same
+        // spawn the env rollout uses, so search and env share one chance model.
         let next = &transition.next_state;
         let eaten = state.food.len().saturating_sub(next.food.len());
         if eaten == 0 {
-            return Vec::new();
+            return None;
         }
-        (0..n)
-            .map(|_| {
-                let mut food = next.food.clone();
-                for _ in 0..eaten {
-                    self.spawn_one(&next.snakes, &mut food, rng);
-                }
-                SnakeState {
-                    snakes: next.snakes.clone(),
-                    food,
-                }
-            })
-            .collect()
+        let mut food = next.food.clone();
+        for _ in 0..eaten {
+            self.spawn_one(&next.snakes, &mut food, rng);
+        }
+        Some(SnakeState {
+            snakes: next.snakes.clone(),
+            food,
+        })
     }
 
     fn initial_state(&self, rng: &mut dyn Rng) -> SnakeState {
@@ -702,17 +697,17 @@ mod game_tests {
     #[test]
     fn step_env_equals_step_then_sample_chance() {
         // The unification invariant: the realized env step and the search's chance sampler are the
-        // SAME draw. `step_env` must equal `step` then `sample_chance(.., 1)` under the same RNG seed,
-        // so the rollout and the search can never use different chance dynamics.
+        // SAME draw. `step_env` must equal `step` then `sample_chance` under the same RNG seed, so the
+        // rollout and the search can never use different chance dynamics.
         // Food directly in front of A (faces Right, head (4,2)): Forward eats it, triggering a respawn.
         let g = game();
         let st = initial_state(&[(4, 3)]);
         let actions = [0usize, 0];
         let realized = g.step_env(&st, &actions, &mut TestRng(42));
         let t = g.step(&st, &actions);
-        let mut sampled = g.sample_chance(&st, &t, &mut TestRng(42), 1);
-        assert_eq!(sampled.len(), 1, "an eaten apple is a chance node");
-        assert_eq!(realized.next_state, sampled.swap_remove(0));
+        let sampled = g.sample_chance(&st, &t, &mut TestRng(42));
+        assert!(sampled.is_some(), "an eaten apple is a chance node");
+        assert_eq!(realized.next_state, sampled.unwrap());
         assert_eq!(realized.rewards, t.rewards);
         assert_eq!(realized.terminal, t.terminal);
         assert!((realized.rewards[0] - 1.0).abs() < 1e-12, "A ate one apple");
@@ -729,9 +724,9 @@ mod game_tests {
         let st = initial_state(&[(0, 0)]); // far corner, untouched
         for actions in [[0usize, 0], [1, 2], [2, 1], [0, 2]] {
             let t = g.step(&st, &actions);
-            // Nothing eaten -> no chance node, regardless of how many samples are requested.
+            // Nothing eaten -> no chance node (`None`).
             assert!(
-                g.sample_chance(&st, &t, &mut TestRng(1), 4).is_empty(),
+                g.sample_chance(&st, &t, &mut TestRng(1)).is_none(),
                 "actions {actions:?}"
             );
             // ...so the realized env step is exactly the deterministic step.
@@ -744,12 +739,15 @@ mod game_tests {
 
     #[test]
     fn sample_chance_draws_independent_valid_respawns() {
-        // food_samples > 1 fans the chance node into that many independent draws, each a uniform-random
-        // apple on a previously empty cell — not a single deterministic belief.
+        // Repeated `sample_chance` draws (the caller's fan-out) are independent uniform-random apples on
+        // a previously empty cell — not a single deterministic belief. One rng stream across the draws.
         let g = game();
         let st = initial_state(&[(4, 3)]);
         let t = g.step(&st, &[0, 0]);
-        let samples = g.sample_chance(&st, &t, &mut TestRng(7), 20);
+        let mut rng = TestRng(7);
+        let samples: Vec<SnakeState> = (0..20)
+            .map(|_| g.sample_chance(&st, &t, &mut rng).unwrap())
+            .collect();
         assert_eq!(samples.len(), 20);
         let occupied: std::collections::HashSet<Cell> = t
             .next_state
@@ -781,7 +779,10 @@ mod game_tests {
         let st = initial_state(&[(4, 3)]);
         let t = g.step(&st, &[0, 0]); // A eats the only apple -> a respawn chance node
         let n = 20_000;
-        let samples = g.sample_chance(&st, &t, &mut TestRng(12345), n);
+        let mut rng = TestRng(12345);
+        let samples: Vec<SnakeState> = (0..n)
+            .map(|_| g.sample_chance(&st, &t, &mut rng).unwrap())
+            .collect();
         let empties = empty_cells(&t.next_state.snakes, &t.next_state.food, G);
         let mut counts: std::collections::HashMap<Cell, usize> = std::collections::HashMap::new();
         for s in &samples {
