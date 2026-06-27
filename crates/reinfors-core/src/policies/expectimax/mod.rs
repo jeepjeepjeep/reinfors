@@ -10,6 +10,7 @@ use crate::encoder::StateEncoder;
 use crate::engine::CollectStats;
 use crate::game::{Game, Rng};
 use crate::policy::{argmax, Policy};
+use crate::reward::Reward;
 use search::{search_many, InteriorTarget, SearchConfig, SearchStats};
 
 /// A search's per-decision evaluation: root per-head values (for acting and the z-mix target),
@@ -51,10 +52,12 @@ impl Policy for SelectiveExpectimax {
         rng.below(self.n_heads)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn evaluate<G, F>(
         &self,
         game: &G,
         enc: &dyn StateEncoder<State = G::State>,
+        reward: &dyn Reward<Event = G::Event, State = G::State>,
         requests: Vec<(G::State, usize)>,
         seed: u64,
         collect_interior: bool,
@@ -68,6 +71,7 @@ impl Policy for SelectiveExpectimax {
         search_many(
             game,
             enc,
+            reward,
             &self.cfg,
             requests,
             collect_interior,

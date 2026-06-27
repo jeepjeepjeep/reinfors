@@ -42,11 +42,12 @@ impl<G: Game> Episode<G> {
         encoder.encode(&self.state, agent)
     }
 
-    /// Advance through the env transition, updating `state`; returns this tick's `(per-agent rewards,
-    /// terminal)`.
-    pub(crate) fn advance(&mut self, game: &G, actions: &[usize]) -> (Vec<f64>, bool) {
+    /// Advance through the env transition, updating `state`; returns this tick's `(per-agent events,
+    /// terminal)`. A [`Reward`](crate::Reward) (held by the caller, not the `Episode`) maps the events
+    /// to scalar rewards.
+    pub(crate) fn advance(&mut self, game: &G, actions: &[usize]) -> (Vec<G::Event>, bool) {
         let t = game.step_env(&self.state, actions, &mut self.rng);
         self.state = t.next_state;
-        (t.rewards, t.terminal)
+        (t.events, t.terminal)
     }
 }

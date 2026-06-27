@@ -25,6 +25,7 @@ use crate::episode::Episode;
 use crate::game::Game;
 use crate::learner::{Learner, Step};
 use crate::policy::Policy;
+use crate::reward::Reward;
 use crate::rng::SplitMix64;
 
 /// One finished episode's outcome, for logging: per-agent total realized reward (one entry per
@@ -58,6 +59,7 @@ pub struct EngineParams {
 pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     game: G,
     encoder: Box<dyn StateEncoder<State = G::State>>,
+    reward: Box<dyn Reward<Event = G::Event, State = G::State>>,
     policy: P,
     learner: L,
     params: EngineParams,
@@ -75,6 +77,7 @@ where
     pub fn new(
         game: G,
         encoder: Box<dyn StateEncoder<State = G::State>>,
+        reward: Box<dyn Reward<Event = G::Event, State = G::State>>,
         policy: P,
         learner: L,
         params: EngineParams,
@@ -103,6 +106,7 @@ where
         Engine {
             game,
             encoder,
+            reward,
             policy,
             learner,
             params,
@@ -148,6 +152,7 @@ where
             let evals = self.policy.evaluate(
                 &self.game,
                 &*self.encoder,
+                &*self.reward,
                 requests,
                 search_seed,
                 collect_interior,
@@ -188,15 +193,15 @@ where
             let mut finished: Vec<(usize, bool)> = Vec::new(); // (game index, terminal?)
             for (gi, agents) in acted.into_iter().enumerate() {
                 let joint: Vec<usize> = agents.iter().map(|a| a.unwrap_or(0)).collect();
-                let (rewards, terminal) = self.episodes[gi].advance(&self.game, &joint);
+                let (events, terminal) = self.episodes[gi].advance(&self.game, &joint);
                 self.ticks[gi] += 1;
                 let truncated = self.ticks[gi] >= self.params.max_ticks && !terminal;
                 let needs_next_obs = self.learner.needs_next_obs();
                 for (si, action) in agents.iter().enumerate() {
                     if action.is_some() {
-                        let mut reward = rewards[si];
+                        let mut reward = self.reward.step_reward(&events[si], si);
                         if truncated {
-                            reward += self.game.truncation_bonus(&self.episodes[gi].state, si);
+                            reward += self.reward.truncation_bonus(&self.episodes[gi].state, si);
                         }
                         let next_obs = if needs_next_obs {
                             self.episodes[gi].observe(&*self.encoder, si)

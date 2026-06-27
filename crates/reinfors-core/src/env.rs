@@ -66,17 +66,18 @@ impl<G: Game> Env<G> {
     }
 
     /// Apply a joint action (one index per agent; entries for inactive agents are ignored), advancing
-    /// the episode through the env transition. Returns this tick's per-agent reward vector.
-    pub fn step(&mut self, actions: &[usize]) -> Vec<f64> {
+    /// the episode through the env transition. Returns this tick's per-agent events — what happened to
+    /// each agent (`Env` holds no reward; a game-aware caller reads the outcome from these or `state()`).
+    pub fn step(&mut self, actions: &[usize]) -> Vec<G::Event> {
         debug_assert!(!self.done, "step() after done — call reset() first");
         debug_assert_eq!(
             actions.len(),
             self.game.num_agents(),
             "step() expects one action per agent"
         );
-        let (rewards, terminal) = self.episode.advance(&self.game, actions);
+        let (events, terminal) = self.episode.advance(&self.game, actions);
         self.done = terminal;
-        rewards
+        events
     }
 }
 
@@ -86,12 +87,13 @@ mod tests {
     use crate::encoder::StateEncoder;
     use crate::game::{Actor, Game, Rng, Transition};
 
-    // A 1-agent walk to `goal`: action 1 steps right, 0 stays; terminal (reward 1) at the goal.
+    // A 1-agent walk to `goal`: action 1 steps right, 0 stays; the event is 1.0 at the goal, else 0.0.
     struct Walk {
         goal: i32,
     }
     impl Game for Walk {
         type State = i32;
+        type Event = f64;
         fn num_agents(&self) -> usize {
             1
         }
@@ -108,12 +110,12 @@ mod tests {
                 Vec::new()
             }
         }
-        fn step(&self, pos: &i32, actions: &[usize]) -> Transition<i32> {
+        fn step(&self, pos: &i32, actions: &[usize]) -> Transition<i32, f64> {
             let next = pos + actions[0] as i32;
             let terminal = next >= self.goal;
             Transition {
                 next_state: next,
-                rewards: vec![if terminal { 1.0 } else { 0.0 }],
+                events: vec![if terminal { 1.0 } else { 0.0 }],
                 terminal,
             }
         }
@@ -138,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn steps_to_terminal_and_reports_done_and_reward() {
+    fn steps_to_terminal_and_reports_done_and_event() {
         let mut e = env();
         assert!(!e.done() && e.active_agents() == vec![0]);
         assert_eq!(e.observe(0), vec![0.0]);

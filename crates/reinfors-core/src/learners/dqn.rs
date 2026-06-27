@@ -133,6 +133,7 @@ mod tests {
     struct DummyGame;
     impl crate::game::Game for DummyGame {
         type State = ();
+        type Event = ();
         fn num_agents(&self) -> usize {
             1
         }
@@ -145,7 +146,7 @@ mod tests {
         fn legal_actions(&self, _: &(), _: usize) -> Vec<usize> {
             vec![0, 1]
         }
-        fn step(&self, _: &(), _: &[usize]) -> crate::game::Transition<()> {
+        fn step(&self, _: &(), _: &[usize]) -> crate::game::Transition<(), ()> {
             unimplemented!()
         }
         fn initial_state(&self, _: &mut dyn Rng) {}

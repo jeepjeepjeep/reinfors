@@ -5,6 +5,7 @@
 use crate::encoder::StateEncoder;
 use crate::game::{Game, Rng};
 use crate::policy::{argmax, Policy};
+use crate::reward::Reward;
 
 /// DQN's per-decision evaluation: just the per-head Q-values `[K][A]` from one network forward (no
 /// search tree, interior targets, or stats — the seam's non-search case).
@@ -35,10 +36,12 @@ impl Policy for EpsilonGreedyQ {
         rng.below(self.n_heads)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn evaluate<G, F>(
         &self,
         game: &G,
         enc: &dyn StateEncoder<State = G::State>,
+        _reward: &dyn Reward<Event = G::Event, State = G::State>, // model-free: rewards come from the env, not the search
         requests: Vec<(G::State, usize)>,
         _seed: u64,
         _collect_interior: bool, // DQN has no interior targets — a plain forward, nothing to collect

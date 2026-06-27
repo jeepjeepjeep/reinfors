@@ -20,12 +20,14 @@ use pyo3::types::{PyDict, PyTuple};
 
 use reinfors_core::{
     Dqn, DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game, Learner, Opponent, Policy,
-    SearchConfig, SelectiveExpectimax, Space, StateEncoder, TreeStrap, TreeStrapRecord,
+    Reward as RewardTrait, SearchConfig, SelectiveExpectimax, Space, StateEncoder, TreeStrap,
+    TreeStrapRecord,
 };
-use reinfors_games::snake::Cell;
+use reinfors_games::snake::{Cell, DeathCause};
 use reinfors_games::{
-    Action, Connect4, Connect4Planes, Connect4Reward, Connect4State, EgocentricSnake, GridState,
-    GridWorld, GridWorldPlanes, GridWorldReward, Snake, SnakeReward, SnakeState,
+    Action, Connect4, Connect4Event, Connect4Planes, Connect4Reward, Connect4State,
+    EgocentricSnake, GridEvent, GridState, GridWorld, GridWorldPlanes, GridWorldReward, Snake,
+    SnakeReward, SnakeState, StepEvent,
 };
 
 /// Absolute `Action` -> its `u8` code (Up/Down/Left/Right = 0/1/2/3), for native-state marshalling.
@@ -153,9 +155,10 @@ struct PyEngine {
 #[pymethods]
 impl PyEngine {
     #[new]
-    #[pyo3(signature = (game, policy, learner, n_games, max_ticks, seed=0))]
+    #[pyo3(signature = (game, reward, policy, learner, n_games, max_ticks, seed=0))]
     fn new(
         game: GameHandle,
+        reward: Option<Reward>,
         policy: PolicyHandle,
         learner: LearnerHandle,
         n_games: usize,
@@ -173,7 +176,7 @@ impl PyEngine {
             seed,
         };
         Ok(PyEngine {
-            inner: build_engine(game.spec, policy.spec, learner.spec, engine_params)?,
+            inner: build_engine(game.spec, reward, policy.spec, learner.spec, engine_params)?,
         })
     }
 
@@ -487,7 +490,8 @@ where
     }
 }
 
-/// Game configuration, independent of the acting/learning algorithm.
+/// Game configuration (rules only — the reward is a separate handle, resolved per game at `Engine`
+/// construction), independent of the acting/learning algorithm.
 #[derive(Clone)]
 enum GameSpec {
     Snake {
@@ -496,15 +500,11 @@ enum GameSpec {
         initial_food_count: usize,
         play_to_last: bool,
         win_food_lead: Option<usize>,
-        reward: SnakeReward,
     },
-    Connect4 {
-        reward: Connect4Reward,
-    },
+    Connect4,
     GridWorld {
         size: i32,
         goal: (i32, i32),
-        reward: GridWorldReward,
     },
 }
 
@@ -525,7 +525,6 @@ impl GameSpec {
                 initial_food_count,
                 play_to_last,
                 win_food_lead,
-                reward,
             } => of(
                 Snake {
                     grid_size,
@@ -533,17 +532,69 @@ impl GameSpec {
                     play_to_last,
                     win_food_lead,
                     initial_food_count,
-                    reward,
                 },
                 &EgocentricSnake { grid_size },
             ),
-            GameSpec::Connect4 { reward } => of(Connect4 { reward }, &Connect4Planes),
-            GameSpec::GridWorld { size, goal, reward } => of(
-                GridWorld { size, goal, reward },
-                &GridWorldPlanes { size, goal },
-            ),
+            GameSpec::Connect4 => of(Connect4, &Connect4Planes),
+            GameSpec::GridWorld { size, goal } => {
+                of(GridWorld { size, goal }, &GridWorldPlanes { size, goal })
+            }
         }
     }
+}
+
+/// Resolve the generic `rf.Reward` weights against the game's schema into the concrete reward struct,
+/// boxed as the `dyn Reward` handle the engine threads. One arm per game (the reward keys + defaults
+/// are the game's). Used at `Engine` construction, where both game and reward are known.
+fn build_reward(game: &GameSpec, reward: Option<Reward>) -> PyResult<RewardBox> {
+    Ok(match game {
+        GameSpec::Snake { .. } => {
+            let r = resolve_reward(
+                reward,
+                &[
+                    ("step", 0.0),
+                    ("food", 0.0),
+                    ("loss", 0.0),
+                    ("draw", 0.0),
+                    ("kill", 0.0),
+                    ("win", 0.0),
+                    ("survival", 0.0),
+                ],
+            )?;
+            RewardBox::Snake(SnakeReward {
+                step: r[0],
+                food: r[1],
+                loss: r[2],
+                draw: r[3],
+                kill: r[4],
+                win: r[5],
+                survival: r[6],
+            })
+        }
+        GameSpec::Connect4 => {
+            let r = resolve_reward(reward, &[("win", 1.0), ("loss", -1.0), ("draw", 0.0)])?;
+            RewardBox::Connect4(Connect4Reward {
+                win: r[0],
+                loss: r[1],
+                draw: r[2],
+            })
+        }
+        GameSpec::GridWorld { .. } => {
+            let r = resolve_reward(reward, &[("step", 0.0), ("goal", 1.0)])?;
+            RewardBox::GridWorld(GridWorldReward {
+                step: r[0],
+                goal: r[1],
+            })
+        }
+    })
+}
+
+/// The resolved per-game reward, kept concrete (not yet `Box<dyn Reward>`) so each `build_engine` arm
+/// can pair it with the matching game type for `Engine::new`.
+enum RewardBox {
+    Snake(SnakeReward),
+    Connect4(Connect4Reward),
+    GridWorld(GridWorldReward),
 }
 
 /// Acting-policy configuration. `n_heads` (ensemble size) lives here — the single source the learner
@@ -597,6 +648,7 @@ fn check_unit(name: &str, v: f64) -> PyResult<()> {
 fn build_for_game<G: Game + Send + Sync + 'static>(
     game: G,
     enc: Box<dyn StateEncoder<State = G::State>>,
+    reward: Box<dyn RewardTrait<Event = G::Event, State = G::State>>,
     policy: PolicySpec,
     learner: LearnerSpec,
     engine_params: EngineParams,
@@ -645,7 +697,7 @@ where
             let policy = SelectiveExpectimax::new(cfg, n_heads, epsilon);
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
             Ok(Box::new(EngineImpl {
-                inner: Engine::new(game, enc, policy, learner, engine_params),
+                inner: Engine::new(game, enc, reward, policy, learner, engine_params),
                 dim,
                 action_count,
                 n_heads,
@@ -660,7 +712,7 @@ where
             let policy = EpsilonGreedyQ::new(n_heads, epsilon);
             let learner = Dqn::new(n_heads, bootstrap_p);
             Ok(Box::new(EngineImpl {
-                inner: Engine::new(game, enc, policy, learner, engine_params),
+                inner: Engine::new(game, enc, reward, policy, learner, engine_params),
                 dim,
                 action_count,
                 n_heads,
@@ -676,46 +728,54 @@ where
 /// game; each instantly works with every family.
 fn build_engine(
     game: GameSpec,
+    reward: Option<Reward>,
     policy: PolicySpec,
     learner: LearnerSpec,
     engine_params: EngineParams,
 ) -> PyResult<Box<dyn ErasedEngine>> {
-    match game {
-        GameSpec::Snake {
-            grid_size,
-            initial_length,
-            initial_food_count,
-            play_to_last,
-            win_food_lead,
-            reward,
-        } => build_for_game(
+    let reward = build_reward(&game, reward)?;
+    match (game, reward) {
+        (
+            GameSpec::Snake {
+                grid_size,
+                initial_length,
+                initial_food_count,
+                play_to_last,
+                win_food_lead,
+            },
+            RewardBox::Snake(reward),
+        ) => build_for_game(
             Snake {
                 grid_size,
                 initial_length,
                 play_to_last,
                 win_food_lead,
                 initial_food_count,
-                reward,
             },
             Box::new(EgocentricSnake { grid_size }),
+            Box::new(reward),
             policy,
             learner,
             engine_params,
         ),
-        GameSpec::Connect4 { reward } => build_for_game(
-            Connect4 { reward },
+        (GameSpec::Connect4, RewardBox::Connect4(reward)) => build_for_game(
+            Connect4,
             Box::new(Connect4Planes),
+            Box::new(reward),
             policy,
             learner,
             engine_params,
         ),
-        GameSpec::GridWorld { size, goal, reward } => build_for_game(
-            GridWorld { size, goal, reward },
+        (GameSpec::GridWorld { size, goal }, RewardBox::GridWorld(reward)) => build_for_game(
+            GridWorld { size, goal },
             Box::new(GridWorldPlanes { size, goal }),
+            Box::new(reward),
             policy,
             learner,
             engine_params,
         ),
+        // `build_reward` returns the matching `RewardBox` arm for each game, so other pairings are unreachable.
+        _ => unreachable!("build_reward returns the reward variant matching the game"),
     }
 }
 
@@ -785,8 +845,13 @@ impl PyEnv {
     }
 
     /// Advance one tick with `actions`, a `{agent: action}` map naming exactly the agents that act
-    /// this tick (see `active_agents()`). Returns this tick's per-agent reward vector.
-    fn step(&mut self, actions: HashMap<usize, usize>) -> PyResult<Vec<f64>> {
+    /// this tick (see `active_agents()`). Returns this tick's per-agent events (game-specific objects);
+    /// a game-aware caller reads the outcome from them (`Env` holds no reward).
+    fn step<'py>(
+        &mut self,
+        py: Python<'py>,
+        actions: HashMap<usize, usize>,
+    ) -> PyResult<Vec<Bound<'py, PyAny>>> {
         // `actions` must name exactly the active agents — reject anything else loudly, since a missing
         // active agent or a stray inactive one would let an unintended default move silently advance
         // (and corrupt) the episode.
@@ -810,7 +875,7 @@ impl PyEnv {
         for (agent, action) in actions {
             joint[agent] = action;
         }
-        Ok(self.inner.step(joint))
+        self.inner.step(py, joint)
     }
 }
 
@@ -862,6 +927,53 @@ impl NativeState for GridState {
     }
 }
 
+/// Marshal a game's per-agent `Event` (the outcome of a tick that `step` returns — what a reward maps
+/// to a scalar) into an interpretable Python object, so a game-aware caller can read the outcome (e.g.
+/// the win/loss/draw verdict in play/eval) without the `Env` holding a reward. One impl per event type.
+trait NativeEvent {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>>;
+}
+
+impl NativeEvent for StepEvent {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let d = PyDict::new(py);
+        d.set_item("ate_food", self.ate_food)?;
+        d.set_item("died", self.died)?;
+        d.set_item("killed_opponent", self.killed_opponent)?;
+        d.set_item("won", self.won)?;
+        d.set_item("lost", self.lost)?;
+        d.set_item("drew", self.drew)?;
+        let cause = self.death_cause.map(|c| match c {
+            DeathCause::Wall => "wall",
+            DeathCause::SelfBody => "self",
+            DeathCause::OppBody => "opponent",
+            DeathCause::HeadOn => "head_on",
+        });
+        d.set_item("death_cause", cause)?;
+        Ok(d.into_any())
+    }
+}
+
+impl NativeEvent for Connect4Event {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let s = match self {
+            Connect4Event::Ongoing => "ongoing",
+            Connect4Event::Win => "win",
+            Connect4Event::Loss => "loss",
+            Connect4Event::Draw => "draw",
+        };
+        Ok(s.into_pyobject(py)?.into_any())
+    }
+}
+
+impl NativeEvent for GridEvent {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let d = PyDict::new(py);
+        d.set_item("reached_goal", self.reached_goal)?;
+        Ok(d.into_any())
+    }
+}
+
 /// A single-game `Env` with its concrete `Game` erased, so one Python `Env` holds any game.
 trait ErasedEnv: Send + Sync {
     fn reset(&mut self);
@@ -873,7 +985,12 @@ trait ErasedEnv: Send + Sync {
     fn observe<'py>(&self, py: Python<'py>, agent: usize) -> Bound<'py, PyArray3<f32>>;
     fn observation_space<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>>;
     fn state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>>;
-    fn step(&mut self, actions: Vec<usize>) -> Vec<f64>;
+    /// Advance one tick; returns this tick's per-agent events as a Python list (game-specific objects).
+    fn step<'py>(
+        &mut self,
+        py: Python<'py>,
+        actions: Vec<usize>,
+    ) -> PyResult<Vec<Bound<'py, PyAny>>>;
 }
 
 struct EnvImpl<G: Game> {
@@ -885,6 +1002,7 @@ impl<G> ErasedEnv for EnvImpl<G>
 where
     G: Game + Send + Sync + 'static,
     G::State: Send + Sync + NativeState,
+    G::Event: NativeEvent,
 {
     fn reset(&mut self) {
         self.inner.reset();
@@ -916,8 +1034,16 @@ where
     fn state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         Ok(self.inner.state().to_py(py)?.into_any())
     }
-    fn step(&mut self, actions: Vec<usize>) -> Vec<f64> {
-        self.inner.step(&actions)
+    fn step<'py>(
+        &mut self,
+        py: Python<'py>,
+        actions: Vec<usize>,
+    ) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        self.inner
+            .step(&actions)
+            .iter()
+            .map(|e| e.to_py(py))
+            .collect()
     }
 }
 
@@ -931,7 +1057,6 @@ fn build_env(game: GameSpec, seed: u64) -> Box<dyn ErasedEnv> {
             initial_food_count,
             play_to_last,
             win_food_lead,
-            reward,
         } => {
             let enc = EgocentricSnake { grid_size };
             let obs_shape = enc.obs_shape();
@@ -943,7 +1068,6 @@ fn build_env(game: GameSpec, seed: u64) -> Box<dyn ErasedEnv> {
                         play_to_last,
                         win_food_lead,
                         initial_food_count,
-                        reward,
                     },
                     Box::new(enc),
                     seed,
@@ -951,18 +1075,18 @@ fn build_env(game: GameSpec, seed: u64) -> Box<dyn ErasedEnv> {
                 obs_shape,
             })
         }
-        GameSpec::Connect4 { reward } => {
+        GameSpec::Connect4 => {
             let obs_shape = Connect4Planes.obs_shape();
             Box::new(EnvImpl {
-                inner: Env::new(Connect4 { reward }, Box::new(Connect4Planes), seed),
+                inner: Env::new(Connect4, Box::new(Connect4Planes), seed),
                 obs_shape,
             })
         }
-        GameSpec::GridWorld { size, goal, reward } => {
+        GameSpec::GridWorld { size, goal } => {
             let enc = GridWorldPlanes { size, goal };
             let obs_shape = enc.obs_shape();
             Box::new(EnvImpl {
-                inner: Env::new(GridWorld { size, goal, reward }, Box::new(enc), seed),
+                inner: Env::new(GridWorld { size, goal }, Box::new(enc), seed),
                 obs_shape,
             })
         }
@@ -1084,7 +1208,7 @@ struct GameHandle {
 #[pymethods]
 impl GameHandle {
     #[staticmethod]
-    #[pyo3(signature = (grid_size=20, initial_length=3, food=3, play_to_last=true, win_food_lead=None, reward=None))]
+    #[pyo3(signature = (grid_size=20, initial_length=3, food=3, play_to_last=true, win_food_lead=None))]
     #[pyo3(name = "Snake")]
     fn snake(
         grid_size: i32,
@@ -1092,76 +1216,36 @@ impl GameHandle {
         food: usize,
         play_to_last: bool,
         win_food_lead: Option<usize>,
-        reward: Option<Reward>,
-    ) -> PyResult<Self> {
-        let r = resolve_reward(
-            reward,
-            &[
-                ("step", 0.0),
-                ("food", 0.0),
-                ("loss", 0.0),
-                ("draw", 0.0),
-                ("kill", 0.0),
-                ("win", 0.0),
-                ("survival", 0.0),
-            ],
-        )?;
-        Ok(GameHandle {
+    ) -> Self {
+        GameHandle {
             spec: GameSpec::Snake {
                 grid_size,
                 initial_length,
                 initial_food_count: food,
                 play_to_last,
                 win_food_lead,
-                reward: SnakeReward {
-                    step: r[0],
-                    food: r[1],
-                    loss: r[2],
-                    draw: r[3],
-                    kill: r[4],
-                    win: r[5],
-                    survival: r[6],
-                },
             },
-        })
+        }
     }
 
     #[staticmethod]
-    #[pyo3(signature = (reward=None))]
     #[pyo3(name = "Connect4")]
-    fn connect4(reward: Option<Reward>) -> PyResult<Self> {
-        let r = resolve_reward(reward, &[("win", 1.0), ("loss", -1.0), ("draw", 0.0)])?;
-        Ok(GameHandle {
-            spec: GameSpec::Connect4 {
-                reward: Connect4Reward {
-                    win: r[0],
-                    loss: r[1],
-                    draw: r[2],
-                },
-            },
-        })
+    fn connect4() -> Self {
+        GameHandle {
+            spec: GameSpec::Connect4,
+        }
     }
 
     #[staticmethod]
-    #[pyo3(signature = (size=5, goal_row=4, goal_col=4, reward=None))]
+    #[pyo3(signature = (size=5, goal_row=4, goal_col=4))]
     #[pyo3(name = "GridWorld")]
-    fn gridworld(
-        size: i32,
-        goal_row: i32,
-        goal_col: i32,
-        reward: Option<Reward>,
-    ) -> PyResult<Self> {
-        let r = resolve_reward(reward, &[("step", 0.0), ("goal", 1.0)])?;
-        Ok(GameHandle {
+    fn gridworld(size: i32, goal_row: i32, goal_col: i32) -> Self {
+        GameHandle {
             spec: GameSpec::GridWorld {
                 size,
                 goal: (goal_row, goal_col),
-                reward: GridWorldReward {
-                    step: r[0],
-                    goal: r[1],
-                },
             },
-        })
+        }
     }
 
     /// The game's observation `Space` (an `rf.spaces.Box`) — its `shape` sizes the value network's

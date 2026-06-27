@@ -69,12 +69,13 @@ def treestrap_loss(q: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) ->
 
 
 def build_engine(grid: int, n_heads: int, n_games: int, seed: int) -> rf.Engine:
-    game = rf.games.Snake(grid_size=grid, reward=rf.Reward(food=1.0, loss=-10.0, win=10.0, draw=-5.0))
+    game = rf.games.Snake(grid_size=grid)
+    reward = rf.Reward(food=1.0, loss=-10.0, win=10.0, draw=-5.0)
     policy = rf.policies.SelectiveExpectimax(
         expansion_budget=32, top_k=4, max_depth=6, beta=1.0, food_samples=1, n_heads=n_heads, epsilon=0.1
     )
     learner = rf.learners.TreeStrap(gamma=0.99, outcome_weight=0.3, bootstrap_p=1.0, interior_targets=False)
-    return rf.Engine(game, policy, learner, n_games=n_games, max_ticks=200, seed=seed)
+    return rf.Engine(game, reward, policy, learner, n_games=n_games, max_ticks=200, seed=seed)
 
 
 def train_step(

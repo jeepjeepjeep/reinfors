@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use reinfors_core::game::{Actor, Game, Rng, Transition};
-use reinfors_core::StateEncoder;
+use reinfors_core::{Reward, StateEncoder};
 
 pub type Cell = (i32, i32);
 
@@ -56,9 +56,6 @@ pub struct StepEvent {
     pub won: bool,
     pub lost: bool,
     pub drew: bool,
-    /// Set by the rollout engine (never by `advance` or the search) when this is a truncation tick
-    /// the snake reached alive, so the `survival` reward fires only there — matching the runner.
-    pub survived_to_max_ticks: bool,
 }
 
 // `SnakeEnv` is gone: snake's dynamics are methods on `Snake` (which holds the config), operating on
@@ -219,8 +216,11 @@ pub struct SnakeReward {
     pub survival: f64,
 }
 
-impl SnakeReward {
-    pub fn eval(&self, e: &StepEvent) -> f64 {
+impl Reward for SnakeReward {
+    type Event = StepEvent;
+    type State = SnakeState;
+
+    fn step_reward(&self, e: &StepEvent, _agent: usize) -> f64 {
         let mut reward = self.step;
         if e.died {
             if e.lost {
@@ -243,10 +243,17 @@ impl SnakeReward {
         if e.lost {
             reward += self.loss; // lost while alive: out-eaten under win_food_lead
         }
-        if e.survived_to_max_ticks {
-            reward += self.survival;
-        }
         reward
+    }
+
+    /// The survival reward, paid to a snake still alive at a truncation tick (the engine applies it
+    /// only there). A dead snake collects nothing.
+    fn truncation_bonus(&self, state: &SnakeState, agent: usize) -> f64 {
+        if state.snakes[agent].alive {
+            self.survival
+        } else {
+            0.0
+        }
     }
 }
 
@@ -286,7 +293,6 @@ pub struct Snake {
     pub play_to_last: bool,
     pub win_food_lead: Option<usize>,
     pub initial_food_count: usize,
-    pub reward: SnakeReward,
 }
 
 impl Snake {
@@ -537,6 +543,7 @@ impl Snake {
 
 impl Game for Snake {
     type State = SnakeState;
+    type Event = StepEvent;
 
     fn num_agents(&self) -> usize {
         2
@@ -558,7 +565,7 @@ impl Game for Snake {
         }
     }
 
-    fn step(&self, state: &SnakeState, actions: &[usize]) -> Transition<SnakeState> {
+    fn step(&self, state: &SnakeState, actions: &[usize]) -> Transition<SnakeState, StepEvent> {
         // Relative action index -> absolute heading per (living) snake; `advance` coasts dead ones.
         let mut moves: [Option<Action>; 2] = [None, None];
         for (i, (slot, snake)) in moves.iter_mut().zip(state.snakes.iter()).enumerate() {
@@ -574,10 +581,9 @@ impl Game for Snake {
         let mut snakes = state.snakes.clone();
         let mut food = state.food.clone();
         let (events, done) = self.advance(&mut snakes, &mut food, moves, || None);
-        let rewards = vec![self.reward.eval(&events[0]), self.reward.eval(&events[1])];
         Transition {
             next_state: SnakeState { snakes, food },
-            rewards,
+            events: events.into(),
             terminal: done,
         }
     }
@@ -585,7 +591,7 @@ impl Game for Snake {
     fn sample_chance(
         &self,
         state: &SnakeState,
-        transition: &Transition<SnakeState>,
+        transition: &Transition<SnakeState, StepEvent>,
         rng: &mut dyn Rng,
     ) -> Option<SnakeState> {
         // An eaten apple is the only stochastic event: `step` removed it without respawning, so the
@@ -615,14 +621,6 @@ impl Game for Snake {
         }
         SnakeState { snakes, food }
     }
-
-    fn truncation_bonus(&self, state: &SnakeState, agent: usize) -> f64 {
-        if state.snakes[agent].alive {
-            self.reward.survival
-        } else {
-            0.0
-        }
-    }
 }
 
 #[cfg(test)]
@@ -650,7 +648,6 @@ mod game_tests {
             play_to_last: false,
             win_food_lead: None,
             initial_food_count: 1,
-            reward: reward(),
         }
     }
 
@@ -705,9 +702,12 @@ mod game_tests {
         let sampled = g.sample_chance(&st, &t, &mut TestRng(42));
         assert!(sampled.is_some(), "an eaten apple is a chance node");
         assert_eq!(realized.next_state, sampled.unwrap());
-        assert_eq!(realized.rewards, t.rewards);
+        assert_eq!(realized.events, t.events);
         assert_eq!(realized.terminal, t.terminal);
-        assert!((realized.rewards[0] - 1.0).abs() < 1e-12, "A ate one apple");
+        assert!(
+            (reward().step_reward(&realized.events[0], 0) - 1.0).abs() < 1e-12,
+            "A ate one apple"
+        );
         assert_eq!(
             realized.next_state.food.len(),
             1,
@@ -729,7 +729,7 @@ mod game_tests {
             // ...so the realized env step is exactly the deterministic step.
             let realized = g.step_env(&st, &actions, &mut TestRng(1));
             assert_eq!(realized.next_state, t.next_state, "actions {actions:?}");
-            assert_eq!(realized.rewards, t.rewards);
+            assert_eq!(realized.events, t.events);
             assert_eq!(realized.terminal, t.terminal);
         }
     }
@@ -853,9 +853,13 @@ mod game_tests {
         // Realized transition: same move as `step`, but the eaten apple respawns at an RNG empty cell
         // (not the first-empty belief). Reward carries the food bonus; count is restored.
         let g = game();
+        let r = reward();
         let st = initial_state(&[(4, 3)]);
         let t = g.step_env(&st, &[0, 0], &mut TestRng(1));
-        assert!((t.rewards[0] - 1.0).abs() < 1e-12, "A ate -> food reward");
+        assert!(
+            (r.step_reward(&t.events[0], 0) - 1.0).abs() < 1e-12,
+            "A ate -> food reward"
+        );
         assert!(!t.terminal);
         assert_eq!(
             t.next_state.food.len(),
@@ -865,18 +869,26 @@ mod game_tests {
         // A coast with no food/death scores the bare step reward, never the survival bonus.
         let empty = initial_state(&[]);
         let t2 = g.step_env(&empty, &[0, 0], &mut TestRng(1));
-        assert_eq!(t2.rewards, vec![0.0, 0.0]);
+        assert_eq!(
+            [
+                r.step_reward(&t2.events[0], 0),
+                r.step_reward(&t2.events[1], 1)
+            ],
+            [0.0, 0.0]
+        );
     }
 
     #[test]
     fn truncation_bonus_is_survival_for_the_living_only() {
-        let mut g = game();
-        g.reward.survival = 0.25;
+        let r = SnakeReward {
+            survival: 0.25,
+            ..reward()
+        };
         let st = initial_state(&[]);
-        assert!((g.truncation_bonus(&st, 0) - 0.25).abs() < 1e-12);
+        assert!((r.truncation_bonus(&st, 0) - 0.25).abs() < 1e-12);
         let mut dead = st.clone();
         dead.snakes[0].alive = false;
-        assert_eq!(g.truncation_bonus(&dead, 0), 0.0);
+        assert_eq!(r.truncation_bonus(&dead, 0), 0.0);
     }
 }
 
@@ -884,8 +896,8 @@ mod game_tests {
 mod env_tests {
     use super::*;
 
-    // A Snake config for driving the dynamics directly; the reward is irrelevant here (these assert
-    // events, not rewards). `advance` takes a working `(snakes, food)` and mutates it.
+    // A Snake config for driving the dynamics directly (these assert events, not rewards).
+    // `advance` takes a working `(snakes, food)` and mutates it.
     fn game(grid_size: i32, win_food_lead: Option<usize>) -> Snake {
         Snake {
             grid_size,
@@ -893,15 +905,6 @@ mod env_tests {
             play_to_last: false,
             win_food_lead,
             initial_food_count: 0,
-            reward: SnakeReward {
-                step: 0.0,
-                food: 0.0,
-                loss: 0.0,
-                draw: 0.0,
-                kill: 0.0,
-                win: 0.0,
-                survival: 0.0,
-            },
         }
     }
 
@@ -1067,15 +1070,6 @@ mod obs_tests {
             play_to_last: false,
             win_food_lead: None,
             initial_food_count: 0,
-            reward: SnakeReward {
-                step: 0.0,
-                food: 0.0,
-                loss: 0.0,
-                draw: 0.0,
-                kill: 0.0,
-                win: 0.0,
-                survival: 0.0,
-            },
         }
         .initial_snakes()
     }
@@ -1127,26 +1121,27 @@ mod reward_tests {
     }
 
     #[test]
-    fn survival_fires_only_when_survived_to_max_ticks() {
+    fn step_reward_scores_events_not_survival() {
+        // The survival bonus is paid via `truncation_bonus`, never from a step event: a nothing-happened
+        // tick scores 0, and eating scores the food bonus.
         let r = reward();
-        assert_eq!(r.eval(&StepEvent::default()), 0.0); // alive, nothing happened
-        let survived = StepEvent {
-            survived_to_max_ticks: true,
+        assert_eq!(r.step_reward(&StepEvent::default(), 0), 0.0);
+        let ate = StepEvent {
+            ate_food: true,
             ..Default::default()
         };
-        assert!((r.eval(&survived) - 0.25).abs() < 1e-12);
+        assert!((r.step_reward(&ate, 0) - 0.1).abs() < 1e-12);
     }
 
     #[test]
-    fn a_dead_snake_never_collects_survival() {
-        // The died branch returns before the survival term, mirroring MinimalReward's early return.
+    fn a_dead_snake_scores_only_its_terminal_outcome() {
+        // The died branch returns before the alive-only terms, so a lost death scores just `loss`.
         let r = reward();
         let dead = StepEvent {
             died: true,
             lost: true,
-            survived_to_max_ticks: true,
             ..Default::default()
         };
-        assert!((r.eval(&dead) - (-0.5)).abs() < 1e-12); // loss only
+        assert!((r.step_reward(&dead, 0) - (-0.5)).abs() < 1e-12); // loss only
     }
 }

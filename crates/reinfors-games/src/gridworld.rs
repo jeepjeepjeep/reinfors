@@ -3,7 +3,7 @@
 //! lookahead, no opponent) end to end through the generic search and rollout engine. Deterministic, so
 //! `sample_chance` is the default (`None`).
 
-use reinfors_core::{Actor, Game, StateEncoder, Transition};
+use reinfors_core::{Actor, Game, Reward, StateEncoder, Transition};
 
 type Pos = (i32, i32);
 
@@ -16,6 +16,12 @@ pub struct GridState {
     pub done: bool, // reached the goal
 }
 
+/// The agent's outcome on one tick: whether it reached the goal (terminal) this tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct GridEvent {
+    pub reached_goal: bool,
+}
+
 /// GridWorld's reward weights: `goal` on reaching the goal (terminal), `step` on every other tick.
 #[derive(Clone, Copy, Debug)]
 pub struct GridWorldReward {
@@ -23,13 +29,25 @@ pub struct GridWorldReward {
     pub goal: f64,
 }
 
-/// A `size x size` grid: one agent navigates to `goal`, earning `reward.goal` on arrival (terminal)
-/// and `reward.step` otherwise. The four moves are always legal; a move into a wall keeps the agent
-/// in place.
+impl Reward for GridWorldReward {
+    type Event = GridEvent;
+    type State = GridState;
+
+    fn step_reward(&self, event: &GridEvent, _agent: usize) -> f64 {
+        if event.reached_goal {
+            self.goal
+        } else {
+            self.step
+        }
+    }
+}
+
+/// A `size x size` grid: one agent navigates to `goal` (terminal on arrival). The four moves are
+/// always legal; a move into a wall keeps the agent in place. Rules only; the reward is the decoupled
+/// [`GridWorldReward`].
 pub struct GridWorld {
     pub size: i32,
     pub goal: Pos,
-    pub reward: GridWorldReward,
 }
 
 impl GridWorld {
@@ -46,6 +64,7 @@ impl GridWorld {
 
 impl Game for GridWorld {
     type State = GridState;
+    type Event = GridEvent;
 
     fn num_agents(&self) -> usize {
         1
@@ -67,16 +86,12 @@ impl Game for GridWorld {
         }
     }
 
-    fn step(&self, state: &GridState, actions: &[usize]) -> Transition<GridState> {
+    fn step(&self, state: &GridState, actions: &[usize]) -> Transition<GridState, GridEvent> {
         let pos = self.moved(state.pos, actions[0]);
         let done = pos == self.goal;
         Transition {
             next_state: GridState { pos, done },
-            rewards: vec![if done {
-                self.reward.goal
-            } else {
-                self.reward.step
-            }],
+            events: vec![GridEvent { reached_goal: done }],
             terminal: done,
         }
     }
@@ -131,10 +146,13 @@ mod tests {
         GridWorld {
             size: 5,
             goal: (0, 1),
-            reward: GridWorldReward {
-                step: 0.0,
-                goal: 1.0,
-            },
+        }
+    }
+
+    fn reward() -> GridWorldReward {
+        GridWorldReward {
+            step: 0.0,
+            goal: 1.0,
         }
     }
 
@@ -181,8 +199,8 @@ mod tests {
                 done: true
             }
         );
-        assert!(t.terminal && (t.rewards[0] - 1.0).abs() < 1e-12);
-        // Up from the top row is a wall: stay, non-terminal, step reward.
+        assert!(t.terminal && t.events[0].reached_goal);
+        // Up from the top row is a wall: stay, non-terminal, no goal reached.
         let t = w.step(
             &GridState {
                 pos: (0, 0),
@@ -191,7 +209,7 @@ mod tests {
             &[0],
         );
         assert_eq!(t.next_state.pos, (0, 0));
-        assert!(!t.terminal && t.rewards[0] == 0.0);
+        assert!(!t.terminal && !t.events[0].reached_goal);
     }
 
     #[test]
@@ -246,7 +264,16 @@ mod tests {
             pos: (0, 0),
             done: false,
         };
-        let results = search_many(&w, &enc(), &cfg(), vec![(start, 0)], false, 0, zero_infer);
+        let results = search_many(
+            &w,
+            &enc(),
+            &reward(),
+            &cfg(),
+            vec![(start, 0)],
+            false,
+            0,
+            zero_infer,
+        );
         let values = &results[0].0; // [K][A]
         for head in values {
             let best = (0..4)
@@ -274,7 +301,14 @@ mod tests {
             max_ticks: 30,
             seed: 0,
         };
-        let mut engine = Engine::new(world(), Box::new(enc()), policy, learner, params);
+        let mut engine = Engine::new(
+            world(),
+            Box::new(enc()),
+            Box::new(reward()),
+            policy,
+            learner,
+            params,
+        );
         let (records, stats) = engine.collect(50, zero_infer);
         assert!(records.len() >= 50);
         for (obs, tgt, mask) in &records {
@@ -300,7 +334,14 @@ mod tests {
             max_ticks: 10,
             seed: 0,
         };
-        let mut engine = Engine::new(world(), Box::new(enc()), policy, learner, params);
+        let mut engine = Engine::new(
+            world(),
+            Box::new(enc()),
+            Box::new(reward()),
+            policy,
+            learner,
+            params,
+        );
         let dim = N_CHANNELS * 25;
         let (records, stats) = engine.collect(120, zero_infer);
         assert!(records.len() >= 120);

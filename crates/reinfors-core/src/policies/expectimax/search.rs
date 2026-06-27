@@ -25,6 +25,7 @@ use rayon::prelude::*;
 
 use crate::encoder::StateEncoder;
 use crate::game::{Actor, Game, Rng};
+use crate::reward::Reward;
 use crate::rng::SplitMix64;
 
 /// The agent's belief about the opponent's move distribution.
@@ -162,6 +163,7 @@ fn expand_round<G: Game>(
     s: &mut Search<G::State>,
     game: &G,
     enc: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event, State = G::State>,
     cfg: &SearchConfig,
     first: bool,
 ) {
@@ -181,6 +183,7 @@ fn expand_round<G: Game>(
             &mut s.arena,
             game,
             enc,
+            reward,
             cfg,
             ni,
             agent,
@@ -225,9 +228,11 @@ where
 /// serial. This is value-neutral: every search is deterministic and reads only its own state, so the
 /// result is bit-identical to a sequential run regardless of thread count. `infer` is never called
 /// off the calling thread, so a Python `infer` callback keeps the GIL on one thread.
+#[allow(clippy::too_many_arguments)]
 pub fn search_many<G: Game + Sync, F>(
     game: &G,
     enc: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event, State = G::State>,
     cfg: &SearchConfig,
     requests: Vec<(G::State, usize)>,
     collect_interior: bool,
@@ -271,7 +276,7 @@ where
         // `active` inside is equivalent to the list above (nothing mutates between).
         for_each_search(&mut searches, parallel, |_, s| {
             if s.active(budget) {
-                expand_round(s, game, enc, cfg, first);
+                expand_round(s, game, enc, reward, cfg, first);
                 for k in 0..s.new_leaves.len() {
                     let li = s.new_leaves[k];
                     if s.arena[li].depth < cfg.max_depth {
@@ -484,6 +489,7 @@ fn push_branches<G: Game>(
     arena: &mut Vec<Node<G::State>>,
     game: &G,
     enc: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event, State = G::State>,
     cfg: &SearchConfig,
     state: &G::State,
     joint: &[usize],
@@ -496,7 +502,7 @@ fn push_branches<G: Game>(
     rng: &mut dyn Rng,
 ) {
     let t = game.step(state, joint);
-    let reward = t.rewards[agent];
+    let step_reward = reward.step_reward(&t.events[agent], agent);
     // Draw the chance children: the search owns the `food_samples` fan-out, calling `sample_chance`
     // once per Monte-Carlo draw. `None` means the transition is deterministic — and since determinism
     // is invariant across draws, the first `None` ends the fan-out, leaving a single `t.next_state`
@@ -529,7 +535,7 @@ fn push_branches<G: Game>(
             weight,
             deferred,
             scale,
-            reward,
+            reward: step_reward,
             child,
         });
     }
@@ -552,6 +558,7 @@ fn expand_node<G: Game>(
     arena: &mut Vec<Node<G::State>>,
     game: &G,
     enc: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event, State = G::State>,
     cfg: &SearchConfig,
     ni: usize,
     agent: usize,
@@ -579,6 +586,7 @@ fn expand_node<G: Game>(
                         arena,
                         game,
                         enc,
+                        reward,
                         cfg,
                         &state,
                         &joint,
@@ -606,6 +614,7 @@ fn expand_node<G: Game>(
                     arena,
                     game,
                     enc,
+                    reward,
                     cfg,
                     &state,
                     &joint,
@@ -631,6 +640,7 @@ fn expand_node<G: Game>(
                     arena,
                     game,
                     enc,
+                    reward,
                     cfg,
                     &state,
                     &joint,
@@ -822,14 +832,17 @@ mod tests {
     use super::*;
     use crate::encoder::StateEncoder;
     use crate::game::{Actor, Game, Rng, Transition};
+    use crate::reward::Reward;
     use std::cell::Cell;
 
-    // A 1-agent deterministic line walk: action 0 stays, 1 advances; reward = the action; never
-    // terminal (so the frontier is always real leaves). No chance node, so a search is seed-independent
-    // — which makes pooled-vs-solo bit-identity trivial to assert and the backup hand-computable.
+    // A 1-agent deterministic line walk: action 0 stays, 1 advances; the event is the action, and
+    // `LineReward` turns it back into reward = action. Never terminal (so the frontier is always real
+    // leaves). No chance node, so a search is seed-independent — which makes pooled-vs-solo bit-identity
+    // trivial to assert and the backup hand-computable.
     struct Line;
     impl Game for Line {
         type State = i32;
+        type Event = f64;
         fn num_agents(&self) -> usize {
             1
         }
@@ -846,16 +859,26 @@ mod tests {
                 Vec::new()
             }
         }
-        fn step(&self, pos: &i32, actions: &[usize]) -> Transition<i32> {
+        fn step(&self, pos: &i32, actions: &[usize]) -> Transition<i32, f64> {
             let a = actions[0] as i32;
             Transition {
                 next_state: pos + a,
-                rewards: vec![a as f64],
+                events: vec![a as f64],
                 terminal: false,
             }
         }
         fn initial_state(&self, _: &mut dyn Rng) -> i32 {
             0
+        }
+    }
+
+    // Reward = the event (the action), so the search backs up reward = action as before.
+    struct LineReward;
+    impl Reward for LineReward {
+        type Event = f64;
+        type State = i32;
+        fn step_reward(&self, event: &f64, _agent: usize) -> f64 {
+            *event
         }
     }
 
@@ -910,6 +933,7 @@ mod tests {
         let pooled = search_many(
             &Line,
             &LineEnc,
+            &LineReward,
             &cfg(8),
             states.iter().map(|&s| (s, 0)).collect(),
             false,
@@ -923,6 +947,7 @@ mod tests {
             let solo = search_many(
                 &Line,
                 &LineEnc,
+                &LineReward,
                 &cfg(8),
                 vec![(s, 0)],
                 false,
@@ -965,7 +990,16 @@ mod tests {
             }
             out
         };
-        let results = search_many(&Line, &LineEnc, &cfg(1), vec![(0, 0)], false, 0, infer);
+        let results = search_many(
+            &Line,
+            &LineEnc,
+            &LineReward,
+            &cfg(1),
+            vec![(0, 0)],
+            false,
+            0,
+            infer,
+        );
         let values = &results[0].0; // [K=1][A=2]
         assert_eq!(values.len(), 1);
         assert!((values[0][0] - 0.9).abs() < 1e-9, "{values:?}");

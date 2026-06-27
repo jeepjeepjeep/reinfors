@@ -19,18 +19,23 @@ pub enum Actor {
     Chance,
 }
 
-/// One transition's deterministic outcome: the resulting state, the per-agent reward vector, and
-/// whether the game ended.
-pub struct Transition<S> {
+/// One transition's deterministic outcome: the resulting state, the per-agent `Event` (what happened
+/// to each agent — a [`Reward`](crate::Reward) maps these to scalars), and whether the game ended.
+pub struct Transition<S, E> {
     pub next_state: S,
-    pub rewards: Vec<f64>,
+    pub events: Vec<E>,
     pub terminal: bool,
 }
 
 /// A finite-action, perfect-information game. Single-agent, sequential or simultaneous multi-agent,
-/// and N-player general-sum are all expressible via `actor` + the per-agent reward vector.
+/// and N-player general-sum are all expressible via `actor` + the per-agent `Event`. The game owns
+/// only dynamics + outcomes; turning an `Event` into a scalar reward is the [`Reward`](crate::Reward)'s
+/// job, decoupled like the encoder.
 pub trait Game {
     type State: Clone;
+
+    /// The per-agent outcome of a tick (e.g. snake's `StepEvent`), consumed by a `Reward`.
+    type Event;
 
     fn num_agents(&self) -> usize;
 
@@ -46,7 +51,7 @@ pub trait Game {
 
     fn legal_actions(&self, state: &Self::State, agent: usize) -> Vec<usize>;
 
-    fn step(&self, state: &Self::State, actions: &[usize]) -> Transition<Self::State>;
+    fn step(&self, state: &Self::State, actions: &[usize]) -> Transition<Self::State, Self::Event>;
 
     /// Draw one realization of the transition's environment chance. `None` means the transition is
     /// deterministic (no chance node), so callers use `transition.next_state` directly. Determinism is
@@ -56,7 +61,7 @@ pub trait Game {
     fn sample_chance(
         &self,
         state: &Self::State,
-        transition: &Transition<Self::State>,
+        transition: &Transition<Self::State, Self::Event>,
         rng: &mut dyn Rng,
     ) -> Option<Self::State> {
         let _ = (state, transition, rng);
@@ -70,18 +75,13 @@ pub trait Game {
         state: &Self::State,
         actions: &[usize],
         rng: &mut dyn Rng,
-    ) -> Transition<Self::State> {
+    ) -> Transition<Self::State, Self::Event> {
         let t = self.step(state, actions);
         let next_state = self.sample_chance(state, &t, rng).unwrap_or(t.next_state);
         Transition {
             next_state,
-            rewards: t.rewards,
+            events: t.events,
             terminal: t.terminal,
         }
-    }
-
-    fn truncation_bonus(&self, state: &Self::State, agent: usize) -> f64 {
-        let _ = (state, agent);
-        0.0
     }
 }

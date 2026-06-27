@@ -94,8 +94,12 @@ fn game(search: &SearchParams, initial_food_count: usize) -> Snake {
         play_to_last: search.play_to_last,
         win_food_lead: search.win_food_lead,
         initial_food_count,
-        reward: search.reward,
     }
+}
+
+/// The decoupled reward handle (the engine + search apply it; the game no longer carries it).
+fn reward(search: &SearchParams) -> Box<SnakeReward> {
+    Box::new(search.reward)
 }
 
 /// Build an engine with the default test config (3 initial apples, TreeStrap with outcome_weight
@@ -109,6 +113,7 @@ fn engine(
     Engine::new(
         game(&s, 3),
         enc(&s),
+        reward(&s),
         policy(&s, n_heads),
         learner(0.5, true),
         params(n_games, seed),
@@ -171,6 +176,7 @@ fn games_carry_food_so_snakes_can_eat() {
     let mut e = Engine::new(
         game(&s, 3),
         enc(&s),
+        reward(&s),
         policy(&s, 2),
         learner(0.5, false),
         params(8, 3),
@@ -187,9 +193,16 @@ fn bootstrap_p_extremes_set_all_or_no_heads() {
     let s = search();
     // bootstrap_p now lives on the learner. n_heads (2) matches `infer`'s 2 heads.
     let all = TreeStrap::new(0.99, 0.5, 1.0, true);
-    for (_, _, mask) in Engine::new(game(&s, 3), enc(&s), policy(&s, 2), all, params(4, 5))
-        .collect(40, infer)
-        .0
+    for (_, _, mask) in Engine::new(
+        game(&s, 3),
+        enc(&s),
+        reward(&s),
+        policy(&s, 2),
+        all,
+        params(4, 5),
+    )
+    .collect(40, infer)
+    .0
     {
         assert!(
             mask.iter().all(|&m| m == 1.0),
@@ -197,9 +210,16 @@ fn bootstrap_p_extremes_set_all_or_no_heads() {
         );
     }
     let none = TreeStrap::new(0.99, 0.5, 0.0, true);
-    for (_, _, mask) in Engine::new(game(&s, 3), enc(&s), policy(&s, 2), none, params(4, 5))
-        .collect(40, infer)
-        .0
+    for (_, _, mask) in Engine::new(
+        game(&s, 3),
+        enc(&s),
+        reward(&s),
+        policy(&s, 2),
+        none,
+        params(4, 5),
+    )
+    .collect(40, infer)
+    .0
     {
         assert!(mask.iter().all(|&m| m == 0.0), "p=0 must include no head");
     }
@@ -214,6 +234,7 @@ fn zero_outcome_weight_leaves_targets_unblended() {
     let r0 = Engine::new(
         game(&s, 3),
         enc(&s),
+        reward(&s),
         policy(&s, 2),
         learner(0.0, false),
         params(4, 9),
@@ -223,6 +244,7 @@ fn zero_outcome_weight_leaves_targets_unblended() {
     let r1 = Engine::new(
         game(&s, 3),
         enc(&s),
+        reward(&s),
         policy(&s, 2),
         learner(0.9, false),
         params(4, 9),
@@ -249,7 +271,14 @@ fn survival_bonus_propagates_through_z_mixing_on_truncation() {
         s.reward.survival = survival;
         let mut p = params(4, 0);
         p.max_ticks = 1;
-        Engine::new(game(&s, 0), enc(&s), policy(&s, 2), learner(1.0, false), p)
+        Engine::new(
+            game(&s, 0),
+            enc(&s),
+            reward(&s),
+            policy(&s, 2),
+            learner(1.0, false),
+            p,
+        )
         // no initial food; ow=1, interior off
     };
     let base = mk(0.0).collect(4, infer).0;
@@ -280,7 +309,14 @@ fn collect_reports_episode_and_search_telemetry() {
     let s = search();
     let p = params(4, 11);
     let max_ticks = p.max_ticks;
-    let mut e = Engine::new(game(&s, 3), enc(&s), policy(&s, 2), learner(0.5, false), p);
+    let mut e = Engine::new(
+        game(&s, 3),
+        enc(&s),
+        reward(&s),
+        policy(&s, 2),
+        learner(0.5, false),
+        p,
+    );
     let mut episodes = 0usize;
     let (mut decisions, mut max_depth, mut leaves, mut sigma, mut disagree) =
         (0usize, 0i32, 0.0, 0.0, 0.0);
@@ -346,8 +382,15 @@ fn collected_targets_equal_a_direct_search() {
     let s = search();
     let mut p = params(1, 0);
     p.max_ticks = 1; // truncate after one decision per agent
-    let (records, _) =
-        Engine::new(game(&s, 0), enc(&s), policy(&s, 2), learner(0.0, false), p).collect(2, infer);
+    let (records, _) = Engine::new(
+        game(&s, 0),
+        enc(&s),
+        reward(&s),
+        policy(&s, 2),
+        learner(0.0, false),
+        p,
+    )
+    .collect(2, infer);
 
     // The engine's deterministic food-free initial state (placement, no food) — same as episode 0's.
     let state = game(&s, 0).initial_state(&mut NoRng);
@@ -356,6 +399,7 @@ fn collected_targets_equal_a_direct_search() {
         &EgocentricSnake {
             grid_size: s.grid_size,
         },
+        &s.reward,
         &config(&s),
         vec![(state.clone(), 0), (state, 1)],
         false,

@@ -5,7 +5,7 @@
 //! (`None`). Action legality is fixed — all 7 columns are always selectable; a move into a full column
 //! is an immediate loss for the mover — so the framework needs no action masking here.
 
-use reinfors_core::{Actor, Game, Rng, StateEncoder, Transition};
+use reinfors_core::{Actor, Game, Reward, Rng, StateEncoder, Transition};
 
 const COLS: usize = 7;
 const ROWS: usize = 6;
@@ -37,6 +37,16 @@ impl Connect4State {
     }
 }
 
+/// A player's outcome on one tick: nothing yet (game ongoing), or the terminal result from its view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Connect4Event {
+    #[default]
+    Ongoing,
+    Win,
+    Loss,
+    Draw,
+}
+
 /// Connect-4's terminal reward weights (zero-sum: the loser gets `loss`, the winner `win`).
 #[derive(Clone, Copy, Debug)]
 pub struct Connect4Reward {
@@ -55,11 +65,24 @@ impl Default for Connect4Reward {
     }
 }
 
-/// Standard 7x6 Connect-4 with zero-sum terminal rewards.
-#[derive(Default)]
-pub struct Connect4 {
-    pub reward: Connect4Reward,
+impl Reward for Connect4Reward {
+    type Event = Connect4Event;
+    type State = Connect4State;
+
+    fn step_reward(&self, event: &Connect4Event, _agent: usize) -> f64 {
+        match event {
+            Connect4Event::Ongoing => 0.0,
+            Connect4Event::Win => self.win,
+            Connect4Event::Loss => self.loss,
+            Connect4Event::Draw => self.draw,
+        }
+    }
 }
+
+/// Standard 7x6 Connect-4. Rules only; the reward (zero-sum win/loss/draw) is the decoupled
+/// [`Connect4Reward`].
+#[derive(Default)]
+pub struct Connect4;
 
 impl Connect4 {
     fn at(cells: &[u8], r: usize, c: usize) -> u8 {
@@ -96,25 +119,26 @@ impl Connect4 {
         false
     }
 
-    /// Per-agent terminal reward vector for a win by `winner`, or a draw.
-    fn outcome_rewards(&self, winner: Option<usize>) -> Vec<f64> {
+    /// Per-agent terminal event vector for a win by `winner`, or a draw.
+    fn outcome_events(winner: Option<usize>) -> Vec<Connect4Event> {
         match winner {
             Some(w) => (0..2)
                 .map(|a| {
                     if a == w {
-                        self.reward.win
+                        Connect4Event::Win
                     } else {
-                        self.reward.loss
+                        Connect4Event::Loss
                     }
                 })
                 .collect(),
-            None => vec![self.reward.draw; 2],
+            None => vec![Connect4Event::Draw; 2],
         }
     }
 }
 
 impl Game for Connect4 {
     type State = Connect4State;
+    type Event = Connect4Event;
 
     fn num_agents(&self) -> usize {
         2
@@ -137,7 +161,11 @@ impl Game for Connect4 {
         }
     }
 
-    fn step(&self, state: &Connect4State, actions: &[usize]) -> Transition<Connect4State> {
+    fn step(
+        &self,
+        state: &Connect4State,
+        actions: &[usize],
+    ) -> Transition<Connect4State, Connect4Event> {
         let mover = state.turn;
         let col = actions[mover];
         let mut cells = state.cells;
@@ -154,10 +182,10 @@ impl Game for Connect4 {
                 }
             }
         };
-        let rewards = if terminal {
-            self.outcome_rewards(winner)
+        let events = if terminal {
+            Self::outcome_events(winner)
         } else {
-            vec![0.0; 2]
+            vec![Connect4Event::Ongoing; 2]
         };
         Transition {
             next_state: Connect4State {
@@ -165,7 +193,7 @@ impl Game for Connect4 {
                 turn: next_turn,
                 done: terminal,
             },
-            rewards,
+            events,
             terminal,
         }
     }
@@ -236,7 +264,7 @@ mod tests {
 
     #[test]
     fn drop_win_full_column_and_turn_flip() {
-        let g = Connect4::default();
+        let g = Connect4;
         let empty = Connect4State {
             cells: [0; 42],
             turn: 0,
@@ -246,7 +274,7 @@ mod tests {
         let t = g.step(&empty, &[0]);
         assert_eq!(t.next_state.cells[0], 1); // player 0 at (0,0)
         assert_eq!(t.next_state.turn, 1);
-        assert!(!t.terminal && t.rewards == vec![0.0, 0.0]);
+        assert!(!t.terminal && t.events == vec![Connect4Event::Ongoing; 2]);
         // Completing four-in-a-row wins (player 0 has 3 across the bottom; col 3 finishes it).
         let mut cells = [0u8; 42];
         for c in 0..3 {
@@ -260,7 +288,7 @@ mod tests {
             },
             &[3],
         );
-        assert!(t.terminal && t.rewards == vec![1.0, -1.0]);
+        assert!(t.terminal && t.events == vec![Connect4Event::Win, Connect4Event::Loss]);
         // A move into a full column loses immediately.
         let mut full = [0u8; 42];
         for r in 0..ROWS {
@@ -274,12 +302,12 @@ mod tests {
             },
             &[0],
         );
-        assert!(t.terminal && t.rewards == vec![-1.0, 1.0]);
+        assert!(t.terminal && t.events == vec![Connect4Event::Loss, Connect4Event::Win]);
     }
 
     #[test]
     fn sequential_metadata_and_legality() {
-        let g = Connect4::default();
+        let g = Connect4;
         let s = Connect4State {
             cells: [0; 42],
             turn: 1,
@@ -297,7 +325,7 @@ mod tests {
         // Player 0 to move with three across the bottom (cols 0-2) and player 1 elsewhere: dropping in
         // column 3 wins immediately, so it must be the best root action with value = the win reward.
         // This drives the sequential MAX-vs-opponent-chance search.
-        let g = Connect4::default();
+        let g = Connect4;
         let mut cells = [0u8; 42];
         for c in 0..3 {
             at(&mut cells, 0, c, 1); // player 0
@@ -313,6 +341,7 @@ mod tests {
         let results = search_many(
             &g,
             &Connect4Planes,
+            &Connect4Reward::default(),
             &cfg(),
             vec![(state, 0)],
             false,
@@ -345,8 +374,9 @@ mod tests {
             seed: 0,
         };
         let mut engine = Engine::new(
-            Connect4::default(),
+            Connect4,
             Box::new(Connect4Planes),
+            Box::new(Connect4Reward::default()),
             policy,
             learner,
             params,
