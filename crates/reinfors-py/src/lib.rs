@@ -20,8 +20,7 @@ use pyo3::types::{PyDict, PyTuple};
 
 use reinfors_core::{
     Dqn, DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game, Learner, Opponent, Policy,
-    Reward as RewardTrait, SearchConfig, SelectiveExpectimax, Space, StateEncoder, TreeStrap,
-    TreeStrapRecord,
+    Reward, SearchConfig, SelectiveExpectimax, Space, StateEncoder, TreeStrap, TreeStrapRecord,
 };
 use reinfors_games::snake::{Cell, DeathCause};
 use reinfors_games::{
@@ -158,7 +157,7 @@ impl PyEngine {
     #[pyo3(signature = (game, reward, policy, learner, n_games, max_ticks, seed=0))]
     fn new(
         game: GameHandle,
-        reward: Option<Reward>,
+        reward: Option<PyReward>,
         policy: PolicyHandle,
         learner: LearnerHandle,
         n_games: usize,
@@ -546,7 +545,7 @@ impl GameSpec {
 /// Resolve the generic `rf.Reward` weights against the game's schema into the concrete reward struct,
 /// boxed as the `dyn Reward` handle the engine threads. One arm per game (the reward keys + defaults
 /// are the game's). Used at `Engine` construction, where both game and reward are known.
-fn build_reward(game: &GameSpec, reward: Option<Reward>) -> PyResult<RewardBox> {
+fn build_reward(game: &GameSpec, reward: Option<PyReward>) -> PyResult<RewardBox> {
     Ok(match game {
         GameSpec::Snake { .. } => {
             let r = resolve_reward(
@@ -648,7 +647,7 @@ fn check_unit(name: &str, v: f64) -> PyResult<()> {
 fn build_for_game<G: Game + Send + Sync + 'static>(
     game: G,
     enc: Box<dyn StateEncoder<State = G::State>>,
-    reward: Box<dyn RewardTrait<Event = G::Event, State = G::State>>,
+    reward: Box<dyn Reward<Event = G::Event, State = G::State>>,
     policy: PolicySpec,
     learner: LearnerSpec,
     engine_params: EngineParams,
@@ -728,7 +727,7 @@ where
 /// game; each instantly works with every family.
 fn build_engine(
     game: GameSpec,
-    reward: Option<Reward>,
+    reward: Option<PyReward>,
     policy: PolicySpec,
     learner: LearnerSpec,
     engine_params: EngineParams,
@@ -1104,18 +1103,20 @@ fn build_env(game: GameSpec, seed: u64) -> Box<dyn ErasedEnv> {
 /// `rf.Reward` — a generic named-weight reward: a `{component: weight}` map that a game interprets.
 /// Each game declares the components it understands; an unrecognized key is an error (see
 /// `resolve_reward`), so `rf.Reward(food=1.0)` for a non-snake game is rejected rather than ignored.
-#[pyclass]
+/// Named `PyReward` (exposed to Python as `Reward`) so the Rust name doesn't clash with the core
+/// `reinfors_core::Reward` trait — same `Py*` convention as `PyEngine` / `PyEnv` / `PyBox`.
+#[pyclass(name = "Reward")]
 #[derive(Clone, Default)]
-struct Reward {
+struct PyReward {
     weights: HashMap<String, f64>,
 }
 
 #[pymethods]
-impl Reward {
+impl PyReward {
     #[new]
     #[pyo3(signature = (**weights))]
     fn new(weights: Option<HashMap<String, f64>>) -> Self {
-        Reward {
+        PyReward {
             weights: weights.unwrap_or_default(),
         }
     }
@@ -1125,7 +1126,7 @@ impl Reward {
 /// caller passed must be one of the schema's components (any unknown key is an error listing the valid
 /// set), and each component reads its weight, falling back to its schema default. Returns the resolved
 /// weights in schema order.
-fn resolve_reward(reward: Option<Reward>, schema: &[(&str, f64)]) -> PyResult<Vec<f64>> {
+fn resolve_reward(reward: Option<PyReward>, schema: &[(&str, f64)]) -> PyResult<Vec<f64>> {
     let weights = reward.map(|r| r.weights).unwrap_or_default();
     if let Some(bad) = weights.keys().find(|k| !schema.iter().any(|(s, _)| s == k)) {
         let valid: Vec<&str> = schema.iter().map(|(s, _)| *s).collect();
@@ -1360,7 +1361,7 @@ fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<GameHandle>()?;
     m.add_class::<PolicyHandle>()?;
     m.add_class::<LearnerHandle>()?;
-    m.add_class::<Reward>()?;
+    m.add_class::<PyReward>()?;
     m.add_class::<TreeStrapBatch>()?;
     m.add_class::<DqnBatch>()?;
     m.add_class::<PyBox>()?;
