@@ -254,8 +254,8 @@ impl Reward for SnakeReward {
 
 // ========= The `Snake` Game adapter + `EgocentricSnake` encoder =========
 
-/// Snake's dynamic state: the two snakes and the food. Static config (grid size, rules, reward) lives
-/// on `Snake`, so the search/engine can carry just this around per node.
+/// Snake's dynamic state: the two snakes and the food. Static config (grid size, rules) lives on
+/// `Snake` and the reward on the decoupled `SnakeReward`, so the search/engine carry just this per node.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SnakeState {
     pub snakes: [SnakeBody; 2],

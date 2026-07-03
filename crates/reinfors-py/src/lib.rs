@@ -981,6 +981,9 @@ impl NativeEvent for StepEvent {
             DeathCause::HeadOn => "head_on",
         });
         d.set_item("death_cause", cause)?;
+        // `survived_to_max_ticks` is intentionally omitted: it is a rollout-only flag (set by the
+        // Engine's `mark_truncation`), never by `Env`, which has no truncation horizon — so it is always
+        // false here.
         Ok(d.into_any())
     }
 }

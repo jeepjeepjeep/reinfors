@@ -14,9 +14,9 @@
 //! its own RNG environment chance: games start from the same deterministic
 //! placement, so without this they would be identical. `step_env`/`initial_state` draw the true env
 //! chance from each game's own RNG — the same `sample_chance` the search Monte-Carlos in-tree (from its
-//! own seeded stream), so env and search share one chance model; see `search`. A truncation tick
-//! reached alive pays the game's `truncation_bonus`, which the `Learner`'s z-mix
-//! carries back to earlier steps.
+//! own seeded stream), so env and search share one chance model; see `search`. When a game hits its
+//! `truncation_horizon`, the engine has it `mark_truncation` the tick's events (e.g. snake's survival
+//! flag) so the `Reward` scores the bonus, which the `Learner`'s z-mix carries back to earlier steps.
 
 use std::collections::HashMap;
 

@@ -77,9 +77,10 @@ n_actions = game.action_space().n           # 7
 # size your own torch/JAX net from (obs_shape, n_actions) — reinfors ships no model
 engine = rf.Engine(
     game,
+    rf.Reward(win=1.0, loss=-1.0),          # reward is decoupled from the game
     rf.make_policy("selective_expectimax", n_heads=4),
     rf.make_learner("treestrap"),
-    n_games=16, max_ticks=200,
+    n_games=16,                             # unbounded games take a max_ticks= on the game handle
 )
 obs, targets, masks, telemetry = engine.collect(2048, infer)  # `infer`: (N, C*H*W) f32 -> (N, K, A) f64
 ```
