@@ -136,6 +136,17 @@ def test_game_handles_advertise_spaces() -> None:
     assert rf.games.GridWorld(size=5).action_space().n == 4
 
 
+def test_loop_prone_games_default_to_a_finite_truncation_horizon() -> None:
+    # A game that can loop forever (snake circling, gridworld never reaching the goal) MUST default to a
+    # finite horizon, else Engine.collect would spin on a non-terminating episode. Connect-4 always ends
+    # on its own, so it truncates never. `max_ticks=None` is the explicit opt-in to "never truncate".
+    assert rf.games.Snake().truncation_horizon() == 1000
+    assert rf.games.GridWorld().truncation_horizon() == 1000
+    assert rf.games.Connect4().truncation_horizon() is None
+    assert rf.games.Snake(max_ticks=None).truncation_horizon() is None  # explicit opt-out
+    assert rf.games.Snake(max_ticks=250).truncation_horizon() == 250
+
+
 def test_make_constructs_and_rejects_unknown() -> None:
     # The name-addressable path builds the same handles the typed constructors do.
     engine = rf.Engine(

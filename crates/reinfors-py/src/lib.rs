@@ -1258,7 +1258,10 @@ struct GameHandle {
 #[pymethods]
 impl GameHandle {
     #[staticmethod]
-    #[pyo3(signature = (grid_size=20, initial_length=3, food=3, play_to_last=true, win_food_lead=None, max_ticks=None))]
+    // Snake can loop forever (circling without eating/dying), so `max_ticks` defaults to a finite cap:
+    // it keeps `Engine.collect` from spinning on a non-terminating episode. Pass `max_ticks=None` to
+    // explicitly opt into never truncating.
+    #[pyo3(signature = (grid_size=20, initial_length=3, food=3, play_to_last=true, win_food_lead=None, max_ticks=1000))]
     #[pyo3(name = "Snake")]
     fn snake(
         grid_size: i32,
@@ -1290,7 +1293,9 @@ impl GameHandle {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (size=5, goal_row=4, goal_col=4, max_ticks=None))]
+    // GridWorld can wander forever without reaching the goal, so `max_ticks` defaults to a finite cap
+    // (pass `max_ticks=None` to opt into never truncating).
+    #[pyo3(signature = (size=5, goal_row=4, goal_col=4, max_ticks=1000))]
     #[pyo3(name = "GridWorld")]
     fn gridworld(
         size: i32,
@@ -1317,6 +1322,16 @@ impl GameHandle {
     /// The game's action `Space` (an `rf.spaces.Discrete`) — its `n` sizes the network's output head.
     fn action_space<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         space_to_py(py, self.spec.spaces().1)
+    }
+
+    /// The episode-length cap after which the rollout truncates a still-running game, or `None` for a
+    /// game that always ends on its own (Connect-4). Loop-prone games (snake, gridworld) default to a
+    /// finite cap so `Engine.collect` can't spin on a non-terminating episode.
+    fn truncation_horizon(&self) -> Option<usize> {
+        match self.spec {
+            GameSpec::Snake { max_ticks, .. } | GameSpec::GridWorld { max_ticks, .. } => max_ticks,
+            GameSpec::Connect4 => None,
+        }
     }
 }
 
