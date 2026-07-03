@@ -5,6 +5,7 @@
 use crate::encoder::StateEncoder;
 use crate::engine::CollectStats;
 use crate::game::{Game, Rng};
+use crate::reward::Reward;
 
 /// How an algorithm evaluates states and acts.
 pub trait Policy {
@@ -15,11 +16,14 @@ pub trait Policy {
     fn begin_episode(&self, rng: &mut dyn Rng) -> Self::PolicyState;
 
     /// Pooled evaluation of a batch of active `(state, agent)` requests with the live net (`infer`):
-    /// one batched forward per round, shared across games.
+    /// one batched forward per round, shared across games. `reward` lets a searching policy value the
+    /// in-tree immediate rewards (the engine's per-step reward source); non-search policies ignore it.
+    #[allow(clippy::too_many_arguments)]
     fn evaluate<G, F>(
         &self,
         game: &G,
         enc: &dyn StateEncoder<State = G::State>,
+        reward: &dyn Reward<Event = G::Event>,
         requests: Vec<(G::State, usize)>,
         seed: u64,
         collect_interior: bool,

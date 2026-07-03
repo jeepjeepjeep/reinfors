@@ -11,12 +11,12 @@ def test_connect4_played_to_a_win() -> None:
     # P0 stacks column 0, P1 column 1; P0 completes four-in-a-column first. Moves alternate, matching
     # the turn order `active_agents` reports.
     moves = [(0, 0), (1, 1), (0, 0), (1, 1), (0, 0), (1, 1), (0, 0)]
-    last: list[float] = []
+    last: list = []
     for agent, col in moves:
         assert env.active_agents() == [agent]  # sequential: one mover per tick
-        last = env.step({agent: col})
+        last = env.step({agent: col})  # per-agent events (Env holds no reward)
     assert env.done()
-    assert last[0] > 0 and last[1] < 0  # zero-sum: P0 wins
+    assert last == ["win", "loss"]  # the terminal events carry the outcome: P0 wins
     assert env.active_agents() == []
 
 
@@ -43,8 +43,8 @@ def test_snake_steps_both_agents_simultaneously() -> None:
     assert env.observation_space().shape == (5, 8, 8)  # net sizable from the env alone
     obs = env.observe(0)
     assert obs.shape == (5, 8, 8) and obs.dtype == np.float32
-    rewards = env.step({0: 1, 1: 1})  # both move forward
-    assert len(rewards) == 2
+    events = env.step({0: 1, 1: 1})  # both move forward; per-agent event dicts
+    assert len(events) == 2 and all("died" in e for e in events)
 
 
 def test_step_rejects_wrong_or_missing_agents() -> None:

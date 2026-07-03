@@ -69,6 +69,8 @@ impl Learner<QEvaluation> for Dqn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::Engine;
+    use crate::game::{Actor, Game, Transition};
     use crate::policies::epsilon_greedy_q::EpsilonGreedyQ;
     use crate::rng::SplitMix64;
 
@@ -125,27 +127,28 @@ mod tests {
     }
 
     // Compile-only: a DQN policy + learner share QEvaluation, so they satisfy the engine coupling.
-    fn _assert_seam_composes() -> Option<crate::engine::Engine<DummyGame, EpsilonGreedyQ, Dqn>> {
+    fn _assert_seam_composes() -> Option<Engine<DummyGame, EpsilonGreedyQ, Dqn>> {
         None
     }
 
     #[allow(dead_code)] // used only as a type parameter in the compile-only assertion above
     struct DummyGame;
-    impl crate::game::Game for DummyGame {
+    impl Game for DummyGame {
         type State = ();
+        type Event = ();
         fn num_agents(&self) -> usize {
             1
         }
         fn action_count(&self) -> usize {
             2
         }
-        fn actor(&self, _: &()) -> crate::game::Actor {
-            crate::game::Actor::Agent(0)
+        fn actor(&self, _: &()) -> Actor {
+            Actor::Agent(0)
         }
         fn legal_actions(&self, _: &(), _: usize) -> Vec<usize> {
             vec![0, 1]
         }
-        fn step(&self, _: &(), _: &[usize]) -> crate::game::Transition<()> {
+        fn step(&self, _: &(), _: &[usize]) -> Transition<(), ()> {
             unimplemented!()
         }
         fn initial_state(&self, _: &mut dyn Rng) {}

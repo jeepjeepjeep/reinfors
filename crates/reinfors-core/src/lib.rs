@@ -12,6 +12,7 @@ pub mod learner;
 pub mod learners;
 pub mod policies;
 pub mod policy;
+pub mod reward;
 pub(crate) mod rng;
 pub mod space;
 
@@ -28,6 +29,7 @@ pub use policies::expectimax::search::{
 };
 pub use policies::expectimax::{SearchEvaluation, SelectiveExpectimax};
 pub use policy::Policy;
+pub use reward::Reward;
 pub use space::Space;
 
 pub fn version() -> &'static str {

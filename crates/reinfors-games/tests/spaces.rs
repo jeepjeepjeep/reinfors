@@ -3,8 +3,7 @@
 
 use reinfors_core::{Game, Space, StateEncoder};
 use reinfors_games::{
-    Connect4, Connect4Planes, EgocentricSnake, GridWorld, GridWorldPlanes, GridWorldReward, Snake,
-    SnakeReward,
+    Connect4, Connect4Planes, EgocentricSnake, GridWorld, GridWorldPlanes, Snake,
 };
 
 fn unbounded(shape: Vec<usize>) -> Space {
@@ -23,15 +22,7 @@ fn snake_advertises_egocentric_box_and_three_actions() {
         play_to_last: false,
         win_food_lead: None,
         initial_food_count: 3,
-        reward: SnakeReward {
-            step: 0.0,
-            food: 0.0,
-            loss: 0.0,
-            draw: 0.0,
-            kill: 0.0,
-            win: 0.0,
-            survival: 0.0,
-        },
+        max_ticks: None,
     };
     assert_eq!(
         EgocentricSnake { grid_size: 12 }.observation_space(),
@@ -42,7 +33,7 @@ fn snake_advertises_egocentric_box_and_three_actions() {
 
 #[test]
 fn connect4_advertises_two_plane_box_and_seven_columns() {
-    let game = Connect4::default();
+    let game = Connect4;
     assert_eq!(Connect4Planes.observation_space(), unbounded(vec![2, 6, 7]));
     assert_eq!(game.action_space(), Space::Discrete { n: 7 });
 }
@@ -52,10 +43,7 @@ fn gridworld_advertises_size_scaled_box_and_four_moves() {
     let game = GridWorld {
         size: 5,
         goal: (4, 4),
-        reward: GridWorldReward {
-            step: 0.0,
-            goal: 1.0,
-        },
+        max_ticks: None,
     };
     assert_eq!(
         GridWorldPlanes {

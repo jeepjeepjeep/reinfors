@@ -33,19 +33,22 @@ class GameHandle:
         food: int = ...,
         play_to_last: bool = ...,
         win_food_lead: int | None = ...,
-        reward: Reward | None = ...,
+        max_ticks: int | None = ...,
     ) -> GameHandle: ...
     @staticmethod
-    def Connect4(reward: Reward | None = ...) -> GameHandle: ...
+    def Connect4() -> GameHandle: ...
     @staticmethod
     def GridWorld(
         size: int = ...,
         goal_row: int = ...,
         goal_col: int = ...,
-        reward: Reward | None = ...,
+        max_ticks: int | None = ...,
     ) -> GameHandle: ...
     def observation_space(self) -> Box: ...
     def action_space(self) -> Discrete: ...
+    # The truncation horizon (episode cap); None = never truncate (only for games that always end,
+    # like Connect-4). Loop-prone games default to a finite cap.
+    def truncation_horizon(self) -> int | None: ...
 
 class PolicyHandle:
     @staticmethod
@@ -104,10 +107,10 @@ class Engine:
     def __init__(
         self,
         game: GameHandle,
+        reward: Reward | None,
         policy: PolicyHandle,
         learner: LearnerHandle,
         n_games: int,
-        max_ticks: int,
         seed: int = ...,
     ) -> None: ...
     # The batch is learner-shaped: the TreeStrap family yields a `TreeStrapBatch`, the DQN family a
@@ -127,4 +130,6 @@ class Env:
     def observe(self, agent: int) -> NDArray[np.float32]: ...
     def observation_space(self) -> Box: ...
     def state(self) -> dict[str, Any]: ...
-    def step(self, actions: dict[int, int]) -> list[float]: ...
+    # Per-agent events (game-specific: snake → dict, connect4 → str, gridworld → dict). The Env holds
+    # no reward; a game-aware caller reads the outcome from these.
+    def step(self, actions: dict[int, int]) -> list[Any]: ...

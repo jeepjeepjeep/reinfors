@@ -43,34 +43,35 @@ def _treestrap() -> object:
 
 
 def _connect4_engine() -> object:
+    # Connect-4 is bounded (it always terminates), so it needs no truncation horizon.
     return rf.Engine(
-        rf.games.Connect4(reward=rf.Reward(win=1.0, loss=-1.0, draw=0.0)),
+        rf.games.Connect4(),
+        rf.Reward(win=1.0, loss=-1.0, draw=0.0),
         _selective(),
         _treestrap(),
         n_games=2,
-        max_ticks=30,
         seed=0,
     )
 
 
 def _gridworld_engine() -> object:
     return rf.Engine(
-        rf.games.GridWorld(size=5, goal_row=0, goal_col=1, reward=rf.Reward(step=0.0, goal=1.0)),
+        rf.games.GridWorld(size=5, goal_row=0, goal_col=1, max_ticks=30),
+        rf.Reward(step=0.0, goal=1.0),
         _selective(),
         _treestrap(),
         n_games=2,
-        max_ticks=30,
         seed=0,
     )
 
 
 def _dqn_engine() -> object:
     return rf.Engine(
-        rf.games.GridWorld(size=5, goal_row=0, goal_col=1, reward=rf.Reward(step=0.0, goal=1.0)),
+        rf.games.GridWorld(size=5, goal_row=0, goal_col=1, max_ticks=10),
+        rf.Reward(step=0.0, goal=1.0),
         rf.policies.EpsilonGreedyQ(n_heads=_K, epsilon=0.1),
         rf.learners.Dqn(bootstrap_p=1.0),
         n_games=3,
-        max_ticks=10,
         seed=0,
     )
 
@@ -135,14 +136,25 @@ def test_game_handles_advertise_spaces() -> None:
     assert rf.games.GridWorld(size=5).action_space().n == 4
 
 
+def test_loop_prone_games_default_to_a_finite_truncation_horizon() -> None:
+    # A game that can loop forever (snake circling, gridworld never reaching the goal) MUST default to a
+    # finite horizon, else Engine.collect would spin on a non-terminating episode. Connect-4 always ends
+    # on its own, so it truncates never. `max_ticks=None` is the explicit opt-in to "never truncate".
+    assert rf.games.Snake().truncation_horizon() == 1000
+    assert rf.games.GridWorld().truncation_horizon() == 1000
+    assert rf.games.Connect4().truncation_horizon() is None
+    assert rf.games.Snake(max_ticks=None).truncation_horizon() is None  # explicit opt-out
+    assert rf.games.Snake(max_ticks=250).truncation_horizon() == 250
+
+
 def test_make_constructs_and_rejects_unknown() -> None:
     # The name-addressable path builds the same handles the typed constructors do.
     engine = rf.Engine(
         rf.make_game("connect4"),
+        rf.Reward(win=1.0, loss=-1.0, draw=0.0),
         rf.make_policy("selective_expectimax", n_heads=_K),
         rf.make_learner("treestrap"),
         n_games=2,
-        max_ticks=10,
     )
     _, _, _, telemetry = engine.collect(20, _dummy_infer(7))
     assert telemetry["decisions"] > 0
@@ -171,14 +183,17 @@ def test_engine_from_config_round_trips_a_yaml_shaped_dict() -> None:
 
 
 def test_reward_rejects_keys_not_valid_for_the_game() -> None:
-    # The generic Reward is validated per game: any key the game doesn't define is an error (not
-    # silently ignored). Valid keys still work, and missing ones fall back to the game's default.
-    rf.games.Snake(reward=rf.Reward(food=1.0, loss=-10.0))  # snake keys: ok
-    rf.games.Connect4(reward=rf.Reward(win=1.0))  # connect4 keys: ok
+    # The generic Reward is validated per game at Engine construction (the reward is decoupled from the
+    # game now): any key the game doesn't define is an error (not silently ignored). Valid keys work.
+    def engine(game: object, reward: object) -> object:
+        return rf.Engine(game, reward, _selective(), _treestrap(), n_games=1)
+
+    engine(rf.games.Snake(grid_size=8), rf.Reward(food=1.0, loss=-10.0))  # snake keys: ok
+    engine(rf.games.Connect4(), rf.Reward(win=1.0))  # connect4 keys: ok
     with pytest.raises(ValueError, match="unknown reward key"):
-        rf.games.Snake(reward=rf.Reward(goal=1.0))  # 'goal' is gridworld's, not snake's
+        engine(rf.games.Snake(grid_size=8), rf.Reward(goal=1.0))  # 'goal' is gridworld's, not snake's
     with pytest.raises(ValueError, match="unknown reward key"):
-        rf.games.Connect4(reward=rf.Reward(food=1.0))  # 'food' is snake's, not connect4's
+        engine(rf.games.Connect4(), rf.Reward(food=1.0))  # 'food' is snake's, not connect4's
 
 
 def test_incompatible_policy_learner_pairing_is_rejected() -> None:
@@ -186,10 +201,10 @@ def test_incompatible_policy_learner_pairing_is_rejected() -> None:
     with pytest.raises(ValueError):
         rf.Engine(
             rf.games.GridWorld(size=5),
+            rf.Reward(goal=1.0),
             rf.policies.EpsilonGreedyQ(n_heads=_K),
             rf.learners.TreeStrap(),
             n_games=1,
-            max_ticks=10,
         )
 
 
@@ -209,10 +224,10 @@ def test_engine_rejects_degenerate_search_params(bad: dict) -> None:
     with pytest.raises(ValueError):
         rf.Engine(
             rf.games.Snake(grid_size=8),
+            rf.Reward(food=1.0),
             rf.policies.SelectiveExpectimax(**kw),
             rf.learners.TreeStrap(),
             n_games=1,
-            max_ticks=10,
         )
 
 

@@ -49,15 +49,16 @@ def _engine(
             food=food,
             play_to_last=False,
             win_food_lead=None,
-            reward=reinfors.Reward(
-                step=_REWARD[0],
-                food=_REWARD[1],
-                loss=_REWARD[2],
-                draw=_REWARD[3],
-                kill=_REWARD[4],
-                win=_REWARD[5],
-                survival=survival,
-            ),
+            max_ticks=max_ticks,  # the truncation horizon is the game's now
+        ),
+        reinfors.Reward(
+            step=_REWARD[0],
+            food=_REWARD[1],
+            loss=_REWARD[2],
+            draw=_REWARD[3],
+            kill=_REWARD[4],
+            win=_REWARD[5],
+            survival=survival,
         ),
         reinfors.policies.SelectiveExpectimax(
             expansion_budget=budget,
@@ -78,7 +79,6 @@ def _engine(
             interior_targets=interior,
         ),
         n_games=n_games,
-        max_ticks=max_ticks,
         seed=seed,
     )
 
