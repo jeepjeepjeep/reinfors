@@ -35,6 +35,7 @@ fn snake_steps_both_agents_simultaneously() {
         play_to_last: false,
         win_food_lead: None,
         initial_food_count: 1,
+        max_ticks: None,
     };
     let mut env = Env::new(game, Box::new(EgocentricSnake { grid_size: 8 }), 0);
     assert_eq!(env.active_agents(), vec![0, 1]); // simultaneous: both live agents act

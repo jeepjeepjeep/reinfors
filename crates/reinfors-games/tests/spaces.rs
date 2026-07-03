@@ -22,6 +22,7 @@ fn snake_advertises_egocentric_box_and_three_actions() {
         play_to_last: false,
         win_food_lead: None,
         initial_food_count: 3,
+        max_ticks: None,
     };
     assert_eq!(
         EgocentricSnake { grid_size: 12 }.observation_space(),
@@ -42,6 +43,7 @@ fn gridworld_advertises_size_scaled_box_and_four_moves() {
     let game = GridWorld {
         size: 5,
         goal: (4, 4),
+        max_ticks: None,
     };
     assert_eq!(
         GridWorldPlanes {

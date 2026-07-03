@@ -33,6 +33,7 @@ class GameHandle:
         food: int = ...,
         play_to_last: bool = ...,
         win_food_lead: int | None = ...,
+        max_ticks: int | None = ...,
     ) -> GameHandle: ...
     @staticmethod
     def Connect4() -> GameHandle: ...
@@ -41,6 +42,7 @@ class GameHandle:
         size: int = ...,
         goal_row: int = ...,
         goal_col: int = ...,
+        max_ticks: int | None = ...,
     ) -> GameHandle: ...
     def observation_space(self) -> Box: ...
     def action_space(self) -> Discrete: ...
@@ -106,7 +108,6 @@ class Engine:
         policy: PolicyHandle,
         learner: LearnerHandle,
         n_games: int,
-        max_ticks: int,
         seed: int = ...,
     ) -> None: ...
     # The batch is learner-shaped: the TreeStrap family yields a `TreeStrapBatch`, the DQN family a

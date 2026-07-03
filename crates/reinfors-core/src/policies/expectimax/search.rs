@@ -163,7 +163,7 @@ fn expand_round<G: Game>(
     s: &mut Search<G::State>,
     game: &G,
     enc: &dyn StateEncoder<State = G::State>,
-    reward: &dyn Reward<Event = G::Event, State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
     cfg: &SearchConfig,
     first: bool,
 ) {
@@ -232,7 +232,7 @@ where
 pub fn search_many<G: Game + Sync, F>(
     game: &G,
     enc: &dyn StateEncoder<State = G::State>,
-    reward: &dyn Reward<Event = G::Event, State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
     cfg: &SearchConfig,
     requests: Vec<(G::State, usize)>,
     collect_interior: bool,
@@ -489,7 +489,7 @@ fn push_branches<G: Game>(
     arena: &mut Vec<Node<G::State>>,
     game: &G,
     enc: &dyn StateEncoder<State = G::State>,
-    reward: &dyn Reward<Event = G::Event, State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
     cfg: &SearchConfig,
     state: &G::State,
     joint: &[usize],
@@ -558,7 +558,7 @@ fn expand_node<G: Game>(
     arena: &mut Vec<Node<G::State>>,
     game: &G,
     enc: &dyn StateEncoder<State = G::State>,
-    reward: &dyn Reward<Event = G::Event, State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
     cfg: &SearchConfig,
     ni: usize,
     agent: usize,
@@ -876,7 +876,6 @@ mod tests {
     struct LineReward;
     impl Reward for LineReward {
         type Event = f64;
-        type State = i32;
         fn step_reward(&self, event: &f64, _agent: usize) -> f64 {
             *event
         }

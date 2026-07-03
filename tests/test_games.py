@@ -43,37 +43,35 @@ def _treestrap() -> object:
 
 
 def _connect4_engine() -> object:
+    # Connect-4 is bounded (it always terminates), so it needs no truncation horizon.
     return rf.Engine(
         rf.games.Connect4(),
         rf.Reward(win=1.0, loss=-1.0, draw=0.0),
         _selective(),
         _treestrap(),
         n_games=2,
-        max_ticks=30,
         seed=0,
     )
 
 
 def _gridworld_engine() -> object:
     return rf.Engine(
-        rf.games.GridWorld(size=5, goal_row=0, goal_col=1),
+        rf.games.GridWorld(size=5, goal_row=0, goal_col=1, max_ticks=30),
         rf.Reward(step=0.0, goal=1.0),
         _selective(),
         _treestrap(),
         n_games=2,
-        max_ticks=30,
         seed=0,
     )
 
 
 def _dqn_engine() -> object:
     return rf.Engine(
-        rf.games.GridWorld(size=5, goal_row=0, goal_col=1),
+        rf.games.GridWorld(size=5, goal_row=0, goal_col=1, max_ticks=10),
         rf.Reward(step=0.0, goal=1.0),
         rf.policies.EpsilonGreedyQ(n_heads=_K, epsilon=0.1),
         rf.learners.Dqn(bootstrap_p=1.0),
         n_games=3,
-        max_ticks=10,
         seed=0,
     )
 
@@ -146,7 +144,6 @@ def test_make_constructs_and_rejects_unknown() -> None:
         rf.make_policy("selective_expectimax", n_heads=_K),
         rf.make_learner("treestrap"),
         n_games=2,
-        max_ticks=10,
     )
     _, _, _, telemetry = engine.collect(20, _dummy_infer(7))
     assert telemetry["decisions"] > 0
@@ -178,7 +175,7 @@ def test_reward_rejects_keys_not_valid_for_the_game() -> None:
     # The generic Reward is validated per game at Engine construction (the reward is decoupled from the
     # game now): any key the game doesn't define is an error (not silently ignored). Valid keys work.
     def engine(game: object, reward: object) -> object:
-        return rf.Engine(game, reward, _selective(), _treestrap(), n_games=1, max_ticks=10)
+        return rf.Engine(game, reward, _selective(), _treestrap(), n_games=1)
 
     engine(rf.games.Snake(grid_size=8), rf.Reward(food=1.0, loss=-10.0))  # snake keys: ok
     engine(rf.games.Connect4(), rf.Reward(win=1.0))  # connect4 keys: ok
@@ -197,7 +194,6 @@ def test_incompatible_policy_learner_pairing_is_rejected() -> None:
             rf.policies.EpsilonGreedyQ(n_heads=_K),
             rf.learners.TreeStrap(),
             n_games=1,
-            max_ticks=10,
         )
 
 
@@ -221,7 +217,6 @@ def test_engine_rejects_degenerate_search_params(bad: dict) -> None:
             rf.policies.SelectiveExpectimax(**kw),
             rf.learners.TreeStrap(),
             n_games=1,
-            max_ticks=10,
         )
 
 

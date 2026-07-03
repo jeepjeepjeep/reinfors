@@ -41,7 +41,7 @@ impl Policy for EpsilonGreedyQ {
         &self,
         game: &G,
         enc: &dyn StateEncoder<State = G::State>,
-        _reward: &dyn Reward<Event = G::Event, State = G::State>, // model-free: rewards come from the env, not the search
+        _reward: &dyn Reward<Event = G::Event>, // model-free: rewards come from the env, not the search
         requests: Vec<(G::State, usize)>,
         _seed: u64,
         _collect_interior: bool, // DQN has no interior targets — a plain forward, nothing to collect

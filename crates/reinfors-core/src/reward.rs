@@ -4,24 +4,21 @@
 //! observation: the reward is the agent's / training objective, not a rule of the game, so it is a
 //! separate handle threaded into the `Engine` and the search.
 //!
+//! `Reward` is purely `Event -> scalar` — the reward-relevant mirror of the encoder's `State -> obs`,
+//! so the two halves of a transition never cross over (`State` is observational, `Event` is
+//! reward-relevant). Even truncation flows through here: the rollout stamps the truncation outcome onto
+//! the tick's `Event` (via [`Game::mark_truncation`](crate::Game::mark_truncation)), so this is the one
+//! path that maps outcomes to scalars.
+//!
 //! Object-safe (no generic methods, no `Self` by value), so it is held as
-//! `Box<dyn Reward<Event = G::Event, State = G::State>>` — the reward equivalent of the boxed encoder.
-//! Only the training path needs it: the `Engine` (to fill training-record rewards + the episode-end
-//! z-mix) and the search (immediate rewards in the backup). The caller-driven `Env` holds none — it
-//! surfaces game-specific events, and a game-aware consumer reads the outcome from those.
+//! `Box<dyn Reward<Event = G::Event>>` — the reward equivalent of the boxed encoder. Only the training
+//! path needs it: the `Engine` (training-record rewards + the episode-end z-mix) and the search
+//! (immediate rewards in the backup). The caller-driven `Env` holds none — it surfaces game-specific
+//! events, and a game-aware consumer reads the outcome from those.
 
 pub trait Reward: Send + Sync {
     type Event;
-    type State;
 
     /// The scalar reward `agent` earns from its per-agent `event` this tick.
     fn step_reward(&self, event: &Self::Event, agent: usize) -> f64;
-
-    /// A bonus paid to `agent` on a truncation tick it reached alive (e.g. a survival reward). Read
-    /// from a state snapshot, since truncation is the rollout hitting `max_ticks`, not a transition.
-    /// Defaults to none.
-    fn truncation_bonus(&self, state: &Self::State, agent: usize) -> f64 {
-        let _ = (state, agent);
-        0.0
-    }
 }

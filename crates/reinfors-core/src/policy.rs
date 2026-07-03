@@ -23,7 +23,7 @@ pub trait Policy {
         &self,
         game: &G,
         enc: &dyn StateEncoder<State = G::State>,
-        reward: &dyn Reward<Event = G::Event, State = G::State>,
+        reward: &dyn Reward<Event = G::Event>,
         requests: Vec<(G::State, usize)>,
         seed: u64,
         collect_interior: bool,

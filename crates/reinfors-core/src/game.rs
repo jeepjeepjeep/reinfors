@@ -84,4 +84,20 @@ pub trait Game {
             terminal: t.terminal,
         }
     }
+
+    /// The episode-length cap after which the rollout truncates a still-running game, or `None` for a
+    /// game that always ends on its own (e.g. Connect-4). This is a property the game *declares* — the
+    /// `Engine` does the tick-counting and enforces it, so the horizon never enters `State` or the
+    /// search. Truncation is thus wholly a game concern (when *and*, via `mark_truncation`, what).
+    fn truncation_horizon(&self) -> Option<usize> {
+        None
+    }
+
+    /// Stamp the truncation outcome onto `events` when the rollout cuts the episode off at the horizon
+    /// (the `Engine` calls this on that tick, before the reward evaluates the events). A game encodes
+    /// "survived to the cutoff" here — e.g. snake flags its still-alive agents so their `Reward` pays
+    /// the survival bonus. Default: no truncation-specific outcome.
+    fn mark_truncation(&self, state: &Self::State, events: &mut [Self::Event]) {
+        let _ = (state, events);
+    }
 }

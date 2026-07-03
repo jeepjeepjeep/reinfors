@@ -54,24 +54,28 @@ def registered_learners() -> list[str]:
 def engine_from_config(config: dict[str, Any]) -> Engine:
     """Build an `Engine` from a nested config block, e.g.::
 
-        {"game": {"name": "snake", "grid_size": 20, "reward": {"food": 1.0, "loss": -10.0}},
+        {"game": {"name": "snake", "grid_size": 20, "max_ticks": 750, "reward": {"food": 1.0, "loss": -10.0}},
          "policy": {"name": "selective_expectimax", "n_heads": 10, ...},
          "learner": {"name": "treestrap", "gamma": 0.99, ...},
-         "engine": {"n_games": 16, "max_ticks": 750, "seed": 0}}
+         "engine": {"n_games": 16, "seed": 0}}
 
     Each block's `name` selects the handle; the remaining keys are its constructor kwargs. The reward
-    is decoupled from the game in the API, but a `reward` mapping nested under `game` (or given as its
-    own top-level block) is still accepted and wrapped into an `rf.Reward` — so a config parsed straight
-    from YAML (`yaml.safe_load(...)`) works as-is — and routed to the `Engine`.
+    and `max_ticks` (the truncation horizon) are both game-side now, but for YAML friendliness a
+    `reward` mapping and a `max_ticks` given in the `engine` block are still accepted and routed to the
+    right place — so a config parsed straight from YAML (`yaml.safe_load(...)`) works as-is.
     """
 
     def _split(block: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         return block["name"], {k: v for k, v in block.items() if k != "name"}
 
     g_name, g_kw = _split(config["game"])
+    engine_kw = dict(config.get("engine", {}))
     # The reward rides with the game block (YAML-friendly) or its own block; it goes to the Engine now.
     reward_cfg = g_kw.pop("reward", None) or config.get("reward")
     reward = Reward(**reward_cfg) if isinstance(reward_cfg, dict) else reward_cfg
+    # `max_ticks` is the game's truncation horizon; accept it in the engine block (legacy) and route it.
+    if "max_ticks" in engine_kw:
+        g_kw.setdefault("max_ticks", engine_kw.pop("max_ticks"))
     p_name, p_kw = _split(config["policy"])
     l_name, l_kw = _split(config["learner"])
     return Engine(
@@ -79,7 +83,7 @@ def engine_from_config(config: dict[str, Any]) -> Engine:
         reward,
         make_policy(p_name, **p_kw),
         make_learner(l_name, **l_kw),
-        **config.get("engine", {}),
+        **engine_kw,
     )
 
 

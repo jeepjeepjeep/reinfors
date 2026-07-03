@@ -154,26 +154,21 @@ struct PyEngine {
 #[pymethods]
 impl PyEngine {
     #[new]
-    #[pyo3(signature = (game, reward, policy, learner, n_games, max_ticks, seed=0))]
+    #[pyo3(signature = (game, reward, policy, learner, n_games, seed=0))]
     fn new(
         game: GameHandle,
         reward: Option<PyReward>,
         policy: PolicyHandle,
         learner: LearnerHandle,
         n_games: usize,
-        max_ticks: usize,
         seed: u64,
     ) -> PyResult<Self> {
-        if n_games < 1 || max_ticks < 1 {
+        if n_games < 1 {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "n_games and max_ticks must be >= 1",
+                "n_games must be >= 1",
             ));
         }
-        let engine_params = EngineParams {
-            n_games,
-            max_ticks,
-            seed,
-        };
+        let engine_params = EngineParams { n_games, seed };
         Ok(PyEngine {
             inner: build_engine(game.spec, reward, policy.spec, learner.spec, engine_params)?,
         })
@@ -499,11 +494,13 @@ enum GameSpec {
         initial_food_count: usize,
         play_to_last: bool,
         win_food_lead: Option<usize>,
+        max_ticks: Option<usize>,
     },
     Connect4,
     GridWorld {
         size: i32,
         goal: (i32, i32),
+        max_ticks: Option<usize>,
     },
 }
 
@@ -524,6 +521,7 @@ impl GameSpec {
                 initial_food_count,
                 play_to_last,
                 win_food_lead,
+                max_ticks,
             } => of(
                 Snake {
                     grid_size,
@@ -531,13 +529,23 @@ impl GameSpec {
                     play_to_last,
                     win_food_lead,
                     initial_food_count,
+                    max_ticks,
                 },
                 &EgocentricSnake { grid_size },
             ),
             GameSpec::Connect4 => of(Connect4, &Connect4Planes),
-            GameSpec::GridWorld { size, goal } => {
-                of(GridWorld { size, goal }, &GridWorldPlanes { size, goal })
-            }
+            GameSpec::GridWorld {
+                size,
+                goal,
+                max_ticks,
+            } => of(
+                GridWorld {
+                    size,
+                    goal,
+                    max_ticks,
+                },
+                &GridWorldPlanes { size, goal },
+            ),
         }
     }
 }
@@ -641,13 +649,24 @@ fn check_unit(name: &str, v: f64) -> PyResult<()> {
     Ok(())
 }
 
+/// Reject a zero truncation horizon (`max_ticks=0` would truncate before any decision). `None` (never
+/// truncate) and any positive cap are fine.
+fn check_max_ticks(max_ticks: Option<usize>) -> PyResult<()> {
+    if max_ticks == Some(0) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "max_ticks must be >= 1 (or None to never truncate)",
+        ));
+    }
+    Ok(())
+}
+
 /// Family axis: given a concrete game, build the engine for a valid (policy, learner) pair. Written
 /// once, generic over `G`, so a new family applies to every game; invalid pairings error here. Also
 /// where the composed params are validated (the handles store them unchecked).
 fn build_for_game<G: Game + Send + Sync + 'static>(
     game: G,
     enc: Box<dyn StateEncoder<State = G::State>>,
-    reward: Box<dyn Reward<Event = G::Event, State = G::State>>,
+    reward: Box<dyn Reward<Event = G::Event>>,
     policy: PolicySpec,
     learner: LearnerSpec,
     engine_params: EngineParams,
@@ -741,6 +760,7 @@ fn build_engine(
                 initial_food_count,
                 play_to_last,
                 win_food_lead,
+                max_ticks,
             },
             RewardBox::Snake(reward),
         ) => build_for_game(
@@ -750,6 +770,7 @@ fn build_engine(
                 play_to_last,
                 win_food_lead,
                 initial_food_count,
+                max_ticks,
             },
             Box::new(EgocentricSnake { grid_size }),
             Box::new(reward),
@@ -765,8 +786,19 @@ fn build_engine(
             learner,
             engine_params,
         ),
-        (GameSpec::GridWorld { size, goal }, RewardBox::GridWorld(reward)) => build_for_game(
-            GridWorld { size, goal },
+        (
+            GameSpec::GridWorld {
+                size,
+                goal,
+                max_ticks,
+            },
+            RewardBox::GridWorld(reward),
+        ) => build_for_game(
+            GridWorld {
+                size,
+                goal,
+                max_ticks,
+            },
             Box::new(GridWorldPlanes { size, goal }),
             Box::new(reward),
             policy,
@@ -1056,6 +1088,7 @@ fn build_env(game: GameSpec, seed: u64) -> Box<dyn ErasedEnv> {
             initial_food_count,
             play_to_last,
             win_food_lead,
+            max_ticks,
         } => {
             let enc = EgocentricSnake { grid_size };
             let obs_shape = enc.obs_shape();
@@ -1067,6 +1100,7 @@ fn build_env(game: GameSpec, seed: u64) -> Box<dyn ErasedEnv> {
                         play_to_last,
                         win_food_lead,
                         initial_food_count,
+                        max_ticks,
                     },
                     Box::new(enc),
                     seed,
@@ -1081,11 +1115,23 @@ fn build_env(game: GameSpec, seed: u64) -> Box<dyn ErasedEnv> {
                 obs_shape,
             })
         }
-        GameSpec::GridWorld { size, goal } => {
+        GameSpec::GridWorld {
+            size,
+            goal,
+            max_ticks,
+        } => {
             let enc = GridWorldPlanes { size, goal };
             let obs_shape = enc.obs_shape();
             Box::new(EnvImpl {
-                inner: Env::new(GridWorld { size, goal }, Box::new(enc), seed),
+                inner: Env::new(
+                    GridWorld {
+                        size,
+                        goal,
+                        max_ticks,
+                    },
+                    Box::new(enc),
+                    seed,
+                ),
                 obs_shape,
             })
         }
@@ -1209,7 +1255,7 @@ struct GameHandle {
 #[pymethods]
 impl GameHandle {
     #[staticmethod]
-    #[pyo3(signature = (grid_size=20, initial_length=3, food=3, play_to_last=true, win_food_lead=None))]
+    #[pyo3(signature = (grid_size=20, initial_length=3, food=3, play_to_last=true, win_food_lead=None, max_ticks=None))]
     #[pyo3(name = "Snake")]
     fn snake(
         grid_size: i32,
@@ -1217,16 +1263,19 @@ impl GameHandle {
         food: usize,
         play_to_last: bool,
         win_food_lead: Option<usize>,
-    ) -> Self {
-        GameHandle {
+        max_ticks: Option<usize>,
+    ) -> PyResult<Self> {
+        check_max_ticks(max_ticks)?;
+        Ok(GameHandle {
             spec: GameSpec::Snake {
                 grid_size,
                 initial_length,
                 initial_food_count: food,
                 play_to_last,
                 win_food_lead,
+                max_ticks,
             },
-        }
+        })
     }
 
     #[staticmethod]
@@ -1238,15 +1287,22 @@ impl GameHandle {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (size=5, goal_row=4, goal_col=4))]
+    #[pyo3(signature = (size=5, goal_row=4, goal_col=4, max_ticks=None))]
     #[pyo3(name = "GridWorld")]
-    fn gridworld(size: i32, goal_row: i32, goal_col: i32) -> Self {
-        GameHandle {
+    fn gridworld(
+        size: i32,
+        goal_row: i32,
+        goal_col: i32,
+        max_ticks: Option<usize>,
+    ) -> PyResult<Self> {
+        check_max_ticks(max_ticks)?;
+        Ok(GameHandle {
             spec: GameSpec::GridWorld {
                 size,
                 goal: (goal_row, goal_col),
+                max_ticks,
             },
-        }
+        })
     }
 
     /// The game's observation `Space` (an `rf.spaces.Box`) — its `shape` sizes the value network's

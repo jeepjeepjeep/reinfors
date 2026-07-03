@@ -67,7 +67,6 @@ impl Default for Connect4Reward {
 
 impl Reward for Connect4Reward {
     type Event = Connect4Event;
-    type State = Connect4State;
 
     fn step_reward(&self, event: &Connect4Event, _agent: usize) -> f64 {
         match event {
@@ -370,7 +369,6 @@ mod tests {
         let learner = TreeStrap::new(0.99, 0.3, 1.0, false); // gamma, outcome_weight, bootstrap_p, interior
         let params = EngineParams {
             n_games: 3,
-            max_ticks: 50,
             seed: 0,
         };
         let mut engine = Engine::new(

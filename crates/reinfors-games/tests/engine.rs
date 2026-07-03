@@ -20,6 +20,7 @@ struct SearchParams {
     top_k: usize,
     max_depth: i32,
     food_samples: usize,
+    max_ticks: Option<usize>,
     reward: SnakeReward,
     opponent: Opponent,
 }
@@ -32,11 +33,7 @@ fn enc(s: &SearchParams) -> Box<EgocentricSnake> {
 }
 
 fn params(n_games: usize, seed: u64) -> EngineParams {
-    EngineParams {
-        n_games,
-        max_ticks: 50,
-        seed,
-    }
+    EngineParams { n_games, seed }
 }
 
 /// The default test learner: gamma 0.99 (matches `search()`), the given z-mix weight + interior flag,
@@ -74,6 +71,7 @@ fn search() -> SearchParams {
         top_k: 4,
         max_depth: 6,
         food_samples: 1,
+        max_ticks: Some(50),
         reward: SnakeReward {
             step: 0.0,
             food: 0.0,
@@ -94,6 +92,7 @@ fn game(search: &SearchParams, initial_food_count: usize) -> Snake {
         play_to_last: search.play_to_last,
         win_food_lead: search.win_food_lead,
         initial_food_count,
+        max_ticks: search.max_ticks,
     }
 }
 
@@ -269,15 +268,14 @@ fn survival_bonus_propagates_through_z_mixing_on_truncation() {
     let mk = |survival: f64| {
         let mut s = search();
         s.reward.survival = survival;
-        let mut p = params(4, 0);
-        p.max_ticks = 1;
+        s.max_ticks = Some(1); // the game's horizon: truncate after one decision per agent
         Engine::new(
             game(&s, 0),
             enc(&s),
             reward(&s),
             policy(&s, 2),
             learner(1.0, false),
-            p,
+            params(4, 0),
         )
         // no initial food; ow=1, interior off
     };
@@ -307,15 +305,14 @@ fn collect_reports_episode_and_search_telemetry() {
     // Interior off so the record floor tracks decisions (with it on, the floor is reached via
     // interior targets before any episode completes).
     let s = search();
-    let p = params(4, 11);
-    let max_ticks = p.max_ticks;
+    let max_ticks = s.max_ticks.unwrap();
     let mut e = Engine::new(
         game(&s, 3),
         enc(&s),
         reward(&s),
         policy(&s, 2),
         learner(0.5, false),
-        p,
+        params(4, 11),
     );
     let mut episodes = 0usize;
     let (mut decisions, mut max_depth, mut leaves, mut sigma, mut disagree) =
@@ -379,16 +376,15 @@ fn collected_targets_equal_a_direct_search() {
         }
     }
 
-    let s = search();
-    let mut p = params(1, 0);
-    p.max_ticks = 1; // truncate after one decision per agent
+    let mut s = search();
+    s.max_ticks = Some(1); // the game's horizon: truncate after one decision per agent
     let (records, _) = Engine::new(
         game(&s, 0),
         enc(&s),
         reward(&s),
         policy(&s, 2),
         learner(0.0, false),
-        p,
+        params(1, 0),
     )
     .collect(2, infer);
 

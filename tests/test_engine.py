@@ -49,6 +49,7 @@ def _engine(
             food=food,
             play_to_last=False,
             win_food_lead=None,
+            max_ticks=max_ticks,  # the truncation horizon is the game's now
         ),
         reinfors.Reward(
             step=_REWARD[0],
@@ -78,7 +79,6 @@ def _engine(
             interior_targets=interior,
         ),
         n_games=n_games,
-        max_ticks=max_ticks,
         seed=seed,
     )
 

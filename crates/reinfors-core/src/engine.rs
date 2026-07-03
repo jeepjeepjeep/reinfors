@@ -49,20 +49,19 @@ pub struct CollectStats {
     pub sum_disagreement: f64,
 }
 
-/// Engine-level rollout knobs.
+/// Engine-level rollout knobs. The truncation horizon is the game's (`truncation_horizon`), not an
+/// engine knob — the engine only counts ticks and enforces it.
 pub struct EngineParams {
     pub n_games: usize,
-    pub max_ticks: usize,
     pub seed: u64,
 }
 
 pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     game: G,
     encoder: Box<dyn StateEncoder<State = G::State>>,
-    reward: Box<dyn Reward<Event = G::Event, State = G::State>>,
+    reward: Box<dyn Reward<Event = G::Event>>,
     policy: P,
     learner: L,
-    params: EngineParams,
     episodes: Vec<Episode<G>>,
     search_rng: SplitMix64,
     policy_states: Vec<P::PolicyState>, // per-game acting state for the current episode (Thompson head)
@@ -77,7 +76,7 @@ where
     pub fn new(
         game: G,
         encoder: Box<dyn StateEncoder<State = G::State>>,
-        reward: Box<dyn Reward<Event = G::Event, State = G::State>>,
+        reward: Box<dyn Reward<Event = G::Event>>,
         policy: P,
         learner: L,
         params: EngineParams,
@@ -109,7 +108,6 @@ where
             reward,
             policy,
             learner,
-            params,
             episodes,
             search_rng,
             policy_states,
@@ -188,21 +186,25 @@ where
             }
 
             // 4. Advance every game via the env transition (sampling its chance from the per-game RNG);
-            //    record the executed decisions' rewards (plus the truncation bonus on a truncation
-            //    tick); flush finished games' trajectories with z-mixing and reset them.
+            //    record the executed decisions' rewards; flush finished games' trajectories with
+            //    z-mixing and reset them. On a truncation tick the game stamps the truncation outcome
+            //    onto the events (`mark_truncation`), so the survival reward flows through `step_reward`
+            //    like any other outcome — no separate truncation-reward path.
+            let horizon = self.game.truncation_horizon();
             let mut finished: Vec<(usize, bool)> = Vec::new(); // (game index, terminal?)
             for (gi, agents) in acted.into_iter().enumerate() {
                 let joint: Vec<usize> = agents.iter().map(|a| a.unwrap_or(0)).collect();
-                let (events, terminal) = self.episodes[gi].advance(&self.game, &joint);
+                let (mut events, terminal) = self.episodes[gi].advance(&self.game, &joint);
                 self.ticks[gi] += 1;
-                let truncated = self.ticks[gi] >= self.params.max_ticks && !terminal;
+                let truncated = horizon.is_some_and(|h| self.ticks[gi] >= h) && !terminal;
+                if truncated {
+                    self.game
+                        .mark_truncation(&self.episodes[gi].state, &mut events);
+                }
                 let needs_next_obs = self.learner.needs_next_obs();
                 for (si, action) in agents.iter().enumerate() {
                     if action.is_some() {
-                        let mut reward = self.reward.step_reward(&events[si], si);
-                        if truncated {
-                            reward += self.reward.truncation_bonus(&self.episodes[gi].state, si);
-                        }
+                        let reward = self.reward.step_reward(&events[si], si);
                         let next_obs = if needs_next_obs {
                             self.episodes[gi].observe(&*self.encoder, si)
                         } else {
@@ -215,7 +217,7 @@ where
                         }
                     }
                 }
-                if terminal || self.ticks[gi] >= self.params.max_ticks {
+                if terminal || truncated {
                     finished.push((gi, terminal));
                 }
             }

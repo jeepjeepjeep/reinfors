@@ -31,7 +31,6 @@ pub struct GridWorldReward {
 
 impl Reward for GridWorldReward {
     type Event = GridEvent;
-    type State = GridState;
 
     fn step_reward(&self, event: &GridEvent, _agent: usize) -> f64 {
         if event.reached_goal {
@@ -48,6 +47,9 @@ impl Reward for GridWorldReward {
 pub struct GridWorld {
     pub size: i32,
     pub goal: Pos,
+    /// Episode-length cap (the agent can wander indefinitely); the rollout truncates here. `None` =
+    /// never truncate. GridWorld has no survival bonus, so truncation just ends the episode.
+    pub max_ticks: Option<usize>,
 }
 
 impl GridWorld {
@@ -108,6 +110,10 @@ impl Game for GridWorld {
         }
     }
 
+    fn truncation_horizon(&self) -> Option<usize> {
+        self.max_ticks
+    }
+
     // Deterministic: no `sample_chance` / `step_env` override needed (the trait defaults suffice).
 }
 
@@ -143,9 +149,14 @@ mod tests {
     };
 
     fn world() -> GridWorld {
+        capped(None)
+    }
+
+    fn capped(max_ticks: Option<usize>) -> GridWorld {
         GridWorld {
             size: 5,
             goal: (0, 1),
+            max_ticks,
         }
     }
 
@@ -298,11 +309,10 @@ mod tests {
         let learner = TreeStrap::new(0.99, 0.3, 1.0, false); // gamma, outcome_weight, bootstrap_p, interior
         let params = EngineParams {
             n_games: 3,
-            max_ticks: 30,
             seed: 0,
         };
         let mut engine = Engine::new(
-            world(),
+            capped(Some(30)),
             Box::new(enc()),
             Box::new(reward()),
             policy,
@@ -331,11 +341,10 @@ mod tests {
         let learner = Dqn::new(2, 1.0); // 2 heads, bootstrap_p = 1 -> all-ones masks
         let params = EngineParams {
             n_games: 3,
-            max_ticks: 10,
             seed: 0,
         };
         let mut engine = Engine::new(
-            world(),
+            capped(Some(10)),
             Box::new(enc()),
             Box::new(reward()),
             policy,

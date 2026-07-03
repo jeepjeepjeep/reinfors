@@ -56,6 +56,9 @@ pub struct StepEvent {
     pub won: bool,
     pub lost: bool,
     pub drew: bool,
+    /// Set by the rollout (via `Game::mark_truncation`) on a truncation tick the snake reached alive,
+    /// so its reward pays the `survival` bonus there. Never set by `advance` or the search.
+    pub survived_to_max_ticks: bool,
 }
 
 // `SnakeEnv` is gone: snake's dynamics are methods on `Snake` (which holds the config), operating on
@@ -218,7 +221,6 @@ pub struct SnakeReward {
 
 impl Reward for SnakeReward {
     type Event = StepEvent;
-    type State = SnakeState;
 
     fn step_reward(&self, e: &StepEvent, _agent: usize) -> f64 {
         let mut reward = self.step;
@@ -243,17 +245,10 @@ impl Reward for SnakeReward {
         if e.lost {
             reward += self.loss; // lost while alive: out-eaten under win_food_lead
         }
-        reward
-    }
-
-    /// The survival reward, paid to a snake still alive at a truncation tick (the engine applies it
-    /// only there). A dead snake collects nothing.
-    fn truncation_bonus(&self, state: &SnakeState, agent: usize) -> f64 {
-        if state.snakes[agent].alive {
-            self.survival
-        } else {
-            0.0
+        if e.survived_to_max_ticks {
+            reward += self.survival; // set by `Snake::mark_truncation` on a truncation tick, if alive
         }
+        reward
     }
 }
 
@@ -293,6 +288,9 @@ pub struct Snake {
     pub play_to_last: bool,
     pub win_food_lead: Option<usize>,
     pub initial_food_count: usize,
+    /// Episode-length cap (snake can run forever); the rollout truncates here, paying the survival
+    /// reward to still-alive snakes. `None` = never truncate.
+    pub max_ticks: Option<usize>,
 }
 
 impl Snake {
@@ -621,6 +619,17 @@ impl Game for Snake {
         }
         SnakeState { snakes, food }
     }
+
+    fn truncation_horizon(&self) -> Option<usize> {
+        self.max_ticks
+    }
+
+    /// Flag each still-alive snake as having survived to the truncation, so its reward pays `survival`.
+    fn mark_truncation(&self, state: &SnakeState, events: &mut [StepEvent]) {
+        for (event, snake) in events.iter_mut().zip(state.snakes.iter()) {
+            event.survived_to_max_ticks = snake.alive;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -648,6 +657,7 @@ mod game_tests {
             play_to_last: false,
             win_food_lead: None,
             initial_food_count: 1,
+            max_ticks: None,
         }
     }
 
@@ -879,16 +889,20 @@ mod game_tests {
     }
 
     #[test]
-    fn truncation_bonus_is_survival_for_the_living_only() {
+    fn mark_truncation_pays_survival_to_the_living_only() {
+        // `mark_truncation` flags each still-alive snake, and `step_reward` turns that flag into the
+        // survival bonus — so only the living collect it.
         let r = SnakeReward {
             survival: 0.25,
             ..reward()
         };
-        let st = initial_state(&[]);
-        assert!((r.truncation_bonus(&st, 0) - 0.25).abs() < 1e-12);
-        let mut dead = st.clone();
-        dead.snakes[0].alive = false;
-        assert_eq!(r.truncation_bonus(&dead, 0), 0.0);
+        let mut st = initial_state(&[]);
+        st.snakes[1].alive = false; // A alive, B dead
+        let mut events = [StepEvent::default(), StepEvent::default()];
+        game().mark_truncation(&st, &mut events);
+        assert!(events[0].survived_to_max_ticks && !events[1].survived_to_max_ticks);
+        assert!((r.step_reward(&events[0], 0) - 0.25).abs() < 1e-12); // A: survival
+        assert_eq!(r.step_reward(&events[1], 1), 0.0); // B (dead): none
     }
 }
 
@@ -905,6 +919,7 @@ mod env_tests {
             play_to_last: false,
             win_food_lead,
             initial_food_count: 0,
+            max_ticks: None,
         }
     }
 
@@ -1070,6 +1085,7 @@ mod obs_tests {
             play_to_last: false,
             win_food_lead: None,
             initial_food_count: 0,
+            max_ticks: None,
         }
         .initial_snakes()
     }
@@ -1122,8 +1138,8 @@ mod reward_tests {
 
     #[test]
     fn step_reward_scores_events_not_survival() {
-        // The survival bonus is paid via `truncation_bonus`, never from a step event: a nothing-happened
-        // tick scores 0, and eating scores the food bonus.
+        // The survival bonus rides on the `survived_to_max_ticks` flag (set only by `mark_truncation`),
+        // never on an ordinary event: a nothing-happened tick scores 0, and eating scores the food bonus.
         let r = reward();
         assert_eq!(r.step_reward(&StepEvent::default(), 0), 0.0);
         let ate = StepEvent {
