@@ -13,10 +13,10 @@ Two tracks:
     batch. That contrast is the finding. reinfors' single-env number UNDERSELLS it — its product is
     Track B (parallel, search-driven), not raw stepping.
   * Track B — searched decisions/sec at a fixed budget: reinfors `Mcts` (UCT) vs OpenSpiel `MCTSBot`,
-    same algorithm (both UCT, matching `uct_c` and `num_simulations`). The remaining difference is the
-    leaf evaluator — reinfors uses the net (zeros here); OpenSpiel does random rollouts — which a
-    shared-net follow-up will close. So this is now an algorithm-matched *implementation* race; it still
-    measures throughput, not search quality (rollouts do more work per simulation than a net eval).
+    now a fully-controlled race — same algorithm (both UCT, matching `uct_c` and `num_simulations`) AND
+    the same leaf evaluator (a shared small value net; see `SharedNet`), fed the same canonical board. So
+    it isolates the search *implementation*: the difference is that reinfors runs the whole loop in Rust
+    and batches the net across each round's pooled leaves, where OpenSpiel drives it per-leaf from Python.
 
 Install (on the machine you're benchmarking): `pip install jax[cuda12] pgx open_spiel` (adjust the jax
 wheel for your accelerator). reinfors must be a RELEASE build — this checks and warns.
@@ -58,6 +58,44 @@ def _throughput(work: Any, repeats: int) -> float:
 
 
 # --------------------------------------------------------------------------------------------------
+# Shared value net for Track B. A small fixed-weight MLP fed the SAME canonical connect4 board by both
+# frameworks' MCTS, so the leaf evaluation is a genuinely shared, equal-cost forward — not reinfors'
+# zeros vs OpenSpiel's random rollouts. Canonical board: 42-dim (+1 own, -1 opp, 0 empty) from the
+# current player's perspective, index r*7+c with row 0 = bottom — the layout reinfors' Connect4Planes
+# and OpenSpiel's `observation_tensor` both produce (a test asserts they agree).
+# --------------------------------------------------------------------------------------------------
+_HIDDEN = 64
+
+
+class SharedNet:
+    def __init__(self) -> None:
+        rng = np.random.default_rng(0)
+        self.w1 = (rng.standard_normal((42, _HIDDEN)) / np.sqrt(42)).astype(np.float32)
+        self.w2 = (rng.standard_normal((_HIDDEN, 1)) / np.sqrt(_HIDDEN)).astype(np.float32)
+
+    def value(self, board: np.ndarray) -> np.ndarray:
+        """(N, 42) canonical board -> (N,) value in (-1, 1), from the board's current-player perspective."""
+        h = np.maximum(board.astype(np.float32) @ self.w1, 0.0)
+        return np.tanh(h @ self.w2)[:, 0]
+
+
+_SHARED_NET = SharedNet()
+
+
+def board_from_reinfors(obs: np.ndarray) -> np.ndarray:
+    """reinfors' Connect4Planes obs is `[own(42), opp(42)]` flat -> the canonical `(N, 42)` board."""
+    return obs[:, :42] - obs[:, 42:]
+
+
+def board_from_openspiel(state: Any) -> np.ndarray:
+    """An OpenSpiel connect4 state -> the canonical `(1, 42)` board (planes are absolute per player; row
+    0 = bottom, matching reinfors)."""
+    cur = state.current_player()
+    ot = np.asarray(state.observation_tensor(cur)).reshape(3, 6, 7)
+    return (ot[cur] - ot[1 - cur]).reshape(1, 42)
+
+
+# --------------------------------------------------------------------------------------------------
 # Backends. Each: name, device(), available() -> (ok, detail), raw_step(batch, steps) -> transitions/s,
 # search(budget, decisions) -> decisions/s or None. A backend is fully self-contained and isolated, so a
 # missing/broken one never taints the others.
@@ -93,9 +131,9 @@ class ReinforsBackend:
 
     def search(self, budget: int, decisions: int, repeats: int) -> float | None:
         # Genuine UCT MCTS on connect4, ONE game (per-core, for a fair head-to-head vs a single MCTS bot
-        # — reinfors additionally scales across cores, see Phase 1), trivial zeros evaluator. `budget` =
-        # num_simulations, and uct_c matches the OpenSpiel backend, so this is now algorithm-matched
-        # (both UCT); only the leaf evaluator differs (net/zeros here vs random rollout there).
+        # — reinfors additionally scales across cores, see Phase 1). `budget` = num_simulations and uct_c
+        # match the OpenSpiel backend, and both evaluate leaves with the SAME shared net — so this is a
+        # controlled UCT-vs-UCT race. reinfors batches the net across the round's pooled leaves.
         action_count = rf.games.Connect4().action_space().n
         engine = rf.Engine(
             rf.games.Connect4(),
@@ -107,7 +145,11 @@ class ReinforsBackend:
         )
 
         def infer(arr: np.ndarray) -> np.ndarray:
-            return np.zeros((arr.shape[0], 1, action_count), dtype=np.float64)
+            # State value from the shared net, broadcast across actions (MCTS uses the max = the value).
+            v = _SHARED_NET.value(board_from_reinfors(arr))
+            out = np.empty((arr.shape[0], 1, action_count), dtype=np.float64)
+            out[:, 0, :] = v[:, None]
+            return out
 
         return _throughput(lambda: int(engine.collect(decisions, infer).obs.shape[0]), repeats)
 
@@ -207,8 +249,21 @@ class OpenSpielBackend:
         from open_spiel.python.algorithms import mcts
 
         game = self._game()
-        evaluator = mcts.RandomRolloutEvaluator(n_rollouts=1)
-        bot = mcts.MCTSBot(game, uct_c=2.0, max_simulations=budget, evaluator=evaluator)
+
+        class NetEvaluator(mcts.Evaluator):
+            """Evaluate connect4 leaves with the shared net (value only; uniform prior — no policy head),
+            so this is the SAME leaf eval reinfors' MCTS runs."""
+
+            def evaluate(self, state: Any) -> np.ndarray:
+                v = float(_SHARED_NET.value(board_from_openspiel(state))[0])
+                return np.array([v, -v]) if state.current_player() == 0 else np.array([-v, v])
+
+            def prior(self, state: Any) -> list[tuple[int, float]]:
+                legal = state.legal_actions()
+                p = 1.0 / len(legal)
+                return [(a, p) for a in legal]
+
+        bot = mcts.MCTSBot(game, uct_c=2.0, max_simulations=budget, evaluator=NetEvaluator())
 
         def work() -> int:
             state = game.new_initial_state()
@@ -300,8 +355,8 @@ def run(args: argparse.Namespace) -> None:
             "Track B — searched decisions/sec on connect4 (budget = UCT simulations; per-core)",
             ("budget", *(f"{b.name} [{b.device()}]" for b in searchers)),
             rows_b,
-            note="both UCT (matched uct_c + budget); reinfors evaluates leaves with the net (zeros), "
-            "OpenSpiel with random rollouts — throughput, not quality. reinfors also scales across cores (Phase 1).",
+            note="both UCT with the SAME shared net (matched uct_c + budget) — a controlled implementation "
+            "race. reinfors batches the net across pooled leaves + scales across cores (Phase 1).",
         )
 
 
