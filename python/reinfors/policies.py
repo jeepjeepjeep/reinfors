@@ -13,10 +13,12 @@ from . import _reinfors
 
 SelectiveExpectimax = _reinfors.PolicyHandle.SelectiveExpectimax
 EpsilonGreedyQ = _reinfors.PolicyHandle.EpsilonGreedyQ
+Mcts = _reinfors.PolicyHandle.Mcts
 
 _REGISTRY: dict[str, Callable[..., Any]] = {
     "selective_expectimax": SelectiveExpectimax,
     "epsilon_greedy_q": EpsilonGreedyQ,
+    "mcts": Mcts,
 }
 
 

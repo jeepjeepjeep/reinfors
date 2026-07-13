@@ -4,3 +4,4 @@
 
 pub mod epsilon_greedy_q;
 pub mod expectimax;
+pub mod mcts;

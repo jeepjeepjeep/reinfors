@@ -18,6 +18,10 @@ use search::{search_many, InteriorTarget, SearchConfig, SearchStats};
 /// consumed by `TreeStrap` (the `learners` → `policies` edge: the producer owns the type).
 pub struct SearchEvaluation {
     pub values: Vec<Vec<f64>>, // [K][A]
+    /// Root per-action visit counts `[A]`, for a policy that *acts* by visit count (MCTS). Empty for
+    /// searches that act by value (expectimax) — `select` falls back to `values`. Never a training
+    /// target: `TreeStrap` regresses `values` (backed-up value), not visits.
+    pub visits: Vec<f64>,
     /// Interior MAX-node targets — a payload for the *consuming* `TreeStrap` (it drains them
     /// into immediate records), produced here only because the search is what generates them. Empty
     /// unless the learner asked for them via `needs_interior` (threaded into `evaluate`).
@@ -91,6 +95,7 @@ impl Policy for SelectiveExpectimax {
             };
             SearchEvaluation {
                 values,
+                visits: Vec::new(), // expectimax acts by value
                 interior,
                 stats,
             }
