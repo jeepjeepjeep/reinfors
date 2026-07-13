@@ -3,9 +3,9 @@
 //! they build the engine via the public core API (`Engine`, `EngineParams`, `SelectiveExpectimax`,
 //! `TreeStrap`, `SearchConfig`) and a `Snake`.
 
-use reinfors_core::{Engine, EngineParams, SelectiveExpectimax, TreeStrap};
+use reinfors_core::{Engine, EngineParams, ReachedStateBuffer, SelectiveExpectimax, TreeStrap};
 use reinfors_core::{Opponent, SearchConfig};
-use reinfors_games::{EgocentricSnake, Snake, SnakeReward};
+use reinfors_games::{snake_length_cell, EgocentricSnake, Snake, SnakeReward};
 
 /// Test config bundle: the snake + search knobs the helpers below read (was `reinfors_games::
 /// SearchParams`, which only the retired parity wrappers needed).
@@ -414,4 +414,56 @@ fn collected_targets_equal_a_direct_search() {
             }
         }
     }
+}
+
+#[test]
+fn start_buffer_with_p_fresh_one_is_bit_identical_to_default() {
+    // The determinism guard: the start-buffer machinery (per-tick `observe` + its disjoint RNG) must
+    // never perturb the env-chance draws. With p_fresh = 1.0 every reset falls back to `initial_state`,
+    // so the collected records must be bit-identical to the default `AlwaysInitialState` engine.
+    let baseline = engine(4, 2, 5).collect(80, infer).0;
+    let buffered = engine(4, 2, 5)
+        .with_start_distribution(Box::new(ReachedStateBuffer::new(
+            16,
+            1.0,
+            snake_length_cell,
+        )))
+        .collect(80, infer)
+        .0;
+    assert_eq!(
+        baseline, buffered,
+        "p_fresh=1 buffer must not change the rollout"
+    );
+}
+
+#[test]
+fn start_buffer_seeds_episodes_once_it_fills() {
+    // With p_fresh = 0, once the buffer has states (after the first episode) every reset restores one,
+    // so finished episodes get tagged `seeded`. The telemetry tag lets a caller keep off-d0 episodes
+    // out of the true-start curves. Short horizon + interior off so episodes finish quickly and the
+    // record floor tracks decisions.
+    let mut s = search();
+    s.max_ticks = Some(5);
+    let mut e = Engine::new(
+        game(&s, 3),
+        enc(&s),
+        reward(&s),
+        policy(&s, 2),
+        learner(0.5, false),
+        params(4, 6),
+    )
+    .with_start_distribution(Box::new(ReachedStateBuffer::new(
+        64,
+        0.0,
+        snake_length_cell,
+    )));
+    let mut any_seeded = false;
+    for _ in 0..4 {
+        let (_records, stats) = e.collect(200, infer);
+        any_seeded |= stats.episodes.iter().any(|ep| ep.seeded);
+    }
+    assert!(
+        any_seeded,
+        "with p_fresh=0 and a filled buffer, some episodes should start from a buffered state"
+    );
 }

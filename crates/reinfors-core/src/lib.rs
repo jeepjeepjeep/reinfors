@@ -15,6 +15,7 @@ pub mod policy;
 pub mod reward;
 pub(crate) mod rng;
 pub mod space;
+pub mod start;
 
 pub use encoder::StateEncoder;
 pub use engine::{CollectStats, Engine, EngineParams, EpisodeSummary};
@@ -31,6 +32,7 @@ pub use policies::expectimax::{SearchEvaluation, SelectiveExpectimax};
 pub use policy::Policy;
 pub use reward::Reward;
 pub use space::Space;
+pub use start::{AlwaysInitialState, ReachedStateBuffer, Start, StartDistribution};
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

@@ -109,9 +109,40 @@ def test_episode_reward_is_per_agent(make_engine, action_count: int, num_agents:
     _, _, _, telemetry = engine.collect(150, _dummy_infer(action_count))
     episodes = telemetry["episodes"]
     assert len(episodes) > 0
-    for rewards, length in episodes:
+    for rewards, length, seeded in episodes:
         assert len(rewards) == num_agents
         assert length >= 1 and all(np.isfinite(r) for r in rewards)
+        assert seeded is False  # no start buffer configured -> every episode is a fresh start
+
+
+def test_start_buffer_is_off_by_default_snake_only_and_tags_seeded() -> None:
+    # The reached-state start buffer is off by default and snake-only in v1. Enabled with p_fresh=0 and
+    # a short horizon, it fills and then seeds episodes from reached states (tagged in telemetry).
+    engine = rf.Engine(
+        rf.games.Snake(grid_size=8, max_ticks=5),
+        rf.Reward(food=1.0, loss=-1.0),
+        _selective(),
+        _treestrap(),
+        n_games=4,
+        start_buffer=True,
+        start_buffer_capacity=64,
+        p_fresh=0.0,
+    )
+    seeded_any = False
+    for _ in range(4):
+        _, _, _, telemetry = engine.collect(200, _dummy_infer(3))
+        seeded_any |= any(seeded for _, _, seeded in telemetry["episodes"])
+    assert seeded_any, "p_fresh=0 should seed some episodes once the buffer fills"
+    # No cell key for non-snake games -> enabling the buffer is rejected.
+    with pytest.raises(ValueError, match="only supported for the snake"):
+        rf.Engine(
+            rf.games.Connect4(),
+            rf.Reward(win=1.0),
+            _selective(),
+            _treestrap(),
+            n_games=2,
+            start_buffer=True,
+        )
 
 
 def test_registries_list_the_built_in_names() -> None:

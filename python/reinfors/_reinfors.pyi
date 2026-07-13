@@ -112,6 +112,12 @@ class Engine:
         learner: LearnerHandle,
         n_games: int,
         seed: int = ...,
+        # Reached-state start buffer (off by default; snake only): seed a fraction of episodes from
+        # previously-reached states to flatten start-state coverage. `p_fresh` is the fraction that
+        # still start fresh from `initial_state`.
+        start_buffer: bool = ...,
+        start_buffer_capacity: int = ...,
+        p_fresh: float = ...,
     ) -> None: ...
     # The batch is learner-shaped: the TreeStrap family yields a `TreeStrapBatch`, the DQN family a
     # `DqnBatch`. Both expose named fields and also unpack positionally (back-compat with the old tuple).

@@ -4,6 +4,7 @@
 //! a seed without pulling in an RNG dependency.
 
 /// Tiny deterministic PRNG (splitmix64).
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct SplitMix64 {
     state: u64,
 }
