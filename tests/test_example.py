@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+from typing import Any
 
 import numpy as np
 import pytest
@@ -16,7 +17,9 @@ import pytest
 torch = pytest.importorskip("torch")
 
 
-def _load_example() -> object:
+# `Any`: the example is loaded dynamically from a script path, so its members (ExampleNet, make_infer,
+# …) can't be statically known — this is a smoke test that the example runs against the current API.
+def _load_example() -> Any:
     path = os.path.join(os.path.dirname(__file__), "..", "scripts", "train_example.py")
     spec = importlib.util.spec_from_file_location("train_example", path)
     assert spec is not None and spec.loader is not None
