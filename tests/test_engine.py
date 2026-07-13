@@ -40,7 +40,7 @@ def _engine(
     survival: float = 0.0,
     n_heads: int = _K,
     epsilon: float = 0.1,
-) -> object:
+) -> reinfors.Engine:
     gamma, beta, budget, top_k, max_depth = _SEARCH
     return reinfors.Engine(
         reinfors.games.Snake(
@@ -96,6 +96,7 @@ def test_collect_shapes_and_dtypes() -> None:
 def test_collect_returns_named_treestrap_batch() -> None:
     # The TreeStrap family yields a named TreeStrapBatch; named fields mirror the positional unpacking.
     batch = _engine(0).collect(50, _infer)
+    assert isinstance(batch, reinfors._reinfors.TreeStrapBatch)  # the TreeStrap family's named batch
     obs, tgt, mask, telemetry = batch  # still unpacks positionally (back-compat)
     assert len(batch) == 4
     assert np.array_equal(batch.obs, obs)

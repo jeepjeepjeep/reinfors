@@ -6,6 +6,8 @@ K/A) keeps them torch-free — the model and gradient step live in the consumer,
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 import pytest
 import reinfors as rf
@@ -23,7 +25,7 @@ _TELEMETRY_KEYS = {
 }
 
 
-def _selective() -> object:
+def _selective() -> rf._reinfors.PolicyHandle:
     return rf.policies.SelectiveExpectimax(
         expansion_budget=24,
         top_k=4,
@@ -38,11 +40,11 @@ def _selective() -> object:
     )
 
 
-def _treestrap() -> object:
+def _treestrap() -> rf._reinfors.LearnerHandle:
     return rf.learners.TreeStrap(gamma=0.99, outcome_weight=0.5, bootstrap_p=1.0, interior_targets=False)
 
 
-def _connect4_engine() -> object:
+def _connect4_engine() -> rf.Engine:
     # Connect-4 is bounded (it always terminates), so it needs no truncation horizon.
     return rf.Engine(
         rf.games.Connect4(),
@@ -54,7 +56,7 @@ def _connect4_engine() -> object:
     )
 
 
-def _gridworld_engine() -> object:
+def _gridworld_engine() -> rf.Engine:
     return rf.Engine(
         rf.games.GridWorld(size=5, goal_row=0, goal_col=1, max_ticks=30),
         rf.Reward(step=0.0, goal=1.0),
@@ -65,7 +67,7 @@ def _gridworld_engine() -> object:
     )
 
 
-def _dqn_engine() -> object:
+def _dqn_engine() -> rf.Engine:
     return rf.Engine(
         rf.games.GridWorld(size=5, goal_row=0, goal_col=1, max_ticks=10),
         rf.Reward(step=0.0, goal=1.0),
@@ -76,7 +78,7 @@ def _dqn_engine() -> object:
     )
 
 
-def _dummy_infer(a: int) -> object:
+def _dummy_infer(a: int) -> Callable[[np.ndarray], np.ndarray]:
     def infer(arr: np.ndarray) -> np.ndarray:
         return np.zeros((arr.shape[0], _K, a), dtype=np.float64)
 
@@ -216,7 +218,7 @@ def test_engine_from_config_round_trips_a_yaml_shaped_dict() -> None:
 def test_reward_rejects_keys_not_valid_for_the_game() -> None:
     # The generic Reward is validated per game at Engine construction (the reward is decoupled from the
     # game now): any key the game doesn't define is an error (not silently ignored). Valid keys work.
-    def engine(game: object, reward: object) -> object:
+    def engine(game: rf._reinfors.GameHandle, reward: rf.Reward) -> rf.Engine:
         return rf.Engine(game, reward, _selective(), _treestrap(), n_games=1)
 
     engine(rf.games.Snake(grid_size=8), rf.Reward(food=1.0, loss=-10.0))  # snake keys: ok

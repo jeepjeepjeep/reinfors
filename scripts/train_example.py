@@ -29,8 +29,10 @@ class ExampleNet(nn.Module):
     """A small ensemble value net: shared conv trunk + K linear heads -> (B, K, A). Just enough to plug
     a torch model into reinfors; the K heads give the selective search its disagreement signal."""
 
-    def __init__(self, obs_shape: tuple[int, int, int], n_actions: int, n_heads: int) -> None:
+    def __init__(self, obs_shape: tuple[int, ...], n_actions: int, n_heads: int) -> None:
         super().__init__()
+        # `tuple[int, ...]` matches what `game.observation_space().shape` advertises; these games are
+        # all planar, so it unpacks to (channels, height, width).
         c, h, w = obs_shape
         self.obs_shape = (c, h, w)
         self.n_actions = n_actions
