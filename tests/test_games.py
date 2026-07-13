@@ -159,7 +159,7 @@ def test_game_handles_advertise_spaces() -> None:
     obs = rf.games.Snake(grid_size=12).observation_space()
     assert isinstance(obs, rf.spaces.Box) and obs.shape == (5, 12, 12)
     assert obs.low.shape == obs.shape == obs.high.shape  # bounds broadcast to the obs shape
-    assert np.isneginf(obs.low).all() and np.isposinf(obs.high).all()
+    assert (obs.low == 0.0).all() and (obs.high == 1.0).all()  # one-hot planes -> [0, 1]
     act = rf.games.Snake(grid_size=12).action_space()
     assert isinstance(act, rf.spaces.Discrete) and act.n == 3
     # The non-snake games advertise their own shapes (mirrors the Rust `spaces` test).
