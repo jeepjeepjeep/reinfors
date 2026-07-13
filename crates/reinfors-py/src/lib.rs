@@ -1529,9 +1529,22 @@ fn core_version() -> &'static str {
     reinfors_core::version()
 }
 
+/// The Cargo profile the extension was compiled with: `"debug"` or `"release"`. A debug build runs the
+/// Rust core roughly an order of magnitude slower, so any performance number taken against one is
+/// meaningless — the benchmark harness checks this and warns loudly.
+#[pyfunction]
+fn core_build_profile() -> &'static str {
+    if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    }
+}
+
 #[pymodule]
 fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
+    m.add_function(wrap_pyfunction!(core_build_profile, m)?)?;
     m.add_class::<PyEngine>()?;
     m.add_class::<PyEnv>()?;
     m.add_class::<GameHandle>()?;

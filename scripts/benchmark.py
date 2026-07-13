@@ -20,6 +20,10 @@ Plus a raw single-`rf.Env` stepping ceiling. `search` = SelectiveExpectimax + Tr
     uv run --with numpy python scripts/benchmark.py            # full run (~minutes)
     uv run --with numpy python scripts/benchmark.py --quick    # fast smoke
 
+reinfors MUST be a release build for any of this to mean anything — a debug build (`maturin develop`
+without `--release`) runs the Rust core ~10x slower. The harness checks `core_build_profile()` and warns
+loudly on a debug build; install a wheel (`pip install reinfors`) or `maturin develop --release`.
+
 Phase 2 — true cross-framework head-to-heads (Pgx on GPU, OpenSpiel MCTS) — needs those environments and
 a pinned machine, so it lives in a separate, manually-run script rather than here.
 """
@@ -172,14 +176,30 @@ def _fmt(x: float) -> str:
     return f"{x:,.0f}"
 
 
+def _warn_if_not_release() -> None:
+    profile = rf.core_build_profile()
+    if profile == "release":
+        return
+    bar = "!" * 78
+    print(
+        f"\n{bar}\n"
+        f"!! reinfors was built in '{profile}' mode — the Rust core runs ~10x slower, so EVERY\n"
+        f"!! number below is meaningless. Rebuild release: `maturin develop --release`, or\n"
+        f"!! install a wheel (`maturin build` / `pip install reinfors`).\n"
+        f"{bar}"
+    )
+
+
 def run(args: argparse.Namespace) -> None:
+    _warn_if_not_release()
     cores = os.cpu_count() or 1
     n_games = args.n_games or max(1, cores - 2)
     scaling = [n for n in ([1, 2, 4] if args.quick else [1, 2, 4, 8, 16, 32]) if n <= 4 * cores]
-    scale_budget = 128 if args.quick else 2048
+    scale_per_game = 16 if args.quick else 128  # budget scales with n_games -> comparable rounds per point
     levels = INFER_LEVELS[:2] if args.quick else INFER_LEVELS
     print(
-        f"reinfors {rf.__version__} — {cores} cores | n_games={n_games} records={args.records} repeats={args.repeats}"
+        f"reinfors {rf.__version__} ({rf.core_build_profile()}) — {cores} cores | "
+        f"n_games={n_games} records={args.records} repeats={args.repeats}"
     )
 
     def collect(name: str, mode: str, hidden: int, n: int = n_games, budget: int = args.records) -> str:
@@ -212,7 +232,7 @@ def run(args: argparse.Namespace) -> None:
             grid=GAMES["snake"].grid,
             mode="search",
             n_games=n,
-            records=scale_budget,
+            records=scale_per_game * n,
             repeats=args.repeats,
             hidden=0,
         )
@@ -222,8 +242,8 @@ def run(args: argparse.Namespace) -> None:
         "Parallel scaling — snake, search, zeros infer (records/sec vs n_games)",
         ("n_games", "records/sec", "speedup"),
         rows,
-        note=f"steady-state budget = {scale_budget}; the GIL-holding Python infer caps this "
-        "— a GIL-releasing net scales further.",
+        note=f"budget = {scale_per_game} records/game so every point runs ~{scale_per_game} rounds; "
+        "the GIL-holding Python infer caps the speedup — a GIL-releasing net scales further.",
     )
 
     _table(
