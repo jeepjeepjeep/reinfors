@@ -30,6 +30,7 @@ def test_gymnasium_episode_runs_to_a_terminal_or_the_time_limit() -> None:
     env = gym.make(_gridworld(), rf.Reward(goal=1.0))
     assert isinstance(env, gymnasium.Env)
     env.reset(seed=0)
+    terminated = truncated = False
     for _ in range(50):
         _, reward, terminated, truncated, _ = env.step(env.action_space.sample())
         assert isinstance(reward, float)

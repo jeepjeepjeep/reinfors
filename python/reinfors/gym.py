@@ -27,7 +27,7 @@ imported lazily, so importing this module without them installed is fine until y
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import Any
 
 import numpy as np
 
@@ -89,7 +89,7 @@ def _gym_cls() -> Any:
     class ReinforsGymEnv(gymnasium.Env):
         """A single-agent reinfors game as a ``gymnasium.Env``."""
 
-        metadata: ClassVar[dict[str, Any]] = {"render_modes": []}
+        # `metadata` (with the same `{"render_modes": []}` default) is inherited from `gymnasium.Env`.
 
         def __init__(
             self,
@@ -150,7 +150,7 @@ def _parallel_cls() -> Any:
     class ReinforsParallelEnv(ParallelEnv):
         """A simultaneous multi-agent reinfors game as a PettingZoo ``ParallelEnv``."""
 
-        metadata: ClassVar[dict[str, Any]] = {"name": "reinfors", "render_modes": []}
+        metadata: dict[str, Any] = {"name": "reinfors", "render_modes": []}  # noqa: RUF012
 
         def __init__(
             self,
