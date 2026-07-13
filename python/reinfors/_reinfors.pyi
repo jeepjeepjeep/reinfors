@@ -9,6 +9,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 def core_version() -> str: ...
+def core_build_profile() -> str: ...  # "debug" | "release"; perf numbers are only valid on "release"
 
 class Reward:
     # A generic named-weight reward; each game validates the keys it understands (snake: step/food/

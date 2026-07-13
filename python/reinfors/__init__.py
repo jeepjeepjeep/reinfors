@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import _reinfors, games, gym, learners, policies, spaces
-from ._reinfors import Engine, Env, Reward
+from ._reinfors import Engine, Env, Reward, core_build_profile, core_version
 
 
 def make_game(name: str, **kwargs: Any) -> Any:
@@ -92,6 +92,8 @@ __all__ = [
     "Env",
     "Reward",
     "_reinfors",
+    "core_build_profile",
+    "core_version",
     "engine_from_config",
     "games",
     "gym",
