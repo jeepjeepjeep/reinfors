@@ -15,9 +15,14 @@ dependencies = ["numpy"]
 [project.optional-dependencies]
 train = ["torch"]
 gym = ["gymnasium", "pettingzoo"]
+# `test` pulls everything the full test suite imports (both optional extras + pytest). It exists so a
+# dev/editor venv is reproducible from the same source CI uses — `uv pip install -e ".[test]"` — rather
+# than hand-populated (which drifts, leaving an editor's type checker unable to resolve test imports).
+test = ["reinfors[train,gym]", "pytest"]
 
-# Dev tooling isn't declared as project deps: the Python surface is light, so CI and local runs
-# invoke pinned tools via `uvx <tool>@<version>` (no lockfile / project-management layer).
+# Linters/build tools stay out of the project deps: CI and local runs invoke them pinned via
+# `uvx <tool>@<version>` (ruff, mypy, maturin) — no lockfile / project-management layer. Only runtime +
+# test imports live here, since those are what an editor's type checker must resolve.
 
 [tool.maturin]
 python-source = "python"
