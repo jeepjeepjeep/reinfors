@@ -1547,7 +1547,8 @@ impl PolicyHandle {
 
     /// Monte-Carlo Tree Search (UCT). Pairs with `TreeStrap`. Sequential / single-agent games only
     /// (connect4, gridworld) — rejected for snake. `act_by` is `"value"` (argmax mean action value) or
-    /// `"visits"` (argmax visit count).
+    /// `"visits"` (argmax visit count). Acting is deterministic (no root noise / move sampling), so it
+    /// targets evaluation and benchmarking; for training-data diversity it relies on the start buffer.
     #[staticmethod]
     #[pyo3(signature = (num_simulations=64, uct_c=2.0, max_depth=64, act_by="value"))]
     #[pyo3(name = "Mcts")]

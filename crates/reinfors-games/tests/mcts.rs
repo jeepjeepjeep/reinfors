@@ -80,6 +80,46 @@ fn mcts_finds_a_forced_connect4_win() {
     assert_eq!(evals[0].visits.len(), 7); // per-action visit counts, full action space
 }
 
+/// A position where P1 has three in column 0 and it is P0's move — if P0 doesn't play column 0, P1 wins
+/// there next turn. P0's only safe move is to block by playing column 0.
+fn opponent_threat_state() -> reinfors_games::Connect4State {
+    let game = Connect4;
+    let mut state = game.initial_state(&mut NoRng);
+    for &(mover, col) in &[(0, 1), (1, 0), (0, 1), (1, 0), (0, 2), (1, 0)] {
+        assert_eq!(game.actor(&state), Actor::Agent(mover));
+        let mut joint = vec![0usize; 2];
+        joint[mover] = col;
+        state = game.step(&state, &joint).next_state;
+    }
+    assert_eq!(game.actor(&state), Actor::Agent(0));
+    state
+}
+
+#[test]
+fn mcts_blocks_opponent_win() {
+    // Exercises the negamax turn-change: the opponent's win one ply deeper must propagate to the root
+    // as a loss, so P0 prefers the (neutral) block over any move that lets P1 win. A sign error in the
+    // backup would make P0 choose a losing move instead.
+    let evals = mcts_many(
+        &Connect4,
+        &Connect4Planes,
+        &reward(),
+        &cfg(400),
+        vec![(opponent_threat_state(), 0)],
+        &mut zeros_infer,
+    );
+    let values = &evals[0].values[0];
+    assert_eq!(
+        argmax(values),
+        0,
+        "MCTS should block the opponent's winning column"
+    );
+    assert!(
+        values[0] > values[1],
+        "blocking must beat a move that hands P1 the win"
+    );
+}
+
 #[test]
 fn mcts_is_deterministic() {
     let run = || {

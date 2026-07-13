@@ -9,6 +9,13 @@
 //! are rejected. Two-player games are treated as zero-sum (negamax backup) — correct for connect4. The
 //! binding refuses to pair this policy with a simultaneous/chance game (snake); this module panics as a
 //! backstop for direct core use.
+//!
+//! **Deterministic acting.** v1 acts greedily (`argmax` value or visits), with no root Dirichlet noise
+//! or visit-count sampling, and ignores the acting RNG — ideal for evaluation and a like-for-like
+//! benchmark, where reproducibility is the point. As a *training* policy it adds no self-play diversity
+//! on its own (self-play from a fixed start replays the same game every episode), so training use leans
+//! on the reached-state start buffer for coverage; a temperature / root-noise knob (AlphaZero-style) is
+//! the natural addition if undiluted self-play exploration is wanted.
 
 use crate::encoder::StateEncoder;
 use crate::engine::CollectStats;
