@@ -23,3 +23,17 @@ pub enum Space {
     /// A choice from `0..n`.
     Discrete { n: usize },
 }
+
+impl Space {
+    /// A `[0, 1]`-bounded `Box` of `shape` — the observation space for a one-hot / occupancy-plane
+    /// encoder, whose values are all 0 or 1. Advertising the true bounds (rather than the encoder's
+    /// unbounded default) lets bound-reading consumers behave — e.g. a Gymnasium normalization wrapper,
+    /// which can't scale against ±∞ — and makes a `contains` check meaningful.
+    pub fn unit_box(shape: Vec<usize>) -> Space {
+        Space::Box {
+            shape,
+            low: 0.0,
+            high: 1.0,
+        }
+    }
+}

@@ -3,7 +3,7 @@
 //! lookahead, no opponent) end to end through the generic search and rollout engine. Deterministic, so
 //! `sample_chance` is the default (`None`).
 
-use reinfors_core::{Actor, Game, Reward, StateEncoder, Transition};
+use reinfors_core::{Actor, Game, Reward, Space, StateEncoder, Transition};
 
 type Pos = (i32, i32);
 
@@ -138,6 +138,11 @@ impl StateEncoder for GridWorldPlanes {
 
     fn obs_shape(&self) -> (usize, usize, usize) {
         (N_CHANNELS, self.size as usize, self.size as usize)
+    }
+
+    fn observation_space(&self) -> Space {
+        let (c, h, w) = self.obs_shape();
+        Space::unit_box(vec![c, h, w]) // agent + goal one-hot planes: values in [0, 1]
     }
 }
 

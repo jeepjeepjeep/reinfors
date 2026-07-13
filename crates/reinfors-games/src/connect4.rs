@@ -5,7 +5,7 @@
 //! (`None`). Action legality is fixed — all 7 columns are always selectable; a move into a full column
 //! is an immediate loss for the mover — so the framework needs no action masking here.
 
-use reinfors_core::{Actor, Game, Reward, Rng, StateEncoder, Transition};
+use reinfors_core::{Actor, Game, Reward, Rng, Space, StateEncoder, Transition};
 
 const COLS: usize = 7;
 const ROWS: usize = 6;
@@ -230,6 +230,11 @@ impl StateEncoder for Connect4Planes {
 
     fn obs_shape(&self) -> (usize, usize, usize) {
         (2, ROWS, COLS) // channel 0 = own pieces, 1 = opponent's
+    }
+
+    fn observation_space(&self) -> Space {
+        let (c, h, w) = self.obs_shape();
+        Space::unit_box(vec![c, h, w]) // both planes are one-hot occupancy: values in [0, 1]
     }
 }
 

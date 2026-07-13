@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use reinfors_core::game::{Actor, Game, Rng, Transition};
-use reinfors_core::{Reward, StateEncoder};
+use reinfors_core::{Reward, Space, StateEncoder};
 
 pub type Cell = (i32, i32);
 
@@ -299,6 +299,11 @@ impl StateEncoder for EgocentricSnake {
 
     fn obs_shape(&self) -> (usize, usize, usize) {
         (N_CHANNELS, self.grid_size as usize, self.grid_size as usize)
+    }
+
+    fn observation_space(&self) -> Space {
+        let (c, h, w) = self.obs_shape();
+        Space::unit_box(vec![c, h, w]) // all planes are one-hot occupancy: values in [0, 1]
     }
 }
 
