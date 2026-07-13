@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import _reinfors, games, learners, policies, spaces
+from . import _reinfors, games, gym, learners, policies, spaces
 from ._reinfors import Engine, Env, Reward
 
 
@@ -94,6 +94,7 @@ __all__ = [
     "_reinfors",
     "engine_from_config",
     "games",
+    "gym",
     "learners",
     "make_game",
     "make_learner",

@@ -886,11 +886,11 @@ struct PyEnv {
 #[pymethods]
 impl PyEnv {
     #[new]
-    #[pyo3(signature = (game, seed=0))]
-    fn new(game: GameHandle, seed: u64) -> Self {
-        PyEnv {
-            inner: build_env(game.spec, seed),
-        }
+    #[pyo3(signature = (game, reward=None, seed=0))]
+    fn new(game: GameHandle, reward: Option<PyReward>, seed: u64) -> PyResult<Self> {
+        Ok(PyEnv {
+            inner: build_env(game.spec, reward, seed)?,
+        })
     }
 
     /// Start a new episode.
@@ -969,6 +969,15 @@ impl PyEnv {
             joint[agent] = action;
         }
         self.inner.step(py, joint)
+    }
+
+    /// The per-agent scalar rewards for the most recent `step`, or `None` if this `Env` was built
+    /// without a `reward` (the reward-free play/eval default) or before the first `step`. Lets a
+    /// training-facing consumer (e.g. the Gymnasium/PettingZoo adapters) read scalars without
+    /// duplicating the game's event→reward mapping, which stays in Rust.
+    #[getter]
+    fn rewards(&self) -> Option<Vec<f64>> {
+        self.inner.last_rewards()
     }
 }
 
@@ -1087,11 +1096,17 @@ trait ErasedEnv: Send + Sync {
         py: Python<'py>,
         actions: Vec<usize>,
     ) -> PyResult<Vec<Bound<'py, PyAny>>>;
+    /// The most recent `step`'s per-agent scalar rewards, or `None` if built reward-free / pre-`step`.
+    fn last_rewards(&self) -> Option<Vec<f64>>;
 }
 
 struct EnvImpl<G: Game> {
     inner: Env<G>,
     obs_shape: (usize, usize, usize),
+    // Optional so play/eval stay reward-free (`Env` holds no reward); the training-facing adapters
+    // supply one and read back scalars via `last_rewards`. The event→reward mapping stays in Rust.
+    reward: Option<Box<dyn Reward<Event = G::Event>>>,
+    last_rewards: Option<Vec<f64>>,
 }
 
 impl<G> ErasedEnv for EnvImpl<G>
@@ -1102,6 +1117,7 @@ where
 {
     fn reset(&mut self) {
         self.inner.reset();
+        self.last_rewards = None;
     }
     fn done(&self) -> bool {
         self.inner.done()
@@ -1135,18 +1151,27 @@ where
         py: Python<'py>,
         actions: Vec<usize>,
     ) -> PyResult<Vec<Bound<'py, PyAny>>> {
-        self.inner
-            .step(&actions)
-            .iter()
-            .map(|e| e.to_py(py))
-            .collect()
+        let events = self.inner.step(&actions);
+        self.last_rewards = self.reward.as_ref().map(|r| {
+            events
+                .iter()
+                .enumerate()
+                .map(|(agent, e)| r.step_reward(e, agent))
+                .collect()
+        });
+        events.iter().map(|e| e.to_py(py)).collect()
+    }
+    fn last_rewards(&self) -> Option<Vec<f64>> {
+        self.last_rewards.clone()
     }
 }
 
 /// Build a type-erased `Env` from a `GameSpec`, pairing the game with its default encoder. One arm per
-/// game (mirrors `build_engine`'s game axis).
-fn build_env(game: GameSpec, seed: u64) -> Box<dyn ErasedEnv> {
-    match game {
+/// game (mirrors `build_engine`'s game axis). An optional `reward` makes the `Env` report per-step
+/// scalar rewards (for the training-facing adapters); `None` keeps it reward-free (play/eval).
+fn build_env(game: GameSpec, reward: Option<PyReward>, seed: u64) -> PyResult<Box<dyn ErasedEnv>> {
+    let reward = reward.map(|r| build_reward(&game, Some(r))).transpose()?;
+    Ok(match game {
         GameSpec::Snake {
             grid_size,
             initial_length,
@@ -1171,6 +1196,11 @@ fn build_env(game: GameSpec, seed: u64) -> Box<dyn ErasedEnv> {
                     seed,
                 ),
                 obs_shape,
+                reward: reward.map(|rb| match rb {
+                    RewardBox::Snake(r) => Box::new(r) as Box<dyn Reward<Event = StepEvent>>,
+                    _ => unreachable!("build_reward returns the reward variant matching the game"),
+                }),
+                last_rewards: None,
             })
         }
         GameSpec::Connect4 => {
@@ -1178,6 +1208,11 @@ fn build_env(game: GameSpec, seed: u64) -> Box<dyn ErasedEnv> {
             Box::new(EnvImpl {
                 inner: Env::new(Connect4, Box::new(Connect4Planes), seed),
                 obs_shape,
+                reward: reward.map(|rb| match rb {
+                    RewardBox::Connect4(r) => Box::new(r) as Box<dyn Reward<Event = Connect4Event>>,
+                    _ => unreachable!("build_reward returns the reward variant matching the game"),
+                }),
+                last_rewards: None,
             })
         }
         GameSpec::GridWorld {
@@ -1198,9 +1233,14 @@ fn build_env(game: GameSpec, seed: u64) -> Box<dyn ErasedEnv> {
                     seed,
                 ),
                 obs_shape,
+                reward: reward.map(|rb| match rb {
+                    RewardBox::GridWorld(r) => Box::new(r) as Box<dyn Reward<Event = GridEvent>>,
+                    _ => unreachable!("build_reward returns the reward variant matching the game"),
+                }),
+                last_rewards: None,
             })
         }
-    }
+    })
 }
 
 // ===========================================================================

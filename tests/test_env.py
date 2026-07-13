@@ -20,6 +20,21 @@ def test_connect4_played_to_a_win() -> None:
     assert env.active_agents() == []
 
 
+def test_env_reports_scalar_rewards_only_when_built_with_a_reward() -> None:
+    # Reward-free by default (the play/eval case): `rewards` is None even after a step.
+    plain = rf.Env(rf.games.Connect4(), seed=0)
+    plain.step({0: 3})
+    assert plain.rewards is None
+
+    # Given a reward, the Env reports per-agent scalars for the last step — the event->reward mapping
+    # stays in Rust (this is what the `reinfors.gym` adapters read).
+    env = rf.Env(rf.games.Connect4(), rf.Reward(win=1.0, loss=-1.0, draw=0.0), seed=0)
+    for agent, col in [(0, 0), (1, 1), (0, 0), (1, 1), (0, 0), (1, 1), (0, 0)]:
+        env.step({agent: col})
+    assert env.done()
+    assert env.rewards == [1.0, -1.0]  # P0 wins, P1 loses
+
+
 def test_native_state_is_renderable_per_game() -> None:
     # The native state() exposes interpretable, game-specific structure (for rendering / human play).
     c4 = rf.Env(rf.games.Connect4(), seed=0)
