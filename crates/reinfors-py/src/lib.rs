@@ -19,9 +19,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
 use reinfors_core::{
-    AlwaysInitialState, Dqn, DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game, Learner,
-    Opponent, Policy, ReachedStateBuffer, Reward, SearchConfig, SelectiveExpectimax, Space,
-    StartDistribution, StateEncoder, TreeStrap, TreeStrapRecord,
+    ActBy, AlwaysInitialState, Dqn, DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game,
+    Learner, Mcts, MctsConfig, Opponent, Policy, ReachedStateBuffer, Reward, SearchConfig,
+    SelectiveExpectimax, Space, StartDistribution, StateEncoder, TreeStrap, TreeStrapRecord,
 };
 use reinfors_games::snake::{Cell, DeathCause};
 use reinfors_games::{
@@ -652,6 +652,12 @@ enum PolicySpec {
         n_heads: usize,
         epsilon: f64,
     },
+    Mcts {
+        num_simulations: usize,
+        uct_c: f64,
+        max_depth: i32,
+        act_by: ActBy,
+    },
 }
 
 /// Learning-algorithm configuration. TreeStrap's `gamma` is also threaded into the search config by
@@ -754,6 +760,52 @@ where
                 n_heads,
             }))
         }
+        (
+            PolicySpec::Mcts {
+                num_simulations,
+                uct_c,
+                max_depth,
+                act_by,
+            },
+            LearnerSpec::TreeStrap {
+                gamma,
+                outcome_weight,
+                bootstrap_p,
+                interior_targets: _, // MCTS emits no interior targets (only the root value)
+            },
+        ) => {
+            if num_simulations < 1 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "num_simulations must be >= 1",
+                ));
+            }
+            if max_depth < 1 {
+                return Err(pyo3::exceptions::PyValueError::new_err("max_depth must be >= 1"));
+            }
+            if uct_c < 0.0 {
+                return Err(pyo3::exceptions::PyValueError::new_err("uct_c must be >= 0"));
+            }
+            check_unit("outcome_weight", outcome_weight)?;
+            check_unit("bootstrap_p", bootstrap_p)?;
+            // MCTS is a single-head value search, so the net's head count is 1 for the batch shape.
+            let policy = Mcts::new(
+                MctsConfig {
+                    num_simulations,
+                    uct_c,
+                    gamma,
+                    max_depth,
+                },
+                act_by,
+            );
+            let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, false);
+            Ok(Box::new(EngineImpl {
+                inner: Engine::new(game, enc, reward, policy, learner, engine_params)
+                    .with_start_distribution(start_dist),
+                dim,
+                action_count,
+                n_heads: 1,
+            }))
+        }
         (PolicySpec::EpsilonGreedyQ { n_heads, epsilon }, LearnerSpec::Dqn { bootstrap_p }) => {
             if n_heads < 1 {
                 return Err(pyo3::exceptions::PyValueError::new_err("n_heads must be >= 1"));
@@ -771,7 +823,7 @@ where
             }))
         }
         _ => Err(pyo3::exceptions::PyValueError::new_err(
-            "incompatible policy/learner: TreeStrap pairs with SelectiveExpectimax, Dqn with EpsilonGreedyQ",
+            "incompatible policy/learner: TreeStrap pairs with SelectiveExpectimax or Mcts, Dqn with EpsilonGreedyQ",
         )),
     }
 }
@@ -799,6 +851,14 @@ fn build_engine(
     if start_buffer.is_some() && !matches!(game, GameSpec::Snake { .. }) {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "start_buffer is only supported for the snake game",
+        ));
+    }
+    // MCTS assumes strictly sequential / single-agent play; snake is simultaneous (with chance), so
+    // reject the pairing here rather than let it panic mid-rollout in the search.
+    if matches!(policy, PolicySpec::Mcts { .. }) && matches!(game, GameSpec::Snake { .. }) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "Mcts supports only sequential / single-agent games (connect4, gridworld); snake is \
+             simultaneous — use SelectiveExpectimax for snake",
         ));
     }
     match (game, reward) {
@@ -1483,6 +1543,32 @@ impl PolicyHandle {
         PolicyHandle {
             spec: PolicySpec::EpsilonGreedyQ { n_heads, epsilon },
         }
+    }
+
+    /// Monte-Carlo Tree Search (UCT). Pairs with `TreeStrap`. Sequential / single-agent games only
+    /// (connect4, gridworld) — rejected for snake. `act_by` is `"value"` (argmax mean action value) or
+    /// `"visits"` (argmax visit count).
+    #[staticmethod]
+    #[pyo3(signature = (num_simulations=64, uct_c=2.0, max_depth=64, act_by="value"))]
+    #[pyo3(name = "Mcts")]
+    fn mcts(num_simulations: usize, uct_c: f64, max_depth: i32, act_by: &str) -> PyResult<Self> {
+        let act_by = match act_by {
+            "value" => ActBy::Value,
+            "visits" => ActBy::Visits,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown act_by {other:?}; expected \"value\" or \"visits\""
+                )))
+            }
+        };
+        Ok(PolicyHandle {
+            spec: PolicySpec::Mcts {
+                num_simulations,
+                uct_c,
+                max_depth,
+                act_by,
+            },
+        })
     }
 }
 

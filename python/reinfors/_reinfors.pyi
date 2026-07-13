@@ -67,6 +67,14 @@ class PolicyHandle:
     ) -> PolicyHandle: ...
     @staticmethod
     def EpsilonGreedyQ(n_heads: int = ..., epsilon: float = ...) -> PolicyHandle: ...
+    # MCTS (UCT); pairs with TreeStrap; sequential/single-agent games only. act_by: "value" | "visits".
+    @staticmethod
+    def Mcts(
+        num_simulations: int = ...,
+        uct_c: float = ...,
+        max_depth: int = ...,
+        act_by: str = ...,
+    ) -> PolicyHandle: ...
 
 class LearnerHandle:
     @staticmethod

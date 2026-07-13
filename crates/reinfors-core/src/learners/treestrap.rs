@@ -131,6 +131,7 @@ mod tests {
     fn eval(values: Vec<Vec<f64>>, interior: Vec<InteriorTarget>) -> SearchEvaluation {
         SearchEvaluation {
             values,
+            visits: Vec::new(),
             interior,
             stats: SearchStats::default(),
         }

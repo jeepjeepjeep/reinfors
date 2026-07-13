@@ -149,7 +149,7 @@ def test_start_buffer_is_off_by_default_snake_only_and_tags_seeded() -> None:
 
 def test_registries_list_the_built_in_names() -> None:
     assert rf.registered_games() == ["connect4", "gridworld", "snake"]
-    assert rf.registered_policies() == ["epsilon_greedy_q", "selective_expectimax"]
+    assert rf.registered_policies() == ["epsilon_greedy_q", "mcts", "selective_expectimax"]
     assert rf.registered_learners() == ["dqn", "treestrap"]
 
 
@@ -239,6 +239,57 @@ def test_incompatible_policy_learner_pairing_is_rejected() -> None:
             rf.learners.TreeStrap(),
             n_games=1,
         )
+
+
+def _mcts_infer(action_count: int) -> Callable[[np.ndarray], np.ndarray]:
+    # MCTS is single-head (n_heads=1), so its net returns (N, 1, A).
+    def infer(arr: np.ndarray) -> np.ndarray:
+        return np.zeros((arr.shape[0], 1, action_count), dtype=np.float64)
+
+    return infer
+
+
+@pytest.mark.parametrize(
+    ("game", "action_count"),
+    [
+        (rf.games.Connect4(), 7),
+        (rf.games.GridWorld(size=5, goal_row=0, goal_col=1, max_ticks=20), 4),
+    ],
+)
+def test_mcts_pairs_with_treestrap_on_sequential_games(game: rf._reinfors.GameHandle, action_count: int) -> None:
+    # The MCTS planner drives sequential / single-agent games through TreeStrap: single-head targets.
+    reward = rf.Reward(win=1.0, loss=-1.0) if action_count == 7 else rf.Reward(goal=1.0)
+    engine = rf.Engine(
+        game,
+        reward,
+        rf.policies.Mcts(num_simulations=24, act_by="visits"),
+        rf.learners.TreeStrap(),
+        n_games=2,
+        seed=0,
+    )
+    obs, tgt, mask, telemetry = engine.collect(30, _mcts_infer(action_count))
+    m = obs.shape[0]
+    assert m >= 30
+    assert tgt.shape == (m, 1, action_count)  # MCTS is single-head
+    assert mask.shape == (m, 1)
+    assert telemetry["decisions"] > 0
+
+
+def test_mcts_rejects_simultaneous_snake() -> None:
+    # MCTS assumes sequential/single-agent play; pairing it with snake (simultaneous) fails at build.
+    with pytest.raises(ValueError, match="sequential"):
+        rf.Engine(
+            rf.games.Snake(grid_size=8),
+            rf.Reward(food=1.0, loss=-1.0),
+            rf.policies.Mcts(num_simulations=8),
+            rf.learners.TreeStrap(),
+            n_games=2,
+        )
+
+
+def test_mcts_rejects_unknown_act_by() -> None:
+    with pytest.raises(ValueError, match="act_by"):
+        rf.policies.Mcts(act_by="greedy")
 
 
 @pytest.mark.parametrize(
