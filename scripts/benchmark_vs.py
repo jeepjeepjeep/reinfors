@@ -23,10 +23,10 @@ wheel for your accelerator). reinfors must be a RELEASE build — this checks an
 
     uv run --with numpy --with pgx --with jax[cuda12] --with open_spiel python scripts/benchmark_vs.py
 
-Backends whose deps aren't importable are skipped with a note; the reinfors backend always runs. The
-Pgx and OpenSpiel backends are written to those projects' public APIs but were NOT executable in the
-dev environment they were written in — they are marked UNVALIDATED and want a shakeout (`--smoke`) on
-your machine before you trust their numbers.
+Backends whose deps aren't importable are skipped with a note; the reinfors backend always runs, and a
+per-cell error in any backend degrades to `ERR` (never a crash). The Pgx and OpenSpiel backends have
+been run on CPU (validating their APIs), but Pgx's headline regime — large batch on a GPU/TPU — has not;
+run on your accelerator for those numbers.
 """
 
 # The optional backends import jax/pgx/pyspiel/open_spiel, which aren't installed in the dev/CI env;
@@ -45,8 +45,6 @@ from typing import Any
 
 import numpy as np
 import reinfors as rf
-
-_BUDGET = 64  # matched search budget: reinfors expansion_budget ~ OpenSpiel max_simulations
 
 
 def _throughput(work: Any, repeats: int) -> float:
@@ -69,6 +67,7 @@ def _throughput(work: Any, repeats: int) -> float:
 class ReinforsBackend:
     name = "reinfors"
     validated = True
+    supports_search = True
 
     def available(self) -> tuple[bool, str]:
         return True, f"{rf.__version__} ({rf.core_build_profile()})"
@@ -124,7 +123,8 @@ class ReinforsBackend:
 
 class PgxBackend:
     name = "pgx"
-    validated = False  # UNVALIDATED — written to Pgx's public API, not run in the authoring env
+    validated = True  # runs on jax/pgx (CPU) here; its headline regime — large batch on GPU/TPU — is unrun
+    supports_search = False  # batched MCTS via mctx is a follow-up
 
     def _import(self) -> Any:
         import jax
@@ -151,31 +151,37 @@ class PgxBackend:
         from pgx.experimental import auto_reset
 
         env = pgx.make("connect_four")
+        # pgx >= 2.0 auto_reset takes (state, action, key); vmap over the batch and run the whole
+        # `steps`-long rollout on-device via fori_loop — the fair Pgx fast path (no per-step Python).
+        step = jax.vmap(auto_reset(env.step, env.init))
         init = jax.jit(jax.vmap(env.init))
-        step = jax.jit(jax.vmap(auto_reset(env.step, env.init)))  # reset terminated envs in-place
-        keys = jax.random.split(jax.random.PRNGKey(0), batch)
-        state = init(keys)
+        state0 = init(jax.random.split(jax.random.PRNGKey(0), batch))
 
-        def one(s: Any) -> Any:
-            action = jnp.argmax(s.legal_action_mask, axis=-1)  # first legal action (deterministic)
-            return step(s, action)
+        @jax.jit
+        def rollout(state: Any, key: Any) -> Any:
+            def body(_i: Any, carry: Any) -> Any:
+                state, key = carry
+                action = jnp.argmax(state.legal_action_mask, axis=-1)  # first legal action
+                key, sub = jax.random.split(key)
+                state = step(state, action, jax.random.split(sub, batch))
+                return state, key
+
+            return jax.lax.fori_loop(0, steps, body, (state, key))[0]
 
         def work() -> int:
-            nonlocal state
-            for _ in range(steps):
-                state = one(state)
-            jax.block_until_ready(state)
+            jax.block_until_ready(rollout(state0, jax.random.PRNGKey(1)))
             return batch * steps
 
         return _throughput(work, repeats)
 
-    def search(self, budget: int, decisions: int, repeats: int) -> float | None:
-        return None  # batched MCTS via mctx is deferred to a follow-up
+    def search(self, budget: int, decisions: int, repeats: int) -> float:
+        raise NotImplementedError("batched MCTS via mctx is deferred to a follow-up")
 
 
 class OpenSpielBackend:
     name = "openspiel"
-    validated = False  # UNVALIDATED — written to OpenSpiel's public API, not run in the authoring env
+    validated = True  # runs on open_spiel (CPU) here
+    supports_search = True
 
     def _game(self) -> Any:
         import pyspiel
@@ -251,8 +257,14 @@ def _table(title: str, header: tuple[str, ...], rows: list[tuple[str, ...]], not
         print(fmt(r))
 
 
-def _fmt(x: float | None) -> str:
-    return "—" if x is None else f"{x:,.0f}"
+def _cell(backend: Any, label: str, fn: Any) -> str:
+    """One measured table cell, isolated: a backend failure (e.g. an UNVALIDATED backend's API drift)
+    becomes an 'ERR' cell + a one-line note, never a crash that takes the whole comparison down."""
+    try:
+        return f"{fn():,.0f}"
+    except Exception as e:  # a benchmark cell must never propagate a backend's error
+        print(f"  ! {backend.name} {label} failed: {type(e).__name__}: {str(e).splitlines()[0][:100]}")
+        return "ERR"
 
 
 def run(args: argparse.Namespace) -> None:
@@ -268,22 +280,35 @@ def run(args: argparse.Namespace) -> None:
 
     batches = [1, 8] if args.smoke else [1, 16, 256, 4096]
     steps = 50 if args.smoke else 2000
+    rows_a = []
+    for bs in batches:
+        cells = tuple(
+            _cell(b, f"raw_step(batch={bs})", lambda b=b, bs=bs: b.raw_step(bs, steps, args.repeats)) for b in active
+        )
+        rows_a.append((str(bs), *cells))
     _table(
         "Track A — raw env transitions/sec on connect4 (device in header; CPU rows ~flat, Pgx scales)",
         ("batch", *(f"{b.name} [{b.device()}]" for b in active)),
-        [(str(bs), *(_fmt(b.raw_step(bs, steps, args.repeats)) for b in active)) for bs in batches],
+        rows_a,
         note="reinfors/OpenSpiel don't vectorize raw stepping (batch = N sequential envs); "
         "Track B is reinfors' real product.",
     )
 
-    searchers = [b for b in active if b.search(_BUDGET, 1, 1) is not None]
+    searchers = [b for b in active if b.supports_search]
     budgets = [16, 64] if args.smoke else [16, 64, 256]
     decisions = 20 if args.smoke else 200
     if searchers:
+        rows_b = []
+        for bud in budgets:
+            cells = tuple(
+                _cell(b, f"search(budget={bud})", lambda b=b, bud=bud: b.search(bud, decisions, args.repeats))
+                for b in searchers
+            )
+            rows_b.append((str(bud), *cells))
         _table(
             "Track B — searched decisions/sec on connect4 (budget = expansions ~ simulations; per-core)",
             ("budget", *(f"{b.name} [{b.device()}]" for b in searchers)),
-            [(str(bud), *(_fmt(b.search(bud, decisions, args.repeats)) for b in searchers)) for bud in budgets],
+            rows_b,
             note="DIFFERENT algorithms (selective-expectimax vs MCTS) at matched budget — throughput, not quality. "
             "reinfors shown at n_games=1; it also scales across cores (Phase 1).",
         )
