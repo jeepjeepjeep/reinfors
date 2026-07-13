@@ -38,7 +38,7 @@ __all__ = ["gymnasium_env", "make", "parallel_env"]
 
 
 def _to_gym_box(space: Box) -> Any:
-    import gymnasium
+    import gymnasium  # pyright: ignore[reportMissingImports]  # optional dep (reinfors[gym])
 
     return gymnasium.spaces.Box(
         low=np.asarray(space.low, dtype=np.float32),
@@ -49,7 +49,7 @@ def _to_gym_box(space: Box) -> Any:
 
 
 def _to_gym_discrete(space: Discrete) -> Any:
-    import gymnasium
+    import gymnasium  # pyright: ignore[reportMissingImports]  # optional dep (reinfors[gym])
 
     return gymnasium.spaces.Discrete(space.n)
 
@@ -82,7 +82,7 @@ def _gym_cls() -> Any:
     if _GYM_CLS is not None:
         return _GYM_CLS
     try:
-        import gymnasium
+        import gymnasium  # pyright: ignore[reportMissingImports]  # optional dep (reinfors[gym])
     except ModuleNotFoundError as e:
         raise _missing("gymnasium") from e
 
@@ -143,7 +143,7 @@ def _parallel_cls() -> Any:
     if _PARALLEL_CLS is not None:
         return _PARALLEL_CLS
     try:
-        from pettingzoo import ParallelEnv
+        from pettingzoo import ParallelEnv  # pyright: ignore[reportMissingImports]  # optional dep (reinfors[gym])
     except ModuleNotFoundError as e:
         raise _missing("pettingzoo") from e
 
