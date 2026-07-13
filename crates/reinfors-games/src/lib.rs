@@ -9,7 +9,7 @@ pub mod snake;
 pub use connect4::{Connect4, Connect4Event, Connect4Planes, Connect4Reward, Connect4State};
 pub use gridworld::{GridEvent, GridState, GridWorld, GridWorldPlanes, GridWorldReward};
 pub use snake::{
-    egocentric_parts, relative_to_absolute, Action, Cell, DeathCause, EgocentricSnake,
-    RelativeAction, Snake, SnakeBody, SnakeReward, SnakeState, StepEvent, N_CHANNELS,
-    RELATIVE_ACTIONS,
+    egocentric_parts, relative_to_absolute, snake_length_cell, Action, Cell, DeathCause,
+    EgocentricSnake, RelativeAction, Snake, SnakeBody, SnakeReward, SnakeState, StepEvent,
+    N_CHANNELS, RELATIVE_ACTIONS,
 };

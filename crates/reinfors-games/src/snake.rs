@@ -262,6 +262,28 @@ pub struct SnakeState {
     pub food: HashSet<Cell>,
 }
 
+// Coarsening for the reached-state buffer: bucket a snake length, and how many buckets. Difficulty
+// tracks length, so a fixed linear bucketing spreads start coverage from early to late game; very-late
+// lengths saturate the last bucket. Fixed in v1 (a configurable coarsening is a future refinement).
+const CELL_BUCKET_SIZE: usize = 3;
+const CELL_N_BUCKETS: u64 = 10;
+
+/// A start-state-buffer coverage cell for a snake state: the **unordered** pair of the two snakes'
+/// length buckets, packed into a `u64`. The pair is unordered because self-play is symmetric — one
+/// lopsided rollout already yields both perspectives, so `(20, 4)` and `(4, 20)` are the same cell
+/// (an off-diagonal one). Returns `None` for a state with a dead snake (the episode is effectively
+/// over, so it is not a valid restart point). This is snake's `cell_key` for
+/// [`ReachedStateBuffer`](reinfors_core::ReachedStateBuffer); another game supplies its own.
+pub fn snake_length_cell(state: &SnakeState) -> Option<u64> {
+    if !state.snakes[0].alive || !state.snakes[1].alive {
+        return None;
+    }
+    let bucket = |len: usize| ((len / CELL_BUCKET_SIZE) as u64).min(CELL_N_BUCKETS - 1);
+    let (a, b) = (bucket(state.snakes[0].len()), bucket(state.snakes[1].len()));
+    let (lo, hi) = (a.min(b), a.max(b));
+    Some((lo << 16) | hi)
+}
+
 /// The default snake observation: an egocentric 5-channel grid, the searching snake always facing up
 /// (see [`egocentric_parts`]). Carries `grid_size` (which lives on `Snake`, not in `SnakeState`).
 pub struct EgocentricSnake {
@@ -903,6 +925,42 @@ mod game_tests {
         assert!(events[0].survived_to_max_ticks && !events[1].survived_to_max_ticks);
         assert!((r.step_reward(&events[0], 0) - 0.25).abs() < 1e-12); // A: survival
         assert_eq!(r.step_reward(&events[1], 1), 0.0); // B (dead): none
+    }
+
+    #[test]
+    fn snake_length_cell_is_symmetric_off_diagonal_and_skips_dead() {
+        // Only lengths + aliveness matter to the cell key, so filler bodies of the right length suffice.
+        let mk = |la: usize, lb: usize, b_alive: bool| {
+            let body = |len: usize| (0..len as i32).map(|c| (0, c)).collect::<VecDeque<Cell>>();
+            SnakeState {
+                snakes: [
+                    SnakeBody {
+                        body: body(la),
+                        direction: Action::Right,
+                        alive: true,
+                    },
+                    SnakeBody {
+                        body: body(lb),
+                        direction: Action::Left,
+                        alive: b_alive,
+                    },
+                ],
+                food: HashSet::new(),
+            }
+        };
+        // Self-play symmetry: mirror states are the same (off-diagonal) cell.
+        let lopsided = snake_length_cell(&mk(21, 6, true)).unwrap();
+        assert_eq!(Some(lopsided), snake_length_cell(&mk(6, 21, true)));
+        assert_ne!(
+            lopsided >> 16,
+            lopsided & 0xFFFF,
+            "lopsided -> off-diagonal cell"
+        );
+        // Equal lengths -> a diagonal cell.
+        let sym = snake_length_cell(&mk(9, 9, true)).unwrap();
+        assert_eq!(sym >> 16, sym & 0xFFFF, "equal lengths -> diagonal cell");
+        // A dead snake is not a valid restart point.
+        assert_eq!(snake_length_cell(&mk(9, 9, false)), None);
     }
 }
 

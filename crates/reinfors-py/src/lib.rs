@@ -19,14 +19,15 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
 use reinfors_core::{
-    Dqn, DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game, Learner, Opponent, Policy,
-    Reward, SearchConfig, SelectiveExpectimax, Space, StateEncoder, TreeStrap, TreeStrapRecord,
+    AlwaysInitialState, Dqn, DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game, Learner,
+    Opponent, Policy, ReachedStateBuffer, Reward, SearchConfig, SelectiveExpectimax, Space,
+    StartDistribution, StateEncoder, TreeStrap, TreeStrapRecord,
 };
 use reinfors_games::snake::{Cell, DeathCause};
 use reinfors_games::{
-    Action, Connect4, Connect4Event, Connect4Planes, Connect4Reward, Connect4State,
-    EgocentricSnake, GridEvent, GridState, GridWorld, GridWorldPlanes, GridWorldReward, Snake,
-    SnakeReward, SnakeState, StepEvent,
+    snake_length_cell, Action, Connect4, Connect4Event, Connect4Planes, Connect4Reward,
+    Connect4State, EgocentricSnake, GridEvent, GridState, GridWorld, GridWorldPlanes,
+    GridWorldReward, Snake, SnakeReward, SnakeState, StepEvent,
 };
 
 /// Absolute `Action` -> its `u8` code (Up/Down/Left/Right = 0/1/2/3), for native-state marshalling.
@@ -154,7 +155,8 @@ struct PyEngine {
 #[pymethods]
 impl PyEngine {
     #[new]
-    #[pyo3(signature = (game, reward, policy, learner, n_games, seed=0))]
+    #[pyo3(signature = (game, reward, policy, learner, n_games, seed=0, start_buffer=false, start_buffer_capacity=1000, p_fresh=0.15))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         game: GameHandle,
         reward: Option<PyReward>,
@@ -162,15 +164,41 @@ impl PyEngine {
         learner: LearnerHandle,
         n_games: usize,
         seed: u64,
+        start_buffer: bool,
+        start_buffer_capacity: usize,
+        p_fresh: f64,
     ) -> PyResult<Self> {
         if n_games < 1 {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "n_games must be >= 1",
             ));
         }
+        // Off by default. When on, seed a fraction of episodes from reached mid/late-game states to
+        // flatten start-state coverage (snake only in v1). Validated here so the core stays permissive.
+        let start_buffer = if start_buffer {
+            if start_buffer_capacity < 1 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "start_buffer_capacity must be >= 1",
+                ));
+            }
+            check_unit("p_fresh", p_fresh)?;
+            Some(StartBufferConfig {
+                capacity: start_buffer_capacity,
+                p_fresh,
+            })
+        } else {
+            None
+        };
         let engine_params = EngineParams { n_games, seed };
         Ok(PyEngine {
-            inner: build_engine(game.spec, reward, policy.spec, learner.spec, engine_params)?,
+            inner: build_engine(
+                game.spec,
+                reward,
+                policy.spec,
+                learner.spec,
+                engine_params,
+                start_buffer,
+            )?,
         })
     }
 
@@ -427,10 +455,12 @@ where
         return Err(e);
     }
     let d = (stats.decisions.max(1)) as f64;
-    let episodes: Vec<(Vec<f64>, usize)> = stats
+    // (per-agent reward, length, seeded-from-start-buffer) — the `seeded` tag lets a caller keep
+    // off-d0 episodes out of the true-start learning curves.
+    let episodes: Vec<(Vec<f64>, usize, bool)> = stats
         .episodes
         .iter()
-        .map(|e| (e.reward.clone(), e.length))
+        .map(|e| (e.reward.clone(), e.length, e.seeded))
         .collect();
     let telemetry = PyDict::new(py);
     telemetry.set_item("episodes", episodes)?;
@@ -663,10 +693,12 @@ fn check_max_ticks(max_ticks: Option<usize>) -> PyResult<()> {
 /// Family axis: given a concrete game, build the engine for a valid (policy, learner) pair. Written
 /// once, generic over `G`, so a new family applies to every game; invalid pairings error here. Also
 /// where the composed params are validated (the handles store them unchecked).
+#[allow(clippy::too_many_arguments)]
 fn build_for_game<G: Game + Send + Sync + 'static>(
     game: G,
     enc: Box<dyn StateEncoder<State = G::State>>,
     reward: Box<dyn Reward<Event = G::Event>>,
+    start_dist: Box<dyn StartDistribution<G::State>>,
     policy: PolicySpec,
     learner: LearnerSpec,
     engine_params: EngineParams,
@@ -715,7 +747,8 @@ where
             let policy = SelectiveExpectimax::new(cfg, n_heads, epsilon);
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
             Ok(Box::new(EngineImpl {
-                inner: Engine::new(game, enc, reward, policy, learner, engine_params),
+                inner: Engine::new(game, enc, reward, policy, learner, engine_params)
+                    .with_start_distribution(start_dist),
                 dim,
                 action_count,
                 n_heads,
@@ -730,7 +763,8 @@ where
             let policy = EpsilonGreedyQ::new(n_heads, epsilon);
             let learner = Dqn::new(n_heads, bootstrap_p);
             Ok(Box::new(EngineImpl {
-                inner: Engine::new(game, enc, reward, policy, learner, engine_params),
+                inner: Engine::new(game, enc, reward, policy, learner, engine_params)
+                    .with_start_distribution(start_dist),
                 dim,
                 action_count,
                 n_heads,
@@ -742,16 +776,31 @@ where
     }
 }
 
+/// Reached-state start-buffer config (`rf.Engine(..., start_buffer=True, ...)`), validated at the
+/// engine boundary.
+struct StartBufferConfig {
+    capacity: usize,
+    p_fresh: f64,
+}
+
 /// Game axis: pick the concrete game from `GameSpec`, then dispatch to `build_for_game`. One arm per
-/// game; each instantly works with every family.
+/// game; each instantly works with every family. The start distribution is wired here too, since only
+/// the snake arm has a cell key for the reached-state buffer (other games use `AlwaysInitialState`).
 fn build_engine(
     game: GameSpec,
     reward: Option<PyReward>,
     policy: PolicySpec,
     learner: LearnerSpec,
     engine_params: EngineParams,
+    start_buffer: Option<StartBufferConfig>,
 ) -> PyResult<Box<dyn ErasedEngine>> {
     let reward = build_reward(&game, reward)?;
+    // The reached-state buffer needs a game-specific cell key; only snake supplies one in v1.
+    if start_buffer.is_some() && !matches!(game, GameSpec::Snake { .. }) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "start_buffer is only supported for the snake game",
+        ));
+    }
     match (game, reward) {
         (
             GameSpec::Snake {
@@ -763,25 +812,37 @@ fn build_engine(
                 max_ticks,
             },
             RewardBox::Snake(reward),
-        ) => build_for_game(
-            Snake {
-                grid_size,
-                initial_length,
-                play_to_last,
-                win_food_lead,
-                initial_food_count,
-                max_ticks,
-            },
-            Box::new(EgocentricSnake { grid_size }),
-            Box::new(reward),
-            policy,
-            learner,
-            engine_params,
-        ),
+        ) => {
+            let start_dist: Box<dyn StartDistribution<SnakeState>> = match start_buffer {
+                Some(cfg) => Box::new(ReachedStateBuffer::new(
+                    cfg.capacity,
+                    cfg.p_fresh,
+                    snake_length_cell,
+                )),
+                None => Box::new(AlwaysInitialState),
+            };
+            build_for_game(
+                Snake {
+                    grid_size,
+                    initial_length,
+                    play_to_last,
+                    win_food_lead,
+                    initial_food_count,
+                    max_ticks,
+                },
+                Box::new(EgocentricSnake { grid_size }),
+                Box::new(reward),
+                start_dist,
+                policy,
+                learner,
+                engine_params,
+            )
+        }
         (GameSpec::Connect4, RewardBox::Connect4(reward)) => build_for_game(
             Connect4,
             Box::new(Connect4Planes),
             Box::new(reward),
+            Box::new(AlwaysInitialState),
             policy,
             learner,
             engine_params,
@@ -801,6 +862,7 @@ fn build_engine(
             },
             Box::new(GridWorldPlanes { size, goal }),
             Box::new(reward),
+            Box::new(AlwaysInitialState),
             policy,
             learner,
             engine_params,

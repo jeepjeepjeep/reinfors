@@ -27,13 +27,17 @@ use crate::learner::{Learner, Step};
 use crate::policy::Policy;
 use crate::reward::Reward;
 use crate::rng::SplitMix64;
+use crate::start::{AlwaysInitialState, Start, StartDistribution};
 
 /// One finished episode's outcome, for logging: per-agent total realized reward (one entry per
-/// agent) and the episode length in ticks.
+/// agent), the episode length in ticks, and whether it was seeded from the start-state buffer (a
+/// `StartDistribution::Restore`) rather than a fresh `initial_state` — so off-`d₀` episodes can be kept
+/// out of the true-start learning curves.
 #[derive(Clone)]
 pub struct EpisodeSummary {
     pub reward: Vec<f64>,
     pub length: usize,
+    pub seeded: bool,
 }
 
 /// Telemetry for one `collect` call: finished-episode summaries and aggregated search diagnostics.
@@ -64,6 +68,12 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     learner: L,
     episodes: Vec<Episode<G>>,
     search_rng: SplitMix64,
+    // Where each fresh episode starts (default: the game's `initial_state`). Its RNG is a stream
+    // disjoint from `search_rng` and the per-game env RNGs, so an enabled buffer never perturbs the
+    // env-chance draw order — and `AlwaysInitialState` never draws it, so it stays bit-identical.
+    start_dist: Box<dyn StartDistribution<G::State>>,
+    buffer_rng: SplitMix64,
+    seeded: Vec<bool>, // per game: was the current episode seeded from the start buffer?
     policy_states: Vec<P::PolicyState>, // per-game acting state for the current episode (Thompson head)
     ticks: Vec<usize>,
     traj: Vec<Vec<Vec<Step<P::Evaluation>>>>, // [game][agent] decisions awaiting episode-end records
@@ -102,6 +112,8 @@ where
             .map(|_| (0..num_agents).map(|_| Vec::new()).collect())
             .collect();
         let search_rng = SplitMix64::new(params.seed ^ 0xD1B5_4A32_D192_ED03);
+        let buffer_rng = SplitMix64::new(params.seed ^ 0x2545_F491_4F6C_DD1D);
+        let seeded = vec![false; params.n_games]; // the initial episodes are fresh
         Engine {
             game,
             encoder,
@@ -110,10 +122,25 @@ where
             learner,
             episodes,
             search_rng,
+            start_dist: Box::new(AlwaysInitialState),
+            buffer_rng,
+            seeded,
             policy_states,
             ticks,
             traj,
         }
+    }
+
+    /// Override the start-state distribution (default [`AlwaysInitialState`]). A
+    /// [`ReachedStateBuffer`](crate::ReachedStateBuffer) seeds some episodes from previously-reached
+    /// states to flatten start-state coverage. Consuming builder, so the common (default) `new` path
+    /// stays untouched.
+    pub fn with_start_distribution(
+        mut self,
+        start_dist: Box<dyn StartDistribution<G::State>>,
+    ) -> Self {
+        self.start_dist = start_dist;
+        self
     }
 
     /// Roll the games forward until at least `n_records` training records have been collected,
@@ -217,6 +244,12 @@ where
                         }
                     }
                 }
+                // Buffer the reached state for start-state coverage — non-terminal states only (you
+                // can't restart from a terminal one). A no-op under `AlwaysInitialState` (default).
+                if !terminal {
+                    self.start_dist
+                        .observe(&self.episodes[gi].state, &mut self.buffer_rng);
+                }
                 if terminal || truncated {
                     finished.push((gi, terminal));
                 }
@@ -256,11 +289,26 @@ where
                         .episode_records(&steps, &tail, &mut self.episodes[gi].rng),
                 );
             }
+            // Tag the summary with the finishing episode's seeded flag (set at its start) BEFORE the
+            // reset below overwrites it for the next episode.
             stats.episodes.push(EpisodeSummary {
                 reward: ep_reward,
                 length: self.ticks[gi],
+                seeded: self.seeded[gi],
             });
-            self.episodes[gi].reset(&self.game);
+            // Start the next episode: the buffer either restores a reached state or falls back to a
+            // fresh `initial_state`. `AlwaysInitialState` always chooses `Fresh` and draws no buffer
+            // RNG, so this is the current reset path unchanged.
+            match self.start_dist.choose(&mut self.buffer_rng) {
+                Start::Restore(state) => {
+                    self.episodes[gi].state = state;
+                    self.seeded[gi] = true;
+                }
+                Start::Fresh => {
+                    self.episodes[gi].reset(&self.game);
+                    self.seeded[gi] = false;
+                }
+            }
             self.ticks[gi] = 0;
             self.policy_states[gi] = self.policy.begin_episode(&mut self.episodes[gi].rng);
         }
