@@ -13,10 +13,15 @@ Two tracks:
     batch. That contrast is the finding. reinfors' single-env number UNDERSELLS it — its product is
     Track B (parallel, search-driven), not raw stepping.
   * Track B — searched decisions/sec at a fixed budget: reinfors `Mcts` (UCT) vs OpenSpiel `MCTSBot`,
-    now a fully-controlled race — same algorithm (both UCT, matching `uct_c` and `num_simulations`) AND
-    the same leaf evaluator (a shared small value net; see `SharedNet`), fed the same canonical board. So
-    it isolates the search *implementation*: the difference is that reinfors runs the whole loop in Rust
-    and batches the net across each round's pooled leaves, where OpenSpiel drives it per-leaf from Python.
+    a controlled race — same algorithm (both UCT, matching `uct_c` and `num_simulations`) AND the same
+    leaf evaluator (a shared small value net; see `SharedNet`), fed the same canonical board. So it
+    isolates the search *implementation*: reinfors runs the whole loop in Rust and batches the net across
+    each round's pooled leaves, where OpenSpiel runs it per-node in Python.
+    CAVEAT: `open_spiel.python.algorithms.mcts` is OpenSpiel's *Python* reference MCTS, so this is
+    Rust-search vs Python-search — NOT "reinfors' MCTS is Nx better". The gap is largest with a cheap
+    evaluator (the ~budget tree ops dominate: Rust << Python, ~4x here) and collapses toward ~1.5x as the
+    net dominates and both bottleneck on the same numpy forward. OpenSpiel's C++ MCTS would be faster but
+    can't call a Python evaluator, so a shared-Python-net comparison structurally forces the Python bot.
 
 Install (on the machine you're benchmarking): `pip install jax[cuda12] pgx open_spiel` (adjust the jax
 wheel for your accelerator). reinfors must be a RELEASE build — this checks and warns.
@@ -355,8 +360,9 @@ def run(args: argparse.Namespace) -> None:
             "Track B — searched decisions/sec on connect4 (budget = UCT simulations; per-core)",
             ("budget", *(f"{b.name} [{b.device()}]" for b in searchers)),
             rows_b,
-            note="both UCT with the SAME shared net (matched uct_c + budget) — a controlled implementation "
-            "race. reinfors batches the net across pooled leaves + scales across cores (Phase 1).",
+            note="both UCT with the SAME shared net (matched uct_c + budget). NB OpenSpiel here is its "
+            "*Python* MCTS, so this is Rust-search vs Python-search — the gap shrinks toward ~1.5x as a "
+            "heavier net dominates (both then bottleneck on the same numpy forward).",
         )
 
 
