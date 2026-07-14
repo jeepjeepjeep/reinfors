@@ -223,6 +223,22 @@ impl PyEngine {
         }
         self.inner.collect(py, n_records, &infer)
     }
+
+    /// Train entirely in Rust: `steps` rounds of (collect `collect_size` records via `net`'s Rust
+    /// forward, then one `trainer` gradient step), with net + records never crossing into Python.
+    /// Returns the per-step loss. `net` must be the net `trainer` was built from. TreeStrap only.
+    #[cfg(feature = "nn")]
+    fn train(
+        &mut self,
+        py: Python<'_>,
+        net: PyRef<'_, PyNet>,
+        mut trainer: PyRefMut<'_, PyTrainer>,
+        steps: usize,
+        collect_size: usize,
+    ) -> PyResult<Vec<f64>> {
+        self.inner
+            .train_native(py, net.0.as_ref(), &mut trainer.0, steps, collect_size)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +267,19 @@ trait ErasedEngine: Send + Sync {
         n_records: usize,
         net: &dyn reinfors_nn::ValueNet,
     ) -> PyResult<Bound<'py, PyAny>>;
+
+    /// The fully-in-Rust training loop: `steps` rounds of (collect `collect_size` records with `net`,
+    /// then one gradient step on them). Records never touch Python. Returns the per-step loss. Errors if
+    /// the learner has no in-Rust training path (only TreeStrap does).
+    #[cfg(feature = "nn")]
+    fn train_native(
+        &mut self,
+        py: Python<'_>,
+        net: &dyn reinfors_nn::ValueNet,
+        trainer: &mut reinfors_nn::TreeStrapTrainer,
+        steps: usize,
+        collect_size: usize,
+    ) -> PyResult<Vec<f64>>;
 }
 
 /// Marshal a learner's records (with the rollout telemetry) into the Python record batch. One impl per
@@ -265,6 +294,45 @@ trait RecordBatch: Sized {
         n_heads: usize,
         telemetry: Bound<'py, PyDict>,
     ) -> PyResult<Bound<'py, PyAny>>;
+
+    /// Flatten a batch into the contiguous `f32` buffers a Rust-native trainer consumes, or `None` if
+    /// the learner has no in-Rust training path (only TreeStrap does today). Keeps records in Rust for
+    /// the fused `engine.train` — they never marshal to Python.
+    #[cfg(feature = "nn")]
+    fn to_train_buffers(_records: &[Self]) -> Option<TrainBuffers> {
+        None
+    }
+}
+
+/// Row-major training buffers for `reinfors_nn::TreeStrapTrainer::update`: `obs` `[n·dim]`,
+/// `targets` `[n·K·A]`, `mask` `[n·K]`.
+#[cfg(feature = "nn")]
+struct TrainBuffers {
+    obs: Vec<f32>,
+    targets: Vec<f32>,
+    mask: Vec<f32>,
+    n: i64,
+}
+
+/// The net's head count must equal the learner's (`Mcts` → 1 head; `SelectiveExpectimax` → `n_heads`),
+/// or the target tensor won't line up with the net's output. A clear error beats a libtorch reshape panic.
+#[cfg(feature = "nn")]
+fn check_head_match(net: &dyn reinfors_nn::ValueNet, target_len: i64, n: i64) -> PyResult<()> {
+    let a = net.n_actions() as i64;
+    let record_heads = if n > 0 {
+        target_len / (n * a)
+    } else {
+        net.n_heads() as i64
+    };
+    if record_heads != net.n_heads() as i64 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "net has n_heads={} but the policy produced {}-head targets; build the net with n_heads={}",
+            net.n_heads(),
+            record_heads,
+            record_heads
+        )));
+    }
+    Ok(())
 }
 
 /// `engine.collect` result for the TreeStrap family: per-head searched targets + a bootstrap mask.
@@ -385,6 +453,25 @@ impl RecordBatch for TreeStrapRecord {
             },
         )?
         .into_any())
+    }
+
+    #[cfg(feature = "nn")]
+    fn to_train_buffers(records: &[Self]) -> Option<TrainBuffers> {
+        if records.is_empty() {
+            return None;
+        }
+        let (mut obs, mut targets, mut mask) = (Vec::new(), Vec::new(), Vec::new());
+        for (o, t, m) in records {
+            obs.extend_from_slice(o);
+            targets.extend(t.iter().flatten().map(|&v| v as f32)); // f64 targets -> f32 for the net
+            mask.extend_from_slice(m);
+        }
+        Some(TrainBuffers {
+            obs,
+            targets,
+            mask,
+            n: records.len() as i64,
+        })
     }
 }
 
@@ -566,6 +653,40 @@ where
     ) -> PyResult<Bound<'py, PyAny>> {
         let (records, telemetry) = run_collect_native(&mut self.inner, py, n_records, net)?;
         L::Record::into_py_batch(records, py, self.dim, self.n_heads, telemetry)
+    }
+
+    #[cfg(feature = "nn")]
+    fn train_native(
+        &mut self,
+        py: Python<'_>,
+        net: &dyn reinfors_nn::ValueNet,
+        trainer: &mut reinfors_nn::TreeStrapTrainer,
+        steps: usize,
+        collect_size: usize,
+    ) -> PyResult<Vec<f64>> {
+        let mut losses = Vec::with_capacity(steps);
+        for _ in 0..steps {
+            // collect with the net's Rust forward (no callback), then one grad step — all in Rust.
+            let (records, _stats) = self
+                .inner
+                .collect(collect_size, |obs, n| net.forward(&obs, n));
+            match L::Record::to_train_buffers(&records) {
+                Some(tb) => {
+                    check_head_match(net, tb.targets.len() as i64, tb.n)?;
+                    let loss = trainer.loss(net, &tb.obs, &tb.targets, &tb.mask, tb.n);
+                    // Release the GIL for the backward: torch's Python autograd engine (installed once
+                    // `import torch` runs) requires it, and the step touches no Python.
+                    let tr = &mut *trainer;
+                    losses.push(py.allow_threads(move || tr.step(&loss)));
+                }
+                None => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "engine.train requires the TreeStrap learner",
+                    ))
+                }
+            }
+        }
+        Ok(losses)
     }
 }
 
@@ -1763,6 +1884,46 @@ impl PyNet {
     }
 }
 
+/// Adam + masked-Huber trainer over a `Net`'s parameters — the in-Rust learning half. Use it fused
+/// (`engine.train(net, trainer, ...)`, the whole loop in Rust) or step-by-step from a Python loop
+/// (`trainer.update(net, obs, targets, masks)` on a batch you collected).
+#[cfg(feature = "nn")]
+#[pyclass(name = "TreeStrapTrainer", unsendable)]
+struct PyTrainer(reinfors_nn::TreeStrapTrainer);
+
+#[cfg(feature = "nn")]
+#[pymethods]
+impl PyTrainer {
+    #[new]
+    #[pyo3(signature = (net, lr = 2.5e-4))]
+    fn new(net: PyRef<'_, PyNet>, lr: f64) -> PyResult<Self> {
+        reinfors_nn::TreeStrapTrainer::new(net.0.as_ref(), lr)
+            .map(PyTrainer)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    }
+
+    /// One gradient step on a batch you collected: `obs` (N, dim) f32, `targets` (N, K, A) f64,
+    /// `masks` (N, K) f32 — the shapes `engine.collect` returns. `net` must be the trainer's net.
+    fn update(
+        &mut self,
+        py: Python<'_>,
+        net: PyRef<'_, PyNet>,
+        obs: PyReadonlyArray2<'_, f32>,
+        targets: PyReadonlyArray3<'_, f64>,
+        masks: PyReadonlyArray2<'_, f32>,
+    ) -> PyResult<f64> {
+        let n = obs.as_array().shape()[0] as i64;
+        let o: Vec<f32> = obs.as_array().iter().copied().collect();
+        let t: Vec<f32> = targets.as_array().iter().map(|&v| v as f32).collect();
+        let m: Vec<f32> = masks.as_array().iter().copied().collect();
+        check_head_match(net.0.as_ref(), t.len() as i64, n)?;
+        let loss = self.0.loss(net.0.as_ref(), &o, &t, &m, n);
+        // GIL released for the backward (see train_native) — the step touches no Python.
+        let tr = &mut self.0;
+        Ok(py.allow_threads(move || tr.step(&loss)))
+    }
+}
+
 #[pymodule]
 fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
@@ -1779,5 +1940,7 @@ fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDiscrete>()?;
     #[cfg(feature = "nn")]
     m.add_class::<PyNet>()?;
+    #[cfg(feature = "nn")]
+    m.add_class::<PyTrainer>()?;
     Ok(())
 }

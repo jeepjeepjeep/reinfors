@@ -3,6 +3,8 @@ without the `nn` feature — `rf.nn.Conv` raises `ImportError`, which these test
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 import reinfors as rf
@@ -67,13 +69,46 @@ def test_set_weights_reaches_live_params() -> None:
 def test_engine_collect_accepts_a_native_net() -> None:
     # The net is just another `infer` source: `collect` runs the search's forward in Rust, no callback.
     net = _conv_or_skip()
-    engine = rf.Engine(
+    obs, targets, _masks, telemetry = _engine(net).collect(256, net)
+    assert obs.shape[0] > 0 and targets.shape[1:] == (K, A) and telemetry["decisions"] > 0
+
+
+def _engine(net: object) -> Any:
+    return rf.Engine(
         rf.games.Connect4(),
         rf.Reward(win=1.0, loss=-1.0),
         rf.policies.SelectiveExpectimax(n_heads=K, expansion_budget=16, top_k=4, max_depth=4),
-        rf.learners.TreeStrap(gamma=0.99),
+        rf.learners.TreeStrap(gamma=0.99, outcome_weight=0.3),
         n_games=8,
         seed=0,
     )
-    obs, targets, _masks, telemetry = engine.collect(256, net)
-    assert obs.shape[0] > 0 and targets.shape[1:] == (K, A) and telemetry["decisions"] > 0
+
+
+def test_fused_engine_train_runs_entirely_in_rust() -> None:
+    # collect (net's Rust forward) + grad step, all in Rust — records never touch Python. Deterministic
+    # (seeded), so the loss trajectory is reproducible; it should improve over the initial step.
+    net = _conv_or_skip()
+    trainer = rf.nn.TreeStrapTrainer(net, lr=1e-3)
+    losses = _engine(net).train(net, trainer, steps=10, collect_size=256)
+    assert len(losses) == 10 and all(np.isfinite(losses))
+    assert min(losses) < losses[0]  # learning happened
+
+
+def test_stepwise_trainer_update_moves_weights() -> None:
+    # Model C: Python owns the loop, Rust does the collect + gradient step on a collected batch.
+    net = _conv_or_skip()
+    trainer = rf.nn.TreeStrapTrainer(net, lr=1e-3)
+    engine = _engine(net)
+    before = [w.copy() for w in net.get_weights()]
+    obs, targets, masks, _ = engine.collect(256, net)
+    loss = trainer.update(net, obs, targets, masks)
+    assert np.isfinite(loss)
+    assert any(not np.array_equal(a, b) for a, b in zip(net.get_weights(), before, strict=True))
+
+
+def test_train_head_mismatch_errors_clearly() -> None:
+    # A net whose head count differs from the policy's must fail with a clear message, not a libtorch panic.
+    _conv_or_skip()
+    net = rf.nn.Conv(SHAPE, A, 3)  # 3 heads vs the policy's K=8
+    with pytest.raises(ValueError, match="n_heads"):
+        _engine(net).train(net, rf.nn.TreeStrapTrainer(net), steps=1, collect_size=64)
