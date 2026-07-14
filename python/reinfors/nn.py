@@ -31,15 +31,17 @@ def _require() -> Any:
     return _Net
 
 
-def Conv(obs_shape: Sequence[int], n_actions: int, n_heads: int) -> Any:
-    """Conv trunk + K linear heads, sized from a planar observation shape `(C, H, W)`."""
+def Conv(obs_shape: Sequence[int], n_actions: int, n_heads: int, device: str = "cpu") -> Any:
+    """Conv trunk + K linear heads, sized from a planar observation shape `(C, H, W)`. `device` is one of
+    `"cpu"` / `"metal"` / `"cuda"` / `"auto"`, chosen at runtime (the GPU backend must be compiled in)."""
     c, h, w = obs_shape
-    return _require().conv((c, h, w), n_actions, n_heads)
+    return _require().conv((c, h, w), n_actions, n_heads, device)
 
 
-def Mlp(in_dim: int, hidden: int, n_actions: int, n_heads: int) -> Any:
-    """Two-layer MLP + K linear heads, for a flattened observation vector of `in_dim`."""
-    return _require().mlp(in_dim, hidden, n_actions, n_heads)
+def Mlp(in_dim: int, hidden: int, n_actions: int, n_heads: int, device: str = "cpu") -> Any:
+    """Two-layer MLP + K linear heads, for a flattened observation vector of `in_dim`. See `Conv` for
+    `device`."""
+    return _require().mlp(in_dim, hidden, n_actions, n_heads, device)
 
 
 def TreeStrapTrainer(net: Any, lr: float = 2.5e-4) -> Any:

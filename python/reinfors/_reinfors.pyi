@@ -133,8 +133,17 @@ class Engine:
     # `infer` is a Python callable, or (with the `nn` extra) a `Net` for a callback-free forward.
     def collect(self, n_records: int, infer: Any) -> TreeStrapBatch | DqnBatch: ...
     # Fully-in-Rust training loop (TreeStrap only): `steps` rounds of (collect `collect_size` records via
-    # the trainer's net, then one `trainer` step). Returns the per-step loss. See `reinfors.nn`.
-    def train(self, trainer: TreeStrapTrainer, steps: int, collect_size: int) -> list[float]: ...
+    # the trainer's net, then `reuse * records / batch_size` mini-batch steps). Returns one telemetry dict
+    # per collect: `losses` (per grad step), `records`, `collect_seconds`, `episodes`, and the `search`
+    # aggregates — the keys `collect` reports. `batch_size=None` → one full-batch step. See `reinfors.nn`.
+    def train(
+        self,
+        trainer: TreeStrapTrainer,
+        steps: int,
+        collect_size: int,
+        batch_size: int | None = ...,
+        reuse: float = ...,
+    ) -> list[dict[str, Any]]: ...
 
 class Env:
     """A caller-driven single-game instance (the inverse of `Engine`): you supply each tick's actions."""
@@ -162,10 +171,11 @@ class Env:
 # at runtime only in a `--no-default-features` build — `reinfors.nn` guards for that. Pass an instance to
 # `Engine.collect` in place of an `infer` callable to run the forward in Rust (no callback).
 class Net:
+    # device: "cpu" | "metal" | "cuda" | "auto" (GPU backends must be compiled in).
     @staticmethod
-    def conv(obs_shape: tuple[int, int, int], n_actions: int, n_heads: int) -> Net: ...
+    def conv(obs_shape: tuple[int, int, int], n_actions: int, n_heads: int, device: str = ...) -> Net: ...
     @staticmethod
-    def mlp(in_dim: int, hidden: int, n_actions: int, n_heads: int) -> Net: ...
+    def mlp(in_dim: int, hidden: int, n_actions: int, n_heads: int, device: str = ...) -> Net: ...
     @property
     def n_heads(self) -> int: ...
     @property
