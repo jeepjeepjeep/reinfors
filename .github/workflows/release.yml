@@ -1,0 +1,79 @@
+# Build release wheels for every platform and publish to PyPI.
+#
+# One-time setup (PyPI side): create the `reinfors` project's Trusted Publisher at
+# https://pypi.org/manage/account/publishing/ — GitHub owner `jeepjeepjeep`, repo `reinfors`,
+# workflow `release.yml`, and leave the "environment" field BLANK (this workflow uses none). No API
+# token/secret is needed; publishing is via OIDC.
+#
+# To cut a release: bump `[workspace.package] version` in Cargo.toml (the single version source; maturin
+# reads it), merge, then publish a GitHub Release tagged `vX.Y.Z`. That fires this workflow, which builds
+# release (--release) abi3 wheels + an sdist and uploads them. Manual `workflow_dispatch` builds the
+# wheels but does NOT publish (the publish job is gated on a release event) — use it to smoke the build.
+name: release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    name: wheels ${{ matrix.os }} ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64 }
+          - { os: ubuntu-latest, target: aarch64 }
+          - { os: macos-13, target: x86_64 } # intel
+          - { os: macos-14, target: aarch64 } # apple silicon
+          - { os: windows-latest, target: x64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10" # the abi3 floor (requires-python >=3.10); one wheel serves 3.10+
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          # --release is essential: a debug build runs the Rust core ~10x slower (see core_build_profile).
+          args: --release --out dist
+          manylinux: auto # build inside a manylinux container on Linux for broad compatibility
+          sccache: "true"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.target }}
+          path: dist/*.whl
+
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: dist/*.tar.gz
+
+  publish:
+    name: publish to PyPI
+    if: github.event_name == 'release'
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC for PyPI Trusted Publishing (no stored token)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
