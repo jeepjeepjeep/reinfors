@@ -56,6 +56,15 @@ def test_openspiel_cpp_and_python_mcts_run() -> None:
     assert os_backend.search_python(16, 6, 1, mod.SharedNet(8)) > 0
 
 
+def test_pgx_mctx_batched_search_runs() -> None:
+    # The pgx+mctx batched MCTS backend runs and yields positive throughput (validates the mctx/pgx
+    # wiring — env dynamics, uniform prior, negamax discount). GPU numbers need an accelerator.
+    pytest.importorskip("pgx")
+    pytest.importorskip("mctx")
+    mod = _load()
+    assert mod.PgxBackend().search_mcts(8, 8, 1, 4) > 0
+
+
 def test_shared_net_encoding_matches_across_frameworks() -> None:
     # The whole point of a *shared* net: reinfors' and OpenSpiel's native connect4 encodings must yield
     # the SAME canonical board for the same position, so the net is one value function, not two.
