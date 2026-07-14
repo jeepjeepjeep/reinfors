@@ -6,7 +6,7 @@ have different execution models and run on different hardware, there is no singl
 reports per *track*, swept over batch size / net size, with **every row tagged by device**. Never read a
 GPU row against a CPU row as one ratio; read each within its track and hardware.
 
-Two tracks:
+Three tracks:
   * Track A — raw env transitions/sec (apply one action, advance one state). reinfors and OpenSpiel are
     single-core CPU (a "batch" is just N independent envs stepped in a loop — they don't vectorize raw
     stepping), so their curves are ~flat in batch; Pgx vmaps on the accelerator, so its curve rises with
@@ -31,11 +31,16 @@ Two tracks:
         net evaluator (the pip wheel omits it). This column uses a C++ *rollout* evaluator as a fast-loop
         proxy; it is NOT the C++-net comparison, so don't read it as "reinfors == OpenSpiel's fast net path".
       - a heavy net makes reinfors + openspiel-py net-bound (both fall below the C++ rollout reference).
+  * Track C — batched MCTS: searched decisions/sec vs batch, with reinfors `n_games` == pgx batch. Both
+    parallelize across B self-play games — reinfors (Rust trees + one batched net call/round) vs pgx+mctx
+    (B JAX trees vmapped on-device, uniform-prior AlphaZero MCTS). THE board-game search comparison. pgx+
+    mctx is a GPU-regime tool (UNVALIDATED / CPU here) — expect reinfors to lead at small batch (no
+    compile/JAX overhead) and pgx+mctx at large batch on a GPU. Run it on your accelerator for the curve.
 
-Install (on the machine you're benchmarking): `pip install jax[cuda12] pgx open_spiel` (adjust the jax
-wheel for your accelerator). reinfors must be a RELEASE build — this checks and warns.
+Install (on the machine you're benchmarking): `pip install jax[cuda12] pgx mctx open_spiel` (adjust the
+jax wheel for your accelerator). reinfors must be a RELEASE build — this checks and warns.
 
-    uv run --with numpy --with pgx --with jax[cuda12] --with open_spiel python scripts/benchmark_vs.py
+    uv run --with numpy --with pgx --with mctx --with jax[cuda12] --with open_spiel python scripts/benchmark_vs.py
 
 Backends whose deps aren't importable are skipped with a note; the reinfors backend always runs, and a
 per-cell error in any backend degrades to `ERR` (never a crash). The Pgx backend's headline regime —
@@ -138,17 +143,17 @@ class ReinforsBackend:
             e.reset()
         return _throughput(lambda: sum(work() for _ in range(steps)), repeats)
 
-    def search(self, budget: int, decisions: int, repeats: int, net: SharedNet) -> float:
-        # Genuine UCT MCTS on connect4, ONE game (per-core; reinfors additionally scales across cores,
-        # see Phase 1). `budget`/uct_c match the OpenSpiel bots. The whole loop runs in Rust and calls
-        # the shared net through the `infer` callback (batched across the round's pooled leaves).
+    def search(self, budget: int, decisions: int, repeats: int, net: SharedNet, n_games: int = 1) -> float:
+        # Genuine UCT MCTS on connect4. `n_games` pools that many self-play games — the batch axis reinfors
+        # parallelizes over (rayon + one batched net call per round), the analogue of pgx+mctx's batch and
+        # OpenSpiel's per-bot. The whole loop runs in Rust and calls the net through the `infer` callback.
         action_count = rf.games.Connect4().action_space().n
         engine = rf.Engine(
             rf.games.Connect4(),
             rf.Reward(win=1.0, loss=-1.0, draw=0.0),
             rf.policies.Mcts(num_simulations=budget, uct_c=2.0, max_depth=64),
             rf.learners.TreeStrap(gamma=0.99, outcome_weight=0.3, bootstrap_p=1.0, interior_targets=False),
-            n_games=1,
+            n_games=n_games,
             seed=0,
         )
 
@@ -210,6 +215,70 @@ class PgxBackend:
         def work() -> int:
             jax.block_until_ready(rollout(state0, jax.random.PRNGKey(1)))
             return batch * steps
+
+        return _throughput(work, repeats)
+
+    def search_mcts(self, budget: int, decisions: int, repeats: int, batch: int) -> float:
+        # Batched AlphaZero-style MCTS via DeepMind's mctx on pgx connect4: `batch` independent trees
+        # advance in lockstep on-device (the analogue of reinfors' n_games). Uniform prior (no policy
+        # head, to match reinfors' UCT) + a small JAX value net; 2-player zero-sum via discount=-1
+        # (negamax). Env dynamics ARE mctx's recurrent_fn (perfect-information / AlphaZero). No root noise.
+        import jax
+        import jax.numpy as jnp
+        import mctx
+        import pgx
+        from pgx.experimental import auto_reset
+
+        env = pgx.make("connect_four")
+        a_count = env.num_actions
+        obs_dim = int(np.prod(env.observation_shape))
+        k1, k2 = jax.random.split(jax.random.PRNGKey(0))
+        w1 = jax.random.normal(k1, (obs_dim, 64)) / jnp.sqrt(float(obs_dim))
+        w2 = jax.random.normal(k2, (64, 1)) / jnp.sqrt(64.0)
+        uniform = jnp.zeros((batch, a_count))
+
+        def value(state: Any) -> Any:
+            x = state.observation.reshape(state.observation.shape[0], -1)
+            return jnp.tanh(jnp.maximum(x @ w1, 0.0) @ w2)[:, 0]  # (batch,), current-player perspective
+
+        def recurrent_fn(_params: Any, _rng: Any, action: Any, state: Any) -> Any:
+            mover = state.current_player
+            state = jax.vmap(env.step)(state, action)
+            v = jnp.where(state.terminated, 0.0, value(state))
+            out = mctx.RecurrentFnOutput(
+                reward=state.rewards[jnp.arange(batch), mover],  # to the player who moved
+                discount=jnp.where(state.terminated, 0.0, -1.0),  # negamax (2p zero-sum)
+                prior_logits=uniform,
+                value=v,
+            )
+            return out, state
+
+        reset_step = jax.vmap(auto_reset(env.step, env.init))
+
+        @jax.jit
+        def one_round(state: Any, key: Any) -> Any:
+            key, sk, rk = jax.random.split(key, 3)
+            root = mctx.RootFnOutput(prior_logits=uniform, value=value(state), embedding=state)
+            out = mctx.muzero_policy(
+                None,
+                sk,
+                root,
+                recurrent_fn,
+                num_simulations=budget,
+                invalid_actions=~state.legal_action_mask,
+                dirichlet_fraction=0.0,
+            )
+            return reset_step(state, out.action, jax.random.split(rk, batch)), key
+
+        state0 = jax.vmap(env.init)(jax.random.split(jax.random.PRNGKey(1), batch))
+        rounds = max(1, decisions // batch)  # each round = `batch` decisions (one search per game)
+
+        def work() -> int:
+            state, key = state0, jax.random.PRNGKey(2)
+            for _ in range(rounds):
+                state, key = one_round(state, key)
+            jax.block_until_ready(state)
+            return rounds * batch
 
         return _throughput(work, repeats)
 
@@ -383,6 +452,47 @@ def _track_b(active: list[Any], args: argparse.Namespace) -> None:
     )
 
 
+def _track_c(active: list[Any], args: argparse.Namespace) -> None:
+    rf_b = next((b for b in active if b.name == "reinfors"), None)
+    pgx_b = next((b for b in active if b.name == "pgx"), None)
+    if rf_b is None:
+        return
+    pgx_ok = pgx_b is not None
+    if pgx_ok:
+        try:
+            import mctx  # noqa: F401
+        except ImportError:
+            pgx_ok = False
+    budget = 64
+    batches = [1, 8] if args.smoke else [1, 8, 64, 512, 4096]
+    decisions = 40 if args.smoke else 400
+    net = SharedNet(64)
+
+    header = ["batch (n_games)", "reinfors [cpu]"]
+    if pgx_ok and pgx_b is not None:
+        header.append(f"pgx+mctx [{pgx_b.device()}]")
+    rows = []
+    for bs in batches:
+        cells = [
+            str(bs),
+            _cell(rf_b, f"n_games={bs}", lambda bs=bs: rf_b.search(budget, decisions, args.repeats, net, bs)),
+        ]
+        if pgx_ok and pgx_b is not None:
+            cells.append(
+                _cell(pgx_b, f"mcts batch={bs}", lambda bs=bs: pgx_b.search_mcts(budget, decisions, args.repeats, bs))
+            )
+        rows.append(tuple(cells))
+    _table(
+        f"Track C — batched MCTS decisions/sec vs batch (UCT, budget={budget}; reinfors n_games == pgx batch)",
+        tuple(header),
+        rows,
+        note="THE board-game search comparison: both parallelize across B games (reinfors: Rust trees + one "
+        "batched net call/round; pgx+mctx: B JAX trees vmapped on-device). Same budget + net size (weights "
+        "differ). pgx+mctx is UNVALIDATED / CPU here — its regime is GPU; run on an accelerator for the real "
+        "curve. Expect reinfors to lead at small batch (no compile/JAX overhead), pgx+mctx at large batch on GPU.",
+    )
+
+
 def run(args: argparse.Namespace) -> None:
     _warn_if_not_release()
     print(f"host: {platform.platform()} | {platform.processor() or 'cpu'} x{os.cpu_count()}")
@@ -394,6 +504,7 @@ def run(args: argparse.Namespace) -> None:
             active.append(b)
     _track_a(active, args)
     _track_b(active, args)
+    _track_c(active, args)
 
 
 def main() -> None:
