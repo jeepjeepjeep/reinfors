@@ -15,9 +15,10 @@ from typing import Any
 
 from . import _reinfors
 
-# `Net` exists only when built with the `nn` feature (libtorch); absent otherwise. `getattr` keeps this
-# import-clean either way, and the factories raise a clear error when it's missing.
+# `Net`/`TreeStrapTrainer` exist only when built with the `nn` feature (libtorch); absent otherwise.
+# `getattr` keeps this import-clean either way, and the factories raise a clear error when missing.
 _Net = getattr(_reinfors, "Net", None)
+_Trainer = getattr(_reinfors, "TreeStrapTrainer", None)
 
 
 def _require() -> Any:
@@ -38,3 +39,14 @@ def Conv(obs_shape: Sequence[int], n_actions: int, n_heads: int) -> Any:
 def Mlp(in_dim: int, hidden: int, n_actions: int, n_heads: int) -> Any:
     """Two-layer MLP + K linear heads, for a flattened observation vector of `in_dim`."""
     return _require().mlp(in_dim, hidden, n_actions, n_heads)
+
+
+def TreeStrapTrainer(net: Any, lr: float = 2.5e-4) -> Any:
+    """Adam + masked-Huber trainer over `net`'s parameters — the in-Rust learning half. Drive it fused
+    (`engine.train(net, trainer, steps, collect_size)`, whole loop in Rust) or step-by-step from a Python
+    loop (`trainer.update(net, obs, targets, masks)` on a collected batch)."""
+    if _Trainer is None:
+        raise ImportError(
+            "reinfors-nn training needs the 'nn' extra (libtorch); build with `maturin develop --features nn`."
+        )
+    return _Trainer(net, lr)

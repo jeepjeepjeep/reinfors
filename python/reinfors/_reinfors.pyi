@@ -130,7 +130,11 @@ class Engine:
     ) -> None: ...
     # The batch is learner-shaped: the TreeStrap family yields a `TreeStrapBatch`, the DQN family a
     # `DqnBatch`. Both expose named fields and also unpack positionally (back-compat with the old tuple).
+    # `infer` is a Python callable, or (with the `nn` extra) a `Net` for a callback-free forward.
     def collect(self, n_records: int, infer: Any) -> TreeStrapBatch | DqnBatch: ...
+    # Fully-in-Rust training loop (nn extra, TreeStrap only): `steps` rounds of (collect `collect_size`
+    # records via `net`, then one `trainer` step). Returns the per-step loss. See `reinfors.nn`.
+    def train(self, net: Net, trainer: TreeStrapTrainer, steps: int, collect_size: int) -> list[float]: ...
 
 class Env:
     """A caller-driven single-game instance (the inverse of `Engine`): you supply each tick's actions."""
@@ -169,3 +173,15 @@ class Net:
     def forward(self, obs: NDArray[np.float32]) -> NDArray[np.float64]: ...
     def get_weights(self) -> list[NDArray[np.float32]]: ...
     def set_weights(self, weights: list[NDArray[np.float32]]) -> None: ...
+
+# Adam + masked-Huber trainer over a `Net`'s parameters (nn extra). Fused via `Engine.train`, or stepped
+# from Python via `update` on a collected batch. Same runtime-optionality as `Net`.
+class TreeStrapTrainer:
+    def __init__(self, net: Net, lr: float = ...) -> None: ...
+    def update(
+        self,
+        net: Net,
+        obs: NDArray[np.float32],
+        targets: NDArray[np.float64],
+        masks: NDArray[np.float32],
+    ) -> float: ...

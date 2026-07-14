@@ -5,7 +5,7 @@
 //! stays model-agnostic: it never depends on this crate; the arbitrary-Python-callback path is primary.
 //! Architectures mirror `scripts/train_example.py` so a torch-trained checkpoint loads unchanged and a
 //! Rust/Python parity test is exact.
-use tch::nn::{self, ConvConfig, Module};
+use tch::nn::{self, ConvConfig, Module, OptimizerConfig};
 use tch::{Device, Kind, Tensor};
 
 /// A batched, per-head action-value network: a pooled `[n, C·H·W]` observation batch in, `[n·K·A]`
@@ -13,7 +13,14 @@ use tch::{Device, Kind, Tensor};
 pub trait ValueNet {
     fn n_heads(&self) -> usize;
     fn n_actions(&self) -> usize;
+    /// Inference forward: flat `[n·dim]` obs in, `[n·K·A]` values out (no autograd — see `forward_t`).
     fn forward(&self, obs: &[f32], n: usize) -> Vec<f64>;
+    /// Autograd forward: an `[n, dim]` float tensor in, an `[n, K, A]` tensor out, with the graph
+    /// retained so a loss backpropagates into the parameters. The training core; `forward` is just this
+    /// under a no-grad guard. Object-safe (concrete tensor types).
+    fn forward_t(&self, x: &Tensor) -> Tensor;
+    /// The net's `VarStore`, so a trainer can build an optimizer over exactly these parameters.
+    fn var_store(&self) -> &nn::VarStore;
     /// Trainable parameters in a fixed order, as shallow views sharing storage with the net — so
     /// `import_weights` copies straight into the live parameters and `forward` sees the update.
     fn params(&self) -> Vec<Tensor>;
@@ -107,10 +114,6 @@ impl Conv {
             n_heads,
         }
     }
-
-    pub fn var_store(&mut self) -> &mut nn::VarStore {
-        &mut self.vs
-    }
 }
 
 impl ValueNet for Conv {
@@ -125,9 +128,22 @@ impl ValueNet for Conv {
         let (c, h, w) = self.shape;
         let x = Tensor::from_slice(obs)
             .to_kind(Kind::Float)
-            .reshape([n as i64, c, h, w]);
-        let x = self.conv.forward(&x).relu().flatten(1, -1);
-        to_values(self.head.forward(&x), n, self.n_heads, self.n_actions)
+            .reshape([n as i64, c * h * w]);
+        to_values(self.forward_t(&x), n, self.n_heads, self.n_actions)
+    }
+    fn forward_t(&self, x: &Tensor) -> Tensor {
+        let (c, h, w) = self.shape;
+        let x = self
+            .conv
+            .forward(&x.reshape([-1, c, h, w]))
+            .relu()
+            .flatten(1, -1);
+        self.head
+            .forward(&x)
+            .reshape([-1, self.n_heads, self.n_actions])
+    }
+    fn var_store(&self) -> &nn::VarStore {
+        &self.vs
     }
     // Order mirrors ExampleNet's state_dict: trunk conv weight/bias, then head weight/bias.
     fn params(&self) -> Vec<Tensor> {
@@ -170,10 +186,6 @@ impl Mlp {
             n_heads,
         }
     }
-
-    pub fn var_store(&mut self) -> &mut nn::VarStore {
-        &mut self.vs
-    }
 }
 
 impl ValueNet for Mlp {
@@ -188,8 +200,16 @@ impl ValueNet for Mlp {
         let x = Tensor::from_slice(obs)
             .to_kind(Kind::Float)
             .reshape([n as i64, self.in_dim]);
-        let x = self.l1.forward(&x).relu();
-        to_values(self.head.forward(&x), n, self.n_heads, self.n_actions)
+        to_values(self.forward_t(&x), n, self.n_heads, self.n_actions)
+    }
+    fn forward_t(&self, x: &Tensor) -> Tensor {
+        let x = self.l1.forward(&x.reshape([-1, self.in_dim])).relu();
+        self.head
+            .forward(&x)
+            .reshape([-1, self.n_heads, self.n_actions])
+    }
+    fn var_store(&self) -> &nn::VarStore {
+        &self.vs
     }
     fn params(&self) -> Vec<Tensor> {
         vec![
@@ -198,6 +218,76 @@ impl ValueNet for Mlp {
             self.head.ws.shallow_clone(),
             self.head.bs.as_ref().unwrap().shallow_clone(),
         ]
+    }
+}
+
+/// Regresses TreeStrap's per-head backed-up value targets (masked Huber + Adam) — the training
+/// counterpart to `forward`. One `update` is a single gradient step on a collected batch; the outer
+/// loop (collect with live weights, then update) belongs to the caller or the fused driver. Synchronous
+/// by design: every collect searches with the just-updated weights (no replay / stale-weight actor).
+pub struct TreeStrapTrainer {
+    opt: nn::Optimizer,
+}
+
+impl TreeStrapTrainer {
+    /// Adam over the net's parameters. `net` must be the same net later passed to `update` — the
+    /// optimizer captures its `VarStore`'s variables, and `update`'s forward reads those same tensors.
+    pub fn new(net: &dyn ValueNet, lr: f64) -> Result<Self, tch::TchError> {
+        Ok(Self {
+            opt: nn::Adam::default().build(net.var_store(), lr)?,
+        })
+    }
+
+    /// The masked-Huber loss tensor (grad graph attached; no backward). Row-major buffers: `obs`
+    /// `[n·dim]`, `targets` `[n·K·A]`, `mask` `[n·K]` (per-head bootstrap). Mirrors the reference trainer:
+    /// `(mask.unsqueeze(-1) * smooth_l1(pred, target)).sum() / (mask.sum().clamp_min(1) * A)`. Split from
+    /// `step` so a Python caller can release the GIL around the (autograd) backward — torch's Python
+    /// autograd engine panics if `backward` runs with the GIL held.
+    pub fn loss(
+        &self,
+        net: &dyn ValueNet,
+        obs: &[f32],
+        targets: &[f32],
+        mask: &[f32],
+        n: i64,
+    ) -> Tensor {
+        let (k, a) = (net.n_heads() as i64, net.n_actions() as i64);
+        let dim = obs.len() as i64 / n;
+        let obs_t = Tensor::from_slice(obs)
+            .to_kind(Kind::Float)
+            .reshape([n, dim]);
+        let tgt_t = Tensor::from_slice(targets)
+            .to_kind(Kind::Float)
+            .reshape([n, k, a]);
+        let mask_t = Tensor::from_slice(mask)
+            .to_kind(Kind::Float)
+            .reshape([n, k]);
+        let huber = net
+            .forward_t(&obs_t)
+            .smooth_l1_loss(&tgt_t, tch::Reduction::None, 1.0);
+        (mask_t.unsqueeze(-1) * huber).sum(Kind::Float)
+            / (mask_t.sum(Kind::Float).clamp_min(1.0) * (a as f64))
+    }
+
+    /// Backward + one Adam step on a precomputed `loss`; returns its scalar value. Expensive (runs
+    /// autograd) — a Python caller should release the GIL around this.
+    pub fn step(&mut self, loss: &Tensor) -> f64 {
+        self.opt.backward_step(loss);
+        loss.double_value(&[])
+    }
+
+    /// Convenience `loss` + `step`, for Rust callers with no GIL to manage. The Python binding splits
+    /// them to release the GIL around the backward.
+    pub fn update(
+        &mut self,
+        net: &dyn ValueNet,
+        obs: &[f32],
+        targets: &[f32],
+        mask: &[f32],
+        n: i64,
+    ) -> f64 {
+        let loss = self.loss(net, obs, targets, mask, n);
+        self.step(&loss)
     }
 }
 
@@ -226,6 +316,29 @@ mod tests {
         let obs = vec![0.25f32; 2 * 6 * 7];
         let mut infer = net.infer_fn();
         assert_eq!(infer(obs.clone(), 1), net.forward(&obs, 1));
+    }
+
+    #[test]
+    fn trainer_reduces_loss_and_moves_forward() {
+        let net = Mlp::new(8, 16, 3, 2); // dim=8, K=2, A=3
+        let mut tr = TreeStrapTrainer::new(&net, 1e-2).unwrap();
+        let n = 4i64;
+        let obs: Vec<f32> = (0..(n as usize * 8))
+            .map(|i| (i as f32 * 0.017).sin())
+            .collect();
+        let targets = vec![0.5f32; n as usize * 2 * 3]; // constant targets the net can fit
+        let mask = vec![1.0f32; n as usize * 2];
+        let before_pred = net.forward(&obs, n as usize);
+        let first = tr.update(&net, &obs, &targets, &mask, n);
+        for _ in 0..100 {
+            tr.update(&net, &obs, &targets, &mask, n);
+        }
+        let last = tr.update(&net, &obs, &targets, &mask, n);
+        assert!(
+            last < first * 0.5,
+            "loss should fall with training: {first} -> {last}"
+        );
+        assert_ne!(net.forward(&obs, n as usize), before_pred); // steps reached the live params
     }
 
     #[test]
