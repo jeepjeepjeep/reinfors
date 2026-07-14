@@ -30,7 +30,7 @@ def test_reinfors_backend_throughput_positive() -> None:
     ok, _ = rf_backend.available()
     assert ok
     assert rf_backend.raw_step(batch=2, steps=20, repeats=1) > 0
-    assert rf_backend.search(budget=16, decisions=8, repeats=1) > 0
+    assert rf_backend.search(16, 8, 1, mod.SharedNet(8)) > 0  # MCTS + shared net
 
 
 def test_optional_backends_report_availability_without_crashing() -> None:
@@ -42,8 +42,18 @@ def test_optional_backends_report_availability_without_crashing() -> None:
 
 def test_shared_net_value_is_bounded() -> None:
     mod = _load()
-    v = mod._SHARED_NET.value(np.zeros((3, 42), dtype=np.float32))
+    v = mod.SharedNet(64).value(np.zeros((3, 42), dtype=np.float32))
     assert v.shape == (3,) and np.all(np.abs(v) < 1.0)  # tanh output
+
+
+def test_openspiel_cpp_and_python_mcts_run() -> None:
+    # Both OpenSpiel search paths — the native C++ MCTSBot and the Python MCTS + shared net — produce
+    # positive throughput. Validates the C++ bot construction, which the harness can't exercise otherwise.
+    pytest.importorskip("pyspiel")
+    mod = _load()
+    os_backend = mod.OpenSpielBackend()
+    assert os_backend.search_cpp(16, 6, 1) > 0
+    assert os_backend.search_python(16, 6, 1, mod.SharedNet(8)) > 0
 
 
 def test_shared_net_encoding_matches_across_frameworks() -> None:

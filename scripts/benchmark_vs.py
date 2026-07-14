@@ -3,8 +3,8 @@
 Compares reinfors against the packages it's genuinely comparable to, on the one game they all implement
 (connect4): **Pgx** (JAX, GPU/TPU-resident, batched) and **OpenSpiel** (C++ core, MCTS). Because these
 have different execution models and run on different hardware, there is no single fair number — so this
-reports per *track*, swept over batch size / search budget, with **every row tagged by device**. Never
-read a GPU row against a CPU row as one ratio; read each within its track and hardware.
+reports per *track*, swept over batch size / net size, with **every row tagged by device**. Never read a
+GPU row against a CPU row as one ratio; read each within its track and hardware.
 
 Two tracks:
   * Track A — raw env transitions/sec (apply one action, advance one state). reinfors and OpenSpiel are
@@ -12,16 +12,17 @@ Two tracks:
     stepping), so their curves are ~flat in batch; Pgx vmaps on the accelerator, so its curve rises with
     batch. That contrast is the finding. reinfors' single-env number UNDERSELLS it — its product is
     Track B (parallel, search-driven), not raw stepping.
-  * Track B — searched decisions/sec at a fixed budget: reinfors `Mcts` (UCT) vs OpenSpiel `MCTSBot`,
-    a controlled race — same algorithm (both UCT, matching `uct_c` and `num_simulations`) AND the same
-    leaf evaluator (a shared small value net; see `SharedNet`), fed the same canonical board. So it
-    isolates the search *implementation*: reinfors runs the whole loop in Rust and batches the net across
-    each round's pooled leaves, where OpenSpiel runs it per-node in Python.
-    CAVEAT: `open_spiel.python.algorithms.mcts` is OpenSpiel's *Python* reference MCTS, so this is
-    Rust-search vs Python-search — NOT "reinfors' MCTS is Nx better". The gap is largest with a cheap
-    evaluator (the ~budget tree ops dominate: Rust << Python, ~4x here) and collapses toward ~1.5x as the
-    net dominates and both bottleneck on the same numpy forward. OpenSpiel's C++ MCTS would be faster but
-    can't call a Python evaluator, so a shared-Python-net comparison structurally forces the Python bot.
+  * Track B — searched decisions/sec (UCT), swept over the shared net's size at a fixed budget. Three
+    columns: **reinfors** (Rust MCTS + the shared net), **openspiel-py** (`open_spiel.python.algorithms.
+    mcts` + the SAME shared net, fed the same canonical board), and **openspiel-c++** (the native C++
+    `MCTSBot`). The C++ bot CAN'T call a Python net — `pyspiel.Evaluator` isn't Python-subclassable — so
+    it uses a C++ rollout evaluator and is shown as a *constant reference* (ignores the net): OpenSpiel's
+    real fast path. How to read it:
+      - reinfors ≈ openspiel-c++ at a light net (both compiled) — reinfors is *comparable to*, not far
+        ahead of, OpenSpiel's real search;
+      - reinfors vs openspiel-py is Rust-loop vs Python-loop — OpenSpiel's Python reference MCTS is
+        ~14x slower than its C++ one, so beating it is not the headline it looks like;
+      - a heavy net makes reinfors and openspiel-py net-bound (both fall below the C++ rollout reference).
 
 Install (on the machine you're benchmarking): `pip install jax[cuda12] pgx open_spiel` (adjust the jax
 wheel for your accelerator). reinfors must be a RELEASE build — this checks and warns.
@@ -29,9 +30,8 @@ wheel for your accelerator). reinfors must be a RELEASE build — this checks an
     uv run --with numpy --with pgx --with jax[cuda12] --with open_spiel python scripts/benchmark_vs.py
 
 Backends whose deps aren't importable are skipped with a note; the reinfors backend always runs, and a
-per-cell error in any backend degrades to `ERR` (never a crash). The Pgx and OpenSpiel backends have
-been run on CPU (validating their APIs), but Pgx's headline regime — large batch on a GPU/TPU — has not;
-run on your accelerator for those numbers.
+per-cell error in any backend degrades to `ERR` (never a crash). The Pgx backend's headline regime —
+large batch on a GPU/TPU — is unrun here (CPU only); run it on your accelerator for those numbers.
 """
 
 # The optional backends import jax/pgx/pyspiel/open_spiel, which aren't installed in the dev/CI env;
@@ -64,27 +64,24 @@ def _throughput(work: Any, repeats: int) -> float:
 
 # --------------------------------------------------------------------------------------------------
 # Shared value net for Track B. A small fixed-weight MLP fed the SAME canonical connect4 board by both
-# frameworks' MCTS, so the leaf evaluation is a genuinely shared, equal-cost forward — not reinfors'
-# zeros vs OpenSpiel's random rollouts. Canonical board: 42-dim (+1 own, -1 opp, 0 empty) from the
-# current player's perspective, index r*7+c with row 0 = bottom — the layout reinfors' Connect4Planes
-# and OpenSpiel's `observation_tensor` both produce (a test asserts they agree).
+# reinfors' and OpenSpiel-python's MCTS, so their leaf evaluation is a genuinely shared, equal-cost
+# forward (the search implementation is what differs). Canonical board: 42-dim (+1 own, -1 opp, 0 empty)
+# from the current player's perspective, index r*7+c with row 0 = bottom — the layout reinfors'
+# Connect4Planes and OpenSpiel's `observation_tensor` both produce (a test asserts they agree). Its cost
+# is swept via `hidden` to show the transition from search-bound to inference-bound.
 # --------------------------------------------------------------------------------------------------
-_HIDDEN = 64
 
 
 class SharedNet:
-    def __init__(self) -> None:
+    def __init__(self, hidden: int) -> None:
         rng = np.random.default_rng(0)
-        self.w1 = (rng.standard_normal((42, _HIDDEN)) / np.sqrt(42)).astype(np.float32)
-        self.w2 = (rng.standard_normal((_HIDDEN, 1)) / np.sqrt(_HIDDEN)).astype(np.float32)
+        self.w1 = (rng.standard_normal((42, hidden)) / np.sqrt(42)).astype(np.float32)
+        self.w2 = (rng.standard_normal((hidden, 1)) / np.sqrt(hidden)).astype(np.float32)
 
     def value(self, board: np.ndarray) -> np.ndarray:
         """(N, 42) canonical board -> (N,) value in (-1, 1), from the board's current-player perspective."""
         h = np.maximum(board.astype(np.float32) @ self.w1, 0.0)
         return np.tanh(h @ self.w2)[:, 0]
-
-
-_SHARED_NET = SharedNet()
 
 
 def board_from_reinfors(obs: np.ndarray) -> np.ndarray:
@@ -101,8 +98,8 @@ def board_from_openspiel(state: Any) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------------------------------
-# Backends. Each: name, device(), available() -> (ok, detail), raw_step(batch, steps) -> transitions/s,
-# search(budget, decisions) -> decisions/s or None. A backend is fully self-contained and isolated, so a
+# Backends. Each: name, device(), available() -> (ok, detail), raw_step(batch, steps) -> transitions/s.
+# Track B search methods are backend-specific (see each). A backend is self-contained and isolated, so a
 # missing/broken one never taints the others.
 # --------------------------------------------------------------------------------------------------
 
@@ -110,7 +107,6 @@ def board_from_openspiel(state: Any) -> np.ndarray:
 class ReinforsBackend:
     name = "reinfors"
     validated = True
-    supports_search = True
 
     def available(self) -> tuple[bool, str]:
         return True, f"{rf.__version__} ({rf.core_build_profile()})"
@@ -134,11 +130,10 @@ class ReinforsBackend:
             e.reset()
         return _throughput(lambda: sum(work() for _ in range(steps)), repeats)
 
-    def search(self, budget: int, decisions: int, repeats: int) -> float | None:
-        # Genuine UCT MCTS on connect4, ONE game (per-core, for a fair head-to-head vs a single MCTS bot
-        # — reinfors additionally scales across cores, see Phase 1). `budget` = num_simulations and uct_c
-        # match the OpenSpiel backend, and both evaluate leaves with the SAME shared net — so this is a
-        # controlled UCT-vs-UCT race. reinfors batches the net across the round's pooled leaves.
+    def search(self, budget: int, decisions: int, repeats: int, net: SharedNet) -> float:
+        # Genuine UCT MCTS on connect4, ONE game (per-core; reinfors additionally scales across cores,
+        # see Phase 1). `budget`/uct_c match the OpenSpiel bots. The whole loop runs in Rust and calls
+        # the shared net through the `infer` callback (batched across the round's pooled leaves).
         action_count = rf.games.Connect4().action_space().n
         engine = rf.Engine(
             rf.games.Connect4(),
@@ -150,8 +145,7 @@ class ReinforsBackend:
         )
 
         def infer(arr: np.ndarray) -> np.ndarray:
-            # State value from the shared net, broadcast across actions (MCTS uses the max = the value).
-            v = _SHARED_NET.value(board_from_reinfors(arr))
+            v = net.value(board_from_reinfors(arr))  # state value, broadcast across actions (MCTS max = V)
             out = np.empty((arr.shape[0], 1, action_count), dtype=np.float64)
             out[:, 0, :] = v[:, None]
             return out
@@ -162,7 +156,6 @@ class ReinforsBackend:
 class PgxBackend:
     name = "pgx"
     validated = True  # runs on jax/pgx (CPU) here; its headline regime — large batch on GPU/TPU — is unrun
-    supports_search = False  # batched MCTS via mctx is a follow-up
 
     def _import(self) -> Any:
         import jax
@@ -212,14 +205,10 @@ class PgxBackend:
 
         return _throughput(work, repeats)
 
-    def search(self, budget: int, decisions: int, repeats: int) -> float:
-        raise NotImplementedError("batched MCTS via mctx is deferred to a follow-up")
-
 
 class OpenSpielBackend:
     name = "openspiel"
     validated = True  # runs on open_spiel (CPU) here
-    supports_search = True
 
     def _game(self) -> Any:
         import pyspiel
@@ -250,26 +239,7 @@ class OpenSpielBackend:
 
         return _throughput(lambda: sum(work() for _ in range(steps)), repeats)
 
-    def search(self, budget: int, decisions: int, repeats: int) -> float | None:
-        from open_spiel.python.algorithms import mcts
-
-        game = self._game()
-
-        class NetEvaluator(mcts.Evaluator):
-            """Evaluate connect4 leaves with the shared net (value only; uniform prior — no policy head),
-            so this is the SAME leaf eval reinfors' MCTS runs."""
-
-            def evaluate(self, state: Any) -> np.ndarray:
-                v = float(_SHARED_NET.value(board_from_openspiel(state))[0])
-                return np.array([v, -v]) if state.current_player() == 0 else np.array([-v, v])
-
-            def prior(self, state: Any) -> list[tuple[int, float]]:
-                legal = state.legal_actions()
-                p = 1.0 / len(legal)
-                return [(a, p) for a in legal]
-
-        bot = mcts.MCTSBot(game, uct_c=2.0, max_simulations=budget, evaluator=NetEvaluator())
-
+    def _run_bot(self, game: Any, bot: Any, decisions: int, repeats: int) -> float:
         def work() -> int:
             state = game.new_initial_state()
             for _ in range(decisions):
@@ -279,6 +249,38 @@ class OpenSpielBackend:
             return decisions
 
         return _throughput(work, repeats)
+
+    def search_python(self, budget: int, decisions: int, repeats: int, net: SharedNet) -> float:
+        # OpenSpiel's *Python* reference MCTS with the shared net evaluator — the only way to feed it a
+        # Python net. This is the Rust-loop-vs-Python-loop comparison against reinfors.
+        from open_spiel.python.algorithms import mcts
+
+        game = self._game()
+
+        class NetEvaluator(mcts.Evaluator):
+            def evaluate(self, state: Any) -> np.ndarray:
+                v = float(net.value(board_from_openspiel(state))[0])
+                return np.array([v, -v]) if state.current_player() == 0 else np.array([-v, v])
+
+            def prior(self, state: Any) -> list[tuple[int, float]]:
+                legal = state.legal_actions()
+                p = 1.0 / len(legal)
+                return [(a, p) for a in legal]
+
+        bot = mcts.MCTSBot(game, uct_c=2.0, max_simulations=budget, evaluator=NetEvaluator())
+        return self._run_bot(game, bot, decisions, repeats)
+
+    def search_cpp(self, budget: int, decisions: int, repeats: int) -> float:
+        # OpenSpiel's native C++ MCTSBot with a C++ rollout evaluator — its real fast path. It can't call
+        # a Python net (`pyspiel.Evaluator` isn't subclassable), so this uses rollouts and is the honest
+        # "how fast is OpenSpiel's search" reference (independent of the shared net's size).
+        import pyspiel
+
+        game = self._game()
+        evaluator = pyspiel.RandomRolloutEvaluator(1, 42)  # (n_rollouts, seed)
+        # (game, evaluator, uct_c, max_simulations, max_memory_mb, solve, seed, verbose)
+        bot = pyspiel.MCTSBot(game, evaluator, 2.0, budget, 1000, False, 42, False)
+        return self._run_bot(game, bot, decisions, repeats)
 
 
 BACKENDS = [ReinforsBackend(), PgxBackend(), OpenSpielBackend()]
@@ -309,13 +311,68 @@ def _table(title: str, header: tuple[str, ...], rows: list[tuple[str, ...]], not
 
 
 def _cell(backend: Any, label: str, fn: Any) -> str:
-    """One measured table cell, isolated: a backend failure (e.g. an UNVALIDATED backend's API drift)
-    becomes an 'ERR' cell + a one-line note, never a crash that takes the whole comparison down."""
+    """One measured table cell, isolated: a backend failure (e.g. an API drift) becomes an 'ERR' cell +
+    a one-line note, never a crash that takes the whole comparison down."""
     try:
         return f"{fn():,.0f}"
     except Exception as e:  # a benchmark cell must never propagate a backend's error
         print(f"  ! {backend.name} {label} failed: {type(e).__name__}: {str(e).splitlines()[0][:100]}")
         return "ERR"
+
+
+def _track_a(active: list[Any], args: argparse.Namespace) -> None:
+    batches = [1, 8] if args.smoke else [1, 16, 256, 4096]
+    steps = 50 if args.smoke else 2000
+    rows = []
+    for bs in batches:
+        cells = tuple(
+            _cell(b, f"raw_step(batch={bs})", lambda b=b, bs=bs: b.raw_step(bs, steps, args.repeats)) for b in active
+        )
+        rows.append((str(bs), *cells))
+    _table(
+        "Track A — raw env transitions/sec on connect4 (device in header; CPU rows ~flat, Pgx scales)",
+        ("batch", *(f"{b.name} [{b.device()}]" for b in active)),
+        rows,
+        note="reinfors/OpenSpiel don't vectorize raw stepping (batch = N sequential envs); "
+        "Track B is reinfors' real product.",
+    )
+
+
+def _track_b(active: list[Any], args: argparse.Namespace) -> None:
+    rf_b = next((b for b in active if b.name == "reinfors"), None)
+    os_b = next((b for b in active if b.name == "openspiel"), None)
+    if rf_b is None:
+        return
+    budget = 64
+    hiddens = [1, 64] if args.smoke else [1, 64, 512, 2048]
+    decisions = 20 if args.smoke else 200
+
+    header = ["net hidden", "reinfors [rust+net]"]
+    cpp = None
+    if os_b is not None:
+        header += ["openspiel-py [+net]", "openspiel-c++ [rollout]"]
+        cpp = _cell(os_b, "cpp-mcts", lambda: os_b.search_cpp(budget, decisions, args.repeats))
+
+    rows = []
+    for h in hiddens:
+        net = SharedNet(h)
+        cells = [str(h), _cell(rf_b, f"net={h}", lambda net=net: rf_b.search(budget, decisions, args.repeats, net))]
+        if os_b is not None and cpp is not None:
+            cells.append(
+                _cell(os_b, f"py net={h}", lambda net=net: os_b.search_python(budget, decisions, args.repeats, net))
+            )
+            cells.append(cpp)  # constant reference: the C++ bot ignores the net
+        rows.append(tuple(cells))
+    _table(
+        f"Track B — searched decisions/sec on connect4 (UCT, budget={budget}, per-core; rows = shared-net size)",
+        tuple(header),
+        rows,
+        note="reinfors & openspiel-py run the SAME shared net (rows = hidden units). openspiel-c++ is the "
+        "native C++ MCTSBot with a C++ rollout evaluator (it can't call a Python net), constant across "
+        "rows — OpenSpiel's real fast path. Read: reinfors ~ openspiel-c++ at a light net; reinfors-vs-"
+        "openspiel-py is Rust-loop vs Python-loop (the Python impl is ~14x slower than C++); a heavy net "
+        "makes reinfors + openspiel-py net-bound.",
+    )
 
 
 def run(args: argparse.Namespace) -> None:
@@ -324,46 +381,11 @@ def run(args: argparse.Namespace) -> None:
     active = []
     for b in BACKENDS:
         ok, detail = b.available()
-        tag = "" if b.validated else "  [UNVALIDATED]"
-        print(f"  backend {b.name:10s} {'OK' if ok else 'skip'} — {detail}{tag if ok else ''}")
+        print(f"  backend {b.name:10s} {'OK' if ok else 'skip'} — {detail}")
         if ok:
             active.append(b)
-
-    batches = [1, 8] if args.smoke else [1, 16, 256, 4096]
-    steps = 50 if args.smoke else 2000
-    rows_a = []
-    for bs in batches:
-        cells = tuple(
-            _cell(b, f"raw_step(batch={bs})", lambda b=b, bs=bs: b.raw_step(bs, steps, args.repeats)) for b in active
-        )
-        rows_a.append((str(bs), *cells))
-    _table(
-        "Track A — raw env transitions/sec on connect4 (device in header; CPU rows ~flat, Pgx scales)",
-        ("batch", *(f"{b.name} [{b.device()}]" for b in active)),
-        rows_a,
-        note="reinfors/OpenSpiel don't vectorize raw stepping (batch = N sequential envs); "
-        "Track B is reinfors' real product.",
-    )
-
-    searchers = [b for b in active if b.supports_search]
-    budgets = [16, 64] if args.smoke else [16, 64, 256]
-    decisions = 20 if args.smoke else 200
-    if searchers:
-        rows_b = []
-        for bud in budgets:
-            cells = tuple(
-                _cell(b, f"search(budget={bud})", lambda b=b, bud=bud: b.search(bud, decisions, args.repeats))
-                for b in searchers
-            )
-            rows_b.append((str(bud), *cells))
-        _table(
-            "Track B — searched decisions/sec on connect4 (budget = UCT simulations; per-core)",
-            ("budget", *(f"{b.name} [{b.device()}]" for b in searchers)),
-            rows_b,
-            note="both UCT with the SAME shared net (matched uct_c + budget). NB OpenSpiel here is its "
-            "*Python* MCTS, so this is Rust-search vs Python-search — the gap shrinks toward ~1.5x as a "
-            "heavier net dominates (both then bottleneck on the same numpy forward).",
-        )
+    _track_a(active, args)
+    _track_b(active, args)
 
 
 def main() -> None:
