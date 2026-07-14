@@ -23,9 +23,13 @@ Two tracks:
         apples-to-apples comparison, and reinfors is ~4x faster at n_games=1 (more at scale). That is
         reinfors' real edge: a compiled (Rust) search loop that keeps your net in Python — a combination
         OpenSpiel doesn't offer.
-      - openspiel-c++ (constant) is OpenSpiel's speed *only if you write the net in C++/libtorch*.
-        reinfors reaches that same class while keeping the net in Python — it isn't beaten by OpenSpiel's
-        fast path, it just gets there without forcing a C++ net.
+      - openspiel-c++ (constant) is OpenSpiel's speed *only if you write the net in C++/libtorch* — the
+        path that runs the net in-process. reinfors keeps the net in Python, which costs a per-eval
+        Rust<->Python boundary: real at n_games=1 (batch-1 calls), but amortized by BATCHING the net
+        across pooled games (Phase 1's n_games scaling). Whether reinfors' Python-net path matches an
+        all-C++ net path at n_games=1 is UNTESTED here — it needs OpenSpiel built with libtorch + a C++
+        net evaluator (the pip wheel omits it). This column uses a C++ *rollout* evaluator as a fast-loop
+        proxy; it is NOT the C++-net comparison, so don't read it as "reinfors == OpenSpiel's fast net path".
       - a heavy net makes reinfors + openspiel-py net-bound (both fall below the C++ rollout reference).
 
 Install (on the machine you're benchmarking): `pip install jax[cuda12] pgx open_spiel` (adjust the jax
@@ -374,8 +378,8 @@ def _track_b(active: list[Any], args: argparse.Namespace) -> None:
         note="reinfors & openspiel-py run the SAME shared net (rows = hidden units); openspiel-c++ is the "
         "native C++ MCTSBot (can't call a Python net), constant across rows. For a PYTHON net — the usual "
         "workflow — openspiel-py is OpenSpiel's ONLY option, so reinfors is ~4x faster there: a compiled "
-        "search loop + a Python net, which OpenSpiel doesn't offer. openspiel-c++ is its speed only if you "
-        "write the net in C++/libtorch; reinfors reaches that class while keeping the net in Python.",
+        "search loop + a Python net, which OpenSpiel doesn't offer. openspiel-c++ (a C++ *rollout* proxy, "
+        "NOT a C++ net) is a fast-loop reference; reinfors-vs-an-all-C++-net path is untested here.",
     )
 
 
