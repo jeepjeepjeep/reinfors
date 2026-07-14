@@ -225,20 +225,32 @@ impl PyEngine {
     }
 
     /// Train entirely in Rust: `steps` rounds of (collect `collect_size` records via the trainer's net's
-    /// Rust forward, then one gradient step), with net + records never crossing into Python. Returns the
-    /// per-step loss. Trains the net the `trainer` was built from (which it owns). TreeStrap only.
+    /// Rust forward, then `reuse × records / batch_size` mini-batch gradient steps), with net + records
+    /// never crossing into Python. `batch_size=None` → one step on the whole collect. Returns one
+    /// telemetry dict per collect (`losses`, `records`, `collect_seconds`, `episodes`, and the `search`
+    /// aggregates — the same keys `collect` reports). Trains the net the `trainer` owns. TreeStrap only.
     #[cfg(feature = "nn")]
-    fn train(
+    #[pyo3(signature = (trainer, steps, collect_size, batch_size = None, reuse = 1.0))]
+    fn train<'py>(
         &mut self,
-        py: Python<'_>,
+        py: Python<'py>,
         mut trainer: PyRefMut<'_, PyTrainer>,
         steps: usize,
         collect_size: usize,
-    ) -> PyResult<Vec<f64>> {
+        batch_size: Option<usize>,
+        reuse: f64,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let net = trainer.net.clone_ref(py); // the trainer's own net — drives both collect and the step
         let net = net.borrow(py);
-        self.inner
-            .train_native(py, net.0.as_ref(), &mut trainer.inner, steps, collect_size)
+        self.inner.train_native(
+            py,
+            net.0.as_ref(),
+            &mut trainer.inner,
+            steps,
+            collect_size,
+            batch_size,
+            reuse,
+        )
     }
 }
 
@@ -270,17 +282,21 @@ trait ErasedEngine: Send + Sync {
     ) -> PyResult<Bound<'py, PyAny>>;
 
     /// The fully-in-Rust training loop: `steps` rounds of (collect `collect_size` records with `net`,
-    /// then one gradient step on them). Records never touch Python. Returns the per-step loss. Errors if
-    /// the learner has no in-Rust training path (only TreeStrap does).
+    /// then `reuse × records / batch_size` mini-batch gradient steps on them). Records never touch
+    /// Python. Returns one telemetry dict per collect (episodes + search stats + this collect's losses +
+    /// record count + collect seconds). Errors if the learner has no in-Rust training path (TreeStrap only).
     #[cfg(feature = "nn")]
-    fn train_native(
+    #[allow(clippy::too_many_arguments)]
+    fn train_native<'py>(
         &mut self,
-        py: Python<'_>,
+        py: Python<'py>,
         net: &dyn reinfors_nn::ValueNet,
         trainer: &mut reinfors_nn::TreeStrapTrainer,
         steps: usize,
         collect_size: usize,
-    ) -> PyResult<Vec<f64>>;
+        batch_size: Option<usize>,
+        reuse: f64,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>>;
 }
 
 /// Marshal a learner's records (with the rollout telemetry) into the Python record batch. One impl per
@@ -657,43 +673,70 @@ where
     }
 
     #[cfg(feature = "nn")]
-    fn train_native(
+    #[allow(clippy::too_many_arguments)]
+    fn train_native<'py>(
         &mut self,
-        py: Python<'_>,
+        py: Python<'py>,
         net: &dyn reinfors_nn::ValueNet,
         trainer: &mut reinfors_nn::TreeStrapTrainer,
         steps: usize,
         collect_size: usize,
-    ) -> PyResult<Vec<f64>> {
-        let mut losses = Vec::with_capacity(steps);
+        batch_size: Option<usize>,
+        reuse: f64,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let mut rng: u64 = 0x2545_F491_4F6C_DD1D; // xorshift64 for mini-batch sampling (fixed seed)
+        let mut out = Vec::with_capacity(steps);
         for _ in 0..steps {
-            // collect with the net's Rust forward (no callback), then one grad step — all in Rust.
-            let (records, _stats) = self
+            // Collect with the net's Rust forward (no callback); time it for a comparable throughput stat.
+            let t0 = std::time::Instant::now();
+            let (records, stats) = self
                 .inner
                 .collect(collect_size, |obs, n| net.forward(&obs, n));
+            let collect_seconds = t0.elapsed().as_secs_f64();
             // Check emptiness first, so `to_train_buffers`'s `None` unambiguously means "not TreeStrap".
             if records.is_empty() {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "engine.train collected 0 records — increase collect_size",
                 ));
             }
-            match L::Record::to_train_buffers(&records) {
-                Some(tb) => {
-                    check_head_match(net, tb.targets.len() as i64, tb.n)?;
-                    let loss = trainer.loss(net, &tb.obs, &tb.targets, &tb.mask, tb.n);
-                    // Release the GIL for the (pure-Rust candle) backward — it touches no Python, so
-                    // other Python threads can run while it computes.
-                    let tr = &mut *trainer;
-                    losses.push(py.allow_threads(move || tr.step(&loss)));
-                }
+            let tb = match L::Record::to_train_buffers(&records) {
+                Some(tb) => tb,
                 None => {
                     return Err(pyo3::exceptions::PyValueError::new_err(
                         "engine.train requires the TreeStrap learner",
                     ))
                 }
+            };
+            check_head_match(net, tb.targets.len() as i64, tb.n)?;
+            let n = tb.n as usize;
+            let (dim, ka, k) = (tb.obs.len() / n, tb.targets.len() / n, tb.mask.len() / n);
+            let bs = batch_size.map(|b| b.clamp(1, n)).unwrap_or(n);
+            // `reuse` = gradient updates per collected record (as in train_reinfors.py's replay factor).
+            let num_grad = ((reuse * n as f64) / bs as f64).round().max(1.0) as usize;
+            let mut losses = Vec::with_capacity(num_grad);
+            for _ in 0..num_grad {
+                let (mut obs_mb, mut tgt_mb, mut mask_mb) = (Vec::new(), Vec::new(), Vec::new());
+                for _ in 0..bs {
+                    rng ^= rng << 13;
+                    rng ^= rng >> 7;
+                    rng ^= rng << 17;
+                    let i = (rng as usize) % n; // sample a record (with replacement)
+                    obs_mb.extend_from_slice(&tb.obs[i * dim..(i + 1) * dim]);
+                    tgt_mb.extend_from_slice(&tb.targets[i * ka..(i + 1) * ka]);
+                    mask_mb.extend_from_slice(&tb.mask[i * k..(i + 1) * k]);
+                }
+                let loss = trainer.loss(net, &obs_mb, &tgt_mb, &mask_mb, bs as i64);
+                // Release the GIL for the (pure-Rust candle) backward — it touches no Python.
+                let tr = &mut *trainer;
+                losses.push(py.allow_threads(move || tr.step(&loss)));
             }
+            let d = build_telemetry(py, &stats)?; // episodes + search aggregates (same keys as `collect`)
+            d.set_item("losses", losses)?;
+            d.set_item("records", tb.n)?;
+            d.set_item("collect_seconds", collect_seconds)?;
+            out.push(d);
         }
-        Ok(losses)
+        Ok(out)
     }
 }
 
@@ -1827,20 +1870,32 @@ struct PyNet(Box<dyn reinfors_nn::ValueNet>);
 #[cfg(feature = "nn")]
 #[pymethods]
 impl PyNet {
-    /// Conv trunk + K heads, sized from a planar observation shape `(C, H, W)`.
+    /// Conv trunk + K heads, sized from a planar observation shape `(C, H, W)`. `device` is one of
+    /// `"cpu"` / `"metal"` / `"cuda"` / `"auto"`, chosen at runtime (the GPU backend must be compiled in).
     #[staticmethod]
-    fn conv(obs_shape: (i64, i64, i64), n_actions: i64, n_heads: i64) -> Self {
-        PyNet(Box::new(reinfors_nn::Conv::new(
-            obs_shape, n_actions, n_heads,
-        )))
+    #[pyo3(signature = (obs_shape, n_actions, n_heads, device = "cpu"))]
+    fn conv(
+        obs_shape: (i64, i64, i64),
+        n_actions: i64,
+        n_heads: i64,
+        device: &str,
+    ) -> PyResult<Self> {
+        let dev =
+            reinfors_nn::resolve_device(device).map_err(pyo3::exceptions::PyValueError::new_err)?;
+        Ok(PyNet(Box::new(reinfors_nn::Conv::new(
+            obs_shape, n_actions, n_heads, dev,
+        ))))
     }
 
-    /// Two-layer MLP + K heads, for a flattened observation vector of `in_dim`.
+    /// Two-layer MLP + K heads, for a flattened observation vector of `in_dim`. See `conv` for `device`.
     #[staticmethod]
-    fn mlp(in_dim: i64, hidden: i64, n_actions: i64, n_heads: i64) -> Self {
-        PyNet(Box::new(reinfors_nn::Mlp::new(
-            in_dim, hidden, n_actions, n_heads,
-        )))
+    #[pyo3(signature = (in_dim, hidden, n_actions, n_heads, device = "cpu"))]
+    fn mlp(in_dim: i64, hidden: i64, n_actions: i64, n_heads: i64, device: &str) -> PyResult<Self> {
+        let dev =
+            reinfors_nn::resolve_device(device).map_err(pyo3::exceptions::PyValueError::new_err)?;
+        Ok(PyNet(Box::new(reinfors_nn::Mlp::new(
+            in_dim, hidden, n_actions, n_heads, dev,
+        ))))
     }
 
     #[getter]

@@ -4,14 +4,21 @@
 //! Rust, so `Engine::collect` runs the forward pass without the per-round Python callback, and the whole
 //! `engine.train` loop runs with no external C++ library and no Python. The core stays model-agnostic: it
 //! never depends on this crate; the arbitrary-Python-callback path is primary. Architectures mirror
-//! `scripts/train_example.py`. CPU by default; build with `--features metal`/`--features cuda` for GPU.
+//! `scripts/train_example.py`. Device is chosen per-net at runtime (`resolve_device`); GPU backends
+//! (`metal`/`cuda`) must be compiled in (`--features …`), then selectable without a rebuild. candle's
+//! Metal backend needs macOS 15+.
+//!
+//! Performance caveat: candle's CPU `conv2d` is ~8-10x slower than PyTorch (open candle issue
+//! <https://github.com/huggingface/candle/issues/3119> — im2col copy overhead dominates; a BLAS feature
+//! like `accelerate`/`mkl` speeds only the matmul/linear path, not conv). So `Mlp` (and linear-heavy
+//! nets) are fast on CPU, but `Conv` is conv-bound — use a GPU device for conv nets, or drive the search
+//! with a Python net (torch's CPU conv uses oneDNN and is fast).
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::{
     conv2d, linear, Conv2d, Conv2dConfig, Linear, Module, Optimizer, VarBuilder, VarMap,
 };
 
-/// The compute device: a GPU when built with (and able to open) that backend, else CPU. Metal is
-/// self-contained on macOS; CUDA needs the CUDA runtime present.
+/// "auto" — a GPU when built with (and able to open) that backend, else CPU.
 fn default_device() -> Device {
     #[cfg(feature = "cuda")]
     if let Ok(d) = Device::new_cuda(0) {
@@ -22,6 +29,43 @@ fn default_device() -> Device {
         return d;
     }
     Device::Cpu
+}
+
+/// Select a device by name at RUNTIME — `"cpu"`, `"metal"`, `"cuda"`, or `"auto"`. The backend must have
+/// been compiled in (`--features nn-metal`/`nn-cuda`, as the release wheels are); otherwise a requested
+/// GPU returns a clear error rather than silently falling back. This is the torch-style split: the wheel
+/// carries the backend, the caller picks the device per run without rebuilding.
+pub fn resolve_device(name: &str) -> std::result::Result<Device, String> {
+    match name {
+        "cpu" => Ok(Device::Cpu),
+        "auto" => Ok(default_device()),
+        "metal" => {
+            #[cfg(feature = "metal")]
+            {
+                Device::new_metal(0).map_err(|e| e.to_string())
+            }
+            #[cfg(not(feature = "metal"))]
+            {
+                Err("built without Metal support — install/build reinfors with the nn-metal feature".into())
+            }
+        }
+        "cuda" => {
+            #[cfg(feature = "cuda")]
+            {
+                Device::new_cuda(0).map_err(|e| e.to_string())
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                Err(
+                    "built without CUDA support — install/build reinfors with the nn-cuda feature"
+                        .into(),
+                )
+            }
+        }
+        other => Err(format!(
+            "unknown device '{other}' (expected cpu / metal / cuda / auto)"
+        )),
+    }
 }
 
 /// A batched, per-head action-value network: a pooled `[n, C·H·W]` observation batch in, `[n·K·A]`
@@ -111,8 +155,7 @@ pub struct Conv {
 }
 
 impl Conv {
-    pub fn new(obs_shape: (i64, i64, i64), n_actions: i64, n_heads: i64) -> Self {
-        let device = default_device();
+    pub fn new(obs_shape: (i64, i64, i64), n_actions: i64, n_heads: i64, device: Device) -> Self {
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
         let (c, h, w) = (
@@ -189,8 +232,7 @@ pub struct Mlp {
 }
 
 impl Mlp {
-    pub fn new(in_dim: i64, hidden: i64, n_actions: i64, n_heads: i64) -> Self {
-        let device = default_device();
+    pub fn new(in_dim: i64, hidden: i64, n_actions: i64, n_heads: i64, device: Device) -> Self {
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
         let (in_dim, a, k) = (in_dim as usize, n_actions as usize, n_heads as usize);
@@ -336,7 +378,7 @@ mod tests {
 
     #[test]
     fn conv_forward_has_pooled_khead_shape() {
-        let net = Conv::new((2, 6, 7), 7, 8); // connect4-ish: (C,H,W), A=7, K=8
+        let net = Conv::new((2, 6, 7), 7, 8, Device::Cpu); // connect4-ish: (C,H,W), A=7, K=8
         let out = net.forward(&vec![0.0; 3 * 2 * 6 * 7], 3);
         assert_eq!(out.len(), 3 * 8 * 7);
         assert!(out.iter().all(|v| v.is_finite()));
@@ -344,14 +386,14 @@ mod tests {
 
     #[test]
     fn mlp_forward_has_pooled_khead_shape() {
-        let net = Mlp::new(42, 32, 7, 4);
+        let net = Mlp::new(42, 32, 7, 4, Device::Cpu);
         let out = net.forward(&vec![0.0; 5 * 42], 5);
         assert_eq!(out.len(), 5 * 4 * 7);
     }
 
     #[test]
     fn infer_fn_matches_forward() {
-        let net = Conv::new((2, 6, 7), 7, 8);
+        let net = Conv::new((2, 6, 7), 7, 8, Device::Cpu);
         let obs = vec![0.25f32; 2 * 6 * 7];
         let mut infer = net.infer_fn();
         assert_eq!(infer(obs.clone(), 1), net.forward(&obs, 1));
@@ -359,7 +401,7 @@ mod tests {
 
     #[test]
     fn import_then_export_round_trips_and_changes_forward() {
-        let net = Conv::new((2, 6, 7), 7, 8);
+        let net = Conv::new((2, 6, 7), 7, 8, Device::Cpu);
         let obs = vec![0.5f32; 2 * 6 * 7];
         let before = net.forward(&obs, 1);
         let ramp: Vec<Vec<f32>> = export_weights(&net)
@@ -375,7 +417,7 @@ mod tests {
 
     #[test]
     fn trainer_reduces_loss_and_moves_forward() {
-        let net = Mlp::new(8, 16, 3, 2); // dim=8, K=2, A=3
+        let net = Mlp::new(8, 16, 3, 2, Device::Cpu); // dim=8, K=2, A=3
         let mut tr = TreeStrapTrainer::new(&net, 1e-2).unwrap();
         let n = 4i64;
         let obs: Vec<f32> = (0..(n as usize * 8))

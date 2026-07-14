@@ -85,14 +85,27 @@ def _engine(net: object) -> Any:
     )
 
 
-def test_fused_engine_train_runs_entirely_in_rust() -> None:
-    # collect (net's Rust forward) + grad step, all in Rust — records never touch Python. Deterministic
-    # (seeded), so the loss trajectory is reproducible; it should improve over the initial step.
+def test_fused_engine_train_returns_telemetry_and_learns() -> None:
+    # collect (net's Rust forward) + mini-batch grad steps, all in Rust — records never touch Python.
+    # Each collect returns a telemetry dict: per-grad-step losses + episodes + search aggregates.
     net = _conv_or_skip()
     trainer = rf.nn.TreeStrapTrainer(net, lr=1e-3)
-    losses = _engine(net).train(trainer, steps=10, collect_size=256)
-    assert len(losses) == 10 and all(np.isfinite(losses))
-    assert min(losses) < losses[0]  # learning happened
+    steps = _engine(net).train(trainer, steps=5, collect_size=256, batch_size=64, reuse=1.0)
+    assert len(steps) == 5
+    for s in steps:
+        assert set(s) >= {"losses", "records", "collect_seconds", "episodes", "decisions", "mean_leaves"}
+        assert abs(len(s["losses"]) - s["records"] / 64) <= 1  # reuse=1 -> ~records/batch_size grad steps
+    losses = [x for s in steps for x in s["losses"]]
+    assert all(np.isfinite(losses)) and min(losses) < losses[0]  # learning happened
+
+
+def test_net_device_selection() -> None:
+    _conv_or_skip()
+    assert rf.nn.Conv(SHAPE, A, K, device="cpu").n_heads == K  # explicit cpu works
+    with pytest.raises(ValueError, match="unknown device"):
+        rf.nn.Conv(SHAPE, A, K, device="bogus")
+    with pytest.raises(ValueError, match="Metal"):  # this build has no metal backend compiled in
+        rf.nn.Conv(SHAPE, A, K, device="metal")
 
 
 def test_stepwise_trainer_update_moves_weights() -> None:
