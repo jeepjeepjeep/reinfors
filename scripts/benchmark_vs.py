@@ -12,11 +12,11 @@ Two tracks:
     stepping), so their curves are ~flat in batch; Pgx vmaps on the accelerator, so its curve rises with
     batch. That contrast is the finding. reinfors' single-env number UNDERSELLS it — its product is
     Track B (parallel, search-driven), not raw stepping.
-  * Track B — searched decisions/sec at a fixed budget: reinfors selective-expectimax vs OpenSpiel
-    `MCTSBot`, trivial evaluator (zeros / random rollout), budget matched (expansions ~ simulations).
-    CAVEAT: these are DIFFERENT algorithms — this measures how fast each turns a compute budget into a
-    decision, not which searches better. A follow-up adds a genuine MCTS planner to reinfors for a
-    like-for-like race; another swaps the trivial evaluator for a shared small net.
+  * Track B — searched decisions/sec at a fixed budget: reinfors `Mcts` (UCT) vs OpenSpiel `MCTSBot`,
+    same algorithm (both UCT, matching `uct_c` and `num_simulations`). The remaining difference is the
+    leaf evaluator — reinfors uses the net (zeros here); OpenSpiel does random rollouts — which a
+    shared-net follow-up will close. So this is now an algorithm-matched *implementation* race; it still
+    measures throughput, not search quality (rollouts do more work per simulation than a net eval).
 
 Install (on the machine you're benchmarking): `pip install jax[cuda12] pgx open_spiel` (adjust the jax
 wheel for your accelerator). reinfors must be a RELEASE build — this checks and warns.
@@ -92,24 +92,15 @@ class ReinforsBackend:
         return _throughput(lambda: sum(work() for _ in range(steps)), repeats)
 
     def search(self, budget: int, decisions: int, repeats: int) -> float | None:
-        # Selective expectimax on connect4, ONE game (per-core, for a fair head-to-head vs a single MCTS
-        # bot — reinfors additionally scales across cores, see Phase 1), trivial zeros evaluator.
+        # Genuine UCT MCTS on connect4, ONE game (per-core, for a fair head-to-head vs a single MCTS bot
+        # — reinfors additionally scales across cores, see Phase 1), trivial zeros evaluator. `budget` =
+        # num_simulations, and uct_c matches the OpenSpiel backend, so this is now algorithm-matched
+        # (both UCT); only the leaf evaluator differs (net/zeros here vs random rollout there).
         action_count = rf.games.Connect4().action_space().n
         engine = rf.Engine(
             rf.games.Connect4(),
             rf.Reward(win=1.0, loss=-1.0, draw=0.0),
-            rf.policies.SelectiveExpectimax(
-                expansion_budget=budget,
-                top_k=max(1, budget // 8),
-                max_depth=8,
-                beta=1.0,
-                food_samples=1,
-                n_heads=1,
-                epsilon=0.0,
-                opponent="uniform",
-                opp_temperature=1.0,
-                opp_floor=0.1,
-            ),
+            rf.policies.Mcts(num_simulations=budget, uct_c=2.0, max_depth=64),
             rf.learners.TreeStrap(gamma=0.99, outcome_weight=0.3, bootstrap_p=1.0, interior_targets=False),
             n_games=1,
             seed=0,
@@ -306,11 +297,11 @@ def run(args: argparse.Namespace) -> None:
             )
             rows_b.append((str(bud), *cells))
         _table(
-            "Track B — searched decisions/sec on connect4 (budget = expansions ~ simulations; per-core)",
+            "Track B — searched decisions/sec on connect4 (budget = UCT simulations; per-core)",
             ("budget", *(f"{b.name} [{b.device()}]" for b in searchers)),
             rows_b,
-            note="DIFFERENT algorithms (selective-expectimax vs MCTS) at matched budget — throughput, not quality. "
-            "reinfors shown at n_games=1; it also scales across cores (Phase 1).",
+            note="both UCT (matched uct_c + budget); reinfors evaluates leaves with the net (zeros), "
+            "OpenSpiel with random rollouts — throughput, not quality. reinfors also scales across cores (Phase 1).",
         )
 
 
