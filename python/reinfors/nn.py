@@ -43,9 +43,9 @@ def Mlp(in_dim: int, hidden: int, n_actions: int, n_heads: int) -> Any:
 
 
 def TreeStrapTrainer(net: Any, lr: float = 2.5e-4) -> Any:
-    """Adam + masked-Huber trainer over `net`'s parameters — the in-Rust learning half. Drive it fused
-    (`engine.train(net, trainer, steps, collect_size)`, whole loop in Rust) or step-by-step from a Python
-    loop (`trainer.update(net, obs, targets, masks)` on a collected batch)."""
+    """Adam + masked-Huber trainer over `net`'s parameters — the in-Rust learning half. It holds `net`,
+    so it always trains that exact net. Drive it fused (`engine.train(trainer, steps, collect_size)`,
+    whole loop in Rust) or step-by-step from a Python loop (`trainer.update(obs, targets, masks)`)."""
     if _Trainer is None:
         raise ImportError(
             "Rust-native training is missing — reinfors was built with --no-default-features. "

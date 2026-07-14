@@ -224,20 +224,21 @@ impl PyEngine {
         self.inner.collect(py, n_records, &infer)
     }
 
-    /// Train entirely in Rust: `steps` rounds of (collect `collect_size` records via `net`'s Rust
-    /// forward, then one `trainer` gradient step), with net + records never crossing into Python.
-    /// Returns the per-step loss. `net` must be the net `trainer` was built from. TreeStrap only.
+    /// Train entirely in Rust: `steps` rounds of (collect `collect_size` records via the trainer's net's
+    /// Rust forward, then one gradient step), with net + records never crossing into Python. Returns the
+    /// per-step loss. Trains the net the `trainer` was built from (which it owns). TreeStrap only.
     #[cfg(feature = "nn")]
     fn train(
         &mut self,
         py: Python<'_>,
-        net: PyRef<'_, PyNet>,
         mut trainer: PyRefMut<'_, PyTrainer>,
         steps: usize,
         collect_size: usize,
     ) -> PyResult<Vec<f64>> {
+        let net = trainer.net.clone_ref(py); // the trainer's own net — drives both collect and the step
+        let net = net.borrow(py);
         self.inner
-            .train_native(py, net.0.as_ref(), &mut trainer.0, steps, collect_size)
+            .train_native(py, net.0.as_ref(), &mut trainer.inner, steps, collect_size)
     }
 }
 
@@ -670,6 +671,12 @@ where
             let (records, _stats) = self
                 .inner
                 .collect(collect_size, |obs, n| net.forward(&obs, n));
+            // Check emptiness first, so `to_train_buffers`'s `None` unambiguously means "not TreeStrap".
+            if records.is_empty() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "engine.train collected 0 records — increase collect_size",
+                ));
+            }
             match L::Record::to_train_buffers(&records) {
                 Some(tb) => {
                     check_head_match(net, tb.targets.len() as i64, tb.n)?;
@@ -1885,29 +1892,33 @@ impl PyNet {
 }
 
 /// Adam + masked-Huber trainer over a `Net`'s parameters — the in-Rust learning half. Use it fused
-/// (`engine.train(net, trainer, ...)`, the whole loop in Rust) or step-by-step from a Python loop
-/// (`trainer.update(net, obs, targets, masks)` on a batch you collected).
+/// (`engine.train(trainer, ...)`, the whole loop in Rust) or step-by-step from a Python loop
+/// (`trainer.update(obs, targets, masks)` on a batch you collected). The trainer holds the `Net` it was
+/// built from — the optimizer steps *those* parameters, so binding them here makes it impossible to
+/// train the wrong net (a same-shape different instance would otherwise silently no-op).
 #[cfg(feature = "nn")]
 #[pyclass(name = "TreeStrapTrainer", unsendable)]
-struct PyTrainer(reinfors_nn::TreeStrapTrainer);
+struct PyTrainer {
+    inner: reinfors_nn::TreeStrapTrainer,
+    net: Py<PyNet>,
+}
 
 #[cfg(feature = "nn")]
 #[pymethods]
 impl PyTrainer {
     #[new]
     #[pyo3(signature = (net, lr = 2.5e-4))]
-    fn new(net: PyRef<'_, PyNet>, lr: f64) -> PyResult<Self> {
-        reinfors_nn::TreeStrapTrainer::new(net.0.as_ref(), lr)
-            .map(PyTrainer)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    fn new(py: Python<'_>, net: Py<PyNet>, lr: f64) -> PyResult<Self> {
+        let inner = reinfors_nn::TreeStrapTrainer::new(net.borrow(py).0.as_ref(), lr)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        Ok(Self { inner, net })
     }
 
     /// One gradient step on a batch you collected: `obs` (N, dim) f32, `targets` (N, K, A) f64,
-    /// `masks` (N, K) f32 — the shapes `engine.collect` returns. `net` must be the trainer's net.
+    /// `masks` (N, K) f32 — the shapes `engine.collect` returns. Trains the trainer's own `Net`.
     fn update(
         &mut self,
         py: Python<'_>,
-        net: PyRef<'_, PyNet>,
         obs: PyReadonlyArray2<'_, f32>,
         targets: PyReadonlyArray3<'_, f64>,
         masks: PyReadonlyArray2<'_, f32>,
@@ -1916,10 +1927,11 @@ impl PyTrainer {
         let o: Vec<f32> = obs.as_array().iter().copied().collect();
         let t: Vec<f32> = targets.as_array().iter().map(|&v| v as f32).collect();
         let m: Vec<f32> = masks.as_array().iter().copied().collect();
+        let net = self.net.borrow(py); // the net this trainer owns — can't diverge from the optimizer
         check_head_match(net.0.as_ref(), t.len() as i64, n)?;
-        let loss = self.0.loss(net.0.as_ref(), &o, &t, &m, n);
+        let loss = self.inner.loss(net.0.as_ref(), &o, &t, &m, n);
         // GIL released for the backward (see train_native) — the step touches no Python.
-        let tr = &mut self.0;
+        let tr = &mut self.inner;
         Ok(py.allow_threads(move || tr.step(&loss)))
     }
 }

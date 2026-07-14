@@ -90,7 +90,7 @@ def test_fused_engine_train_runs_entirely_in_rust() -> None:
     # (seeded), so the loss trajectory is reproducible; it should improve over the initial step.
     net = _conv_or_skip()
     trainer = rf.nn.TreeStrapTrainer(net, lr=1e-3)
-    losses = _engine(net).train(net, trainer, steps=10, collect_size=256)
+    losses = _engine(net).train(trainer, steps=10, collect_size=256)
     assert len(losses) == 10 and all(np.isfinite(losses))
     assert min(losses) < losses[0]  # learning happened
 
@@ -102,7 +102,7 @@ def test_stepwise_trainer_update_moves_weights() -> None:
     engine = _engine(net)
     before = [w.copy() for w in net.get_weights()]
     obs, targets, masks, _ = engine.collect(256, net)
-    loss = trainer.update(net, obs, targets, masks)
+    loss = trainer.update(obs, targets, masks)  # trains the net the trainer owns
     assert np.isfinite(loss)
     assert any(not np.array_equal(a, b) for a, b in zip(net.get_weights(), before, strict=True))
 
@@ -112,4 +112,11 @@ def test_train_head_mismatch_errors_clearly() -> None:
     _conv_or_skip()
     net = rf.nn.Conv(SHAPE, A, 3)  # 3 heads vs the policy's K=8
     with pytest.raises(ValueError, match="n_heads"):
-        _engine(net).train(net, rf.nn.TreeStrapTrainer(net), steps=1, collect_size=64)
+        _engine(net).train(rf.nn.TreeStrapTrainer(net), steps=1, collect_size=64)
+
+
+def test_train_empty_batch_reports_collect_size_not_learner() -> None:
+    # collect_size=0 yields 0 records — the error must point at the empty batch, not misreport the learner.
+    net = _conv_or_skip()
+    with pytest.raises(ValueError, match="0 records"):
+        _engine(net).train(rf.nn.TreeStrapTrainer(net), steps=1, collect_size=0)
