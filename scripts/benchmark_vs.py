@@ -467,9 +467,11 @@ def _track_b_native(active: list[Any], args: argparse.Namespace) -> None:
         print(f"  Track B-native skipped — {e}")
         return
     try:
-        import torch  # the like-for-like control shares reinfors-nn's libtorch
+        import torch  # noqa: F401  — the like-for-like control shares reinfors-nn's libtorch
+
+        have_torch = True
     except ImportError:
-        torch = None  # type: ignore[assignment]
+        have_torch = False
 
     budget = 64
     grid = [(64, 1), (64, 16)] if args.smoke else [(64, 1), (64, 64), (512, 1), (512, 16), (512, 64)]
@@ -489,6 +491,9 @@ def _track_b_native(active: list[Any], args: argparse.Namespace) -> None:
     def torch_infer(w: list[np.ndarray]) -> Any:
         # A torch MLP with the net's OWN weights — identical libtorch kernels to tch, so the tch-vs-torch
         # gap is only the boundary (GIL + numpy<->tensor marshalling + torch's Python dispatch per call).
+        # Re-imported here (only reached when the top-level import succeeded) so it's a non-optional module.
+        import torch
+
         model = torch.nn.Sequential(
             torch.nn.Linear(84, w[0].shape[0]), torch.nn.ReLU(), torch.nn.Linear(w[0].shape[0], 7)
         )
@@ -509,7 +514,7 @@ def _track_b_native(active: list[Any], args: argparse.Namespace) -> None:
         return infer
 
     header = ["net hidden", "n_games", "rust-native [tch]"]
-    if torch is not None:
+    if have_torch:
         header += ["python [torch]", "tch/torch"]
     header += ["python [numpy]"]
 
@@ -525,7 +530,7 @@ def _track_b_native(active: list[Any], args: argparse.Namespace) -> None:
         try:
             native = measure(net, ng)
             cells = [str(h), str(ng), f"{native:,.0f}"]
-            if torch is not None:
+            if have_torch:
                 tq = measure(torch_infer(w), ng)
                 cells += [f"{tq:,.0f}", f"{native / tq:.2f}x"]
             cells.append(f"{measure(numpy_infer, ng):,.0f}")
