@@ -5,7 +5,14 @@
 //! `engine.train` loop runs with no external C++ library and no Python. The core stays model-agnostic: it
 //! never depends on this crate; the arbitrary-Python-callback path is primary. Architectures mirror
 //! `scripts/train_example.py`. Device is chosen per-net at runtime (`resolve_device`); GPU backends
-//! (`metal`/`cuda`) must be compiled in (`--features …`), then selectable without a rebuild.
+//! (`metal`/`cuda`) must be compiled in (`--features …`), then selectable without a rebuild. candle's
+//! Metal backend needs macOS 15+.
+//!
+//! Performance caveat: candle's CPU `conv2d` is ~8-10x slower than PyTorch (open candle issue
+//! <https://github.com/huggingface/candle/issues/3119> — im2col copy overhead dominates; a BLAS feature
+//! like `accelerate`/`mkl` speeds only the matmul/linear path, not conv). So `Mlp` (and linear-heavy
+//! nets) are fast on CPU, but `Conv` is conv-bound — use a GPU device for conv nets, or drive the search
+//! with a Python net (torch's CPU conv uses oneDNN and is fast).
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::{
     conv2d, linear, Conv2d, Conv2dConfig, Linear, Module, Optimizer, VarBuilder, VarMap,
