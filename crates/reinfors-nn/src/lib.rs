@@ -244,16 +244,22 @@ impl ValueNet for Mlp {
 /// counterpart to `forward`. One `update` is a single gradient step on a collected batch; the outer
 /// loop (collect with live weights, then update) belongs to the caller or the fused driver. Synchronous
 /// by design: every collect searches with the just-updated weights (no replay / stale-weight actor).
+/// The optimizer is candle's `AdamW` with `weight_decay = 0`, i.e. plain Adam (candle ships no `Adam`),
+/// matching the reference trainer's `torch.optim.Adam`.
 pub struct TreeStrapTrainer {
     opt: candle_nn::AdamW,
 }
 
 impl TreeStrapTrainer {
-    /// Adam over the net's parameters. `net` must be the same net later passed to `update` — the
-    /// optimizer captures its `VarMap`'s vars, and `update`'s forward reads those same tensors.
+    /// Adam (AdamW with weight_decay=0) over the net's parameters. `net` must be the same net later
+    /// passed to `update` — the optimizer captures its `VarMap`'s vars, and `update`'s forward reads
+    /// those same tensors.
     pub fn new(net: &dyn ValueNet, lr: f64) -> Result<Self> {
+        // weight_decay pinned to 0 explicitly: AdamW == Adam only at wd=0, and we don't want a future
+        // change to candle's ParamsAdamW default to silently introduce decay.
         let params = candle_nn::ParamsAdamW {
             lr,
+            weight_decay: 0.0,
             ..Default::default()
         };
         Ok(Self {
