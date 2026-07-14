@@ -10,35 +10,46 @@ reinfors ships **no** model, loss, or training loop. You bring the net.
 
 ## Why reinfors — where it fits
 
-Two libraries already do parts of this well, and reinfors deliberately sits between them:
+reinfors runs the game and a decision-time search in a fast, parallel Rust engine and calls out to *your*
+network for leaf evaluation — pooling those calls across games into one batched forward per round. Two
+established libraries overlap with parts of this:
 
 - **[Pgx](https://github.com/sotetsuk/pgx)** runs board-game environments *entirely on GPU/TPU* in JAX
-  (vmapped across a batch, no host transfer) — unbeatable for board games at massive batch, but
-  board-games-only (fixed-size state) and your network must be JAX.
-- **[OpenSpiel](https://github.com/google-deepmind/open_spiel)** has a fast C++ MCTS and a huge game
-  library, but its C++ search can only call *C++* evaluators; to drive it with a Python network you drop
-  to its Python MCTS, which is roughly an order of magnitude slower.
+  (vmapped across a batch, no host transfer). Unbeatable for board games at large batch — but
+  board-games-only (fixed-size state) and the network must be JAX.
+- **[OpenSpiel](https://github.com/google-deepmind/open_spiel)** is a large C++/Python library of games
+  and algorithms. Its C++ core (games *and* search) is fast, its game states are as flexible as
+  reinfors', and its AlphaZero pipeline parallelises self-play across actor processes/threads (with a
+  batched inference server in C++) on GPU-backed nets — so for a network defined in *its* framework it
+  will typically out-run reinfors. The catch is that framework: the fast path is a C++/libtorch model,
+  and the flexible Python path drops to a pure-Python search (~an order of magnitude slower than the C++).
 
-reinfors' niche is the combination neither offers: a **compiled (Rust) search loop driven by your own
-Python network**, parallelised across games on CPU, over game spaces too irregular for JAX to vectorise.
+reinfors' distinctive combination is **a compiled search driven by an *arbitrary Python* network**: bring
+any callable — numpy, PyTorch, JAX, your own — with no C++/JAX toolchain and no fixed model interface,
+and still get a parallel, batched, compiled search. You trade peak throughput for that flexibility and a
+pure-Python workflow.
 
 | | **reinfors** | **Pgx** | **OpenSpiel** |
 |---|---|---|---|
-| Search runs in | Rust (compiled) | JAX / XLA | C++ (fast) *or* Python (slow) |
-| Your net can be | **any** framework, via a callback | JAX only | C++/libtorch (fast path) *or* Python (slow path) |
-| Compiled search **+** a Python net | ✅ | ✗ (net is JAX) | ✗ (fast path needs a C++ net) |
-| Hardware | CPU, parallel (rayon) | GPU / TPU, on-device | CPU |
-| Game state | **any** — dynamic / irregular (e.g. variable-length) | fixed-size (board games) | broad (board, card, imperfect-info) |
-| Cross-game batching | pooled across `n_games`, one net call/round | `vmap` over the batch | per-bot / C++ inference server |
+| Search runs in | Rust (compiled, CPU, rayon-parallel) | JAX / XLA (on-device) | C++ (fast) *or* Python (slow) |
+| Your network | **any** Python callable / framework | JAX only | its model framework — C++/libtorch, or JAX (Python AlphaZero) |
+| Compiled search **+** an *arbitrary Python* net | ✅ | ✗ (net is JAX) | ✗ (C++ net for the fast path) |
+| Net device | anywhere you put it (incl. GPU) | GPU / TPU (with the env) | anywhere (incl. GPU) |
+| Game state | flexible — dynamic / irregular OK¹ | fixed-size (board games) | flexible (board, card, imperfect-info) |
+| Self-play scaling | pooled across `n_games`, one net call/round | `vmap` over the batch | parallel actors; C++ batches via an inference server |
 | Games shipped today | few (3, growing) | many board games | very many |
-| Sweet spot | flexible nets, irregular games, CPU / mid-scale | board games at large GPU batch | breadth of games + algorithms |
+| Setup | `pip install`, write a Python callback | JAX + Pgx | pip (Python path) or a C++/libtorch build (fast path) |
 
-The honest summary: for **board games at massive GPU scale**, reach for Pgx; for the **broadest game and
-algorithm library**, OpenSpiel; for **a compiled search you drive with your own Python network across
-flexible game spaces on CPU** — that's reinfors. Concretely: for a Python-net workflow, reinfors' Rust
-search is several times faster than OpenSpiel's Python MCTS (the only OpenSpiel path that accepts a Python
-net); against OpenSpiel's C++ MCTS or Pgx+mctx on a GPU it trades raw board-game throughput for
-generality. Reproducible head-to-heads — including where each *wins* — live in `scripts/benchmark_vs.py`.
+¹ The Rust core *can* express dynamic/irregular state (e.g. snake's variable-length bodies), which JAX
+can't vectorise — but only three games ship today; the library is growing.
+
+The honest summary: for **board games at GPU scale**, use Pgx; for the **broadest games + algorithms**, or
+a fast fully-native pipeline with a framework net, use OpenSpiel; for **injecting an arbitrary Python
+network into a compiled, parallel search over flexible game spaces**, in pure Python — that's reinfors.
+reinfors' measured speed lead is specifically over OpenSpiel's *Python* search path (the only one that
+accepts a Python net); a fully-native C++ pipeline with a framework net is faster. A future
+Rust-native-net option (train entirely in Rust, no Python boundary) could close that gap for common
+architectures while keeping the arbitrary-Python-net path. Reproducible head-to-heads: `scripts/benchmark_vs.py`.
 
 ## Install
 
