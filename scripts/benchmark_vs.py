@@ -453,21 +453,22 @@ def _track_b(active: list[Any], args: argparse.Namespace) -> None:
 
 
 def _track_b_native(active: list[Any], args: argparse.Namespace) -> None:
-    """Isolate the Python↔net boundary. The SAME MLP value function drives reinfors' search three ways,
-    all sharing one set of weights (so identical search work): rust-native (`rf.nn`, forward in Rust),
-    python-torch (a torch module — the LIKE-FOR-LIKE control: same libtorch kernels as tch, so tch/torch
-    is purely the boundary), and python-numpy (a numpy mirror — a fast lightweight-net baseline for
-    context). Swept over net size AND n_games. Needs the `nn` extra (libtorch); else skipped."""
+    """rf.nn (Rust net) vs bringing the same net as a Python callback. The SAME MLP value function drives
+    reinfors' search three ways, all sharing one set of weights (so ~identical search work): rust-native
+    (`rf.nn`, candle, forward in Rust — no per-round callback), python-torch (a torch module via the
+    callback), and python-numpy (a numpy mirror). This is the practical choice a user faces, not a pure
+    boundary isolation — candle, torch, and numpy are different kernels, so the ratio mixes the removed
+    Python↔net boundary with kernel differences. Swept over net size AND n_games. Needs `rf.nn`; else skipped."""
     rf_b = next((b for b in active if b.name == "reinfors"), None)
     if rf_b is None:
         return
     try:
-        rf.nn.Mlp(84, 8, 7, 1)  # probe: is reinfors built with the nn feature?
+        rf.nn.Mlp(84, 8, 7, 1)  # probe: is rf.nn present (default build)?
     except ImportError as e:
         print(f"  Track B-native skipped — {e}")
         return
     try:
-        import torch  # noqa: F401  — the like-for-like control shares reinfors-nn's libtorch
+        import torch  # noqa: F401  — bring-your-own-net comparison point
 
         have_torch = True
     except ImportError:
@@ -489,9 +490,9 @@ def _track_b_native(active: list[Any], args: argparse.Namespace) -> None:
         return _throughput(lambda: int(engine.collect(decisions, source).obs.shape[0]), args.repeats)
 
     def torch_infer(w: list[np.ndarray]) -> Any:
-        # A torch MLP with the net's OWN weights — identical libtorch kernels to tch, so the tch-vs-torch
-        # gap is only the boundary (GIL + numpy<->tensor marshalling + torch's Python dispatch per call).
-        # Re-imported here (only reached when the top-level import succeeded) so it's a non-optional module.
+        # A torch MLP with the net's OWN weights (candle exported them). The gap vs rust-native mixes the
+        # removed Python↔net boundary (GIL + marshalling + torch's per-call dispatch) with candle-vs-torch
+        # kernel differences. Re-imported here (only reached when the top-level import succeeded).
         import torch
 
         model = torch.nn.Sequential(
@@ -513,9 +514,9 @@ def _track_b_native(active: list[Any], args: argparse.Namespace) -> None:
 
         return infer
 
-    header = ["net hidden", "n_games", "rust-native [tch]"]
+    header = ["net hidden", "n_games", "rust-native [candle]"]
     if have_torch:
-        header += ["python [torch]", "tch/torch"]
+        header += ["python [torch]", "candle/torch"]
     header += ["python [numpy]"]
 
     rows = []
@@ -543,12 +544,12 @@ def _track_b_native(active: list[Any], args: argparse.Namespace) -> None:
         f"Track B-native — reinfors decisions/sec: Rust-native net vs the SAME net in Python (UCT, budget={budget})",
         tuple(header),
         rows,
-        note="All columns share ONE MLP's weights (identical search work). The like-for-like is "
-        "tch-vs-torch — same libtorch kernels, so the ratio is purely the Python↔net boundary (GIL + "
-        "marshalling + torch's per-call Python dispatch); reinfors wins it across the board. python-numpy "
-        "is a fast lightweight-net baseline (numpy beats libtorch for tiny tensors, so it flatters the "
-        "callback) — informative, not like-for-like. Bigger standing wins for rust-native: GPU nets and "
-        "training entirely in Rust.",
+        note="All columns share ONE MLP's weights (~identical search work). rust-native runs the forward "
+        "in candle (Rust, no per-round callback); python-torch / python-numpy bring the same net through "
+        "the `infer` callback. The ratio mixes the removed Python↔net boundary with candle-vs-{torch,numpy} "
+        "kernel differences, so read it as the practical 'rf.nn vs a Python net' choice, not a pure boundary "
+        "isolation. The standing wins for rust-native are training entirely in Rust and GPU (candle "
+        "metal/cuda).",
     )
 
 

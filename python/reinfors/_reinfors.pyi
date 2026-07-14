@@ -158,9 +158,9 @@ class Env:
     @property
     def rewards(self) -> list[float] | None: ...
 
-# Optional Rust-native value net (the `reinfors[nn]` / libtorch build). Declared here for typing; at
-# runtime it exists only when built with the `nn` feature — `reinfors.nn` guards for its absence. Pass an
-# instance to `Engine.collect` in place of an `infer` callable to run the forward in Rust (no callback).
+# Rust-native value net (candle — pure Rust, in the wheel by default). Declared here for typing; absent
+# at runtime only in a `--no-default-features` build — `reinfors.nn` guards for that. Pass an instance to
+# `Engine.collect` in place of an `infer` callable to run the forward in Rust (no callback).
 class Net:
     @staticmethod
     def conv(obs_shape: tuple[int, int, int], n_actions: int, n_heads: int) -> Net: ...

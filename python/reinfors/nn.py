@@ -1,11 +1,12 @@
-"""Optional Rust-native value nets (libtorch via tch), the `reinfors[nn]` extra.
+"""Rust-native value nets (candle — pure Rust, no external library), included in the wheel by default.
 
 These satisfy the search's `infer` contract entirely in Rust, so `engine.collect(n, net)` runs the
 forward pass without the per-round Python callback. Weights round-trip as numpy in the net's fixed
 parameter order (the torch `state_dict` layout: conv/linear weight then bias, trunk before head), so a
 torch-trained checkpoint syncs in with `set_weights` and `get_weights` exports for a parity check.
 
-Available only when reinfors is built with the `nn` feature; the factories raise a clear error otherwise.
+On by default; absent only if reinfors was built with `--no-default-features` (the factories then raise
+a clear error). GPU: build reinfors with `--features nn-metal` (Apple) or `--features nn-cuda` (NVIDIA).
 """
 
 from __future__ import annotations
@@ -15,8 +16,8 @@ from typing import Any
 
 from . import _reinfors
 
-# `Net`/`TreeStrapTrainer` exist only when built with the `nn` feature (libtorch); absent otherwise.
-# `getattr` keeps this import-clean either way, and the factories raise a clear error when missing.
+# `Net`/`TreeStrapTrainer` are absent only in a `--no-default-features` build. `getattr` keeps this
+# import-clean either way, and the factories raise a clear error when missing.
 _Net = getattr(_reinfors, "Net", None)
 _Trainer = getattr(_reinfors, "TreeStrapTrainer", None)
 
@@ -24,8 +25,8 @@ _Trainer = getattr(_reinfors, "TreeStrapTrainer", None)
 def _require() -> Any:
     if _Net is None:
         raise ImportError(
-            "Rust-native nets need reinfors built with the 'nn' extra (libtorch). "
-            "Install `reinfors[nn]`, or build with `maturin develop --features nn`."
+            "Rust-native nets are missing — reinfors was built with --no-default-features. "
+            "Rebuild with the default features (`maturin develop`), which include `nn`."
         )
     return _Net
 
@@ -47,6 +48,7 @@ def TreeStrapTrainer(net: Any, lr: float = 2.5e-4) -> Any:
     loop (`trainer.update(net, obs, targets, masks)` on a collected batch)."""
     if _Trainer is None:
         raise ImportError(
-            "reinfors-nn training needs the 'nn' extra (libtorch); build with `maturin develop --features nn`."
+            "Rust-native training is missing — reinfors was built with --no-default-features. "
+            "Rebuild with the default features (`maturin develop`)."
         )
     return _Trainer(net, lr)

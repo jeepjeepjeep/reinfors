@@ -1,5 +1,5 @@
-"""Rust-native nets (`reinfors[nn]`, the optional libtorch path). Skipped whole when reinfors is built
-without the `nn` feature — `rf.nn.Conv` raises `ImportError`, which these tests treat as "not built"."""
+"""Rust-native nets (`rf.nn`, candle — pure Rust). Skipped whole when reinfors is built with
+`--no-default-features` — `rf.nn.Conv` raises `ImportError`, which these tests treat as "not built"."""
 
 from __future__ import annotations
 
@@ -26,9 +26,10 @@ def test_forward_has_pooled_khead_shape() -> None:
     assert net.n_heads == K and net.n_actions == A
 
 
-def test_forward_matches_torch_exactly() -> None:
-    # Same libtorch backend, so exporting the Rust net's weights into an equivalent torch module must
-    # reproduce its forward bit-for-bit. Also confirms the tch/libtorch version bypass is ABI-safe here.
+def test_forward_matches_torch() -> None:
+    # Export the candle net's weights into an equivalent torch module: the same architecture (Conv2d ·
+    # ReLU · Linear · K heads) must reproduce candle's forward to numerical tolerance. Not bit-exact —
+    # candle and torch are independent implementations — so this guards the layout/semantics, not kernels.
     torch = pytest.importorskip("torch")
     import torch.nn as tnn
 
@@ -107,7 +108,7 @@ def test_stepwise_trainer_update_moves_weights() -> None:
 
 
 def test_train_head_mismatch_errors_clearly() -> None:
-    # A net whose head count differs from the policy's must fail with a clear message, not a libtorch panic.
+    # A net whose head count differs from the policy's must fail with a clear message, not a candle panic.
     _conv_or_skip()
     net = rf.nn.Conv(SHAPE, A, 3)  # 3 heads vs the policy's K=8
     with pytest.raises(ValueError, match="n_heads"):

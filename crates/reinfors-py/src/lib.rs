@@ -315,7 +315,7 @@ struct TrainBuffers {
 }
 
 /// The net's head count must equal the learner's (`Mcts` → 1 head; `SelectiveExpectimax` → `n_heads`),
-/// or the target tensor won't line up with the net's output. A clear error beats a libtorch reshape panic.
+/// or the target tensor won't line up with the net's output. A clear error beats a candle reshape panic.
 #[cfg(feature = "nn")]
 fn check_head_match(net: &dyn reinfors_nn::ValueNet, target_len: i64, n: i64) -> PyResult<()> {
     let a = net.n_actions() as i64;
@@ -674,8 +674,8 @@ where
                 Some(tb) => {
                     check_head_match(net, tb.targets.len() as i64, tb.n)?;
                     let loss = trainer.loss(net, &tb.obs, &tb.targets, &tb.mask, tb.n);
-                    // Release the GIL for the backward: torch's Python autograd engine (installed once
-                    // `import torch` runs) requires it, and the step touches no Python.
+                    // Release the GIL for the (pure-Rust candle) backward — it touches no Python, so
+                    // other Python threads can run while it computes.
                     let tr = &mut *trainer;
                     losses.push(py.allow_threads(move || tr.step(&loss)));
                 }
@@ -1805,14 +1805,14 @@ fn core_build_profile() -> &'static str {
 }
 
 // ===========================================================================
-// Optional Rust-native nets (`reinfors[nn]`, libtorch via tch). A `Net` is just another `infer`
-// source: pass it to `engine.collect` and the forward runs in Rust with no per-round Python callback.
-// Weights round-trip as numpy in the net's fixed parameter order (matching the torch state_dict), so a
-// torch-trained checkpoint syncs in via `set_weights` and a parity check exports out via `get_weights`.
+// Rust-native nets (`rf.nn`, candle — pure Rust). A `Net` is just another `infer` source: pass it to
+// `engine.collect` and the forward runs in Rust with no per-round Python callback. Weights round-trip as
+// numpy in the net's fixed parameter order (the torch state_dict layout), so a torch-trained checkpoint
+// syncs in via `set_weights` and `get_weights` exports out (e.g. for safetensors / a parity check).
 // ===========================================================================
 
-// `unsendable`: tch tensors are not `Sync`, so the net is bound to the thread that built it — which is
-// the GIL thread that also drives `collect` (the native forward runs single-threaded, under the GIL).
+// `unsendable`: the net is only ever used from the GIL thread that drives `collect`/`train`, so it need
+// not be thread-shareable — the simplest sound `#[pyclass]` for a `Box<dyn ValueNet>`.
 #[cfg(feature = "nn")]
 #[pyclass(name = "Net", unsendable)]
 struct PyNet(Box<dyn reinfors_nn::ValueNet>);
