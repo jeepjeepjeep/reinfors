@@ -120,6 +120,15 @@ def test_stepwise_trainer_update_moves_weights() -> None:
     assert any(not np.array_equal(a, b) for a, b in zip(net.get_weights(), before, strict=True))
 
 
+def test_stepwise_update_empty_batch_errors_clearly() -> None:
+    # An empty batch must give a clean error, not a divide-by-zero panic (mirrors engine.train's guard).
+    net = _conv_or_skip()
+    trainer = rf.nn.TreeStrapTrainer(net, lr=1e-3)
+    empty = (np.zeros((0, 2 * 6 * 7), np.float32), np.zeros((0, K, A), np.float64), np.zeros((0, K), np.float32))
+    with pytest.raises(ValueError, match="empty batch"):
+        trainer.update(*empty)
+
+
 def test_train_head_mismatch_errors_clearly() -> None:
     # A net whose head count differs from the policy's must fail with a clear message, not a candle panic.
     _conv_or_skip()

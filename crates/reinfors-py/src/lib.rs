@@ -474,9 +474,7 @@ impl RecordBatch for TreeStrapRecord {
 
     #[cfg(feature = "nn")]
     fn to_train_buffers(records: &[Self]) -> Option<TrainBuffers> {
-        if records.is_empty() {
-            return None;
-        }
+        // `None` means "not trainable" (the default). Emptiness is guarded upstream by the caller.
         let (mut obs, mut targets, mut mask) = (Vec::new(), Vec::new(), Vec::new());
         for (o, t, m) in records {
             obs.extend_from_slice(o);
@@ -1979,6 +1977,12 @@ impl PyTrainer {
         masks: PyReadonlyArray2<'_, f32>,
     ) -> PyResult<f64> {
         let n = obs.as_array().shape()[0] as i64;
+        if n == 0 {
+            // Mirror engine.train's guard: a clean error, not a divide-by-zero panic in `loss`.
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "trainer.update got an empty batch (0 rows)",
+            ));
+        }
         let o: Vec<f32> = obs.as_array().iter().copied().collect();
         let t: Vec<f32> = targets.as_array().iter().map(|&v| v as f32).collect();
         let m: Vec<f32> = masks.as_array().iter().copied().collect();
