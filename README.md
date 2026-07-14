@@ -10,46 +10,56 @@ reinfors ships **no** model, loss, or training loop. You bring the net.
 
 ## Why reinfors — where it fits
 
-reinfors runs the game and a decision-time search in a fast, parallel Rust engine and calls out to *your*
-network for leaf evaluation — pooling those calls across games into one batched forward per round. Two
-established libraries overlap with parts of this:
+reinfors runs the game **and a decision-time search** in a fast, parallel Rust engine and calls out to
+*your* network for leaf evaluation, pooling those calls across games into one batched forward per round.
+The environment is the easy part — the distinctive, load-bearing part is a **flexible search driven by an
+arbitrary network, assembled from decoupled, swappable seams**. Two established libraries overlap with
+pieces of this, and it's worth being precise about the trade:
 
 - **[Pgx](https://github.com/sotetsuk/pgx)** runs board-game environments *entirely on GPU/TPU* in JAX
-  (vmapped across a batch, no host transfer). Unbeatable for board games at large batch — but
-  board-games-only (fixed-size state) and the network must be JAX.
+  (vmapped across a batch, no host transfer) — unbeatable for board games at large batch. But it
+  vectorises the **environment**; the *search* on top is DeepMind's `mctx`, which offers a fixed menu of
+  AlphaZero/MuZero-style policies with a **JAX** value net compiled into the graph. A different search, or
+  a non-JAX net, means re-expressing search as fixed-shape XLA — the hard, algorithm-constraining part.
 - **[OpenSpiel](https://github.com/google-deepmind/open_spiel)** is a large C++/Python library of games
-  and algorithms. Its C++ core (games *and* search) is fast, its game states are as flexible as
-  reinfors', and its AlphaZero pipeline parallelises self-play across actor processes/threads (with a
-  batched inference server in C++) on GPU-backed nets — so for a network defined in *its* framework it
-  will typically out-run reinfors. The catch is that framework: the fast path is a C++/libtorch model,
-  and the flexible Python path drops to a pure-Python search (~an order of magnitude slower than the C++).
+  and algorithms, with flexible states and imperfect-information support. Its C++ core (games *and*
+  search) is fast, and its AlphaZero pipeline scales self-play across actors with a C++ inference server —
+  so a net defined in *its* framework (C++/libtorch) will typically out-run reinfors. The catch is that
+  framework: the fast search can't be driven by an *arbitrary Python* net, and the flexible Python path
+  drops to a pure-Python search (~an order of magnitude slower than the C++). Games bundle their own rules,
+  observations, and rewards together.
 
-reinfors' distinctive combination is **a compiled search driven by an *arbitrary Python* network**: bring
-any callable — numpy, PyTorch, JAX, your own — with no C++/JAX toolchain and no fixed model interface,
-and still get a parallel, batched, compiled search. You trade peak throughput for that flexibility and a
-pure-Python workflow.
+**reinfors' bet is flexibility and modularity, not peak throughput.** A search *tree* is exactly the
+dynamic, data-dependent structure that resists vectorisation — it grows one node per simulation, and
+selection walks variable-length paths — so reinfors writes the *search itself* as ordinary Rust
+(expectimax, MCTS, best-first, or your own), evaluates leaves with **any Python callable** (torch / JAX /
+numpy / your own), and assembles a run from **independent seams that each swap without touching the
+others**: game *rules*, *reward*, *observation encoding*, *start-state distribution*, *policy* (the
+search), *learner* (the targets). No JAX/XLA toolchain, no fixed model interface, no GPU required.
 
 | | **reinfors** | **Pgx** | **OpenSpiel** |
 |---|---|---|---|
 | Search runs in | Rust (compiled, CPU, rayon-parallel) | JAX / XLA (on-device) | C++ (fast) *or* Python (slow) |
-| Your network | **any** Python callable / framework | JAX only | its model framework — C++/libtorch, or JAX (Python AlphaZero) |
+| Search algorithm | **pluggable & custom** — expectimax, MCTS, best-first, write your own | `mctx`'s fixed menu (AlphaZero / MuZero); custom ⇒ re-implement in XLA | large built-in C++/Python library |
+| Your network | **any** Python callable (torch / JAX / numpy / …) | JAX only (in-graph) | C++/libtorch (fast) *or* JAX (Python AlphaZero) |
 | Compiled search **+** an *arbitrary Python* net | ✅ | ✗ (net is JAX) | ✗ (C++ net for the fast path) |
-| Net device | anywhere you put it (incl. GPU) | GPU / TPU (with the env) | anywhere (incl. GPU) |
-| Game state | flexible — dynamic / irregular OK¹ | fixed-size (board games) | flexible (board, card, imperfect-info) |
-| Self-play scaling | pooled across `n_games`, one net call/round | `vmap` over the batch | parallel actors; C++ batches via an inference server |
-| Games shipped today | few (3, growing) | many board games | very many |
-| Setup | `pip install`, write a Python callback | JAX + Pgx | pip (Python path) or a C++/libtorch build (fast path) |
+| Modularity | reward, encoding, start-state, opponent are **decoupled seams** | fused into one jitted pipeline | within the C++ framework; game bundles rules + obs + reward |
+| Game state | native dynamic structures, written directly¹ | fixed-shape arrays (dynamic state via padding + masking) | flexible (board, card, imperfect-info) |
+| Self-play scaling | pooled across `n_games`, one net call/round | `vmap` over the batch | parallel actors; C++ inference server |
+| Best at | flexible / custom search + arbitrary net, CPU / mid-scale | board games at large GPU batch | breadth of games + algorithms; imperfect info |
 
-¹ The Rust core *can* express dynamic/irregular state (e.g. snake's variable-length bodies), which JAX
-can't vectorise — but only three games ship today; the library is growing.
+¹ Pgx *can* represent dynamic grids — its MinAtar and 2048 ports do — but as fixed-shape arrays doing
+worst-case masked work; reinfors expresses the logic directly (a length-3 snake costs length-3 work).
+Three games ship today; the library is growing.
 
-The honest summary: for **board games at GPU scale**, use Pgx; for the **broadest games + algorithms**, or
-a fast fully-native pipeline with a framework net, use OpenSpiel; for **injecting an arbitrary Python
-network into a compiled, parallel search over flexible game spaces**, in pure Python — that's reinfors.
-reinfors' measured speed lead is specifically over OpenSpiel's *Python* search path (the only one that
-accepts a Python net); a fully-native C++ pipeline with a framework net is faster. A future
-Rust-native-net option (train entirely in Rust, no Python boundary) could close that gap for common
-architectures while keeping the arbitrary-Python-net path. Reproducible head-to-heads: `scripts/benchmark_vs.py`.
+**The honest summary.** For **board games at GPU scale**, use Pgx; for the **broadest games + algorithms**,
+or a fast fully-native pipeline with a framework net, use OpenSpiel. Reach for reinfors when you want a
+**custom or non-standard search over a flexible game, driven by your own (any-framework) network, from
+modular pieces, in pure Python** — trading peak throughput for that flexibility. reinfors' measured speed
+lead is specifically over OpenSpiel's *Python* search path (the only one that accepts a Python net); a
+fully-native C++ pipeline with a framework net is faster, and a future Rust-native-net option could narrow
+that gap for common architectures while keeping the arbitrary-net path. Reproducible head-to-heads:
+`scripts/benchmark_vs.py`.
 
 ## Install
 
@@ -115,8 +125,8 @@ count). The result is training records shaped for the learner; the model and the
 ## Status
 
 Pre-1.0. The engine, three games, the search/learner families, and the standard-API adapters are in
-place and tested; the game and policy libraries are actively growing. Current scope is perfect-information
-games with up to two agents. For benchmarking, **build in release** — a debug extension runs the Rust
+place and tested; the game and policy libraries are actively growing. Current scope is fully-observable
+games — sequential or simultaneous-move, with chance — up to two agents. For benchmarking, **build in release** — a debug extension runs the Rust
 core roughly 10× slower (the `rf.core_build_profile()` guard warns when it's not release).
 
 ## Development
