@@ -1,125 +1,124 @@
 # reinfors
 
-A general-purpose, gym-style **simulation + batching engine** with a Rust core and a Python API —
-"Polars for RL environments." The latency-sensitive, Python-slow parts of an RL pipeline (env
-dynamics, observation construction, batched tree search) run in Rust; your network and training
-loop stay in PyTorch/JAX. Rust owns *data generation*; Python owns *learning*.
+**Search-based RL data generation with a Rust core and a Python API.** A fast, parallel Rust engine
+runs your games and a decision-time search, and calls out to *your* network — in any framework — for
+evaluation. Rust owns *data generation*; Python (with torch/JAX/…) owns *learning*. The two meet at one
+seam: an `infer` callback the search invokes once per pooled round, so every `collect` searches with the
+live weights — the actor–learner sync is implicit.
 
-## Layout (maturin "mixed" project — one repo, one wheel)
+reinfors ships **no** model, loss, or training loop. You bring the net.
 
+## Why reinfors — where it fits
+
+Two libraries already do parts of this well, and reinfors deliberately sits between them:
+
+- **[Pgx](https://github.com/sotetsuk/pgx)** runs board-game environments *entirely on GPU/TPU* in JAX
+  (vmapped across a batch, no host transfer) — unbeatable for board games at massive batch, but
+  board-games-only (fixed-size state) and your network must be JAX.
+- **[OpenSpiel](https://github.com/google-deepmind/open_spiel)** has a fast C++ MCTS and a huge game
+  library, but its C++ search can only call *C++* evaluators; to drive it with a Python network you drop
+  to its Python MCTS, which is roughly an order of magnitude slower.
+
+reinfors' niche is the combination neither offers: a **compiled (Rust) search loop driven by your own
+Python network**, parallelised across games on CPU, over game spaces too irregular for JAX to vectorise.
+
+| | **reinfors** | **Pgx** | **OpenSpiel** |
+|---|---|---|---|
+| Search runs in | Rust (compiled) | JAX / XLA | C++ (fast) *or* Python (slow) |
+| Your net can be | **any** framework, via a callback | JAX only | C++/libtorch (fast path) *or* Python (slow path) |
+| Compiled search **+** a Python net | ✅ | ✗ (net is JAX) | ✗ (fast path needs a C++ net) |
+| Hardware | CPU, parallel (rayon) | GPU / TPU, on-device | CPU |
+| Game state | **any** — dynamic / irregular (e.g. variable-length) | fixed-size (board games) | broad (board, card, imperfect-info) |
+| Cross-game batching | pooled across `n_games`, one net call/round | `vmap` over the batch | per-bot / C++ inference server |
+| Games shipped today | few (3, growing) | many board games | very many |
+| Sweet spot | flexible nets, irregular games, CPU / mid-scale | board games at large GPU batch | breadth of games + algorithms |
+
+The honest summary: for **board games at massive GPU scale**, reach for Pgx; for the **broadest game and
+algorithm library**, OpenSpiel; for **a compiled search you drive with your own Python network across
+flexible game spaces on CPU** — that's reinfors. Concretely: for a Python-net workflow, reinfors' Rust
+search is several times faster than OpenSpiel's Python MCTS (the only OpenSpiel path that accepts a Python
+net); against OpenSpiel's C++ MCTS or Pgx+mctx on a GPU it trades raw board-game throughput for
+generality. Reproducible head-to-heads — including where each *wins* — live in `scripts/benchmark_vs.py`.
+
+## Install
+
+```sh
+pip install reinfors            # the engine (needs only numpy)
+pip install reinfors[gym]       # + Gymnasium / PettingZoo adapters (reinfors.gym)
+pip install reinfors[train]     # + torch, to run scripts/train_example.py
 ```
-crates/reinfors-core   pure Rust engine (no Python); the value, unit-testable on its own
-crates/reinfors-py     PyO3 bindings -> compiled module `reinfors._reinfors`
-python/reinfors/       ergonomic Python API (the declarative game builder) — grows over time
-```
 
-## Status
+Prebuilt wheels are published for Linux, macOS, and Windows — one abi3 wheel per platform, Python 3.10+.
 
-The concrete snake slice is in place, differential-tested against `snake_RL` (the oracle):
-
-- **env + egocentric observation** — bit-identical to `CleanSnakeEnv`.
-- **selective expectimax search** — per-head ensemble (σ-VOI priority), uniform and distributional
-  deferred opponents, in-tree apple spawning (deterministic first-empty belief, with `food_samples`
-  Monte-Carlo fan-out of eating branches), and pooled cross-game `search_many` (one batched `infer`
-  per round across all games). Leaf values come from a Python inference callback.
-- **rollout `Engine`** — drives N parallel games (apples spawned uniformly per game) through the
-  pooled search, Thompson-samples a head per game, and `collect`s training records with the full
-  `EnsembleTreeStrapRunner` semantics: episode-end **z-mixing** of the realized return into the
-  executed action, optional **interior** MAX-node targets (true TreeStrap), and a per-head
-  **bootstrap mask** on every record.
-- **training is the consumer's** — reinfors ships *no* model, loss, or training loop: learning is
-  yours, in PyTorch/JAX. The only seam is the `infer` callback (an `(N, C*H*W) f32 -> (N, K, A) f64`
-  forward), which the search calls once per pooled round, so each `collect` automatically searches with
-  the live weights — the actor-learner sync is implicit. `scripts/train_example.py` is a tiny,
-  self-contained reference for wiring a torch model to the engine (optional `torch`:
-  `pip install reinfors[train]`); snake_RL's `scripts/train_reinfors.py` is a full production trainer
-  on the same contract.
-- **parallel search + flat marshalling + benchmark** (this stage) — the per-search CPU work (expand,
-  evaluate, back up) runs in parallel across the pooled requests via rayon, with only the pooled-obs
-  gather and the one `infer` call per round serial; this is value-neutral (bit-identical regardless of
-  thread count). The `infer` boundary passes obs in and values out as single contiguous row-major
-  buffers (obs moved straight into numpy, no copy) instead of nested `Vec`s. On a **release** build
-  (CPU value function, grid 20 / 16 games / 10 heads / budget 64) benchmarking measured
-  ~2.4 ms per searched decision — about **6x faster than the pure-Python oracle**, with the flat
-  boundary worth ~1.6x over nested-`Vec` marshalling and rayon ~1.3x from 1→10 threads. (Benchmark
-  only a release build — a debug extension inflates reinfors' per-search cost several-fold and is
-  meaningless.)
-- **GPU validation** (this stage) — the pipeline runs end to end on a real conv net on the GPU (MPS):
-  a no-grad forward on MPS serves the search and gradient steps run on-device. Benchmarking with the
-  real net on MPS confirmed the founding premise — **pooling is what makes the GPU win**: with the real
-  10-head conv net (grid 20, budget 64) a solo search ties CPU vs MPS (~30 ms/decision, MPS launch
-  overhead cancels its compute edge), but the pooled per-round batch grows MPS to **~3.9x at 8 games
-  and ~6.1x at 32** (≈4 ms/decision) over CPU inference, and rising with pool size. Against snake_RL's
-  planner on the *same* MPS net and pooling (`--baseline --net`), reinfors is ~3-4x faster pooled
-  (0.34x at 8 games, 0.24x at 32). Decomposing that with the pool=1 control (single search, so no
-  rayon parallelism): the raw Rust-vs-Python *search* gap is ~10x when the search dominates (pool=1, a
-  cheap CPU value fn), but only ~1.3x with the real net at pool=1 — there the tiny per-round batch
-  leaves both pinned on un-amortized GPU launches. So reinfors' pooled GPU lead over snake_RL is
-  mostly pooling + parallelising the search across cores (which the GIL denies the Python planner),
-  with the search-implementation gap re-emerging as the per-decision GPU cost shrinks.
-
-Generic game abstractions and the declarative builder come later, once the concrete slice is proven.
-
-## Multiple games through one generic core
-
-The search and rollout engine are generic over a `Game` trait, so one unified `Engine` drives three
-games — **snake** (2-player simultaneous), **Connect-4** (sequential 2-player, alternating MAX vs
-modeled-opponent-chance nodes), and **GridWorld** (single-agent, pure MAX + lookahead). You compose an
-`Engine` from three handles — a game, a policy, and a learner — and every game exposes the same
-`observation_space()` / `action_space()` so a network can be sized from the game, not hard-coded:
+## Quick start
 
 ```python
 import reinfors as rf
 
-game = rf.make_game("connect4")             # or rf.games.Connect4(...); pass size kwargs to variable-shape
-obs_shape = game.observation_space().shape  # (2, 6, 7);  e.g. rf.make_game("gridworld", size=5)
-n_actions = game.action_space().n           # 7
-# size your own torch/JAX net from (obs_shape, n_actions) — reinfors ships no model
-engine = rf.Engine(
-    game,
-    rf.Reward(win=1.0, loss=-1.0),          # reward is decoupled from the game
-    rf.make_policy("selective_expectimax", n_heads=4),
-    rf.make_learner("treestrap"),
-    n_games=16,                             # unbounded games take a max_ticks= on the game handle
-)
-obs, targets, masks, telemetry = engine.collect(2048, infer)  # `infer`: (N, C*H*W) f32 -> (N, K, A) f64
+game    = rf.games.Connect4()
+reward  = rf.Reward(win=1.0, loss=-1.0)          # reward is decoupled from the game's rules
+policy  = rf.policies.Mcts(num_simulations=64)   # or SelectiveExpectimax, EpsilonGreedyQ
+learner = rf.learners.TreeStrap(gamma=0.99)
+engine  = rf.Engine(game, reward, policy, learner, n_games=16)
+
+# `infer(obs) -> per-head action values` is YOUR network's forward pass (torch / JAX / numpy — anything).
+# It's called once per pooled search round, batched across all n_games, and closes over the live weights.
+obs, targets, masks, telemetry = engine.collect(2048, infer)   # training records — you run the grad step
 ```
 
-`rf.registered_games()` / `registered_policies()` / `registered_learners()` list the names;
-`rf.engine_from_config(...)` builds the same `Engine` from a (YAML-shaped) config dict.
+Every game advertises its shapes, so you can size a network from the game instead of hard-coding it:
 
-## Build
+```python
+game = rf.games.Snake(grid_size=20, max_ticks=750)
+obs_shape = game.observation_space().shape        # (C, H, W)
+n_actions = game.action_space().n
+```
+
+`scripts/train_example.py` is a minimal, self-contained PyTorch trainer — the reference for the
+Python↔Rust `infer` contract (`(N, C*H*W) float32 -> (N, K, A) float64`).
+
+## What's in the box
+
+- **Games** (`rf.games`) — `Snake` (2-player simultaneous, variable-length bodies), `Connect4`
+  (sequential), `GridWorld` (single-agent). Games implement a small `Game` trait, so adding one is local.
+- **Policies** (`rf.policies`) — `SelectiveExpectimax` (best-first, ensemble/uncertainty-guided search),
+  `Mcts` (UCT), `EpsilonGreedyQ` (reactive).
+- **Learners** (`rf.learners`) — `TreeStrap` (regress the search's backed-up value targets), `Dqn`.
+- **Standard-API adapters** (`rf.gym`) — expose any game as a `gymnasium.Env` (single-agent) or a
+  PettingZoo `ParallelEnv` (simultaneous multi-agent), so it drops into SB3 / CleanRL / RLlib / Tianshou.
+- **`rf.Env`** — a caller-driven single-game instance for play and evaluation.
+
+Reward, observation encoding, and the start-state distribution are all **decoupled seams**: the game owns
+only the rules, so the same game trains under any reward or encoding without touching its dynamics.
+`rf.make_game` / `make_policy` / `make_learner` and `rf.engine_from_config(...)` are the name-addressable,
+config-driven equivalents.
+
+## How it works
+
+`engine.collect` drives `n_games` in parallel (rayon). Each decision runs the search; the search pools
+the leaves it needs to evaluate *across all active games* into a single `infer` call per round, so one
+batched forward serves the whole pool — this is what amortises the Python↔net boundary and lets a GPU
+network pay off. The search is value-neutral w.r.t. parallelism (bit-identical regardless of thread
+count). The result is training records shaped for the learner; the model and the gradient step are yours.
+
+## Status
+
+Pre-1.0. The engine, three games, the search/learner families, and the standard-API adapters are in
+place and tested; the game and policy libraries are actively growing. Current scope is perfect-information
+games with up to two agents. For benchmarking, **build in release** — a debug extension runs the Rust
+core roughly 10× slower (the `rf.core_build_profile()` guard warns when it's not release).
+
+## Development
 
 ```sh
-uvx maturin build -o dist          # build the wheel
-uvx maturin develop                # or: install into the active venv for iteration
+uvx maturin develop --release      # build + install into the active venv (release; see the note above)
 cargo test -p reinfors-core        # pure-Rust unit tests (no Python)
+uv pip install -e ".[test]"        # a dev/editor venv with the full test suite's imports
 ```
 
-## Training a model
+`main` is protected by a client-side hook that blocks direct pushes; changes go through a PR. After
+cloning, enable the hooks once: `uvx pre-commit install --hook-type pre-commit --hook-type pre-push`.
 
-reinfors generates data; you train. `scripts/train_example.py` is a minimal, self-contained reference
-— a tiny conv net, the `infer` callback, and a short `collect` -> gradient-step loop — showing how a
-torch model plugs into the engine:
+## License
 
-```sh
-maturin develop --release                                   # release build (see benchmark note)
-uv run --with torch python scripts/train_example.py --iterations 20 --device mps
-```
-
-For a full production run — config-driven, replay buffer, TensorBoard logging, checkpoint/resume, and a
-like-for-like speed/quality comparison against the pure-Python oracle — see snake_RL's
-`scripts/train_reinfors.py`, which drives this same `Engine` + `infer` contract while keeping the
-network and gradient step entirely on the snake_RL side.
-
-## Git hooks
-
-`main` is protected by a client-side guard that blocks direct pushes (changes go through a PR).
-After cloning, enable the pre-commit and pre-push hooks once:
-
-```sh
-uvx pre-commit install --hook-type pre-commit --hook-type pre-push
-```
-
-The pre-push hook (`scripts/block-main-push.sh`) rejects `git push` to `main`; use a branch + PR
-instead. (It can be bypassed with `git push --no-verify` for genuine emergencies.)
+MIT — see [LICENSE](LICENSE).
