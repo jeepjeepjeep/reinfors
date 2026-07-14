@@ -1,29 +1,47 @@
-//! Optional Rust-native "standard" value nets (tch / libtorch) for reinfors.
+//! Optional Rust-native "standard" value nets on candle (pure Rust — no libtorch).
 //!
 //! These satisfy the search's `infer` contract — `(obs [n×dim], n) -> values [n·K·A]` — entirely in
-//! Rust, so `Engine::collect` runs the forward pass without the per-round Python callback. The core
-//! stays model-agnostic: it never depends on this crate; the arbitrary-Python-callback path is primary.
-//! Architectures mirror `scripts/train_example.py` so a torch-trained checkpoint loads unchanged and a
-//! Rust/Python parity test is exact.
-use tch::nn::{self, ConvConfig, Module, OptimizerConfig};
-use tch::{Device, Kind, Tensor};
+//! Rust, so `Engine::collect` runs the forward pass without the per-round Python callback, and the whole
+//! `engine.train` loop runs with no external C++ library and no Python. The core stays model-agnostic: it
+//! never depends on this crate; the arbitrary-Python-callback path is primary. Architectures mirror
+//! `scripts/train_example.py`. CPU by default; build with `--features metal`/`--features cuda` for GPU.
+use candle_core::{DType, Device, Result, Tensor};
+use candle_nn::{
+    conv2d, linear, Conv2d, Conv2dConfig, Linear, Module, Optimizer, VarBuilder, VarMap,
+};
+
+/// The compute device: a GPU when built with (and able to open) that backend, else CPU. Metal is
+/// self-contained on macOS; CUDA needs the CUDA runtime present.
+fn default_device() -> Device {
+    #[cfg(feature = "cuda")]
+    if let Ok(d) = Device::new_cuda(0) {
+        return d;
+    }
+    #[cfg(feature = "metal")]
+    if let Ok(d) = Device::new_metal(0) {
+        return d;
+    }
+    Device::Cpu
+}
 
 /// A batched, per-head action-value network: a pooled `[n, C·H·W]` observation batch in, `[n·K·A]`
 /// (K ensemble heads × A actions, row-major) out. The K heads supply the search's disagreement signal.
 pub trait ValueNet {
     fn n_heads(&self) -> usize;
     fn n_actions(&self) -> usize;
-    /// Inference forward: flat `[n·dim]` obs in, `[n·K·A]` values out (no autograd — see `forward_t`).
+    /// Inference forward: flat `[n·dim]` obs in, `[n·K·A]` values out.
     fn forward(&self, obs: &[f32], n: usize) -> Vec<f64>;
-    /// Autograd forward: an `[n, dim]` float tensor in, an `[n, K, A]` tensor out, with the graph
-    /// retained so a loss backpropagates into the parameters. The training core; `forward` is just this
-    /// under a no-grad guard. Object-safe (concrete tensor types).
-    fn forward_t(&self, x: &Tensor) -> Tensor;
-    /// The net's `VarStore`, so a trainer can build an optimizer over exactly these parameters.
-    fn var_store(&self) -> &nn::VarStore;
-    /// Trainable parameters in a fixed order, as shallow views sharing storage with the net — so
-    /// `import_weights` copies straight into the live parameters and `forward` sees the update.
-    fn params(&self) -> Vec<Tensor>;
+    /// Autograd forward: an `[n, dim]` float tensor in, an `[n, K, A]` tensor out (candle tracks the
+    /// graph, so a loss on the result backpropagates into the parameters). The training core; `forward`
+    /// wraps this. Object-safe (concrete tensor types).
+    fn forward_t(&self, x: &Tensor) -> Result<Tensor>;
+    /// The `VarMap` holding the trainable parameters — a trainer builds an optimizer over its vars, and
+    /// `import_weights` sets them by name.
+    fn varmap(&self) -> &VarMap;
+    /// Parameter names in a fixed order (matching the torch `state_dict` layout: trunk before head,
+    /// weight before bias) — the order `export_weights` / `import_weights` use.
+    fn param_names(&self) -> Vec<String>;
+    fn device(&self) -> &Device;
     /// The mutable seam closure `Engine::collect` expects — a Rust-native alternative to a Python
     /// callable. `Sized` so the trait stays object-safe (a `dyn ValueNet` uses `forward` directly).
     fn infer_fn(&self) -> impl FnMut(Vec<f32>, usize) -> Vec<f64> + '_
@@ -34,190 +52,191 @@ pub trait ValueNet {
     }
 }
 
-/// Each parameter as `(shape, row-major f32 data)`, in `params()` order — for exporting Rust-initialised
-/// weights into a torch module (parity test) or checkpointing.
+/// Each parameter as `(shape, row-major f32 data)`, in `param_names()` order — for exporting weights into
+/// a torch module / safetensors, or checkpointing.
 pub fn export_weights(net: &dyn ValueNet) -> Vec<(Vec<i64>, Vec<f32>)> {
-    net.params()
+    let vars = net.varmap().data().lock().unwrap();
+    net.param_names()
         .iter()
-        .map(|p| {
-            let flat = Vec::<f32>::try_from(p.to_kind(Kind::Float).flatten(0, -1))
-                .expect("f32 param buffer");
-            (p.size(), flat)
+        .map(|name| {
+            let t = vars[name].as_tensor();
+            let shape = t.dims().iter().map(|&d| d as i64).collect();
+            let flat = t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            (shape, flat)
         })
         .collect()
 }
 
-/// Copy `data` (in `params()` order, shapes matching) into the net's live parameters. This is the
+/// Copy `data` (in `param_names()` order, shapes matching) into the net's live parameters — the
 /// torch→Rust weight-sync path: push a `state_dict`'s tensors in before a collect.
 pub fn import_weights(net: &dyn ValueNet, data: &[Vec<f32>]) {
-    let _no_grad = tch::no_grad_guard();
-    let params = net.params();
+    let names = net.param_names();
     assert_eq!(
-        params.len(),
+        names.len(),
         data.len(),
         "weight count mismatch: {} vs {}",
-        params.len(),
+        names.len(),
         data.len()
     );
-    for (mut p, d) in params.into_iter().zip(data) {
-        let src = Tensor::from_slice(d).to_kind(p.kind()).reshape(p.size());
-        p.copy_(&src); // in place on the shared storage -> updates the live parameter
+    let vars = net.varmap().data().lock().unwrap();
+    for (name, d) in names.iter().zip(data) {
+        let var = &vars[name];
+        let shape = var.as_tensor().dims().to_vec();
+        let t = Tensor::from_slice(d, shape.as_slice(), net.device()).unwrap();
+        var.set(&t).unwrap();
     }
 }
 
-fn to_values(logits: Tensor, n: usize, k: i64, a: i64) -> Vec<f64> {
-    let out = logits
-        .reshape([n as i64, k, a])
-        .to_kind(Kind::Double)
-        .flatten(0, -1);
-    Vec::<f64>::try_from(out).expect("contiguous f64 value buffer")
+fn to_values(logits: &Tensor) -> Vec<f64> {
+    logits
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap()
+        .into_iter()
+        .map(|v| v as f64)
+        .collect()
 }
 
 /// Conv trunk + K linear heads — mirrors `ExampleNet` (Conv2d(c,16,3,pad=1) · ReLU · Flatten · Linear).
 /// Covers the planar-observation games (snake, connect4, gridworld).
 pub struct Conv {
-    vs: nn::VarStore,
-    conv: nn::Conv2D,
-    head: nn::Linear,
-    shape: (i64, i64, i64),
-    n_actions: i64,
-    n_heads: i64,
+    varmap: VarMap,
+    conv: Conv2d,
+    head: Linear,
+    device: Device,
+    shape: (usize, usize, usize),
+    n_actions: usize,
+    n_heads: usize,
 }
 
 impl Conv {
     pub fn new(obs_shape: (i64, i64, i64), n_actions: i64, n_heads: i64) -> Self {
-        let vs = nn::VarStore::new(Device::Cpu);
-        let root = vs.root();
-        let (c, h, w) = obs_shape;
-        let conv = nn::conv2d(
-            &root / "trunk_conv",
-            c,
-            16,
-            3,
-            ConvConfig {
-                padding: 1,
-                ..Default::default()
-            },
+        let device = default_device();
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+        let (c, h, w) = (
+            obs_shape.0 as usize,
+            obs_shape.1 as usize,
+            obs_shape.2 as usize,
         );
-        let head = nn::linear(
-            &root / "head",
-            16 * h * w,
-            n_heads * n_actions,
-            Default::default(),
-        );
+        let (a, k) = (n_actions as usize, n_heads as usize);
+        let cfg = Conv2dConfig {
+            padding: 1,
+            ..Default::default()
+        };
+        let conv = conv2d(c, 16, 3, cfg, vb.pp("trunk_conv")).unwrap();
+        let head = linear(16 * h * w, k * a, vb.pp("head")).unwrap();
         Self {
-            vs,
+            varmap,
             conv,
             head,
-            shape: obs_shape,
-            n_actions,
-            n_heads,
+            device,
+            shape: (c, h, w),
+            n_actions: a,
+            n_heads: k,
         }
     }
 }
 
 impl ValueNet for Conv {
     fn n_heads(&self) -> usize {
-        self.n_heads as usize
+        self.n_heads
     }
     fn n_actions(&self) -> usize {
-        self.n_actions as usize
+        self.n_actions
     }
     fn forward(&self, obs: &[f32], n: usize) -> Vec<f64> {
-        let _no_grad = tch::no_grad_guard();
         let (c, h, w) = self.shape;
-        let x = Tensor::from_slice(obs)
-            .to_kind(Kind::Float)
-            .reshape([n as i64, c * h * w]);
-        to_values(self.forward_t(&x), n, self.n_heads, self.n_actions)
+        let x = Tensor::from_slice(obs, (n, c * h * w), &self.device).unwrap();
+        to_values(&self.forward_t(&x).unwrap())
     }
-    fn forward_t(&self, x: &Tensor) -> Tensor {
+    fn forward_t(&self, x: &Tensor) -> Result<Tensor> {
         let (c, h, w) = self.shape;
-        let x = self
-            .conv
-            .forward(&x.reshape([-1, c, h, w]))
-            .relu()
-            .flatten(1, -1);
-        self.head
-            .forward(&x)
-            .reshape([-1, self.n_heads, self.n_actions])
+        let n = x.dim(0)?;
+        let x = self.conv.forward(&x.reshape((n, c, h, w))?)?.relu()?;
+        let x = self.head.forward(&x.flatten_from(1)?)?;
+        x.reshape((n, self.n_heads, self.n_actions))
     }
-    fn var_store(&self) -> &nn::VarStore {
-        &self.vs
+    fn varmap(&self) -> &VarMap {
+        &self.varmap
     }
-    // Order mirrors ExampleNet's state_dict: trunk conv weight/bias, then head weight/bias.
-    fn params(&self) -> Vec<Tensor> {
-        vec![
-            self.conv.ws.shallow_clone(),
-            self.conv.bs.as_ref().unwrap().shallow_clone(),
-            self.head.ws.shallow_clone(),
-            self.head.bs.as_ref().unwrap().shallow_clone(),
+    fn param_names(&self) -> Vec<String> {
+        [
+            "trunk_conv.weight",
+            "trunk_conv.bias",
+            "head.weight",
+            "head.bias",
         ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+    fn device(&self) -> &Device {
+        &self.device
     }
 }
 
 /// Two-layer MLP + K heads, for callers that hand the net a flattened observation vector.
 pub struct Mlp {
-    vs: nn::VarStore,
-    l1: nn::Linear,
-    head: nn::Linear,
-    in_dim: i64,
-    n_actions: i64,
-    n_heads: i64,
+    varmap: VarMap,
+    l1: Linear,
+    head: Linear,
+    device: Device,
+    in_dim: usize,
+    n_actions: usize,
+    n_heads: usize,
 }
 
 impl Mlp {
     pub fn new(in_dim: i64, hidden: i64, n_actions: i64, n_heads: i64) -> Self {
-        let vs = nn::VarStore::new(Device::Cpu);
-        let root = vs.root();
-        let l1 = nn::linear(&root / "l1", in_dim, hidden, Default::default());
-        let head = nn::linear(
-            &root / "head",
-            hidden,
-            n_heads * n_actions,
-            Default::default(),
-        );
+        let device = default_device();
+        let varmap = VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+        let (in_dim, a, k) = (in_dim as usize, n_actions as usize, n_heads as usize);
+        let l1 = linear(in_dim, hidden as usize, vb.pp("l1")).unwrap();
+        let head = linear(hidden as usize, k * a, vb.pp("head")).unwrap();
         Self {
-            vs,
+            varmap,
             l1,
             head,
+            device,
             in_dim,
-            n_actions,
-            n_heads,
+            n_actions: a,
+            n_heads: k,
         }
     }
 }
 
 impl ValueNet for Mlp {
     fn n_heads(&self) -> usize {
-        self.n_heads as usize
+        self.n_heads
     }
     fn n_actions(&self) -> usize {
-        self.n_actions as usize
+        self.n_actions
     }
     fn forward(&self, obs: &[f32], n: usize) -> Vec<f64> {
-        let _no_grad = tch::no_grad_guard();
-        let x = Tensor::from_slice(obs)
-            .to_kind(Kind::Float)
-            .reshape([n as i64, self.in_dim]);
-        to_values(self.forward_t(&x), n, self.n_heads, self.n_actions)
+        let x = Tensor::from_slice(obs, (n, self.in_dim), &self.device).unwrap();
+        to_values(&self.forward_t(&x).unwrap())
     }
-    fn forward_t(&self, x: &Tensor) -> Tensor {
-        let x = self.l1.forward(&x.reshape([-1, self.in_dim])).relu();
+    fn forward_t(&self, x: &Tensor) -> Result<Tensor> {
+        let n = x.dim(0)?;
+        let x = self.l1.forward(&x.reshape((n, self.in_dim))?)?.relu()?;
         self.head
-            .forward(&x)
-            .reshape([-1, self.n_heads, self.n_actions])
+            .forward(&x)?
+            .reshape((n, self.n_heads, self.n_actions))
     }
-    fn var_store(&self) -> &nn::VarStore {
-        &self.vs
+    fn varmap(&self) -> &VarMap {
+        &self.varmap
     }
-    fn params(&self) -> Vec<Tensor> {
-        vec![
-            self.l1.ws.shallow_clone(),
-            self.l1.bs.as_ref().unwrap().shallow_clone(),
-            self.head.ws.shallow_clone(),
-            self.head.bs.as_ref().unwrap().shallow_clone(),
-        ]
+    fn param_names(&self) -> Vec<String> {
+        ["l1.weight", "l1.bias", "head.weight", "head.bias"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+    fn device(&self) -> &Device {
+        &self.device
     }
 }
 
@@ -225,24 +244,32 @@ impl ValueNet for Mlp {
 /// counterpart to `forward`. One `update` is a single gradient step on a collected batch; the outer
 /// loop (collect with live weights, then update) belongs to the caller or the fused driver. Synchronous
 /// by design: every collect searches with the just-updated weights (no replay / stale-weight actor).
+/// The optimizer is candle's `AdamW` with `weight_decay = 0`, i.e. plain Adam (candle ships no `Adam`),
+/// matching the reference trainer's `torch.optim.Adam`.
 pub struct TreeStrapTrainer {
-    opt: nn::Optimizer,
+    opt: candle_nn::AdamW,
 }
 
 impl TreeStrapTrainer {
-    /// Adam over the net's parameters. `net` must be the same net later passed to `update` — the
-    /// optimizer captures its `VarStore`'s variables, and `update`'s forward reads those same tensors.
-    pub fn new(net: &dyn ValueNet, lr: f64) -> Result<Self, tch::TchError> {
+    /// Adam (AdamW with weight_decay=0) over the net's parameters. `net` must be the same net later
+    /// passed to `update` — the optimizer captures its `VarMap`'s vars, and `update`'s forward reads
+    /// those same tensors.
+    pub fn new(net: &dyn ValueNet, lr: f64) -> Result<Self> {
+        // weight_decay pinned to 0 explicitly: AdamW == Adam only at wd=0, and we don't want a future
+        // change to candle's ParamsAdamW default to silently introduce decay.
+        let params = candle_nn::ParamsAdamW {
+            lr,
+            weight_decay: 0.0,
+            ..Default::default()
+        };
         Ok(Self {
-            opt: nn::Adam::default().build(net.var_store(), lr)?,
+            opt: candle_nn::AdamW::new(net.varmap().all_vars(), params)?,
         })
     }
 
-    /// The masked-Huber loss tensor (grad graph attached; no backward). Row-major buffers: `obs`
-    /// `[n·dim]`, `targets` `[n·K·A]`, `mask` `[n·K]` (per-head bootstrap). Mirrors the reference trainer:
-    /// `(mask.unsqueeze(-1) * smooth_l1(pred, target)).sum() / (mask.sum().clamp_min(1) * A)`. Split from
-    /// `step` so a Python caller can release the GIL around the (autograd) backward — torch's Python
-    /// autograd engine panics if `backward` runs with the GIL held.
+    /// The masked-Huber loss tensor (candle tracks the graph). Row-major buffers: `obs` `[n·dim]`,
+    /// `targets` `[n·K·A]`, `mask` `[n·K]` (per-head bootstrap). Mirrors the reference trainer:
+    /// `(mask.unsqueeze(-1) * smooth_l1(pred, target)).sum() / (mask.sum().clamp_min(1) * A)`.
     pub fn loss(
         &self,
         net: &dyn ValueNet,
@@ -251,33 +278,45 @@ impl TreeStrapTrainer {
         mask: &[f32],
         n: i64,
     ) -> Tensor {
-        let (k, a) = (net.n_heads() as i64, net.n_actions() as i64);
-        let dim = obs.len() as i64 / n;
-        let obs_t = Tensor::from_slice(obs)
-            .to_kind(Kind::Float)
-            .reshape([n, dim]);
-        let tgt_t = Tensor::from_slice(targets)
-            .to_kind(Kind::Float)
-            .reshape([n, k, a]);
-        let mask_t = Tensor::from_slice(mask)
-            .to_kind(Kind::Float)
-            .reshape([n, k]);
-        let huber = net
-            .forward_t(&obs_t)
-            .smooth_l1_loss(&tgt_t, tch::Reduction::None, 1.0);
-        (mask_t.unsqueeze(-1) * huber).sum(Kind::Float)
-            / (mask_t.sum(Kind::Float).clamp_min(1.0) * (a as f64))
+        self.try_loss(net, obs, targets, mask, n).expect("loss")
     }
 
-    /// Backward + one Adam step on a precomputed `loss`; returns its scalar value. Expensive (runs
-    /// autograd) — a Python caller should release the GIL around this.
+    fn try_loss(
+        &self,
+        net: &dyn ValueNet,
+        obs: &[f32],
+        targets: &[f32],
+        mask: &[f32],
+        n: i64,
+    ) -> Result<Tensor> {
+        let (n, k, a) = (n as usize, net.n_heads(), net.n_actions());
+        let dim = obs.len() / n;
+        let dev = net.device();
+        let obs_t = Tensor::from_slice(obs, (n, dim), dev)?;
+        let tgt = Tensor::from_slice(targets, (n, k, a), dev)?;
+        let mask = Tensor::from_slice(mask, (n, k), dev)?;
+        let pred = net.forward_t(&obs_t)?;
+        // smooth_l1 (beta=1): 0.5·d² where |d|<1, else |d|−0.5.
+        let d = (pred - tgt)?;
+        let abs = d.abs()?;
+        let huber = abs
+            .lt(1f64)?
+            .where_cond(&(d.sqr()? * 0.5)?, &(&abs - 0.5)?)?;
+        let masked = mask.unsqueeze(2)?.broadcast_mul(&huber)?;
+        let denom = mask
+            .sum_all()?
+            .clamp(1f64, f64::INFINITY)?
+            .affine(a as f64, 0.0)?;
+        masked.sum_all()?.broadcast_div(&denom)
+    }
+
+    /// Backward + one Adam step on a precomputed `loss`; returns its scalar value.
     pub fn step(&mut self, loss: &Tensor) -> f64 {
-        self.opt.backward_step(loss);
-        loss.double_value(&[])
+        self.opt.backward_step(loss).expect("optimizer step");
+        loss.to_scalar::<f32>().expect("scalar loss") as f64
     }
 
-    /// Convenience `loss` + `step`, for Rust callers with no GIL to manage. The Python binding splits
-    /// them to release the GIL around the backward.
+    /// Convenience `loss` + `step`, for Rust callers.
     pub fn update(
         &mut self,
         net: &dyn ValueNet,
@@ -319,6 +358,22 @@ mod tests {
     }
 
     #[test]
+    fn import_then_export_round_trips_and_changes_forward() {
+        let net = Conv::new((2, 6, 7), 7, 8);
+        let obs = vec![0.5f32; 2 * 6 * 7];
+        let before = net.forward(&obs, 1);
+        let ramp: Vec<Vec<f32>> = export_weights(&net)
+            .iter()
+            .map(|(_, d)| (0..d.len()).map(|i| (i as f32) * 0.01).collect())
+            .collect();
+        import_weights(&net, &ramp);
+        for ((_, got), want) in export_weights(&net).iter().zip(&ramp) {
+            assert_eq!(got, want);
+        }
+        assert_ne!(net.forward(&obs, 1), before); // the update reached the live params
+    }
+
+    #[test]
     fn trainer_reduces_loss_and_moves_forward() {
         let net = Mlp::new(8, 16, 3, 2); // dim=8, K=2, A=3
         let mut tr = TreeStrapTrainer::new(&net, 1e-2).unwrap();
@@ -339,22 +394,5 @@ mod tests {
             "loss should fall with training: {first} -> {last}"
         );
         assert_ne!(net.forward(&obs, n as usize), before_pred); // steps reached the live params
-    }
-
-    #[test]
-    fn import_then_export_round_trips_and_changes_forward() {
-        let net = Conv::new((2, 6, 7), 7, 8);
-        let obs = vec![0.5f32; 2 * 6 * 7];
-        let before = net.forward(&obs, 1);
-        // Set every parameter to a fixed ramp, then read it back — export must equal what we imported.
-        let ramp: Vec<Vec<f32>> = export_weights(&net)
-            .iter()
-            .map(|(_, d)| (0..d.len()).map(|i| (i as f32) * 0.01).collect())
-            .collect();
-        import_weights(&net, &ramp);
-        for ((_, got), want) in export_weights(&net).iter().zip(&ramp) {
-            assert_eq!(got, want);
-        }
-        assert_ne!(net.forward(&obs, 1), before); // the update actually reached the live params
     }
 }

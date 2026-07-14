@@ -132,9 +132,9 @@ class Engine:
     # `DqnBatch`. Both expose named fields and also unpack positionally (back-compat with the old tuple).
     # `infer` is a Python callable, or (with the `nn` extra) a `Net` for a callback-free forward.
     def collect(self, n_records: int, infer: Any) -> TreeStrapBatch | DqnBatch: ...
-    # Fully-in-Rust training loop (nn extra, TreeStrap only): `steps` rounds of (collect `collect_size`
-    # records via `net`, then one `trainer` step). Returns the per-step loss. See `reinfors.nn`.
-    def train(self, net: Net, trainer: TreeStrapTrainer, steps: int, collect_size: int) -> list[float]: ...
+    # Fully-in-Rust training loop (TreeStrap only): `steps` rounds of (collect `collect_size` records via
+    # the trainer's net, then one `trainer` step). Returns the per-step loss. See `reinfors.nn`.
+    def train(self, trainer: TreeStrapTrainer, steps: int, collect_size: int) -> list[float]: ...
 
 class Env:
     """A caller-driven single-game instance (the inverse of `Engine`): you supply each tick's actions."""
@@ -158,9 +158,9 @@ class Env:
     @property
     def rewards(self) -> list[float] | None: ...
 
-# Optional Rust-native value net (the `reinfors[nn]` / libtorch build). Declared here for typing; at
-# runtime it exists only when built with the `nn` feature — `reinfors.nn` guards for its absence. Pass an
-# instance to `Engine.collect` in place of an `infer` callable to run the forward in Rust (no callback).
+# Rust-native value net (candle — pure Rust, in the wheel by default). Declared here for typing; absent
+# at runtime only in a `--no-default-features` build — `reinfors.nn` guards for that. Pass an instance to
+# `Engine.collect` in place of an `infer` callable to run the forward in Rust (no callback).
 class Net:
     @staticmethod
     def conv(obs_shape: tuple[int, int, int], n_actions: int, n_heads: int) -> Net: ...
@@ -178,9 +178,9 @@ class Net:
 # from Python via `update` on a collected batch. Same runtime-optionality as `Net`.
 class TreeStrapTrainer:
     def __init__(self, net: Net, lr: float = ...) -> None: ...
+    # Trains the net this trainer was built from (which it owns).
     def update(
         self,
-        net: Net,
         obs: NDArray[np.float32],
         targets: NDArray[np.float64],
         masks: NDArray[np.float32],

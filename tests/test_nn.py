@@ -1,5 +1,5 @@
-"""Rust-native nets (`reinfors[nn]`, the optional libtorch path). Skipped whole when reinfors is built
-without the `nn` feature — `rf.nn.Conv` raises `ImportError`, which these tests treat as "not built"."""
+"""Rust-native nets (`rf.nn`, candle — pure Rust). Skipped whole when reinfors is built with
+`--no-default-features` — `rf.nn.Conv` raises `ImportError`, which these tests treat as "not built"."""
 
 from __future__ import annotations
 
@@ -26,9 +26,10 @@ def test_forward_has_pooled_khead_shape() -> None:
     assert net.n_heads == K and net.n_actions == A
 
 
-def test_forward_matches_torch_exactly() -> None:
-    # Same libtorch backend, so exporting the Rust net's weights into an equivalent torch module must
-    # reproduce its forward bit-for-bit. Also confirms the tch/libtorch version bypass is ABI-safe here.
+def test_forward_matches_torch() -> None:
+    # Export the candle net's weights into an equivalent torch module: the same architecture (Conv2d ·
+    # ReLU · Linear · K heads) must reproduce candle's forward to numerical tolerance. Not bit-exact —
+    # candle and torch are independent implementations — so this guards the layout/semantics, not kernels.
     torch = pytest.importorskip("torch")
     import torch.nn as tnn
 
@@ -89,7 +90,7 @@ def test_fused_engine_train_runs_entirely_in_rust() -> None:
     # (seeded), so the loss trajectory is reproducible; it should improve over the initial step.
     net = _conv_or_skip()
     trainer = rf.nn.TreeStrapTrainer(net, lr=1e-3)
-    losses = _engine(net).train(net, trainer, steps=10, collect_size=256)
+    losses = _engine(net).train(trainer, steps=10, collect_size=256)
     assert len(losses) == 10 and all(np.isfinite(losses))
     assert min(losses) < losses[0]  # learning happened
 
@@ -101,14 +102,21 @@ def test_stepwise_trainer_update_moves_weights() -> None:
     engine = _engine(net)
     before = [w.copy() for w in net.get_weights()]
     obs, targets, masks, _ = engine.collect(256, net)
-    loss = trainer.update(net, obs, targets, masks)
+    loss = trainer.update(obs, targets, masks)  # trains the net the trainer owns
     assert np.isfinite(loss)
     assert any(not np.array_equal(a, b) for a, b in zip(net.get_weights(), before, strict=True))
 
 
 def test_train_head_mismatch_errors_clearly() -> None:
-    # A net whose head count differs from the policy's must fail with a clear message, not a libtorch panic.
+    # A net whose head count differs from the policy's must fail with a clear message, not a candle panic.
     _conv_or_skip()
     net = rf.nn.Conv(SHAPE, A, 3)  # 3 heads vs the policy's K=8
     with pytest.raises(ValueError, match="n_heads"):
-        _engine(net).train(net, rf.nn.TreeStrapTrainer(net), steps=1, collect_size=64)
+        _engine(net).train(rf.nn.TreeStrapTrainer(net), steps=1, collect_size=64)
+
+
+def test_train_empty_batch_reports_collect_size_not_learner() -> None:
+    # collect_size=0 yields 0 records — the error must point at the empty batch, not misreport the learner.
+    net = _conv_or_skip()
+    with pytest.raises(ValueError, match="0 records"):
+        _engine(net).train(rf.nn.TreeStrapTrainer(net), steps=1, collect_size=0)

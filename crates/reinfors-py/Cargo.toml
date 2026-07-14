@@ -16,7 +16,13 @@ reinfors-nn = { path = "../reinfors-nn", optional = true }
 pyo3 = { version = "0.25", features = ["extension-module", "abi3-py310"] }
 numpy = "0.25"
 
-# `nn` pulls the optional Rust-native nets (libtorch via tch). OFF by default — the standard wheel needs
-# only numpy; this feature links libtorch and ships as the separate `reinfors[nn]` extra.
+# `nn` pulls the Rust-native nets (candle — pure Rust, no external C++ library). ON by default so the
+# published wheel includes them and `pip install reinfors` gives working `rf.nn` out of the box; opt out
+# with `--no-default-features` for a leaner dev build. `nn-metal` / `nn-cuda` add candle's GPU backends.
 [features]
+default = ["nn"]
 nn = ["dep:reinfors-nn"]
+nn-metal = ["nn", "reinfors-nn/metal"]
+nn-cuda = ["nn", "reinfors-nn/cuda"]
+nn-accelerate = ["nn", "reinfors-nn/accelerate"] # Apple Accelerate BLAS (macOS, self-contained)
+nn-mkl = ["nn", "reinfors-nn/mkl"] # Intel MKL BLAS
