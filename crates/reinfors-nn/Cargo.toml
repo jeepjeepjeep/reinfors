@@ -1,0 +1,10 @@
+# Excluded from the workspace (see the root Cargo.toml): built only when reinfors-py enables `--features
+# nn`, so the standard libtorch-free gate never touches it. Metadata is hardcoded (no workspace inherit).
+[package]
+name = "reinfors-nn"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+tch = "0.24"

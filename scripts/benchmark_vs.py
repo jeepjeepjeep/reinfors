@@ -452,6 +452,101 @@ def _track_b(active: list[Any], args: argparse.Namespace) -> None:
     )
 
 
+def _track_b_native(active: list[Any], args: argparse.Namespace) -> None:
+    """Isolate the Python↔net boundary. The SAME MLP value function drives reinfors' search three ways,
+    all sharing one set of weights (so identical search work): rust-native (`rf.nn`, forward in Rust),
+    python-torch (a torch module — the LIKE-FOR-LIKE control: same libtorch kernels as tch, so tch/torch
+    is purely the boundary), and python-numpy (a numpy mirror — a fast lightweight-net baseline for
+    context). Swept over net size AND n_games. Needs the `nn` extra (libtorch); else skipped."""
+    rf_b = next((b for b in active if b.name == "reinfors"), None)
+    if rf_b is None:
+        return
+    try:
+        rf.nn.Mlp(84, 8, 7, 1)  # probe: is reinfors built with the nn feature?
+    except ImportError as e:
+        print(f"  Track B-native skipped — {e}")
+        return
+    try:
+        import torch  # the like-for-like control shares reinfors-nn's libtorch
+    except ImportError:
+        torch = None  # type: ignore[assignment]
+
+    budget = 64
+    grid = [(64, 1), (64, 16)] if args.smoke else [(64, 1), (64, 64), (512, 1), (512, 16), (512, 64)]
+    decisions = 20 if args.smoke else 200
+
+    def measure(source: Any, n_games: int) -> float:  # source: an rf.nn net or an infer callable
+        engine = rf.Engine(
+            rf.games.Connect4(),
+            rf.Reward(win=1.0, loss=-1.0, draw=0.0),
+            rf.policies.Mcts(num_simulations=budget, uct_c=2.0, max_depth=64),
+            rf.learners.TreeStrap(gamma=0.99, outcome_weight=0.3, bootstrap_p=1.0, interior_targets=False),
+            n_games=n_games,
+            seed=0,
+        )
+        return _throughput(lambda: int(engine.collect(decisions, source).obs.shape[0]), args.repeats)
+
+    def torch_infer(w: list[np.ndarray]) -> Any:
+        # A torch MLP with the net's OWN weights — identical libtorch kernels to tch, so the tch-vs-torch
+        # gap is only the boundary (GIL + numpy<->tensor marshalling + torch's Python dispatch per call).
+        model = torch.nn.Sequential(
+            torch.nn.Linear(84, w[0].shape[0]), torch.nn.ReLU(), torch.nn.Linear(w[0].shape[0], 7)
+        )
+        model.load_state_dict(
+            {
+                "0.weight": torch.tensor(w[0]),
+                "0.bias": torch.tensor(w[1]),
+                "2.weight": torch.tensor(w[2]),
+                "2.bias": torch.tensor(w[3]),
+            }
+        )
+        model.eval()
+
+        def infer(arr: np.ndarray) -> np.ndarray:
+            with torch.no_grad():
+                return model(torch.from_numpy(arr)).reshape(arr.shape[0], 1, 7).numpy().astype(np.float64)
+
+        return infer
+
+    header = ["net hidden", "n_games", "rust-native [tch]"]
+    if torch is not None:
+        header += ["python [torch]", "tch/torch"]
+    header += ["python [numpy]"]
+
+    rows = []
+    for h, ng in grid:
+        net = rf.nn.Mlp(84, h, 7, 1)  # in_dim = connect4 obs (own+opp planes), K=1 head, A=7
+        w = net.get_weights()  # [l1.w (h,84), l1.b (h,), head.w (7,h), head.b (7,)]
+
+        def numpy_infer(arr: np.ndarray, w: list[np.ndarray] = w) -> np.ndarray:
+            hidden = np.maximum(arr @ w[0].T + w[1], 0.0)
+            return (hidden @ w[2].T + w[3]).reshape(arr.shape[0], 1, 7).astype(np.float64)
+
+        try:
+            native = measure(net, ng)
+            cells = [str(h), str(ng), f"{native:,.0f}"]
+            if torch is not None:
+                tq = measure(torch_infer(w), ng)
+                cells += [f"{tq:,.0f}", f"{native / tq:.2f}x"]
+            cells.append(f"{measure(numpy_infer, ng):,.0f}")
+            rows.append(tuple(cells))
+        except Exception as e:  # keep the row, surface the failure
+            print(f"  ! reinfors native h={h} ng={ng} failed: {type(e).__name__}: {str(e).splitlines()[0][:100]}")
+            rows.append((str(h), str(ng), *(["ERR"] * (len(header) - 2))))
+
+    _table(
+        f"Track B-native — reinfors decisions/sec: Rust-native net vs the SAME net in Python (UCT, budget={budget})",
+        tuple(header),
+        rows,
+        note="All columns share ONE MLP's weights (identical search work). The like-for-like is "
+        "tch-vs-torch — same libtorch kernels, so the ratio is purely the Python↔net boundary (GIL + "
+        "marshalling + torch's per-call Python dispatch); reinfors wins it across the board. python-numpy "
+        "is a fast lightweight-net baseline (numpy beats libtorch for tiny tensors, so it flatters the "
+        "callback) — informative, not like-for-like. Bigger standing wins for rust-native: GPU nets and "
+        "training entirely in Rust.",
+    )
+
+
 def _track_c(active: list[Any], args: argparse.Namespace) -> None:
     rf_b = next((b for b in active if b.name == "reinfors"), None)
     pgx_b = next((b for b in active if b.name == "pgx"), None)
@@ -504,6 +599,7 @@ def run(args: argparse.Namespace) -> None:
             active.append(b)
     _track_a(active, args)
     _track_b(active, args)
+    _track_b_native(active, args)
     _track_c(active, args)
 
 

@@ -1,4 +1,7 @@
 /target
+# reinfors-nn is excluded from the workspace, so it builds its own target/ + standalone lock (artifacts).
+/crates/reinfors-nn/target
+/crates/reinfors-nn/Cargo.lock
 /dist
 *.whl
 __pycache__/

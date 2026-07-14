@@ -15,13 +15,16 @@ use std::collections::HashMap;
 
 use numpy::ndarray::{Array2, Array3, ArrayD, IxDyn};
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArray3, PyArrayDyn, PyReadonlyArray3};
+#[cfg(feature = "nn")]
+use numpy::{PyReadonlyArray2, PyReadonlyArrayDyn};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
 use reinfors_core::{
-    ActBy, AlwaysInitialState, Dqn, DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game,
-    Learner, Mcts, MctsConfig, Opponent, Policy, ReachedStateBuffer, Reward, SearchConfig,
-    SelectiveExpectimax, Space, StartDistribution, StateEncoder, TreeStrap, TreeStrapRecord,
+    ActBy, AlwaysInitialState, CollectStats, Dqn, DqnRecord, Engine, EngineParams, Env,
+    EpsilonGreedyQ, Game, Learner, Mcts, MctsConfig, Opponent, Policy, ReachedStateBuffer, Reward,
+    SearchConfig, SelectiveExpectimax, Space, StartDistribution, StateEncoder, TreeStrap,
+    TreeStrapRecord,
 };
 use reinfors_games::snake::{Cell, DeathCause};
 use reinfors_games::{
@@ -211,6 +214,13 @@ impl PyEngine {
         n_records: usize,
         infer: Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        // A Rust-native net is just another `infer` source: dispatch it through the callback-free path.
+        #[cfg(feature = "nn")]
+        if let Ok(net) = infer.downcast::<PyNet>() {
+            return self
+                .inner
+                .collect_native(py, n_records, net.borrow().0.as_ref());
+        }
         self.inner.collect(py, n_records, &infer)
     }
 }
@@ -231,6 +241,15 @@ trait ErasedEngine: Send + Sync {
         py: Python<'py>,
         n_records: usize,
         infer: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>>;
+
+    /// Roll forward using a Rust-native net for `infer` (no per-round Python callback).
+    #[cfg(feature = "nn")]
+    fn collect_native<'py>(
+        &mut self,
+        py: Python<'py>,
+        n_records: usize,
+        net: &dyn reinfors_nn::ValueNet,
     ) -> PyResult<Bound<'py, PyAny>>;
 }
 
@@ -454,6 +473,11 @@ where
     if let Some(e) = callback_err {
         return Err(e);
     }
+    Ok((records, build_telemetry(py, &stats)?))
+}
+
+/// Marshal the rollout's `CollectStats` into the uniform telemetry dict (shared by every collect path).
+fn build_telemetry<'py>(py: Python<'py>, stats: &CollectStats) -> PyResult<Bound<'py, PyDict>> {
     let d = (stats.decisions.max(1)) as f64;
     // (per-agent reward, length, seeded-from-start-buffer) — the `seeded` tag lets a caller keep
     // off-d0 episodes out of the true-start learning curves.
@@ -471,7 +495,27 @@ where
     telemetry.set_item("mean_expansions", stats.sum_expansions / d)?;
     telemetry.set_item("mean_sigma", stats.sum_sigma / d)?;
     telemetry.set_item("mean_disagreement", stats.sum_disagreement / d)?;
-    Ok((records, telemetry))
+    Ok(telemetry)
+}
+
+/// Native-net rollout: drive the engine with a Rust `ValueNet` as the `infer` source — the forward runs
+/// in Rust with no per-round Python callback. Mirrors `run_collect` minus the callback error-latching.
+#[cfg(feature = "nn")]
+fn run_collect_native<'py, G, P, L>(
+    inner: &mut Engine<G, P, L>,
+    py: Python<'py>,
+    n_records: usize,
+    net: &dyn reinfors_nn::ValueNet,
+) -> PyResult<(Vec<L::Record>, Bound<'py, PyDict>)>
+where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
+{
+    let mut infer_fn = |obs: Vec<f32>, n: usize| net.forward(&obs, n);
+    let (records, stats) = inner.collect(n_records, &mut infer_fn);
+    Ok((records, build_telemetry(py, &stats)?))
 }
 
 /// One generic wrapper: a composed engine + its sizing metadata, type-erased behind `ErasedEngine`.
@@ -510,6 +554,17 @@ where
             self.action_count,
             self.n_heads,
         )?;
+        L::Record::into_py_batch(records, py, self.dim, self.n_heads, telemetry)
+    }
+
+    #[cfg(feature = "nn")]
+    fn collect_native<'py>(
+        &mut self,
+        py: Python<'py>,
+        n_records: usize,
+        net: &dyn reinfors_nn::ValueNet,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let (records, telemetry) = run_collect_native(&mut self.inner, py, n_records, net)?;
         L::Record::into_py_batch(records, py, self.dim, self.n_heads, telemetry)
     }
 }
@@ -1628,6 +1683,86 @@ fn core_build_profile() -> &'static str {
     }
 }
 
+// ===========================================================================
+// Optional Rust-native nets (`reinfors[nn]`, libtorch via tch). A `Net` is just another `infer`
+// source: pass it to `engine.collect` and the forward runs in Rust with no per-round Python callback.
+// Weights round-trip as numpy in the net's fixed parameter order (matching the torch state_dict), so a
+// torch-trained checkpoint syncs in via `set_weights` and a parity check exports out via `get_weights`.
+// ===========================================================================
+
+// `unsendable`: tch tensors are not `Sync`, so the net is bound to the thread that built it — which is
+// the GIL thread that also drives `collect` (the native forward runs single-threaded, under the GIL).
+#[cfg(feature = "nn")]
+#[pyclass(name = "Net", unsendable)]
+struct PyNet(Box<dyn reinfors_nn::ValueNet>);
+
+#[cfg(feature = "nn")]
+#[pymethods]
+impl PyNet {
+    /// Conv trunk + K heads, sized from a planar observation shape `(C, H, W)`.
+    #[staticmethod]
+    fn conv(obs_shape: (i64, i64, i64), n_actions: i64, n_heads: i64) -> Self {
+        PyNet(Box::new(reinfors_nn::Conv::new(
+            obs_shape, n_actions, n_heads,
+        )))
+    }
+
+    /// Two-layer MLP + K heads, for a flattened observation vector of `in_dim`.
+    #[staticmethod]
+    fn mlp(in_dim: i64, hidden: i64, n_actions: i64, n_heads: i64) -> Self {
+        PyNet(Box::new(reinfors_nn::Mlp::new(
+            in_dim, hidden, n_actions, n_heads,
+        )))
+    }
+
+    #[getter]
+    fn n_heads(&self) -> usize {
+        self.0.n_heads()
+    }
+
+    #[getter]
+    fn n_actions(&self) -> usize {
+        self.0.n_actions()
+    }
+
+    /// Forward an `(N, dim)` float32 batch to `(N, K, A)` float64 — exactly the values the search sees.
+    fn forward<'py>(
+        &self,
+        py: Python<'py>,
+        obs: PyReadonlyArray2<'py, f32>,
+    ) -> Bound<'py, PyArray3<f64>> {
+        let arr = obs.as_array();
+        let n = arr.shape()[0];
+        let flat: Vec<f32> = arr.iter().copied().collect();
+        let values = self.0.forward(&flat, n);
+        Array3::from_shape_vec((n, self.0.n_heads(), self.0.n_actions()), values)
+            .expect("value buffer shape")
+            .into_pyarray(py)
+    }
+
+    /// Parameters as a list of numpy arrays in the net's fixed order (the torch state_dict layout).
+    fn get_weights<'py>(&self, py: Python<'py>) -> Vec<Bound<'py, PyArrayDyn<f32>>> {
+        reinfors_nn::export_weights(self.0.as_ref())
+            .into_iter()
+            .map(|(shape, data)| {
+                let dims: Vec<usize> = shape.iter().map(|&d| d as usize).collect();
+                ArrayD::from_shape_vec(IxDyn(&dims), data)
+                    .expect("param shape")
+                    .into_pyarray(py)
+            })
+            .collect()
+    }
+
+    /// Copy weights (same order/shapes as `get_weights`) into the live parameters — torch→Rust sync.
+    fn set_weights(&mut self, weights: Vec<PyReadonlyArrayDyn<'_, f32>>) {
+        let data: Vec<Vec<f32>> = weights
+            .iter()
+            .map(|w| w.as_array().iter().copied().collect())
+            .collect();
+        reinfors_nn::import_weights(self.0.as_ref(), &data);
+    }
+}
+
 #[pymodule]
 fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
@@ -1642,5 +1777,7 @@ fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DqnBatch>()?;
     m.add_class::<PyBox>()?;
     m.add_class::<PyDiscrete>()?;
+    #[cfg(feature = "nn")]
+    m.add_class::<PyNet>()?;
     Ok(())
 }

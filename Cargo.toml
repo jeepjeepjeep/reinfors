@@ -1,5 +1,8 @@
 [workspace]
 members = ["crates/reinfors-core", "crates/reinfors-games", "crates/reinfors-py"]
+# reinfors-nn (libtorch via tch) is EXCLUDED, not a member: `cargo {build,test,clippy} --workspace` must
+# stay libtorch-free. It builds only as reinfors-py's optional path dependency under `--features nn`.
+exclude = ["crates/reinfors-nn"]
 resolver = "2"
 
 [workspace.package]

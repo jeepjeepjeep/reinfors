@@ -12,5 +12,11 @@ crate-type = ["cdylib"]
 [dependencies]
 reinfors-core = { path = "../reinfors-core" }
 reinfors-games = { path = "../reinfors-games" }
+reinfors-nn = { path = "../reinfors-nn", optional = true }
 pyo3 = { version = "0.25", features = ["extension-module", "abi3-py310"] }
 numpy = "0.25"
+
+# `nn` pulls the optional Rust-native nets (libtorch via tch). OFF by default — the standard wheel needs
+# only numpy; this feature links libtorch and ships as the separate `reinfors[nn]` extra.
+[features]
+nn = ["dep:reinfors-nn"]
