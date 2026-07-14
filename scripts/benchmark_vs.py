@@ -17,12 +17,16 @@ Two tracks:
     mcts` + the SAME shared net, fed the same canonical board), and **openspiel-c++** (the native C++
     `MCTSBot`). The C++ bot CAN'T call a Python net — `pyspiel.Evaluator` isn't Python-subclassable — so
     it uses a C++ rollout evaluator and is shown as a *constant reference* (ignores the net): OpenSpiel's
-    real fast path. How to read it:
-      - reinfors ≈ openspiel-c++ at a light net (both compiled) — reinfors is *comparable to*, not far
-        ahead of, OpenSpiel's real search;
-      - reinfors vs openspiel-py is Rust-loop vs Python-loop — OpenSpiel's Python reference MCTS is
-        ~14x slower than its C++ one, so beating it is not the headline it looks like;
-      - a heavy net makes reinfors and openspiel-py net-bound (both fall below the C++ rollout reference).
+    real fast path. How to read it, by use case:
+      - If your net is in PYTHON (the usual RL workflow), OpenSpiel's *only* option is openspiel-py — its
+        C++ MCTS can't take a Python evaluator (only C++ evaluators) — so reinfors-vs-openspiel-py is the
+        apples-to-apples comparison, and reinfors is ~4x faster at n_games=1 (more at scale). That is
+        reinfors' real edge: a compiled (Rust) search loop that keeps your net in Python — a combination
+        OpenSpiel doesn't offer.
+      - openspiel-c++ (constant) is OpenSpiel's speed *only if you write the net in C++/libtorch*.
+        reinfors reaches that same class while keeping the net in Python — it isn't beaten by OpenSpiel's
+        fast path, it just gets there without forcing a C++ net.
+      - a heavy net makes reinfors + openspiel-py net-bound (both fall below the C++ rollout reference).
 
 Install (on the machine you're benchmarking): `pip install jax[cuda12] pgx open_spiel` (adjust the jax
 wheel for your accelerator). reinfors must be a RELEASE build — this checks and warns.
@@ -367,11 +371,11 @@ def _track_b(active: list[Any], args: argparse.Namespace) -> None:
         f"Track B — searched decisions/sec on connect4 (UCT, budget={budget}, per-core; rows = shared-net size)",
         tuple(header),
         rows,
-        note="reinfors & openspiel-py run the SAME shared net (rows = hidden units). openspiel-c++ is the "
-        "native C++ MCTSBot with a C++ rollout evaluator (it can't call a Python net), constant across "
-        "rows — OpenSpiel's real fast path. Read: reinfors ~ openspiel-c++ at a light net; reinfors-vs-"
-        "openspiel-py is Rust-loop vs Python-loop (the Python impl is ~14x slower than C++); a heavy net "
-        "makes reinfors + openspiel-py net-bound.",
+        note="reinfors & openspiel-py run the SAME shared net (rows = hidden units); openspiel-c++ is the "
+        "native C++ MCTSBot (can't call a Python net), constant across rows. For a PYTHON net — the usual "
+        "workflow — openspiel-py is OpenSpiel's ONLY option, so reinfors is ~4x faster there: a compiled "
+        "search loop + a Python net, which OpenSpiel doesn't offer. openspiel-c++ is its speed only if you "
+        "write the net in C++/libtorch; reinfors reaches that class while keeping the net in Python.",
     )
 
 
