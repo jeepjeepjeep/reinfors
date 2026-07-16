@@ -51,9 +51,9 @@ pub struct CollectStats {
     pub sum_expansions: f64,
     pub sum_sigma: f64,
     pub sum_disagreement: f64,
-    // Time (and shape) spent inside the `infer` callback across this collect — the value-net forward,
-    // whether a Python callback or a Rust-native net. `collect_seconds - infer_seconds` is the search
-    // (game sim + tree expansion + assembly) cost; `infer_rows / infer_calls` is the mean batch size.
+    // Time (and shape) spent inside the `infer` callback across this collect — the value-net forward.
+    // Timing the `collect()` call and subtracting `infer_seconds` gives the search (game sim + tree
+    // expansion + assembly) cost; `infer_rows / infer_calls` is the mean batch size.
     pub infer_seconds: f64,
     pub infer_calls: usize,
     pub infer_rows: usize,

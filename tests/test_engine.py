@@ -162,11 +162,17 @@ def test_collect_returns_telemetry() -> None:
             "mean_expansions",
             "mean_sigma",
             "mean_disagreement",
+            "infer_seconds",
+            "infer_calls",
+            "infer_rows",
         }
         episodes += stats["episodes"]
         decisions += stats["decisions"]
         assert stats["max_depth"] > 0 and stats["mean_leaves"] > 0.0
         assert stats["mean_sigma"] >= 0.0 and stats["mean_disagreement"] >= 0.0
+        assert stats["infer_calls"] > 0
+        assert stats["infer_rows"] >= stats["infer_calls"]  # >=1 row per call
+        assert stats["infer_seconds"] >= 0.0
     assert decisions > 0 and len(episodes) > 0
     for rewards, length, seeded in episodes:
         assert 1 <= length <= 50  # bounded by max_ticks
