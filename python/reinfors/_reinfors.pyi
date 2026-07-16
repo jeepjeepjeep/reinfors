@@ -68,12 +68,16 @@ class PolicyHandle:
     @staticmethod
     def EpsilonGreedyQ(n_heads: int = ..., epsilon: float = ...) -> PolicyHandle: ...
     # MCTS (UCT); pairs with TreeStrap; sequential/single-agent games only. act_by: "value" | "visits".
+    # temperature > 0 (AlphaZero-style) samples the first temperature_drop plies of each episode
+    # ∝ visits^(1/temperature) for training self-play diversity (None = whole episode); 0 = greedy.
     @staticmethod
     def Mcts(
         num_simulations: int = ...,
         uct_c: float = ...,
         max_depth: int = ...,
         act_by: str = ...,
+        temperature: float = ...,
+        temperature_drop: int | None = ...,
     ) -> PolicyHandle: ...
 
 class LearnerHandle:

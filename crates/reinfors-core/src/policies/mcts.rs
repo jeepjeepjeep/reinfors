@@ -10,12 +10,14 @@
 //! binding refuses to pair this policy with a simultaneous/chance game (snake); this module panics as a
 //! backstop for direct core use.
 //!
-//! **Deterministic acting.** v1 acts greedily (`argmax` value or visits), with no root Dirichlet noise
-//! or visit-count sampling, and ignores the acting RNG — ideal for evaluation and a like-for-like
-//! benchmark, where reproducibility is the point. As a *training* policy it adds no self-play diversity
-//! on its own (self-play from a fixed start replays the same game every episode), so training use leans
-//! on the reached-state start buffer for coverage; a temperature / root-noise knob (AlphaZero-style) is
-//! the natural addition if undiluted self-play exploration is wanted.
+//! **Acting.** Greedy by default (`argmax` value or visits) — deterministic, ideal for evaluation and
+//! like-for-like benchmarks. For *training*, greedy self-play from a fixed start replays the same game
+//! every episode, so an AlphaZero-style acting temperature supplies self-play diversity: with
+//! `temperature > 0`, the first `temperature_drop` moves of each episode are sampled `∝
+//! visits^(1/temperature)` from the engine's seeded acting RNG (later moves act greedily). Same seed →
+//! same games (collects stay reproducible); different episodes → different games. Root Dirichlet noise
+//! is deliberately absent: it perturbs *priors*, a PUCT concept — this UCT search has none. The
+//! reached-state start buffer remains the complementary coverage source.
 
 use crate::encoder::StateEncoder;
 use crate::engine::CollectStats;
@@ -41,6 +43,13 @@ pub struct MctsConfig {
     pub uct_c: f64,
     pub gamma: f64,
     pub max_depth: i32,
+    /// AlphaZero-style acting temperature: `> 0` samples the move `∝ visits^(1/temperature)` for the
+    /// first `temperature_drop` moves of each episode; `0` acts greedily everywhere (the default).
+    pub temperature: f64,
+    /// Number of opening plies per episode the temperature applies to (the counter spans both sides
+    /// of a sequential game, like AlphaZero's); `u32::MAX` means the whole episode. Irrelevant when
+    /// `temperature == 0`.
+    pub temperature_drop: u32,
 }
 
 pub struct Mcts {
@@ -344,11 +353,41 @@ where
     trees.into_iter().map(|t| t.evaluation(a)).collect()
 }
 
+/// Sample an action `∝ visits^(1/temperature)`. Weights are max-normalized before the power so a
+/// small temperature cannot overflow; unvisited actions keep weight 0 and are never picked.
+fn sample_visits(visits: &[f64], temperature: f64, rng: &mut dyn Rng) -> usize {
+    let n_max = visits.iter().fold(0.0f64, |m, &v| m.max(v));
+    if n_max <= 0.0 {
+        return 0;
+    }
+    let w: Vec<f64> = visits
+        .iter()
+        .map(|&n| {
+            if n > 0.0 {
+                (n / n_max).powf(1.0 / temperature)
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let total: f64 = w.iter().sum();
+    let mut r = rng.unit() * total;
+    for (a, &wa) in w.iter().enumerate() {
+        r -= wa;
+        if wa > 0.0 && r <= 0.0 {
+            return a;
+        }
+    }
+    argmax(&w) // numeric fallback (r exhausted by rounding): the modal action
+}
+
 impl Policy for Mcts {
     type Evaluation = SearchEvaluation;
-    type PolicyState = (); // no per-episode state (single value head; UCT is the exploration)
+    type PolicyState = u32; // moves acted this episode — drives the temperature_drop cutoff
 
-    fn begin_episode(&self, _rng: &mut dyn Rng) {}
+    fn begin_episode(&self, _rng: &mut dyn Rng) -> u32 {
+        0
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn evaluate<G, F>(
@@ -369,7 +408,12 @@ impl Policy for Mcts {
         mcts_many(game, enc, reward, &self.cfg, requests, infer)
     }
 
-    fn select(&self, eval: &SearchEvaluation, _state: &mut (), _rng: &mut dyn Rng) -> usize {
+    fn select(&self, eval: &SearchEvaluation, state: &mut u32, rng: &mut dyn Rng) -> usize {
+        let move_idx = *state;
+        *state += 1;
+        if self.cfg.temperature > 0.0 && move_idx < self.cfg.temperature_drop {
+            return sample_visits(&eval.visits, self.cfg.temperature, rng);
+        }
         match self.act_by {
             ActBy::Visits if !eval.visits.is_empty() => argmax(&eval.visits),
             _ => argmax(&eval.values[0]),
@@ -382,5 +426,92 @@ impl Policy for Mcts {
         stats.sum_leaves += s.leaves as f64;
         stats.sum_rounds += s.rounds as f64;
         stats.sum_expansions += s.expansions as f64;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FakeRng(Vec<f64>);
+    impl Rng for FakeRng {
+        fn below(&mut self, _n: usize) -> usize {
+            0
+        }
+        fn unit(&mut self) -> f64 {
+            self.0.remove(0)
+        }
+    }
+
+    fn eval(values: Vec<f64>, visits: Vec<f64>) -> SearchEvaluation {
+        SearchEvaluation {
+            values: vec![values],
+            visits,
+            interior: Vec::new(),
+            stats: SearchStats {
+                max_depth: 1,
+                expansions: 1,
+                leaves: 1,
+                rounds: 1,
+                sigma_sum: 0.0,
+            },
+        }
+    }
+
+    fn mcts(temperature: f64, temperature_drop: u32) -> Mcts {
+        Mcts::new(
+            MctsConfig {
+                num_simulations: 8,
+                uct_c: 1.4,
+                gamma: 1.0,
+                max_depth: 8,
+                temperature,
+                temperature_drop,
+            },
+            ActBy::Visits,
+        )
+    }
+
+    #[test]
+    fn sample_visits_is_proportional_at_temperature_one() {
+        // weights (max-normalized): [1/3, 1, 0] -> cumulative thresholds 0.25 / 1.0 of the total
+        let visits = vec![1.0, 3.0, 0.0];
+        assert_eq!(sample_visits(&visits, 1.0, &mut FakeRng(vec![0.1])), 0);
+        assert_eq!(sample_visits(&visits, 1.0, &mut FakeRng(vec![0.9])), 1);
+    }
+
+    #[test]
+    fn sample_visits_never_picks_unvisited() {
+        for u in [0.0, 0.5, 0.999] {
+            assert_eq!(
+                sample_visits(&[0.0, 5.0, 0.0], 1.0, &mut FakeRng(vec![u])),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn low_temperature_approaches_greedy() {
+        assert_eq!(sample_visits(&[1.0, 3.0], 0.05, &mut FakeRng(vec![0.5])), 1);
+    }
+
+    #[test]
+    fn zero_temperature_acts_greedily_and_ignores_rng() {
+        let p = mcts(0.0, u32::MAX);
+        let e = eval(vec![0.9, 0.1], vec![2.0, 6.0]);
+        let mut moves = 0u32;
+        assert_eq!(p.select(&e, &mut moves, &mut FakeRng(vec![])), 1); // argmax visits, no draw
+        assert_eq!(moves, 1);
+    }
+
+    #[test]
+    fn temperature_drop_switches_to_greedy() {
+        let p = mcts(1.0, 1);
+        let e = eval(vec![0.9, 0.1], vec![6.0, 2.0]);
+        let mut moves = 0u32;
+        // move 0: sampled — a high draw lands on the minority action
+        assert_eq!(p.select(&e, &mut moves, &mut FakeRng(vec![0.99])), 1);
+        // move 1: past the drop — greedy argmax visits, rng untouched
+        assert_eq!(p.select(&e, &mut moves, &mut FakeRng(vec![])), 0);
     }
 }
