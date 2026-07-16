@@ -597,6 +597,11 @@ fn build_telemetry<'py>(py: Python<'py>, stats: &CollectStats) -> PyResult<Bound
     telemetry.set_item("mean_expansions", stats.sum_expansions / d)?;
     telemetry.set_item("mean_sigma", stats.sum_sigma / d)?;
     telemetry.set_item("mean_disagreement", stats.sum_disagreement / d)?;
+    // Net-forward timing: total time in `infer`, call count, and rows summed across calls. Lets a caller
+    // split collect time into infer vs search, and see the real per-call batch size.
+    telemetry.set_item("infer_seconds", stats.infer_seconds)?;
+    telemetry.set_item("infer_calls", stats.infer_calls)?;
+    telemetry.set_item("infer_rows", stats.infer_rows)?;
     Ok(telemetry)
 }
 

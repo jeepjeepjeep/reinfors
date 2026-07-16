@@ -51,6 +51,12 @@ pub struct CollectStats {
     pub sum_expansions: f64,
     pub sum_sigma: f64,
     pub sum_disagreement: f64,
+    // Time (and shape) spent inside the `infer` callback across this collect — the value-net forward,
+    // whether a Python callback or a Rust-native net. `collect_seconds - infer_seconds` is the search
+    // (game sim + tree expansion + assembly) cost; `infer_rows / infer_calls` is the mean batch size.
+    pub infer_seconds: f64,
+    pub infer_calls: usize,
+    pub infer_rows: usize,
 }
 
 /// Engine-level rollout knobs. The truncation horizon is the game's (`truncation_horizon`), not an
@@ -156,6 +162,18 @@ where
         let num_agents = self.game.num_agents();
         let collect_interior = self.learner.needs_interior();
 
+        // Time every `infer` invocation once here, so both call sites (pooled `evaluate`, tail-values)
+        // and every collect path (Python callback or Rust-native net) are measured identically.
+        let (mut infer_seconds, mut infer_calls, mut infer_rows) = (0.0f64, 0usize, 0usize);
+        let mut timed = |obs: Vec<f32>, n: usize| -> Vec<f64> {
+            let t = std::time::Instant::now();
+            let r = infer(obs, n);
+            infer_seconds += t.elapsed().as_secs_f64();
+            infer_calls += 1;
+            infer_rows += n;
+            r
+        };
+
         while out.len() < n_records {
             // 1. Gather one search request per active agent across all games.
             let mut requests: Vec<(G::State, usize)> = Vec::new();
@@ -181,7 +199,7 @@ where
                 requests,
                 search_seed,
                 collect_interior,
-                &mut infer,
+                &mut timed,
             );
 
             // 3. Per decision: fold its telemetry, emit the learner's immediate records,
@@ -255,8 +273,10 @@ where
                 }
             }
 
-            self.flush_finished(&finished, &mut out, &mut stats, &mut infer);
+            self.flush_finished(&finished, &mut out, &mut stats, &mut timed);
         }
+        (stats.infer_seconds, stats.infer_calls, stats.infer_rows) =
+            (infer_seconds, infer_calls, infer_rows);
         (out, stats)
     }
 
