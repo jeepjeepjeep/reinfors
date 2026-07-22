@@ -2,6 +2,7 @@
 //! model-free policy acting on Q-values) is a single file; `expectimax` is a family with shared search
 //! machinery + room for variants (selective today, exhaustive later), so it is a directory.
 
+pub mod alphazero;
 pub mod epsilon_greedy_q;
 pub mod expectimax;
 pub mod mcts;

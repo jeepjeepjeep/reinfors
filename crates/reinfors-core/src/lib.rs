@@ -24,6 +24,7 @@ pub use game::{Actor, Game, Rng, Transition};
 pub use learner::{Learner, Step};
 pub use learners::dqn::{Dqn, DqnRecord};
 pub use learners::treestrap::{TreeStrap, TreeStrapRecord};
+pub use policies::alphazero::{alphazero_many, AlphaZero, AlphaZeroConfig};
 pub use policies::epsilon_greedy_q::{EpsilonGreedyQ, QEvaluation};
 pub use policies::expectimax::search::{
     search_many, InteriorTarget, Opponent, SearchConfig, SearchResult, SearchStats,
