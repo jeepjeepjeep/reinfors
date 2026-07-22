@@ -22,6 +22,7 @@ pub use engine::{CollectStats, Engine, EngineParams, EpisodeSummary};
 pub use env::Env;
 pub use game::{Actor, Game, Rng, Transition};
 pub use learner::{Learner, Step};
+pub use learners::alphazero::{AlphaZeroLearner, AlphaZeroRecord};
 pub use learners::dqn::{Dqn, DqnRecord};
 pub use learners::treestrap::{TreeStrap, TreeStrapRecord};
 pub use policies::alphazero::{alphazero_many, AlphaZero, AlphaZeroConfig};
