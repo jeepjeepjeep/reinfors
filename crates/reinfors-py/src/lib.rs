@@ -76,8 +76,9 @@ fn validate_search_params(
 /// row-major `[n, dim]` buffer (moved straight into a numpy array — no copy), and per-head values
 /// `[n, K, action_count]` come back as one flat row-major buffer. The first failure — a Python error, or (when
 /// `expected_heads` is set, i.e. the `Engine`) a returned head count that disagrees with the
-/// configured `n_heads` — is latched into `callback_err` and zeros (K=1) are returned so the in-flight
-/// search unwinds cheaply; the caller checks `callback_err` afterwards and propagates it. The check
+/// configured `n_heads` — is latched into `callback_err` and zero rows (at the configured head count,
+/// so trajectories never mix K shapes) are returned so the in-flight search unwinds cheaply; the
+/// caller checks `callback_err` afterwards and propagates it. The check
 /// is on the success path only, so a genuine network error always wins (it is never masked by the
 /// head-count check), and it must be here rather than in the core, which cannot tell a real
 /// wrong-K output from this very fallback.
@@ -90,8 +91,11 @@ fn infer_closure<'a, 'py>(
     callback_err: &'a mut Option<PyErr>,
 ) -> impl FnMut(Vec<f32>, usize) -> Vec<f64> + 'a {
     move |obs_flat: Vec<f32>, n: usize| -> Vec<f64> {
+        // Fallback rows keep the configured head count: a mid-collect error/drain must not mix
+        // K-shaped and K=1 evaluations in one trajectory (the episode blend indexes per head).
+        let fallback = n * expected_heads.unwrap_or(1) * action_count;
         if callback_err.is_some() {
-            return vec![0.0; n * action_count]; // K=1 fallback
+            return vec![0.0; fallback];
         }
         let arr = Array2::from_shape_vec((n, dim), obs_flat)
             .expect("obs batch shape")
@@ -112,14 +116,14 @@ fn infer_closure<'a, 'py>(
                                 flat.len()
                             ))
                         });
-                        return vec![0.0; n * action_count];
+                        return vec![0.0; fallback];
                     }
                 }
                 flat
             }
             Err(e) => {
                 *callback_err = Some(e);
-                vec![0.0; n * action_count]
+                vec![0.0; fallback]
             }
         }
     }
@@ -178,6 +182,60 @@ fn az_infer_closure<'a, 'py>(
     }
 }
 
+/// GIL-per-call variants of the two infer closures, for the stream worker thread: the worker holds no
+/// GIL between search rounds (so the trainer's Python runs freely) and acquires it only for the
+/// callback itself. A raised `stop` flag short-circuits to neutral rows *without* touching Python, so
+/// a stopping stream drains its in-flight collect GIL-free.
+fn infer_closure_gil<'a>(
+    infer: &'a Py<PyAny>,
+    dim: usize,
+    action_count: usize,
+    expected_heads: usize,
+    layout: InferLayout,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    callback_err: std::sync::Arc<std::sync::Mutex<Option<PyErr>>>,
+) -> impl FnMut(Vec<f32>, usize) -> Vec<f64> + 'a {
+    move |obs_flat: Vec<f32>, n: usize| -> Vec<f64> {
+        let fallback_len = match layout {
+            InferLayout::ValueHeads => n * expected_heads * action_count,
+            InferLayout::PolicyValue => n * (action_count + 1),
+        };
+        if stop.load(std::sync::atomic::Ordering::Relaxed) || callback_err.lock().unwrap().is_some()
+        {
+            return vec![0.0; fallback_len];
+        }
+        Python::with_gil(|py| {
+            let mut err = callback_err.lock().unwrap().take();
+            let out = {
+                let bound = infer.bind(py);
+                match layout {
+                    InferLayout::ValueHeads => {
+                        let mut f = infer_closure(
+                            py,
+                            bound,
+                            dim,
+                            action_count,
+                            Some(expected_heads),
+                            &mut err,
+                        );
+                        f(obs_flat, n)
+                    }
+                    InferLayout::PolicyValue => {
+                        let mut f = az_infer_closure(py, bound, dim, action_count, &mut err);
+                        f(obs_flat, n)
+                    }
+                }
+            };
+            *callback_err.lock().unwrap() = err;
+            out
+        })
+    }
+}
+
+/// A finished collect, shipped from the worker to the consumer thread with its numpy/dict marshaling
+/// deferred (the worker has no GIL guarantees; `CollectStream.next` runs the thunk under the GIL).
+type BatchThunk = Box<dyn FnOnce(Python<'_>) -> PyResult<PyObject> + Send>;
+
 /// Parse the opponent-model string a policy handle carries into the core `Opponent`.
 fn parse_opponent(opponent: &str, opp_temperature: f64, opp_floor: f64) -> PyResult<Opponent> {
     match opponent {
@@ -203,7 +261,8 @@ fn parse_opponent(opponent: &str, opp_temperature: f64, opp_floor: f64) -> PyRes
 
 #[pyclass(name = "Engine")]
 struct PyEngine {
-    inner: Box<dyn ErasedEngine>,
+    // `None` while a `CollectStream` holds the engine on its worker thread; `stop()` returns it.
+    inner: Option<Box<dyn ErasedEngine>>,
 }
 
 #[pymethods]
@@ -245,14 +304,14 @@ impl PyEngine {
         };
         let engine_params = EngineParams { n_games, seed };
         Ok(PyEngine {
-            inner: build_engine(
+            inner: Some(build_engine(
                 game.spec,
                 reward,
                 policy.spec,
                 learner.spec,
                 engine_params,
                 start_buffer,
-            )?,
+            )?),
         })
     }
 
@@ -265,7 +324,200 @@ impl PyEngine {
         n_records: usize,
         infer: Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        self.inner.collect(py, n_records, &infer)
+        self.inner
+            .as_mut()
+            .ok_or_else(stream_active_err)?
+            .collect(py, n_records, &infer)
+    }
+
+    /// Start continuous background collection: a Rust worker thread runs collect after collect,
+    /// pushing finished batches into a bounded queue of `depth` (None = unbounded — the OpenSpiel
+    /// continuous-actor topology; the worker never pauses, so an outpaced consumer grows the queue).
+    /// With `depth=1` the worker pipelines exactly one batch ahead of the consumer (backpressure).
+    /// The engine is held by the stream until `stop()` returns it; `collect` in the meantime errors.
+    /// Weight staleness is the caller's to manage — the callback reads whatever net it closes over,
+    /// so sync a collector-net copy at your chosen cadence (see the AlphaZero example).
+    #[pyo3(signature = (collect_size, infer, depth=Some(1)))]
+    fn collect_stream(
+        slf: &Bound<'_, Self>,
+        collect_size: usize,
+        infer: Py<PyAny>,
+        depth: Option<usize>,
+    ) -> PyResult<CollectStream> {
+        if collect_size < 1 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "collect_size must be >= 1",
+            ));
+        }
+        if depth == Some(0) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "depth must be >= 1, or None for unbounded",
+            ));
+        }
+        let mut engine = slf
+            .borrow_mut()
+            .inner
+            .take()
+            .ok_or_else(stream_active_err)?;
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let queued = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (tx, rx) = StreamChannel::new(depth);
+        let worker = {
+            let (stop, queued) = (stop.clone(), queued.clone());
+            std::thread::spawn(move || {
+                loop {
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    let result = engine.collect_thunk(collect_size, &infer, stop.clone());
+                    let fatal = result.is_err();
+                    if tx.send(result).is_err() {
+                        break; // consumer dropped the receiver (stop) — engine returns via join
+                    }
+                    queued.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if fatal {
+                        break; // callback error delivered; the stream is dead
+                    }
+                }
+                engine
+            })
+        };
+        Ok(CollectStream {
+            rx: Some(std::sync::Mutex::new(rx)),
+            stop,
+            queued,
+            handle: Some(worker),
+            engine: slf.clone().unbind(),
+        })
+    }
+}
+
+fn stream_active_err() -> PyErr {
+    pyo3::exceptions::PyRuntimeError::new_err(
+        "a collect_stream holds this engine; call stream.stop() first",
+    )
+}
+
+/// One channel type for both depths: bounded (`sync_channel`, sender blocks when full — the
+/// backpressure that makes `depth` mean 'batches the worker may run ahead') or unbounded.
+enum StreamChannel {
+    Bounded(std::sync::mpsc::SyncSender<PyResult<BatchThunk>>),
+    Unbounded(std::sync::mpsc::Sender<PyResult<BatchThunk>>),
+}
+
+impl StreamChannel {
+    fn new(
+        depth: Option<usize>,
+    ) -> (
+        StreamChannel,
+        std::sync::mpsc::Receiver<PyResult<BatchThunk>>,
+    ) {
+        match depth {
+            Some(d) => {
+                let (tx, rx) = std::sync::mpsc::sync_channel(d);
+                (StreamChannel::Bounded(tx), rx)
+            }
+            None => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                (StreamChannel::Unbounded(tx), rx)
+            }
+        }
+    }
+
+    fn send(&self, msg: PyResult<BatchThunk>) -> Result<(), ()> {
+        match self {
+            StreamChannel::Bounded(tx) => tx.send(msg).map_err(|_| ()),
+            StreamChannel::Unbounded(tx) => tx.send(msg).map_err(|_| ()),
+        }
+    }
+}
+
+/// A running background collection (see `Engine.collect_stream`). `next()` blocks (GIL released)
+/// until the worker's next batch is ready and marshals it on this thread; iteration is equivalent.
+/// `stop()` ends the worker and returns the engine to its `Engine` — also on `with`-exit. A dropped,
+/// never-stopped stream detaches its worker (which drains GIL-free via the stop flag) and forfeits
+/// the engine.
+#[pyclass]
+struct CollectStream {
+    rx: Option<std::sync::Mutex<std::sync::mpsc::Receiver<PyResult<BatchThunk>>>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    queued: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    handle: Option<std::thread::JoinHandle<Box<dyn ErasedEngine>>>,
+    engine: Py<PyEngine>,
+}
+
+#[pymethods]
+impl CollectStream {
+    /// The next finished batch (learner-shaped, same as `collect`'s). Blocks with the GIL released
+    /// while the worker finishes one. Raises the latched callback error if the worker died on one,
+    /// or RuntimeError once the stream is stopped/dead.
+    fn next(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let rx = self.rx.as_ref().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("collect stream is stopped")
+        })?;
+        let msg = py.allow_threads(|| rx.lock().unwrap().recv());
+        match msg {
+            Ok(result) => {
+                self.queued
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                result?(py)
+            }
+            Err(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "collect stream ended (stopped, or a callback error was already raised)",
+            )),
+        }
+    }
+
+    /// Finished batches waiting in the queue (advisory; the worker may also have one in flight).
+    fn pending(&self) -> usize {
+        self.queued.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Stop the worker and return the engine to its `Engine` (idempotent). Any queued batches are
+    /// discarded. The engine is reusable afterwards — `collect` or a fresh `collect_stream`.
+    fn stop(&mut self, py: Python<'_>) -> PyResult<()> {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.rx.take(); // unblocks a worker waiting on a full bounded queue
+        if let Some(handle) = self.handle.take() {
+            let engine = py
+                .allow_threads(|| handle.join())
+                .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("stream worker panicked"))?;
+            self.engine.bind(py).borrow_mut().inner = Some(engine);
+        }
+        Ok(())
+    }
+
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Iterator form of `next()`: yields batches until the stream is stopped (then StopIteration).
+    /// A callback error still raises.
+    fn __next__(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+        match self.next(py) {
+            Ok(batch) => Ok(Some(batch)),
+            Err(e) if e.is_instance_of::<pyo3::exceptions::PyRuntimeError>(py) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    #[pyo3(signature = (*_args))]
+    fn __exit__(&mut self, py: Python<'_>, _args: &Bound<'_, PyTuple>) -> PyResult<()> {
+        self.stop(py)
+    }
+}
+
+impl Drop for CollectStream {
+    fn drop(&mut self) {
+        // Signal and detach — never join here: drop can run under the GIL while the worker's next
+        // infer call waits for it. The stop flag makes the worker drain GIL-free and exit.
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.rx.take();
     }
 }
 
@@ -286,6 +538,16 @@ trait ErasedEngine: Send + Sync {
         n_records: usize,
         infer: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>>;
+
+    /// GIL-free collect for the stream worker: runs the rollout acquiring the GIL only inside the
+    /// infer callback, and returns the finished batch as a deferred-marshaling thunk (run under the
+    /// GIL by the consumer). `stop` short-circuits the callback so a stopping stream drains fast.
+    fn collect_thunk(
+        &mut self,
+        n_records: usize,
+        infer: &Py<PyAny>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> PyResult<BatchThunk>;
 }
 
 /// Marshal a learner's records (with the rollout telemetry) into the Python record batch. One impl per
@@ -596,6 +858,16 @@ where
     if let Some(e) = callback_err {
         return Err(e);
     }
+    let telemetry = build_telemetry(py, &stats)?;
+    Ok((records, telemetry))
+}
+
+/// The uniform collect telemetry dict, built from the core stats. Shared by the synchronous collect
+/// path and the stream thunks (which marshal on the consumer thread, after the collect ran).
+fn build_telemetry<'py>(
+    py: Python<'py>,
+    stats: &reinfors_core::CollectStats,
+) -> PyResult<Bound<'py, PyDict>> {
     let d = (stats.decisions.max(1)) as f64;
     // (per-agent reward, length, seeded-from-start-buffer) — the `seeded` tag lets a caller keep
     // off-d0 episodes out of the true-start learning curves.
@@ -618,7 +890,7 @@ where
     telemetry.set_item("infer_seconds", stats.infer_seconds)?;
     telemetry.set_item("infer_calls", stats.infer_calls)?;
     telemetry.set_item("infer_rows", stats.infer_rows)?;
-    Ok((records, telemetry))
+    Ok(telemetry)
 }
 
 /// One generic wrapper: a composed engine + its sizing metadata, type-erased behind `ErasedEngine`.
@@ -641,8 +913,35 @@ where
     P::Evaluation: Send + Sync,
     P::PolicyState: Send + Sync,
     L: Learner<P::Evaluation> + Send + Sync + 'static,
-    L::Record: RecordBatch,
+    L::Record: RecordBatch + Send + 'static,
 {
+    fn collect_thunk(
+        &mut self,
+        n_records: usize,
+        infer: &Py<PyAny>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> PyResult<BatchThunk> {
+        let callback_err = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut infer_fn = infer_closure_gil(
+            infer,
+            self.dim,
+            self.action_count,
+            self.n_heads,
+            self.layout,
+            stop,
+            callback_err.clone(),
+        );
+        let (records, stats) = self.inner.collect(n_records, &mut infer_fn);
+        if let Some(e) = callback_err.lock().unwrap().take() {
+            return Err(e);
+        }
+        let (dim, n_heads) = (self.dim, self.n_heads);
+        Ok(Box::new(move |py: Python<'_>| {
+            let telemetry = build_telemetry(py, &stats)?;
+            Ok(L::Record::into_py_batch(records, py, dim, n_heads, telemetry)?.unbind())
+        }))
+    }
+
     fn collect<'py>(
         &mut self,
         py: Python<'py>,
@@ -1930,6 +2229,7 @@ fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyReward>()?;
     m.add_class::<TreeStrapBatch>()?;
     m.add_class::<AlphaZeroBatch>()?;
+    m.add_class::<CollectStream>()?;
     m.add_class::<DqnBatch>()?;
     m.add_class::<PyBox>()?;
     m.add_class::<PyDiscrete>()?;

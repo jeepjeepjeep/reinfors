@@ -203,6 +203,21 @@ def test_engine_rejects_degenerate_params(bad: dict) -> None:
         _engine(0, **bad)
 
 
+def test_mid_collect_callback_error_raises_cleanly() -> None:
+    # A callback failing AFTER successful K-head rounds must surface as its own error, not corrupt
+    # the in-flight trajectories (fallback rows preserve K; a K=1 fallback would panic the blend).
+    calls = {"n": 0}
+
+    def flaky(arr: np.ndarray) -> np.ndarray:
+        calls["n"] += 1
+        if calls["n"] > 5:
+            raise ValueError("mid-collect boom")
+        return _infer(arr)
+
+    with pytest.raises(ValueError, match="mid-collect boom"):
+        _engine(0, interior=False).collect(600, flaky)
+
+
 def test_engine_rejects_head_count_mismatch() -> None:
     # The Engine is built for 3 heads but `_infer` returns _K=4 — the head count must match, else
     # Thompson sampling silently breaks. Surfaces as a clean ValueError, not a clamp (or a panic).
