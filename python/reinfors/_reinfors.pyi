@@ -79,6 +79,20 @@ class PolicyHandle:
         temperature: float = ...,
         temperature_drop: int | None = ...,
     ) -> PolicyHandle: ...
+    # AlphaZero (PUCT); pairs with learners.AlphaZero; sequential/single-agent games only. The infer
+    # callback returns a (policy_logits (N, A) f64, values (N,) f64) tuple — one forward, both heads.
+    # Root Dirichlet noise (noise_epsilon/noise_alpha) + acting temperature drive self-play diversity;
+    # acting is by visit count. temperature_drop=None applies the temperature to whole episodes.
+    @staticmethod
+    def AlphaZero(
+        num_simulations: int = ...,
+        c_puct: float = ...,
+        max_depth: int = ...,
+        noise_epsilon: float = ...,
+        noise_alpha: float = ...,
+        temperature: float = ...,
+        temperature_drop: int | None = ...,
+    ) -> PolicyHandle: ...
 
 class LearnerHandle:
     @staticmethod
@@ -90,6 +104,21 @@ class LearnerHandle:
     ) -> LearnerHandle: ...
     @staticmethod
     def Dqn(bootstrap_p: float = ...) -> LearnerHandle: ...
+    # AlphaZero record production: (obs, pi, z) — pi = tau=1 root visit distribution, z = discounted
+    # realized return (gamma=1 + win/loss rewards = the paper's z). Pairs with policies.AlphaZero.
+    @staticmethod
+    def AlphaZero(gamma: float = ...) -> LearnerHandle: ...
+
+class AlphaZeroBatch:
+    """`Engine.collect` result for the AlphaZero family. Also unpacks positionally as
+    `obs, policy_targets, value_targets, telemetry = batch`."""
+
+    obs: NDArray[np.float32]
+    policy_targets: NDArray[np.float64]
+    value_targets: NDArray[np.float64]
+    telemetry: dict[str, Any]
+    def __len__(self) -> int: ...
+    def __getitem__(self, i: int) -> Any: ...
 
 class TreeStrapBatch:
     """`Engine.collect` result for the TreeStrap family. Also unpacks positionally as
@@ -134,7 +163,7 @@ class Engine:
     ) -> None: ...
     # The batch is learner-shaped: the TreeStrap family yields a `TreeStrapBatch`, the DQN family a
     # `DqnBatch`. Both expose named fields and also unpack positionally (back-compat with the old tuple).
-    def collect(self, n_records: int, infer: Any) -> TreeStrapBatch | DqnBatch: ...
+    def collect(self, n_records: int, infer: Any) -> TreeStrapBatch | DqnBatch | AlphaZeroBatch: ...
 
 class Env:
     """A caller-driven single-game instance (the inverse of `Engine`): you supply each tick's actions."""

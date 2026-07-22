@@ -6,5 +6,6 @@
 //! so `policies/` and `learners/` are not peers. Do not add a reverse import (e.g. a policy naming a
 //! learner's record type) — that turns the edge into a cycle.
 
+pub mod alphazero;
 pub mod dqn;
 pub mod treestrap;

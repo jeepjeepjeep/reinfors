@@ -1,9 +1,9 @@
 """``rf.learners`` — learning-algorithm handles for composing an ``Engine``.
 
 Each constructor returns an opaque learner handle. A learner pairs with the policy family that
-produces the evaluation it consumes (``TreeStrap`` ↔ ``SelectiveExpectimax``, ``Dqn`` ↔
-``EpsilonGreedyQ``); ``Engine`` rejects an incompatible pairing. ``make`` / ``registered`` are the
-name-addressable form.
+produces the evaluation it consumes (``TreeStrap`` ↔ ``SelectiveExpectimax``/``Mcts``, ``Dqn`` ↔
+``EpsilonGreedyQ``, ``AlphaZero`` ↔ ``AlphaZero``); ``Engine`` rejects an incompatible pairing.
+``make`` / ``registered`` are the name-addressable form.
 """
 
 from __future__ import annotations
@@ -15,10 +15,12 @@ from . import _reinfors
 
 TreeStrap = _reinfors.LearnerHandle.TreeStrap
 Dqn = _reinfors.LearnerHandle.Dqn
+AlphaZero = _reinfors.LearnerHandle.AlphaZero
 
 _REGISTRY: dict[str, Callable[..., Any]] = {
     "treestrap": TreeStrap,
     "dqn": Dqn,
+    "alphazero": AlphaZero,
 }
 
 

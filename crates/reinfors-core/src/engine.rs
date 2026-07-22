@@ -248,8 +248,8 @@ where
                 }
                 let needs_next_obs = self.learner.needs_next_obs();
                 for (si, action) in agents.iter().enumerate() {
+                    let reward = self.reward.step_reward(&events[si], si);
                     if action.is_some() {
-                        let reward = self.reward.step_reward(&events[si], si);
                         let next_obs = if needs_next_obs {
                             self.episodes[gi].observe(&*self.encoder, si)
                         } else {
@@ -260,6 +260,14 @@ where
                             step.next_obs = next_obs;
                             step.terminal = terminal;
                         }
+                    } else if let Some(step) = self.traj[gi][si].last_mut() {
+                        // An agent that did not act this tick can still be scored by it — in a
+                        // sequential game the loser's terminal event fires on the winner's move.
+                        // Fold the reward into their last decision (0 for the common Ongoing/dead
+                        // events, so this only ever carries real outcomes) and mark it terminal so
+                        // the episode outcome reaches their trajectory.
+                        step.reward += reward;
+                        step.terminal |= terminal;
                     }
                 }
                 // Buffer the reached state for start-state coverage — non-terminal states only (you
@@ -365,19 +373,12 @@ where
             }
         }
         if !meta.is_empty() {
-            let q = infer(obs_flat, meta.len()); // flat [n, k, A], row-major
-            let k = q.len() / (meta.len() * a);
+            let q = infer(obs_flat, meta.len()); // one flat row per state; layout = the family's contract
+            let stride = q.len() / meta.len();
             for (i, &key) in meta.iter().enumerate() {
-                let row = &q[i * k * a..(i + 1) * k * a]; // [k, A], head-major
-                let per_head = (0..k)
-                    .map(|h| {
-                        row[h * a..(h + 1) * a]
-                            .iter()
-                            .copied()
-                            .fold(f64::NEG_INFINITY, f64::max)
-                    })
-                    .collect();
-                tails.insert(key, per_head);
+                let row = &q[i * stride..(i + 1) * stride];
+                // The learner knows its family's row layout (default: [K][A] Q-rows, per-head max).
+                tails.insert(key, self.learner.tail_from_row(row, a));
             }
         }
         tails

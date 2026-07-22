@@ -149,8 +149,8 @@ def test_start_buffer_is_off_by_default_snake_only_and_tags_seeded() -> None:
 
 def test_registries_list_the_built_in_names() -> None:
     assert rf.registered_games() == ["connect4", "gridworld", "snake"]
-    assert rf.registered_policies() == ["epsilon_greedy_q", "mcts", "selective_expectimax"]
-    assert rf.registered_learners() == ["dqn", "treestrap"]
+    assert rf.registered_policies() == ["alphazero", "epsilon_greedy_q", "mcts", "selective_expectimax"]
+    assert rf.registered_learners() == ["alphazero", "dqn", "treestrap"]
 
 
 def test_game_handles_advertise_spaces() -> None:

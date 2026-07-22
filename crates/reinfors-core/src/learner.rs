@@ -23,6 +23,22 @@ pub trait Learner<E> {
         false
     }
 
+    /// Extract the z-tail values from one net-output row for the final state. The row layout is the
+    /// policy family's infer contract, which the paired learner knows: the default reads `[K][A]`
+    /// Q-rows (per-head `max_a`, the value-family bootstrap); the AlphaZero learner overrides to read
+    /// the value slot of its `[A]-logits + value` row.
+    fn tail_from_row(&self, row: &[f64], action_count: usize) -> Vec<f64> {
+        let k = row.len() / action_count;
+        (0..k)
+            .map(|h| {
+                row[h * action_count..(h + 1) * action_count]
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max)
+            })
+            .collect()
+    }
+
     /// Whether the engine should fill each buffered `Step`'s `next_obs` (the post-transition `s'`).
     /// True for transition learners (DQN); false (default) for return-based learners (TreeStrap), so
     /// they pay no per-step observation cost.

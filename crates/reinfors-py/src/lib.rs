@@ -19,9 +19,10 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
 use reinfors_core::{
-    ActBy, AlwaysInitialState, Dqn, DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game,
-    Learner, Mcts, MctsConfig, Opponent, Policy, ReachedStateBuffer, Reward, SearchConfig,
-    SelectiveExpectimax, Space, StartDistribution, StateEncoder, TreeStrap, TreeStrapRecord,
+    ActBy, AlphaZero, AlphaZeroConfig, AlphaZeroLearner, AlphaZeroRecord, AlwaysInitialState, Dqn,
+    DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game, Learner, Mcts, MctsConfig,
+    Opponent, Policy, ReachedStateBuffer, Reward, SearchConfig, SelectiveExpectimax, Space,
+    StartDistribution, StateEncoder, TreeStrap, TreeStrapRecord,
 };
 use reinfors_games::snake::{Cell, DeathCause};
 use reinfors_games::{
@@ -119,6 +120,59 @@ fn infer_closure<'a, 'py>(
             Err(e) => {
                 *callback_err = Some(e);
                 vec![0.0; n * action_count]
+            }
+        }
+    }
+}
+
+/// The AlphaZero family's `infer` callback: the Python callable returns a `(policy_logits (N, A) f64,
+/// values (N,) f64)` tuple — no dummy priors for value-only families, no packed heads here — which is
+/// flattened to the core's `[N·(A+1)]` row layout (`A` logits then the value, per row). Same
+/// error-latching contract as `infer_closure`: the first failure (Python error or wrong shapes) is
+/// latched and neutral rows (uniform logits, value 0) unwind the in-flight search cheaply.
+fn az_infer_closure<'a, 'py>(
+    py: Python<'py>,
+    infer: &'a Bound<'py, PyAny>,
+    dim: usize,
+    action_count: usize,
+    callback_err: &'a mut Option<PyErr>,
+) -> impl FnMut(Vec<f32>, usize) -> Vec<f64> + 'a {
+    move |obs_flat: Vec<f32>, n: usize| -> Vec<f64> {
+        let stride = action_count + 1;
+        if callback_err.is_some() {
+            return vec![0.0; n * stride];
+        }
+        let arr = Array2::from_shape_vec((n, dim), obs_flat)
+            .expect("obs batch shape")
+            .into_pyarray(py);
+        let extracted = infer.call1((arr,)).and_then(|r| {
+            let (logits, values) =
+                r.extract::<(numpy::PyReadonlyArray2<f64>, numpy::PyReadonlyArray1<f64>)>()?;
+            Ok((logits.as_array().to_owned(), values.as_array().to_owned()))
+        });
+        match extracted {
+            Ok((logits, values)) => {
+                if logits.shape() != [n, action_count] || values.len() != n {
+                    callback_err.get_or_insert_with(|| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "AlphaZero infer must return (policy_logits ({n}, {action_count}), \
+                             values ({n},)); got logits {:?} and values ({},)",
+                            logits.shape(),
+                            values.len()
+                        ))
+                    });
+                    return vec![0.0; n * stride];
+                }
+                let mut out = Vec::with_capacity(n * stride);
+                for row in 0..n {
+                    out.extend(logits.row(row).iter().copied());
+                    out.push(values[row]);
+                }
+                out
+            }
+            Err(e) => {
+                *callback_err = Some(e);
+                vec![0.0; n * stride]
             }
         }
     }
@@ -325,6 +379,77 @@ impl DqnBatch {
     }
 }
 
+/// `engine.collect` result for the AlphaZero family: root visit distributions + realized returns.
+#[pyclass]
+struct AlphaZeroBatch {
+    #[pyo3(get)]
+    obs: Py<PyArray2<f32>>, // (M, C*H*W)
+    #[pyo3(get)]
+    policy_targets: Py<PyArray2<f64>>, // (M, A) — π, τ=1 normalized root visit counts
+    #[pyo3(get)]
+    value_targets: Py<PyArray1<f64>>, // (M,) — z, discounted realized return
+    #[pyo3(get)]
+    telemetry: Py<PyDict>,
+}
+
+#[pymethods]
+impl AlphaZeroBatch {
+    fn __len__(&self) -> usize {
+        4
+    }
+    /// Also unpacks positionally: `obs, policy_targets, value_targets, telemetry = batch`.
+    fn __getitem__<'py>(&self, py: Python<'py>, i: usize) -> PyResult<Bound<'py, PyAny>> {
+        Ok(match i {
+            0 => self.obs.bind(py).clone().into_any(),
+            1 => self.policy_targets.bind(py).clone().into_any(),
+            2 => self.value_targets.bind(py).clone().into_any(),
+            3 => self.telemetry.bind(py).clone().into_any(),
+            _ => {
+                return Err(pyo3::exceptions::PyIndexError::new_err(
+                    "AlphaZeroBatch index out of range",
+                ))
+            }
+        })
+    }
+}
+
+impl RecordBatch for AlphaZeroRecord {
+    fn into_py_batch<'py>(
+        records: Vec<Self>,
+        py: Python<'py>,
+        dim: usize,
+        _n_heads: usize,
+        telemetry: Bound<'py, PyDict>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let m = records.len();
+        let a = if m > 0 { records[0].1.len() } else { 0 };
+        let mut obs_flat: Vec<f32> = Vec::with_capacity(m * dim);
+        let mut pi_flat: Vec<f64> = Vec::with_capacity(m * a);
+        let mut z: Vec<f64> = Vec::with_capacity(m);
+        for (obs, pi, zi) in records {
+            obs_flat.extend(obs);
+            pi_flat.extend(pi);
+            z.push(zi);
+        }
+        let obs_arr = Array2::from_shape_vec((m, dim), obs_flat)
+            .expect("obs shape")
+            .into_pyarray(py);
+        let pi_arr = Array2::from_shape_vec((m, a), pi_flat)
+            .expect("policy target shape")
+            .into_pyarray(py);
+        Ok(Bound::new(
+            py,
+            AlphaZeroBatch {
+                obs: obs_arr.unbind(),
+                policy_targets: pi_arr.unbind(),
+                value_targets: z.into_pyarray(py).unbind(),
+                telemetry: telemetry.unbind(),
+            },
+        )?
+        .into_any())
+    }
+}
+
 impl RecordBatch for TreeStrapRecord {
     fn into_py_batch<'py>(
         records: Vec<Self>,
@@ -422,8 +547,18 @@ impl RecordBatch for DqnRecord {
     }
 }
 
+/// Which Python `infer` contract the composed policy family speaks — the factory sets it, the collect
+/// path builds the matching marshaling closure. Value families return `(N, K, A)` per-head values;
+/// the AlphaZero family returns a `(policy_logits (N, A), values (N,))` tuple.
+#[derive(Clone, Copy)]
+enum InferLayout {
+    ValueHeads,
+    PolicyValue,
+}
+
 /// Shared rollout: drive any `Engine<G, P, L>` for `n_records`, returning the records and the (uniform)
 /// telemetry dict. Search aggregates are zero for a search-less policy (its `fold_telemetry` is a no-op).
+#[allow(clippy::too_many_arguments)]
 fn run_collect<'py, G, P, L>(
     inner: &mut Engine<G, P, L>,
     py: Python<'py>,
@@ -432,6 +567,7 @@ fn run_collect<'py, G, P, L>(
     dim: usize,
     action_count: usize,
     n_heads: usize,
+    layout: InferLayout,
 ) -> PyResult<(Vec<L::Record>, Bound<'py, PyDict>)>
 where
     G: Game + Sync,
@@ -440,16 +576,22 @@ where
     L: Learner<P::Evaluation>,
 {
     let mut callback_err: Option<PyErr> = None;
-    let (records, stats) = {
-        let mut infer_fn = infer_closure(
-            py,
-            infer,
-            dim,
-            action_count,
-            Some(n_heads),
-            &mut callback_err,
-        );
-        inner.collect(n_records, &mut infer_fn)
+    let (records, stats) = match layout {
+        InferLayout::ValueHeads => {
+            let mut infer_fn = infer_closure(
+                py,
+                infer,
+                dim,
+                action_count,
+                Some(n_heads),
+                &mut callback_err,
+            );
+            inner.collect(n_records, &mut infer_fn)
+        }
+        InferLayout::PolicyValue => {
+            let mut infer_fn = az_infer_closure(py, infer, dim, action_count, &mut callback_err);
+            inner.collect(n_records, &mut infer_fn)
+        }
     };
     if let Some(e) = callback_err {
         return Err(e);
@@ -488,6 +630,7 @@ struct EngineImpl<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     dim: usize,
     action_count: usize,
     n_heads: usize,
+    layout: InferLayout,
 }
 
 impl<G, P, L> ErasedEngine for EngineImpl<G, P, L>
@@ -514,6 +657,7 @@ where
             self.dim,
             self.action_count,
             self.n_heads,
+            self.layout,
         )?;
         L::Record::into_py_batch(records, py, self.dim, self.n_heads, telemetry)
     }
@@ -665,10 +809,19 @@ enum PolicySpec {
         temperature: f64,
         temperature_drop: u32,
     },
+    AlphaZero {
+        num_simulations: usize,
+        c_puct: f64,
+        max_depth: i32,
+        noise_epsilon: f64,
+        noise_alpha: f64,
+        temperature: f64,
+        temperature_drop: u32,
+    },
 }
 
 /// Learning-algorithm configuration. TreeStrap's `gamma` is also threaded into the search config by
-/// the factory, so the search and the z-mix share one discount.
+/// the factory, so the search and the z-mix share one discount (AlphaZero's likewise).
 #[derive(Clone)]
 enum LearnerSpec {
     TreeStrap {
@@ -679,6 +832,9 @@ enum LearnerSpec {
     },
     Dqn {
         bootstrap_p: f64,
+    },
+    AlphaZero {
+        gamma: f64,
     },
 }
 
@@ -765,6 +921,7 @@ where
                 dim,
                 action_count,
                 n_heads,
+                layout: InferLayout::ValueHeads,
             }))
         }
         (
@@ -820,6 +977,62 @@ where
                 dim,
                 action_count,
                 n_heads: 1,
+                layout: InferLayout::ValueHeads,
+            }))
+        }
+        (
+            PolicySpec::AlphaZero {
+                num_simulations,
+                c_puct,
+                max_depth,
+                noise_epsilon,
+                noise_alpha,
+                temperature,
+                temperature_drop,
+            },
+            LearnerSpec::AlphaZero { gamma },
+        ) => {
+            // >= 2: sim 1 evaluates the root itself, so visit-bearing π targets need at least one more.
+            if num_simulations < 2 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "num_simulations must be >= 2",
+                ));
+            }
+            if max_depth < 1 {
+                return Err(pyo3::exceptions::PyValueError::new_err("max_depth must be >= 1"));
+            }
+            if c_puct < 0.0 {
+                return Err(pyo3::exceptions::PyValueError::new_err("c_puct must be >= 0"));
+            }
+            check_unit("noise_epsilon", noise_epsilon)?;
+            if !(noise_alpha > 0.0 && noise_alpha.is_finite()) {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "noise_alpha must be finite and > 0",
+                ));
+            }
+            if !(temperature >= 0.0 && temperature.is_finite()) {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "temperature must be finite and >= 0",
+                ));
+            }
+            let policy = AlphaZero::new(AlphaZeroConfig {
+                num_simulations,
+                c_puct,
+                gamma,
+                max_depth,
+                noise_epsilon,
+                noise_alpha,
+                temperature,
+                temperature_drop,
+            });
+            let learner = AlphaZeroLearner::new(gamma);
+            Ok(Box::new(EngineImpl {
+                inner: Engine::new(game, enc, reward, policy, learner, engine_params)
+                    .with_start_distribution(start_dist),
+                dim,
+                action_count,
+                n_heads: 1, // single value head; π targets are (M, A), no bootstrap masks
+                layout: InferLayout::PolicyValue,
             }))
         }
         (PolicySpec::EpsilonGreedyQ { n_heads, epsilon }, LearnerSpec::Dqn { bootstrap_p }) => {
@@ -836,10 +1049,12 @@ where
                 dim,
                 action_count,
                 n_heads,
+                layout: InferLayout::ValueHeads,
             }))
         }
         _ => Err(pyo3::exceptions::PyValueError::new_err(
-            "incompatible policy/learner: TreeStrap pairs with SelectiveExpectimax or Mcts, Dqn with EpsilonGreedyQ",
+            "incompatible policy/learner: TreeStrap pairs with SelectiveExpectimax or Mcts, Dqn with \
+             EpsilonGreedyQ, and AlphaZero (policy) with AlphaZero (learner)",
         )),
     }
 }
@@ -869,12 +1084,16 @@ fn build_engine(
             "start_buffer is only supported for the snake game",
         ));
     }
-    // MCTS assumes strictly sequential / single-agent play; snake is simultaneous (with chance), so
-    // reject the pairing here rather than let it panic mid-rollout in the search.
-    if matches!(policy, PolicySpec::Mcts { .. }) && matches!(game, GameSpec::Snake { .. }) {
+    // The tree searches (MCTS, AlphaZero) assume strictly sequential / single-agent play; snake is
+    // simultaneous (with chance), so reject the pairing here rather than let it panic mid-rollout.
+    if matches!(
+        policy,
+        PolicySpec::Mcts { .. } | PolicySpec::AlphaZero { .. }
+    ) && matches!(game, GameSpec::Snake { .. })
+    {
         return Err(pyo3::exceptions::PyValueError::new_err(
-            "Mcts supports only sequential / single-agent games (connect4, gridworld); snake is \
-             simultaneous — use SelectiveExpectimax for snake",
+            "Mcts/AlphaZero support only sequential / single-agent games (connect4, gridworld); \
+             snake is simultaneous — use SelectiveExpectimax for snake",
         ));
     }
     match (game, reward) {
@@ -1599,6 +1818,37 @@ impl PolicyHandle {
             },
         })
     }
+
+    /// AlphaZero (PUCT) planner; pairs with `rf.learners.AlphaZero`; sequential/single-agent games
+    /// only. The net callback returns a `(policy_logits (N, A), values (N,))` tuple — one forward,
+    /// both heads. Root Dirichlet noise `(1-noise_epsilon)·P + noise_epsilon·Dir(noise_alpha)`
+    /// supplies search-level exploration (drawn from the seeded stream — collects stay reproducible);
+    /// the acting temperature (same semantics as `Mcts`) supplies move-level diversity. Acting is by
+    /// visit count (classic AlphaZero).
+    #[staticmethod]
+    #[pyo3(signature = (num_simulations=64, c_puct=1.5, max_depth=64, noise_epsilon=0.25, noise_alpha=0.3, temperature=1.0, temperature_drop=8))]
+    #[pyo3(name = "AlphaZero")]
+    fn alphazero(
+        num_simulations: usize,
+        c_puct: f64,
+        max_depth: i32,
+        noise_epsilon: f64,
+        noise_alpha: f64,
+        temperature: f64,
+        temperature_drop: Option<u32>,
+    ) -> Self {
+        PolicyHandle {
+            spec: PolicySpec::AlphaZero {
+                num_simulations,
+                c_puct,
+                max_depth,
+                noise_epsilon,
+                noise_alpha,
+                temperature,
+                temperature_drop: temperature_drop.unwrap_or(u32::MAX),
+            },
+        }
+    }
 }
 
 /// Learner handle (`rf.learners.TreeStrap` / `.Dqn`).
@@ -1637,6 +1887,18 @@ impl LearnerHandle {
             spec: LearnerSpec::Dqn { bootstrap_p },
         }
     }
+
+    /// AlphaZero record production: each decision -> `(obs, π, z)` — π the root visit distribution
+    /// (τ=1), z the discounted realized return (γ=1 with win/loss rewards = the paper's z). Pairs with
+    /// `rf.policies.AlphaZero`.
+    #[staticmethod]
+    #[pyo3(signature = (gamma=1.0))]
+    #[pyo3(name = "AlphaZero")]
+    fn alphazero(gamma: f64) -> Self {
+        LearnerHandle {
+            spec: LearnerSpec::AlphaZero { gamma },
+        }
+    }
 }
 
 #[pyfunction]
@@ -1667,6 +1929,7 @@ fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LearnerHandle>()?;
     m.add_class::<PyReward>()?;
     m.add_class::<TreeStrapBatch>()?;
+    m.add_class::<AlphaZeroBatch>()?;
     m.add_class::<DqnBatch>()?;
     m.add_class::<PyBox>()?;
     m.add_class::<PyDiscrete>()?;
