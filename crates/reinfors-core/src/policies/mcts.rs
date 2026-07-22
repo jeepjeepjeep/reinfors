@@ -1,8 +1,9 @@
-//! Monte-Carlo Tree Search (UCT): a genuine MCTS planner alongside the expectimax family, for a
-//! like-for-like comparison with other MCTS engines. It produces the same [`SearchEvaluation`] the
-//! `TreeStrap` learner consumes — the training target is the root's backed-up per-action values
-//! `values[1][A]` ("MCTS-strap") — and pools its leaf evaluations across games into one `infer` per
-//! round, exactly like the expectimax search.
+//! Monte-Carlo Tree Search: the shared arena tree + pooled simulation loop (`search_many`), guided
+//! either by UCB1 (the `Mcts` policy here) or by net priors under PUCT (the `AlphaZero` policy in
+//! `alphazero` — see [`Guidance`] for the exact axis of difference). The UCT policy produces the same
+//! [`SearchEvaluation`] the `TreeStrap` learner consumes — the training target is the root's backed-up
+//! per-action values `values[1][A]` ("MCTS-strap") — and pools its leaf evaluations across games into
+//! one `infer` per round, exactly like the expectimax search.
 //!
 //! **Sequential + single-agent games only.** MCTS here assumes strictly alternating turns (or one
 //! agent), so a node's actor is a single [`Actor::Agent`]; `Actor::Simultaneous` and `Actor::Chance`
@@ -16,8 +17,9 @@
 //! `temperature > 0`, the first `temperature_drop` moves of each episode are sampled `∝
 //! visits^(1/temperature)` from the engine's seeded acting RNG (later moves act greedily). Same seed →
 //! same games (collects stay reproducible); different episodes → different games. Root Dirichlet noise
-//! is deliberately absent: it perturbs *priors*, a PUCT concept — this UCT search has none. The
-//! reached-state start buffer remains the complementary coverage source.
+//! is deliberately absent from the UCT policy: it perturbs *priors*, a PUCT concept — for a
+//! prior-guided, noise-capable search use the `AlphaZero` policy. The reached-state start buffer
+//! remains the complementary coverage source.
 
 use crate::encoder::StateEncoder;
 use crate::engine::CollectStats;
@@ -26,6 +28,42 @@ use crate::policies::expectimax::search::SearchStats;
 use crate::policies::expectimax::SearchEvaluation;
 use crate::policy::{argmax, Policy};
 use crate::reward::Reward;
+use crate::rng::{dirichlet, SplitMix64};
+
+/// Which rule guides selection, and what the net returns per leaf. The tree machinery below is shared;
+/// this is the only axis the UCT (`Mcts`) and PUCT (`AlphaZero`) policies differ on.
+pub(crate) enum Guidance {
+    /// UCB1 over backed-up values; the net returns per-head Q rows `[K][A]` (leaf value = max of the
+    /// head-mean), and unvisited actions win selection outright.
+    Uct { c: f64 },
+    /// AlphaZero PUCT: the net returns `[A]` policy logits + a value per row (stride `A+1`); each
+    /// node stores its softmaxed prior, and selection scores `Q + c·P·√N/(1+n)`. `noise` is the root
+    /// Dirichlet mix `(epsilon, alpha, stream_seed)` applied once per tree when the root's eval
+    /// returns — `None` (or epsilon 0) searches noise-free.
+    Puct {
+        c: f64,
+        noise: Option<(f64, f64, u64)>,
+    },
+}
+
+impl Guidance {
+    /// Elements per net-output row: `K·A` Q-values (UCT, `k` heads) or `A+1` logits+value (PUCT).
+    fn row_stride(&self, n_rows: usize, out_len: usize, actions: usize) -> usize {
+        match self {
+            Guidance::Uct { .. } => out_len / n_rows.max(1),
+            Guidance::Puct { .. } => actions + 1,
+        }
+    }
+}
+
+/// Numerically stable softmax — the PUCT prior over the full action space (every action is legal by
+/// framework contract; a bad-but-legal action's prior just learns toward zero).
+fn softmax(logits: &[f64]) -> Vec<f64> {
+    let m = logits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let exps: Vec<f64> = logits.iter().map(|&l| (l - m).exp()).collect();
+    let total: f64 = exps.iter().sum();
+    exps.into_iter().map(|e| e / total).collect()
+}
 
 /// How the policy picks the move to play from a finished tree (the training target is the backed-up
 /// value either way — this only changes acting, not what `TreeStrap` regresses).
@@ -88,6 +126,7 @@ struct Node<S> {
     total_visits: u32,
     value: f64, // this node's state value (net leaf eval, or 0 at a terminal) — the backprop source
     obs: Vec<f32>, // staged observation for the pending net eval (empty for terminals)
+    prior: Vec<f64>, // [A] PUCT prior (softmaxed net logits); empty under UCT, and empty = not yet evaluated under PUCT
 }
 
 impl<S> Node<S> {
@@ -112,6 +151,7 @@ impl<S> Node<S> {
             total_visits: 0,
             value: 0.0,
             obs,
+            prior: Vec::new(),
         }
     }
 }
@@ -149,14 +189,17 @@ impl<S: Clone> Tree<S> {
         }
     }
 
-    /// Select from the root by UCT down to an expandable edge, create its child (stepping the game),
-    /// and mark it as the leaf to back up. Returns how the leaf's value is obtained.
+    /// Select from the root down to an expandable edge (scored by `guidance`), create its child
+    /// (stepping the game), and mark it as the leaf to back up. Returns how the leaf's value is
+    /// obtained. Under PUCT the root itself is the first leaf: it is created without an eval, and
+    /// selection needs its prior, so simulation 1 evaluates it in place (empty path).
     fn select_expand<G>(
         &mut self,
         game: &G,
         enc: &dyn StateEncoder<State = S>,
         reward: &dyn Reward<Event = G::Event>,
-        cfg: &MctsConfig,
+        max_depth: i32,
+        guidance: &Guidance,
     ) -> Reached
     where
         G: Game<State = S>,
@@ -170,11 +213,15 @@ impl<S: Clone> Tree<S> {
                 self.leaf = ni;
                 return Reached::Cached(0.0);
             }
-            if node.depth >= cfg.max_depth {
+            if matches!(guidance, Guidance::Puct { .. }) && node.prior.is_empty() {
+                self.leaf = ni; // un-evaluated PUCT node (the root on sim 1): evaluate it in place
+                return Reached::Eval;
+            }
+            if node.depth >= max_depth {
                 self.leaf = ni; // depth cap: use the cached net value evaluated when this node was created
                 return Reached::Cached(node.value);
             }
-            let a = uct_select(node, cfg.uct_c);
+            let a = select_edge(node, guidance);
             self.path.push((ni, a));
             if node.child[a] < 0 {
                 let child = self.expand(game, enc, reward, ni, a);
@@ -229,14 +276,14 @@ impl<S: Clone> Tree<S> {
 
     /// Back up `leaf_value` (from the leaf actor's perspective) along the selected path, negamax across
     /// turn changes (zero-sum), discounting by gamma and adding each edge's immediate reward.
-    fn backprop(&mut self, cfg: &MctsConfig, leaf_value: f64) {
+    fn backprop(&mut self, gamma: f64, leaf_value: f64) {
         self.arena[self.leaf].value = leaf_value;
         let mut g = leaf_value; // value from the child's actor perspective
         for &(ni, a) in self.path.iter().rev() {
             let node_actor = self.arena[ni].actor;
             let child_actor = self.arena[self.arena[ni].child[a] as usize].actor;
             let child_val = if child_actor == node_actor { g } else { -g };
-            let q = self.arena[ni].reward[a] + cfg.gamma * child_val;
+            let q = self.arena[ni].reward[a] + gamma * child_val;
             self.arena[ni].value_sum[a] += q;
             self.arena[ni].visits[a] += 1;
             self.arena[ni].total_visits += 1;
@@ -274,20 +321,37 @@ impl<S: Clone> Tree<S> {
     }
 }
 
-/// UCB1 over a node's actions (mover's perspective); an unvisited action wins outright.
-fn uct_select<S>(node: &Node<S>, c: f64) -> usize {
-    let ln_n = (node.total_visits.max(1) as f64).ln();
+/// Score a node's actions (mover's perspective) by the guidance rule and pick the best.
+/// UCT: UCB1, an unvisited action wins outright. PUCT: `Q + c·P·√N_total/(1+n)` with unvisited
+/// `Q = 0` (the AlphaZero convention) — the prior, not optimism, drives first visits; `N_total` is
+/// floored at 1 so the very first selection is prior-ordered rather than degenerate.
+fn select_edge<S>(node: &Node<S>, guidance: &Guidance) -> usize {
     let mut best = 0;
-    let mut best_ucb = f64::NEG_INFINITY;
+    let mut best_score = f64::NEG_INFINITY;
     for a in 0..node.child.len() {
-        let ucb = if node.visits[a] == 0 {
-            f64::INFINITY
-        } else {
-            let n = node.visits[a] as f64;
-            node.value_sum[a] / n + c * (ln_n / n).sqrt()
+        let score = match guidance {
+            Guidance::Uct { c } => {
+                if node.visits[a] == 0 {
+                    f64::INFINITY
+                } else {
+                    let n = node.visits[a] as f64;
+                    let ln_n = (node.total_visits.max(1) as f64).ln();
+                    node.value_sum[a] / n + c * (ln_n / n).sqrt()
+                }
+            }
+            Guidance::Puct { c, .. } => {
+                let n = node.visits[a] as f64;
+                let q = if node.visits[a] > 0 {
+                    node.value_sum[a] / n
+                } else {
+                    0.0
+                };
+                let sqrt_total = (node.total_visits.max(1) as f64).sqrt();
+                q + c * node.prior[a] * sqrt_total / (1.0 + n)
+            }
         };
-        if ucb > best_ucb {
-            best_ucb = ucb;
+        if score > best_score {
+            best_score = score;
             best = a;
         }
     }
@@ -316,22 +380,57 @@ where
     G::State: Send,
     F: FnMut(Vec<f32>, usize) -> Vec<f64>,
 {
+    let guidance = Guidance::Uct { c: cfg.uct_c };
+    search_many(
+        game,
+        enc,
+        reward,
+        cfg.num_simulations,
+        cfg.gamma,
+        cfg.max_depth,
+        &guidance,
+        requests,
+        infer,
+    )
+}
+
+/// The shared pooled search loop behind both `mcts_many` (UCT) and `alphazero_many` (PUCT): each round
+/// advances every active tree by one simulation, batching the new leaves' observations into a single
+/// `infer` forward, then consumes each returned row per the guidance mode (UCT: Q rows → leaf value;
+/// PUCT: logits+value → node prior + backed-up value, with root noise mixed in once per tree).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn search_many<G, F>(
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
+    num_simulations: usize,
+    gamma: f64,
+    max_depth: i32,
+    guidance: &Guidance,
+    requests: Vec<(G::State, usize)>,
+    infer: &mut F,
+) -> Vec<SearchEvaluation>
+where
+    G: Game + Sync,
+    G::State: Send,
+    F: FnMut(Vec<f32>, usize) -> Vec<f64>,
+{
     let a = game.action_count();
     let mut trees: Vec<Tree<G::State>> = requests
         .into_iter()
         .map(|(state, _agent)| Tree::new(game, enc, state))
         .collect();
 
-    while trees.iter().any(|t| t.sims < cfg.num_simulations) {
+    while trees.iter().any(|t| t.sims < num_simulations) {
         let mut obs_flat: Vec<f32> = Vec::new();
         let mut eval_rows: Vec<usize> = Vec::new(); // trees awaiting this round's forward
         for (ti, tree) in trees.iter_mut().enumerate() {
-            if tree.sims >= cfg.num_simulations {
+            if tree.sims >= num_simulations {
                 continue;
             }
             tree.sims += 1;
-            match tree.select_expand(game, enc, reward, cfg) {
-                Reached::Cached(v) => tree.backprop(cfg, v),
+            match tree.select_expand(game, enc, reward, max_depth, guidance) {
+                Reached::Cached(v) => tree.backprop(gamma, v),
                 Reached::Eval => {
                     obs_flat.extend_from_slice(&tree.arena[tree.leaf].obs);
                     eval_rows.push(ti);
@@ -342,11 +441,38 @@ where
             continue;
         }
         let n = eval_rows.len();
-        let q = infer(obs_flat, n);
-        let k = q.len() / (n * a);
+        let out = infer(obs_flat, n);
+        let stride = guidance.row_stride(n, out.len(), a);
         for (row, &ti) in eval_rows.iter().enumerate() {
-            let v = leaf_value(&q[row * k * a..(row + 1) * k * a], k, a);
-            trees[ti].backprop(cfg, v);
+            let tree = &mut trees[ti];
+            let row_data = &out[row * stride..(row + 1) * stride];
+            match guidance {
+                Guidance::Uct { .. } => {
+                    let v = leaf_value(row_data, stride / a, a);
+                    tree.backprop(gamma, v);
+                }
+                Guidance::Puct { noise, .. } => {
+                    let (logits, value) = row_data.split_at(a);
+                    let mut prior = softmax(logits);
+                    if tree.leaf == 0 {
+                        // The root's one eval: mix in the Dirichlet exploration noise (per-tree
+                        // stream, so pooled searches stay deterministic and independent).
+                        if let Some((eps, alpha, seed)) = noise {
+                            if *eps > 0.0 {
+                                let mut rng = SplitMix64::new(
+                                    seed ^ (ti as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+                                );
+                                let noise_draw = dirichlet(&mut rng, *alpha, a);
+                                for (p, d) in prior.iter_mut().zip(noise_draw) {
+                                    *p = (1.0 - eps) * *p + eps * d;
+                                }
+                            }
+                        }
+                    }
+                    tree.arena[tree.leaf].prior = prior;
+                    tree.backprop(gamma, value[0]);
+                }
+            }
         }
     }
 
@@ -355,7 +481,8 @@ where
 
 /// Sample an action `∝ visits^(1/temperature)`. Weights are max-normalized before the power so a
 /// small temperature cannot overflow; unvisited actions keep weight 0 and are never picked.
-fn sample_visits(visits: &[f64], temperature: f64, rng: &mut dyn Rng) -> usize {
+/// Shared with the `AlphaZero` policy (same acting-temperature semantics).
+pub(crate) fn sample_visits(visits: &[f64], temperature: f64, rng: &mut dyn Rng) -> usize {
     let n_max = visits.iter().fold(0.0f64, |m, &v| m.max(v));
     if n_max <= 0.0 {
         return 0;
@@ -513,5 +640,77 @@ mod tests {
         assert_eq!(p.select(&e, &mut moves, &mut FakeRng(vec![0.99])), 1);
         // move 1: past the drop — greedy argmax visits, rng untouched
         assert_eq!(p.select(&e, &mut moves, &mut FakeRng(vec![])), 0);
+    }
+
+    #[test]
+    fn softmax_is_a_distribution_and_orders_by_logit() {
+        let p = softmax(&[1.0, 3.0, 2.0]);
+        assert!((p.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+        assert!(p[1] > p[2] && p[2] > p[0]);
+        let u = softmax(&[5.0, 5.0]);
+        assert!((u[0] - 0.5).abs() < 1e-12); // equal logits -> uniform
+    }
+
+    fn puct_node(prior: Vec<f64>, visits: Vec<u32>, value_sum: Vec<f64>) -> Node<()> {
+        let a = prior.len();
+        let total = visits.iter().sum();
+        Node {
+            state: (),
+            actor: 0,
+            depth: 0,
+            terminal: false,
+            child: vec![-1; a],
+            reward: vec![0.0; a],
+            visits,
+            value_sum,
+            total_visits: total,
+            value: 0.0,
+            obs: Vec::new(),
+            prior,
+        }
+    }
+
+    #[test]
+    fn puct_first_selection_is_prior_ordered() {
+        // No visits anywhere: scores reduce to c·P(a) (N_total floored at 1) — the prior decides,
+        // unlike UCT where any unvisited action wins outright.
+        let node = puct_node(vec![0.2, 0.5, 0.3], vec![0, 0, 0], vec![0.0; 3]);
+        assert_eq!(
+            select_edge(
+                &node,
+                &Guidance::Puct {
+                    c: 1.5,
+                    noise: None
+                }
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn puct_high_visits_shrink_the_exploration_term() {
+        // Action 1 has the bigger prior but many visits and a mediocre Q; action 0's small-n
+        // exploration term wins — the 1/(1+n) decay working as intended.
+        let node = puct_node(vec![0.3, 0.7], vec![1, 99], vec![0.1, 9.9]); // Q = 0.1 both
+        let g = Guidance::Puct {
+            c: 2.0,
+            noise: None,
+        };
+        assert_eq!(select_edge(&node, &g), 0);
+    }
+
+    #[test]
+    fn puct_exploits_value_at_equal_priors() {
+        let node = puct_node(vec![0.5, 0.5], vec![10, 10], vec![9.0, 1.0]); // Q: 0.9 vs 0.1
+        assert_eq!(
+            select_edge(
+                &node,
+                &Guidance::Puct {
+                    c: 0.1,
+                    noise: None
+                }
+            ),
+            0
+        );
     }
 }
