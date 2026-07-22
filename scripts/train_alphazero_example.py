@@ -11,16 +11,27 @@ cross-entropy target — the search improves on the prior, the prior distills th
 realized game outcome (the value head's MSE target). The optional eval plays the *raw policy head*
 (no search) against a uniform-random opponent — a cheap probe that the distilled prior is learning.
 
+`--depth` switches to overlapped collection (`engine.collect_stream`): a Rust worker collects batch
+t+1 while this process trains on batch t (depth 1 = one batch ahead; `--depth none` = unbounded,
+OpenSpiel's continuous-actor topology). Overlap needs the *two-net pattern*: the worker's callback
+reads a collector net, training updates the learner net, and weights sync between batches under a
+lock — `load_state_dict` releases the GIL mid-copy, so an unlocked swap could expose half-updated
+weights to a concurrent search round. Python locks are GIL-aware; there is no deadlock.
+
 This is a deliberately tiny, self-contained reference, not a production trainer: no replay buffer,
 no checkpoints, no logging. It exists to show the wiring.
 
     uv run --with torch python scripts/train_alphazero_example.py --iterations 40
+    uv run --with torch python scripts/train_alphazero_example.py --iterations 40 --depth 1
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import random
+import threading
+import time
 from collections.abc import Callable
 
 import numpy as np
@@ -34,21 +45,21 @@ class AlphaZeroNet(nn.Module):
     """Two-headed net: shared conv trunk -> policy logits (B, A) + tanh value (B,). Just enough to
     plug a torch model into the AlphaZero family; both heads come from one trunk pass."""
 
-    def __init__(self, obs_shape: tuple[int, ...], n_actions: int) -> None:
+    def __init__(self, obs_shape: tuple[int, ...], n_actions: int, width: int = 32) -> None:
         super().__init__()
         c, h, w = obs_shape
         self.obs_shape = (c, h, w)
         self.trunk = nn.Sequential(
-            nn.Conv2d(c, 32, kernel_size=3, padding=1),
+            nn.Conv2d(c, width, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Conv2d(32, 32, kernel_size=3, padding=1),
+            nn.Conv2d(width, width, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(32 * h * w, 64),
+            nn.Linear(width * h * w, 2 * width),
             nn.ReLU(),
         )
-        self.policy_head = nn.Linear(64, n_actions)
-        self.value_head = nn.Linear(64, 1)
+        self.policy_head = nn.Linear(2 * width, n_actions)
+        self.value_head = nn.Linear(2 * width, 1)
 
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         z = self.trunk(obs)
@@ -155,12 +166,39 @@ def eval_vs_random(net: AlphaZeroNet, device: str, games: int, seed: int) -> flo
     return score / games
 
 
+def run_iteration(
+    args: argparse.Namespace,
+    net: AlphaZeroNet,
+    optimizer: torch.optim.Optimizer,
+    it: int,
+    batch: object,
+) -> None:
+    obs, pi, z, telemetry = batch
+    for _ in range(args.train_passes):
+        policy_loss, value_loss = train_pass(net, optimizer, obs, pi, z, args.batch_size, args.device)
+    print(
+        f"  iter {it:3d}  records {obs.shape[0]:4d}  policy_loss {policy_loss:.4f}  "
+        f"value_loss {value_loss:.4f}  episodes {len(telemetry['episodes'])}"
+    )
+    if args.eval_every and it % args.eval_every == 0:
+        rate = eval_vs_random(net, args.device, args.eval_games, args.seed + it)
+        print(f"  eval (policy head vs random): {rate:.2f} win rate")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--iterations", type=int, default=40, help="collect+train cycles")
     parser.add_argument("--n-games", type=int, default=8, help="parallel self-play games per collect")
     parser.add_argument("--collect-size", type=int, default=512, help="record floor per collect")
     parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--train-passes", type=int, default=1, help="minibatch passes per batch (data reuse)")
+    parser.add_argument("--width", type=int, default=32, help="trunk width (channels)")
+    parser.add_argument(
+        "--depth",
+        default=None,
+        help="overlapped collection: batches the worker may run ahead (int), 'none' = unbounded "
+        "(continuous actors); omit for the synchronous loop",
+    )
     parser.add_argument("--eval-every", type=int, default=10, help="iterations between eval probes (0 = off)")
     parser.add_argument("--eval-games", type=int, default=50)
     parser.add_argument("--device", default="cpu", help="cpu is fastest at these tiny batch sizes")
@@ -169,25 +207,46 @@ def main() -> None:
 
     torch.manual_seed(args.seed)
     game = rf.games.Connect4()
-    net = AlphaZeroNet(game.observation_space().shape, game.action_space().n).to(args.device)
+    net = AlphaZeroNet(game.observation_space().shape, game.action_space().n, args.width).to(args.device)
     optimizer = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
     engine = build_engine(args.n_games, args.seed)
-    infer = make_infer(net, args.device)
 
-    print(f"training on {args.device} — connect4, {args.n_games} games/collect, 48 sims/move")
+    mode = "sync" if args.depth is None else f"depth={args.depth}"
+    print(
+        f"training on {args.device} — connect4, {args.n_games} games/collect, 48 sims/move, width {args.width}, {mode}"
+    )
     if args.eval_every:
         rate = eval_vs_random(net, args.device, args.eval_games, args.seed)
         print(f"  eval (policy head vs random): {rate:.2f} win rate (untrained)")
-    for it in range(1, args.iterations + 1):
-        obs, pi, z, telemetry = engine.collect(args.collect_size, infer)  # search with live weights
-        policy_loss, value_loss = train_pass(net, optimizer, obs, pi, z, args.batch_size, args.device)
-        print(
-            f"  iter {it:3d}  records {obs.shape[0]:4d}  policy_loss {policy_loss:.4f}  "
-            f"value_loss {value_loss:.4f}  episodes {len(telemetry['episodes'])}"
-        )
-        if args.eval_every and it % args.eval_every == 0:
-            rate = eval_vs_random(net, args.device, args.eval_games, args.seed + it)
-            print(f"  eval (policy head vs random): {rate:.2f} win rate")
+
+    t0 = time.perf_counter()
+    if args.depth is None:
+        # Synchronous reference loop: collect and train take turns; one net, implicit weight sync.
+        infer = make_infer(net, args.device)
+        for it in range(1, args.iterations + 1):
+            batch = engine.collect(args.collect_size, infer)  # search with live weights
+            run_iteration(args, net, optimizer, it, batch)
+    else:
+        # Overlapped loop: the worker collects batch t+1 (reading the collector net) while we train
+        # batch t (updating the learner net). The sync point — right after next() — gives the worker
+        # weights exactly one iteration stale, and the lock keeps a state_dict swap atomic relative
+        # to search rounds (Python locks release the GIL while blocking, so this cannot deadlock).
+        depth = None if str(args.depth).lower() in ("none", "inf") else int(args.depth)
+        collector_net = copy.deepcopy(net)
+        sync_lock = threading.Lock()
+        base_infer = make_infer(collector_net, args.device)
+
+        def locked_infer(obs_batch: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            with sync_lock:
+                return base_infer(obs_batch)
+
+        with engine.collect_stream(args.collect_size, locked_infer, depth=depth) as stream:
+            for it in range(1, args.iterations + 1):
+                batch = stream.next()
+                with sync_lock:
+                    collector_net.load_state_dict(net.state_dict())
+                run_iteration(args, net, optimizer, it, batch)
+    print(f"  total {time.perf_counter() - t0:.1f}s for {args.iterations} iterations ({mode})")
 
 
 if __name__ == "__main__":
