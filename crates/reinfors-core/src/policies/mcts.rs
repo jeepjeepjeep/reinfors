@@ -1,8 +1,9 @@
-//! Monte-Carlo Tree Search (UCT): a genuine MCTS planner alongside the expectimax family, for a
-//! like-for-like comparison with other MCTS engines. It produces the same [`SearchEvaluation`] the
-//! `TreeStrap` learner consumes — the training target is the root's backed-up per-action values
-//! `values[1][A]` ("MCTS-strap") — and pools its leaf evaluations across games into one `infer` per
-//! round, exactly like the expectimax search.
+//! Monte-Carlo Tree Search: the shared arena tree + pooled simulation loop (`search_many`), guided
+//! either by UCB1 (the `Mcts` policy here) or by net priors under PUCT (the `AlphaZero` policy in
+//! `alphazero` — see [`Guidance`] for the exact axis of difference). The UCT policy produces the same
+//! [`SearchEvaluation`] the `TreeStrap` learner consumes — the training target is the root's backed-up
+//! per-action values `values[1][A]` ("MCTS-strap") — and pools its leaf evaluations across games into
+//! one `infer` per round, exactly like the expectimax search.
 //!
 //! **Sequential + single-agent games only.** MCTS here assumes strictly alternating turns (or one
 //! agent), so a node's actor is a single [`Actor::Agent`]; `Actor::Simultaneous` and `Actor::Chance`
@@ -16,8 +17,9 @@
 //! `temperature > 0`, the first `temperature_drop` moves of each episode are sampled `∝
 //! visits^(1/temperature)` from the engine's seeded acting RNG (later moves act greedily). Same seed →
 //! same games (collects stay reproducible); different episodes → different games. Root Dirichlet noise
-//! is deliberately absent: it perturbs *priors*, a PUCT concept — this UCT search has none. The
-//! reached-state start buffer remains the complementary coverage source.
+//! is deliberately absent from the UCT policy: it perturbs *priors*, a PUCT concept — for a
+//! prior-guided, noise-capable search use the `AlphaZero` policy. The reached-state start buffer
+//! remains the complementary coverage source.
 
 use crate::encoder::StateEncoder;
 use crate::engine::CollectStats;
