@@ -130,7 +130,8 @@ def eval_vs_random(net: AlphaZeroNet, device: str, games: int, seed: int) -> flo
     alternating sides. Returns the net's win rate (draws count half)."""
     c, h, w = net.obs_shape
     rng = random.Random(seed)
-    net.eval()
+    was_training = net.training  # restored below — leaving eval mode set would silently
+    net.eval()  # break a later train_pass if the trunk ever grows BN/dropout
     score = 0.0
     for g in range(games):
         env = rf.Env(rf.games.Connect4(), seed=rng.randrange(2**31))
@@ -150,15 +151,8 @@ def eval_vs_random(net: AlphaZeroNet, device: str, games: int, seed: int) -> flo
             score += 1.0
         elif events[net_side] == "draw":
             score += 0.5
+    net.train(was_training)
     return score / games
-
-
-def default_device() -> str:
-    if torch.backends.mps.is_available():
-        return "mps"
-    if torch.cuda.is_available():
-        return "cuda"
-    return "cpu"
 
 
 def main() -> None:
