@@ -287,6 +287,47 @@ def test_mcts_rejects_simultaneous_snake() -> None:
         )
 
 
+def _mcts_engine(temperature: float, seed: int = 0, drop: int | None = None) -> rf.Engine:
+    return rf.Engine(
+        rf.games.Connect4(),
+        rf.Reward(win=1.0, loss=-1.0),
+        rf.policies.Mcts(num_simulations=16, temperature=temperature, temperature_drop=drop),
+        rf.learners.TreeStrap(),
+        n_games=1,
+        seed=seed,
+    )
+
+
+def test_mcts_temperature_zero_replays_the_same_game() -> None:
+    # Greedy acting from a fixed start with a fixed net is one deterministic game replayed forever —
+    # the no-self-play-diversity failure mode the temperature exists to fix.
+    _, _, _, tel = _mcts_engine(0.0).collect(120, _mcts_infer(7))
+    lengths = [length for _r, length, _s in tel["episodes"]]
+    assert len(lengths) >= 3 and len(set(lengths)) == 1
+
+
+def test_mcts_temperature_diversifies_self_play_and_stays_seeded() -> None:
+    # temperature > 0 samples opening plies from the seeded acting RNG: episodes within a collect now
+    # differ (diversity), while the same seed still reproduces the identical collect (determinism).
+    _, _, _, t1 = _mcts_engine(1.0).collect(120, _mcts_infer(7))
+    games1 = [(tuple(r), length) for r, length, _s in t1["episodes"]]
+    assert len(set(games1)) > 1
+    _, _, _, t2 = _mcts_engine(1.0).collect(120, _mcts_infer(7))
+    assert games1 == [(tuple(r), length) for r, length, _s in t2["episodes"]]
+
+
+def test_mcts_temperature_drop_zero_is_greedy() -> None:
+    # drop=0 means no plies are sampled — identical behavior to temperature 0.
+    _, _, _, tel = _mcts_engine(1.0, drop=0).collect(120, _mcts_infer(7))
+    lengths = [length for _r, length, _s in tel["episodes"]]
+    assert len(set(lengths)) == 1
+
+
+def test_mcts_rejects_bad_temperature() -> None:
+    with pytest.raises(ValueError, match="temperature"):
+        _mcts_engine(-0.5)
+
+
 def test_mcts_rejects_unknown_act_by() -> None:
     with pytest.raises(ValueError, match="act_by"):
         rf.policies.Mcts(act_by="greedy")

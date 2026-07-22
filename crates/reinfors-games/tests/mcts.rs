@@ -20,6 +20,8 @@ fn cfg(num_simulations: usize) -> MctsConfig {
         uct_c: 2.0,
         gamma: 0.99,
         max_depth: 12,
+        temperature: 0.0,
+        temperature_drop: u32::MAX,
     }
 }
 

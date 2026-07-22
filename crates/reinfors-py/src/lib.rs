@@ -662,6 +662,8 @@ enum PolicySpec {
         uct_c: f64,
         max_depth: i32,
         act_by: ActBy,
+        temperature: f64,
+        temperature_drop: u32,
     },
 }
 
@@ -771,6 +773,8 @@ where
                 uct_c,
                 max_depth,
                 act_by,
+                temperature,
+                temperature_drop,
             },
             LearnerSpec::TreeStrap {
                 gamma,
@@ -790,6 +794,11 @@ where
             if uct_c < 0.0 {
                 return Err(pyo3::exceptions::PyValueError::new_err("uct_c must be >= 0"));
             }
+            if !(temperature >= 0.0 && temperature.is_finite()) {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "temperature must be finite and >= 0",
+                ));
+            }
             check_unit("outcome_weight", outcome_weight)?;
             check_unit("bootstrap_p", bootstrap_p)?;
             // MCTS is a single-head value search, so the net's head count is 1 for the batch shape.
@@ -799,6 +808,8 @@ where
                     uct_c,
                     gamma,
                     max_depth,
+                    temperature,
+                    temperature_drop,
                 },
                 act_by,
             );
@@ -1552,12 +1563,22 @@ impl PolicyHandle {
 
     /// Monte-Carlo Tree Search (UCT). Pairs with `TreeStrap`. Sequential / single-agent games only
     /// (connect4, gridworld) — rejected for snake. `act_by` is `"value"` (argmax mean action value) or
-    /// `"visits"` (argmax visit count). Acting is deterministic (no root noise / move sampling), so it
-    /// targets evaluation and benchmarking; for training-data diversity it relies on the start buffer.
+    /// `"visits"` (argmax visit count). Acting defaults to deterministic (temperature 0) — ideal for
+    /// evaluation and benchmarking. For training self-play diversity set `temperature > 0`
+    /// (AlphaZero-style): the first `temperature_drop` plies of each episode are sampled
+    /// `∝ visits^(1/temperature)` from the seeded acting RNG (later plies act greedily);
+    /// `temperature_drop=None` applies it to the whole episode. Same seed → same games.
     #[staticmethod]
-    #[pyo3(signature = (num_simulations=64, uct_c=2.0, max_depth=64, act_by="value"))]
+    #[pyo3(signature = (num_simulations=64, uct_c=2.0, max_depth=64, act_by="value", temperature=0.0, temperature_drop=None))]
     #[pyo3(name = "Mcts")]
-    fn mcts(num_simulations: usize, uct_c: f64, max_depth: i32, act_by: &str) -> PyResult<Self> {
+    fn mcts(
+        num_simulations: usize,
+        uct_c: f64,
+        max_depth: i32,
+        act_by: &str,
+        temperature: f64,
+        temperature_drop: Option<u32>,
+    ) -> PyResult<Self> {
         let act_by = match act_by {
             "value" => ActBy::Value,
             "visits" => ActBy::Visits,
@@ -1573,6 +1594,8 @@ impl PolicyHandle {
                 uct_c,
                 max_depth,
                 act_by,
+                temperature,
+                temperature_drop: temperature_drop.unwrap_or(u32::MAX),
             },
         })
     }
