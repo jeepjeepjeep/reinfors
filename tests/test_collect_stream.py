@@ -3,6 +3,7 @@ path, both infer families, engine hand-back on stop, error surfacing, and overla
 
 import threading
 import time
+from collections.abc import Callable
 
 import numpy as np
 import pytest
@@ -49,7 +50,9 @@ def _snake_engine(seed: int = 0) -> rf.Engine:
     [(_az_engine, _az_infer), (_snake_engine, _snake_infer)],
     ids=["alphazero", "treestrap"],
 )
-def test_depth1_stream_matches_sequential_collects(make_engine, infer) -> None:
+def test_depth1_stream_matches_sequential_collects(
+    make_engine: Callable[[int], rf.Engine], infer: Callable[..., object]
+) -> None:
     # Frozen "weights" (pure-function infer) + same seed: the streamed batches must be bit-identical
     # to sequential collect() calls — the stream is a scheduler, not a semantics change.
     sync_batches = []
@@ -109,7 +112,7 @@ def test_iteration_yields_batches_then_stops() -> None:
 def test_callback_error_surfaces_and_engine_recovers() -> None:
     calls = {"n": 0}
 
-    def flaky(arr):
+    def flaky(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         calls["n"] += 1
         if calls["n"] > 3:
             raise ValueError("boom in callback")
@@ -150,14 +153,14 @@ def test_overlap_smoke_consumer_works_while_worker_collects() -> None:
     # (no deadlock, GIL is released in next()) and a mutating callback target is tolerated.
     box = {"bias": 0.0}
 
-    def infer(arr):
+    def infer(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         return np.full((arr.shape[0], _A), box["bias"]), np.zeros(arr.shape[0])
 
     eng = _az_engine()
     stream = eng.collect_stream(60, infer, depth=1)
     done = threading.Event()
 
-    def busy():
+    def busy() -> None:
         while not done.is_set():
             sum(i * i for i in range(1000))  # holds/releases the GIL in slices
 

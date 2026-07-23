@@ -7,6 +7,7 @@ K/A) keeps them torch-free — the model and gradient step live in the consumer,
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import pytest
@@ -89,7 +90,7 @@ def _dummy_infer(a: int) -> Callable[[np.ndarray], np.ndarray]:
     ("make_engine", "action_count"),
     [(_connect4_engine, 7), (_gridworld_engine, 4)],
 )
-def test_collect_shapes_and_telemetry(make_engine, action_count: int) -> None:
+def test_collect_shapes_and_telemetry(make_engine: Callable[[], rf.Engine], action_count: int) -> None:
     engine = make_engine()
     obs, tgt, mask, telemetry = engine.collect(40, _dummy_infer(action_count))
     m = obs.shape[0]
@@ -104,7 +105,7 @@ def test_collect_shapes_and_telemetry(make_engine, action_count: int) -> None:
     ("make_engine", "action_count", "num_agents"),
     [(_connect4_engine, 7, 2), (_gridworld_engine, 4, 1)],
 )
-def test_episode_reward_is_per_agent(make_engine, action_count: int, num_agents: int) -> None:
+def test_episode_reward_is_per_agent(make_engine: Callable[[], rf.Engine], action_count: int, num_agents: int) -> None:
     # The engine generalizes to any agent count: each finished episode's telemetry carries one reward
     # per agent — length 1 for single-agent GridWorld, 2 for Connect-4 — not a hardcoded pair.
     engine = make_engine()
@@ -343,9 +344,17 @@ def test_mcts_rejects_unknown_act_by() -> None:
         {"beta": 1.5},
     ],
 )
-def test_engine_rejects_degenerate_search_params(bad: dict) -> None:
+def test_engine_rejects_degenerate_search_params(bad: dict[str, float]) -> None:
     # SelectiveExpectimax search knobs are validated at Engine construction (the core does not).
-    kw = {"expansion_budget": 24, "top_k": 4, "max_depth": 6, "beta": 1.0, "food_samples": 1, "n_heads": _K, **bad}
+    kw: dict[str, Any] = {
+        "expansion_budget": 24,
+        "top_k": 4,
+        "max_depth": 6,
+        "beta": 1.0,
+        "food_samples": 1,
+        "n_heads": _K,
+        **bad,
+    }
     with pytest.raises(ValueError):
         rf.Engine(
             rf.games.Snake(grid_size=8),
@@ -390,7 +399,8 @@ def test_dqn_transitions_drive_a_td_step() -> None:
             self.fc = torch.nn.Linear(dim, n_heads * n_actions)
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            return self.fc(x).view(-1, self.n_heads, self.n_actions)
+            out: torch.Tensor = self.fc(x).view(-1, self.n_heads, self.n_actions)
+            return out
 
     dim, n_actions = 2 * 5 * 5, 4
     obs, actions, rewards, next_obs, dones, masks, _ = _dqn_engine().collect(64, _dummy_infer(n_actions))

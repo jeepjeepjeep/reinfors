@@ -34,7 +34,7 @@ import argparse
 import math
 import os
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from statistics import median
 from time import perf_counter
@@ -157,7 +157,7 @@ def bench_env_steps(name: str, *, grid: int, steps: int, repeats: int, seed: int
     return _throughput(work, repeats)
 
 
-def _table(title: str, header: tuple[str, ...], rows: list[tuple[str, ...]], note: str = "") -> None:
+def _table(title: str, header: tuple[str, ...], rows: Sequence[tuple[str, ...]], note: str = "") -> None:
     widths = [max(len(header[i]), *(len(r[i]) for r in rows)) for i in range(len(header))]
 
     def fmt(cells: tuple[str, ...]) -> str:

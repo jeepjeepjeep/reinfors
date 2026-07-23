@@ -67,6 +67,14 @@ select = [
 quote-style = "double"
 indent-style = "space"
 
+# Pyright (what VS Code / Pylance runs) reads this so IDE and CLI agree: resolve the project venv
+# (a bare `uvx pyright` otherwise reports a silent 0/0/0 with imports unresolved) and pin basic mode
+# — strict typing is mypy's job (below); pyright adds the analyses mypy lacks (e.g. possibly-unbound).
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "basic"
+
 [tool.mypy]
 # Type-check against 3.12 (the CI/dev interpreter — see `--interpreter python3.12` in the build): recent
 # numpy stubs use PEP 695 `type` statements that mypy refuses to parse under an older target. Runtime
@@ -75,16 +83,30 @@ python_version = "3.12"
 strict = true
 warn_unused_configs = true
 
-# The type checker only covers the `python/` package, which is torch-free (numpy only). The torch-using
-# code — `scripts/train_example.py` and `tests/test_example.py` — is exercised by the local torch tests,
-# not mypy, so no torch override is needed here.
+# Scope: the CI gate checks only the torch-free `python/` package, but the whole tree
+# (`python/` + `scripts/` + `tests/`) type-checks clean under strict mypy in a dev env with torch
+# installed — run `.venv/bin/python -m mypy python/reinfors scripts/ tests/` — and that is the
+# maintained bar. The overrides below exist for exactly that full-tree run: optional/stubless deps
+# are ignored when absent, and torch's few stub gaps (e.g. untyped `Tensor.backward`) carry targeted
+# `type: ignore[...]` comments at the call sites rather than a blanket relaxation.
 
-# The Gymnasium / PettingZoo adapters (`reinfors.gym`) subclass optional bases that aren't installed in
-# the type-check env; treat them as untyped and allow subclassing them (same posture as torch).
+# Optional deps of the adapters (`reinfors.gym`) and the benchmark scripts, not installed in every
+# checking env: resolve to Any instead of erroring when missing.
 [[tool.mypy.overrides]]
-module = ["gymnasium.*", "pettingzoo.*"]
+module = ["gymnasium.*", "pettingzoo.*", "jax.*", "pgx.*", "mctx.*", "pyspiel", "open_spiel.*", "torch.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["reinfors.gym"]
 disallow_subclassing_any = false
+
+# The peer-benchmark harness imports optional, stubless frameworks (jax/pgx/mctx/pyspiel) and wraps
+# their untyped surfaces; strict typing is not meaningful there. Same relaxed posture as reinfors.gym,
+# so an IDE / full-tree mypy run stays signal, not noise.
+[[tool.mypy.overrides]]
+module = ["benchmark_vs"]
+disallow_subclassing_any = false
+disallow_untyped_decorators = false
+disallow_untyped_calls = false
+warn_return_any = false
+disallow_any_generics = false

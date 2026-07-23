@@ -128,7 +128,7 @@ def train_pass(
         logits, values = net(o[idx])
         policy_loss, value_loss = alphazero_loss(logits, values, p[idx], v[idx])
         optimizer.zero_grad()
-        (policy_loss + value_loss).backward()
+        (policy_loss + value_loss).backward()  # type: ignore[no-untyped-call]  # torch stub gap
         optimizer.step()
         p_sum += float(policy_loss.item())
         v_sum += float(value_loss.item())
@@ -171,14 +171,15 @@ def run_iteration(
     net: AlphaZeroNet,
     optimizer: torch.optim.Optimizer,
     it: int,
-    batch: object,
+    batch: rf._reinfors.AlphaZeroBatch,
 ) -> None:
-    obs, pi, z, telemetry = batch
+    obs, pi, z = batch.obs, batch.policy_targets, batch.value_targets
+    policy_loss = value_loss = float("nan")  # --train-passes 0 = collect-only; nothing to report
     for _ in range(args.train_passes):
         policy_loss, value_loss = train_pass(net, optimizer, obs, pi, z, args.batch_size, args.device)
     print(
         f"  iter {it:3d}  records {obs.shape[0]:4d}  policy_loss {policy_loss:.4f}  "
-        f"value_loss {value_loss:.4f}  episodes {len(telemetry['episodes'])}"
+        f"value_loss {value_loss:.4f}  episodes {len(batch.telemetry['episodes'])}"
     )
     if args.eval_every and it % args.eval_every == 0:
         rate = eval_vs_random(net, args.device, args.eval_games, args.seed + it)
@@ -225,6 +226,7 @@ def main() -> None:
         infer = make_infer(net, args.device)
         for it in range(1, args.iterations + 1):
             batch = engine.collect(args.collect_size, infer)  # search with live weights
+            assert isinstance(batch, rf._reinfors.AlphaZeroBatch)  # narrows the family union
             run_iteration(args, net, optimizer, it, batch)
     else:
         # Overlapped loop: the worker collects batch t+1 (reading the collector net) while we train
@@ -243,6 +245,7 @@ def main() -> None:
         with engine.collect_stream(args.collect_size, locked_infer, depth=depth) as stream:
             for it in range(1, args.iterations + 1):
                 batch = stream.next()
+                assert isinstance(batch, rf._reinfors.AlphaZeroBatch)  # narrows the family union
                 with sync_lock:
                     collector_net.load_state_dict(net.state_dict())
                 run_iteration(args, net, optimizer, it, batch)

@@ -86,7 +86,7 @@ def _gym_cls() -> Any:
     except ModuleNotFoundError as e:
         raise _missing("gymnasium") from e
 
-    class ReinforsGymEnv(gymnasium.Env):
+    class ReinforsGymEnv(gymnasium.Env["np.ndarray[Any, np.dtype[np.float32]]", int]):
         """A single-agent reinfors game as a ``gymnasium.Env``."""
 
         # `metadata` (with the same `{"render_modes": []}` default) is inherited from `gymnasium.Env`.
