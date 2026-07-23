@@ -112,21 +112,26 @@ fn sole_actor(actor: Actor) -> usize {
     }
 }
 
-/// One search tree. `child`/`reward`/`visits`/`value_sum` are indexed by action id (every game's
-/// `legal_actions` spans the full action space, so action id == slot — no legality indirection).
+/// One search tree node, sparse over the mover's LEGAL actions: `actions` holds the legal action ids
+/// (from `Game::legal_actions`), and `child`/`reward`/`visits`/`value_sum`/`prior` are parallel to it.
+/// For the always-fully-legal games (snake, connect4, gridworld) `actions` is `0..A` and behavior is
+/// bit-identical to the former dense layout; for wide, mostly-illegal action spaces (chess: 4672 ids,
+/// ~35 legal) nodes stay ~legal-sized and selection scans only real moves. Priors and root Dirichlet
+/// noise likewise live on the legal set only (the AlphaZero convention).
 struct Node<S> {
     state: S,
     actor: usize,
     depth: i32,
     terminal: bool,
-    child: Vec<i64>,     // [A] child arena index, -1 if the edge is unexpanded
-    reward: Vec<f64>, // [A] immediate reward for the mover taking this action (its own perspective)
-    visits: Vec<u32>, // [A] edge visit counts
-    value_sum: Vec<f64>, // [A] summed backed-up value (mover's perspective)
+    actions: Vec<usize>, // [L] the mover's legal action ids at this node
+    child: Vec<i64>,     // [L] child arena index, -1 if the edge is unexpanded
+    reward: Vec<f64>, // [L] immediate reward for the mover taking this action (its own perspective)
+    visits: Vec<u32>, // [L] edge visit counts
+    value_sum: Vec<f64>, // [L] summed backed-up value (mover's perspective)
     total_visits: u32,
     value: f64, // this node's state value (net leaf eval, or 0 at a terminal) — the backprop source
     obs: Vec<f32>, // staged observation for the pending net eval (empty for terminals)
-    prior: Vec<f64>, // [A] PUCT prior (softmaxed net logits); empty under UCT, and empty = not yet evaluated under PUCT
+    prior: Vec<f64>, // [L] PUCT prior (softmaxed net logits over the legal set); empty under UCT, and empty = not yet evaluated under PUCT
 }
 
 impl<S> Node<S> {
@@ -135,15 +140,21 @@ impl<S> Node<S> {
         actor: usize,
         depth: i32,
         terminal: bool,
-        actions: usize,
+        actions: Vec<usize>,
         obs: Vec<f32>,
     ) -> Node<S> {
-        let width = if terminal { 0 } else { actions };
+        let actions = if terminal { Vec::new() } else { actions };
+        debug_assert!(
+            terminal || !actions.is_empty(),
+            "non-terminal node with no legal actions — the game must mark such states terminal"
+        );
+        let width = actions.len();
         Node {
             state,
             actor,
             depth,
             terminal,
+            actions,
             child: vec![-1; width],
             reward: vec![0.0; width],
             visits: vec![0; width],
@@ -179,7 +190,8 @@ impl<S: Clone> Tree<S> {
     {
         let actor = sole_actor(game.actor(&state));
         let obs = enc.encode(&state, actor);
-        let root = Node::leaf(state, actor, 0, false, game.action_count(), obs);
+        let legal = game.legal_actions(&state, actor);
+        let root = Node::leaf(state, actor, 0, false, legal, obs);
         Tree {
             arena: vec![root],
             sims: 0,
@@ -236,41 +248,37 @@ impl<S: Clone> Tree<S> {
         }
     }
 
-    /// Step the game for action `a` at node `ni`, appending the resulting child to the arena.
+    /// Step the game for the edge at slot `ai` (an index into the node's legal `actions`), appending
+    /// the resulting child to the arena.
     fn expand<G>(
         &mut self,
         game: &G,
         enc: &dyn StateEncoder<State = S>,
         reward: &dyn Reward<Event = G::Event>,
         ni: usize,
-        a: usize,
+        ai: usize,
     ) -> usize
     where
         G: Game<State = S>,
     {
         let mover = self.arena[ni].actor;
+        let action = self.arena[ni].actions[ai];
         let mut joint = vec![0usize; game.num_agents()];
-        joint[mover] = a;
+        joint[mover] = action;
         let t = game.step(&self.arena[ni].state, &joint);
-        self.arena[ni].reward[a] = reward.step_reward(&t.events[mover], mover);
+        self.arena[ni].reward[ai] = reward.step_reward(&t.events[mover], mover);
         let depth = self.arena[ni].depth + 1;
         let child = if t.terminal {
-            Node::leaf(
-                t.next_state,
-                mover,
-                depth,
-                true,
-                game.action_count(),
-                Vec::new(),
-            )
+            Node::leaf(t.next_state, mover, depth, true, Vec::new(), Vec::new())
         } else {
             let actor = sole_actor(game.actor(&t.next_state));
             let obs = enc.encode(&t.next_state, actor);
-            Node::leaf(t.next_state, actor, depth, false, game.action_count(), obs)
+            let legal = game.legal_actions(&t.next_state, actor);
+            Node::leaf(t.next_state, actor, depth, false, legal, obs)
         };
         let idx = self.arena.len();
         self.arena.push(child);
-        self.arena[ni].child[a] = idx as i64;
+        self.arena[ni].child[ai] = idx as i64;
         idx
     }
 
@@ -293,18 +301,19 @@ impl<S: Clone> Tree<S> {
 
     /// The finished tree's root evaluation: per-action mean value `values[1][A]` (0 for any unvisited
     /// action) and visit counts, plus telemetry.
+    /// The finished tree's root evaluation, densified back to the full action space: illegal (and
+    /// unvisited) actions carry value 0 and visit count 0 — so π targets naturally put zero mass on
+    /// illegal moves, and by-visits acting can never pick one.
     fn evaluation(self, actions: usize) -> SearchEvaluation {
         let root = &self.arena[0];
-        let values: Vec<f64> = (0..actions)
-            .map(|a| {
-                if root.visits[a] > 0 {
-                    root.value_sum[a] / root.visits[a] as f64
-                } else {
-                    0.0
-                }
-            })
-            .collect();
-        let visits: Vec<f64> = root.visits.iter().map(|&n| n as f64).collect();
+        let mut values = vec![0.0f64; actions];
+        let mut visits = vec![0.0f64; actions];
+        for (slot, &action) in root.actions.iter().enumerate() {
+            if root.visits[slot] > 0 {
+                values[action] = root.value_sum[slot] / root.visits[slot] as f64;
+            }
+            visits[action] = root.visits[slot] as f64;
+        }
         let stats = SearchStats {
             max_depth: self.max_depth_seen,
             expansions: self.sims,
@@ -358,10 +367,12 @@ fn select_edge<S>(node: &Node<S>, guidance: &Guidance) -> usize {
     best
 }
 
-/// A leaf state's value = greedy `max_a` of the head-mean net Q (matches the expectimax bootstrap).
-fn leaf_value(q: &[f64], k: usize, a: usize) -> f64 {
-    (0..a)
-        .map(|ai| (0..k).map(|h| q[h * a + ai]).sum::<f64>() / k as f64)
+/// A leaf state's value = greedy max over the LEGAL actions of the head-mean net Q (matches the
+/// expectimax bootstrap; restricting to legal keeps an illegal move's phantom Q out of the bootstrap).
+fn leaf_value(q: &[f64], k: usize, a: usize, legal: &[usize]) -> f64 {
+    legal
+        .iter()
+        .map(|&ai| (0..k).map(|h| q[h * a + ai]).sum::<f64>() / k as f64)
         .fold(f64::NEG_INFINITY, f64::max)
 }
 
@@ -448,21 +459,28 @@ where
             let row_data = &out[row * stride..(row + 1) * stride];
             match guidance {
                 Guidance::Uct { .. } => {
-                    let v = leaf_value(row_data, stride / a, a);
+                    let v = leaf_value(row_data, stride / a, a, &tree.arena[tree.leaf].actions);
                     tree.backprop(gamma, v);
                 }
                 Guidance::Puct { noise, .. } => {
                     let (logits, value) = row_data.split_at(a);
-                    let mut prior = softmax(logits);
+                    // Prior over the LEGAL set only: gather the leaf's legal actions' logits and
+                    // softmax those — illegal moves get zero mass by construction (the AlphaZero
+                    // convention), and the net never needs to learn to suppress them.
+                    let leaf_actions = &tree.arena[tree.leaf].actions;
+                    let legal_logits: Vec<f64> =
+                        leaf_actions.iter().map(|&act| logits[act]).collect();
+                    let mut prior = softmax(&legal_logits);
                     if tree.leaf == 0 {
                         // The root's one eval: mix in the Dirichlet exploration noise (per-tree
-                        // stream, so pooled searches stay deterministic and independent).
+                        // stream, so pooled searches stay deterministic and independent), drawn
+                        // over the legal set (AlphaZero's noise dimension).
                         if let Some((eps, alpha, seed)) = noise {
                             if *eps > 0.0 {
                                 let mut rng = SplitMix64::new(
                                     seed ^ (ti as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
                                 );
-                                let noise_draw = dirichlet(&mut rng, *alpha, a);
+                                let noise_draw = dirichlet(&mut rng, *alpha, prior.len());
                                 for (p, d) in prior.iter_mut().zip(noise_draw) {
                                     *p = (1.0 - eps) * *p + eps * d;
                                 }
@@ -659,6 +677,7 @@ mod tests {
             actor: 0,
             depth: 0,
             terminal: false,
+            actions: (0..a).collect(),
             child: vec![-1; a],
             reward: vec![0.0; a],
             visits,
@@ -712,5 +731,147 @@ mod tests {
             ),
             0
         );
+    }
+}
+
+#[cfg(test)]
+mod masking_tests {
+    //! The legal-action masking path, on a synthetic game whose legal set is a strict subset of the
+    //! action space (every real game today is fully legal, so only this covers sparse nodes).
+    use super::*;
+    use crate::encoder::StateEncoder;
+    use crate::game::{Actor, Game, Rng, Transition};
+    use crate::policies::alphazero::{alphazero_many, AlphaZeroConfig};
+    use crate::reward::Reward as RewardTrait;
+
+    /// A 1-player counting game over A=10 actions where only EVEN action ids are ever legal.
+    /// Action `a` adds `a` to a running total; reaching total >= 8 is a terminal win (+1).
+    struct EvenOnly;
+    #[derive(Clone)]
+    struct St(i32);
+
+    impl Game for EvenOnly {
+        type State = St;
+        type Event = f64;
+        fn num_agents(&self) -> usize {
+            1
+        }
+        fn action_count(&self) -> usize {
+            10
+        }
+        fn actor(&self, _s: &St) -> Actor {
+            Actor::Agent(0)
+        }
+        fn legal_actions(&self, _s: &St, _agent: usize) -> Vec<usize> {
+            (0..10).filter(|a| a % 2 == 0).collect()
+        }
+        fn step(&self, s: &St, actions: &[usize]) -> Transition<St, f64> {
+            let a = actions[0] as i32;
+            assert!(a % 2 == 0, "search stepped an illegal (odd) action: {a}");
+            let total = s.0 + a;
+            Transition {
+                next_state: St(total),
+                events: vec![if total >= 8 { 1.0 } else { 0.0 }],
+                terminal: total >= 8,
+            }
+        }
+        fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+            St(0)
+        }
+    }
+
+    struct Enc;
+    impl StateEncoder for Enc {
+        type State = St;
+        fn encode(&self, s: &St, _agent: usize) -> Vec<f32> {
+            vec![s.0 as f32]
+        }
+        fn obs_shape(&self) -> (usize, usize, usize) {
+            (1, 1, 1)
+        }
+    }
+
+    struct Passthrough;
+    impl RewardTrait for Passthrough {
+        type Event = f64;
+        fn step_reward(&self, event: &f64, _agent: usize) -> f64 {
+            *event
+        }
+    }
+
+    fn run(guidance_puct: bool, noise_eps: f64) -> SearchEvaluation {
+        let mut infer = |_obs: Vec<f32>, n: usize| -> Vec<f64> {
+            if guidance_puct {
+                vec![0.0; n * 11] // A logits + value
+            } else {
+                vec![0.0; n * 10] // K=1 Q rows
+            }
+        };
+        let evals = if guidance_puct {
+            let cfg = AlphaZeroConfig {
+                num_simulations: 40,
+                c_puct: 1.5,
+                gamma: 1.0,
+                max_depth: 8,
+                noise_epsilon: noise_eps,
+                noise_alpha: 0.3,
+                temperature: 0.0,
+                temperature_drop: u32::MAX,
+            };
+            alphazero_many(
+                &EvenOnly,
+                &Enc,
+                &Passthrough,
+                &cfg,
+                vec![(St(0), 0)],
+                7,
+                &mut infer,
+            )
+        } else {
+            let cfg = MctsConfig {
+                num_simulations: 40,
+                uct_c: 1.4,
+                gamma: 1.0,
+                max_depth: 8,
+                temperature: 0.0,
+                temperature_drop: u32::MAX,
+            };
+            mcts_many(
+                &EvenOnly,
+                &Enc,
+                &Passthrough,
+                &cfg,
+                vec![(St(0), 0)],
+                &mut infer,
+            )
+        };
+        evals.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn uct_visits_only_legal_actions() {
+        let eval = run(false, 0.0);
+        for a in (1..10).step_by(2) {
+            assert_eq!(eval.visits[a], 0.0, "illegal action {a} was visited");
+            assert_eq!(eval.values[0][a], 0.0);
+        }
+        assert!(eval.visits.iter().sum::<f64>() > 0.0);
+        // The winning line exists (e.g. 8 outright, or 4+4): argmax visits must be even.
+        let best = (0..10).max_by(|&x, &y| eval.visits[x].partial_cmp(&eval.visits[y]).unwrap());
+        assert_eq!(best.unwrap() % 2, 0);
+    }
+
+    #[test]
+    fn puct_visits_and_noise_stay_legal() {
+        // Strong noise: even fully-noised priors must keep zero mass on illegal moves.
+        let eval = run(true, 0.9);
+        for a in (1..10).step_by(2) {
+            assert_eq!(
+                eval.visits[a], 0.0,
+                "illegal action {a} was visited under noise"
+            );
+        }
+        // π normalization over the dense vector still holds (root visits sum = sims - 1).
+        assert!((eval.visits.iter().sum::<f64>() - 39.0).abs() < 1e-9);
     }
 }
