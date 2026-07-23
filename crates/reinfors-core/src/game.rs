@@ -68,6 +68,38 @@ pub trait Game {
         None
     }
 
+    /// The transition's chance distribution, *declared*: probabilities over the outcome indices
+    /// that [`apply_chance`](Self::apply_chance) accepts. `None` means the transition is
+    /// deterministic — the same condition under which `sample_chance` returns `None`, and the two
+    /// must agree (a correct sampler is constructive proof the game knows this distribution; this
+    /// is its declarative form, and tree searches consume it per their configured
+    /// [`ChanceMode`](crate::ChanceMode)). Contract: probabilities are positive and sum to 1;
+    /// terminal transitions return `None`; outcomes only vary the chance element — they share the
+    /// transition's `terminal` flag and next actor. The default declares every transition
+    /// deterministic.
+    fn chance_outcomes(
+        &self,
+        state: &Self::State,
+        transition: &Transition<Self::State, Self::Event>,
+    ) -> Option<Vec<f64>> {
+        let _ = (state, transition);
+        None
+    }
+
+    /// Materialize one outcome of the transition's chance distribution — the state `sample_chance`
+    /// would produce had it drawn `outcome` (an index into the `chance_outcomes` probabilities).
+    /// Only called with indices of a `Some` distribution; games that declare no chance never see
+    /// it.
+    fn apply_chance(
+        &self,
+        state: &Self::State,
+        transition: &Transition<Self::State, Self::Event>,
+        outcome: usize,
+    ) -> Self::State {
+        let _ = (state, transition, outcome);
+        unreachable!("apply_chance called on a game that declares no chance_outcomes")
+    }
+
     fn initial_state(&self, rng: &mut dyn Rng) -> Self::State;
 
     fn step_env(

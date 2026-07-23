@@ -2,7 +2,7 @@
 //! search, root noise diversifies it deterministically, and simultaneous games are rejected —
 //! mirroring the UCT suite in `mcts.rs`.
 
-use reinfors_core::{alphazero_many, Actor, AlphaZeroConfig, Evaluator, Game, Rng};
+use reinfors_core::{alphazero_many, Actor, AlphaZeroConfig, ChanceMode, Evaluator, Game, Rng};
 use reinfors_games::{Connect4, Connect4Planes, Connect4Reward, EgocentricSnake, Snake};
 
 struct NoRng;
@@ -25,6 +25,7 @@ fn cfg(num_simulations: usize, noise_epsilon: f64) -> AlphaZeroConfig {
         noise_alpha: 0.3,
         temperature: 0.0,
         temperature_drop: u32::MAX,
+        chance: ChanceMode::AlwaysResample,
     }
 }
 

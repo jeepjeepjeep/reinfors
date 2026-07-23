@@ -87,6 +87,9 @@ class PolicyHandle:
     # MCTS (UCT); pairs with TreeStrap; sequential/single-agent games only. act_by: "value" | "visits".
     # temperature > 0 (AlphaZero-style) samples the first temperature_drop plies of each episode
     # ∝ visits^(1/temperature) for training self-play diversity (None = whole episode); 0 = greedy.
+    # chance_mode (declared-chance games): "always_resample" (fresh draw ∝ p per descent, unbiased
+    # default) | "committed" (freeze chance_samples draws per edge — food_samples-style, for wide
+    # fans) | "expand_all" (evaluate every outcome at expansion — exact, narrow fans).
     @staticmethod
     def Mcts(
         num_simulations: int = ...,
@@ -95,6 +98,8 @@ class PolicyHandle:
         act_by: str = ...,
         temperature: float = ...,
         temperature_drop: int | None = ...,
+        chance_mode: str = ...,
+        chance_samples: int = ...,
     ) -> PolicyHandle: ...
     # AlphaZero (PUCT); pairs with learners.AlphaZero; sequential/single-agent games only. The infer
     # callback returns a (policy_logits (N, A) f64, values (N,) f64) tuple — one forward, both heads.
@@ -109,6 +114,8 @@ class PolicyHandle:
         noise_alpha: float = ...,
         temperature: float = ...,
         temperature_drop: int | None = ...,
+        chance_mode: str = ...,
+        chance_samples: int = ...,
     ) -> PolicyHandle: ...
 
 class LearnerHandle:

@@ -75,6 +75,10 @@ pub struct SearchStats {
     pub shared_rows: usize,
     pub fresh_rows: usize,
     pub hit_rows: usize,
+    /// Rows an `ExpandAll` chance fan consumed *beyond* the one its simulation already accounts
+    /// for (fan width − 1 per expanded chance edge; 0 in the other chance modes), so the identity
+    /// above generalizes by subtracting this term from the row-bucket side.
+    pub fan_extra_rows: usize,
 }
 
 /// An interior MAX node's TreeStrap target: its observation and per-head backed-up action values

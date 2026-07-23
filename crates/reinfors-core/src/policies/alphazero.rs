@@ -35,6 +35,9 @@ pub struct AlphaZeroConfig {
     /// `∝ visits^(1/temperature)` for the first `temperature_drop` plies, 0 acts greedily.
     pub temperature: f64,
     pub temperature_drop: u32,
+    /// How the search consumes stochastic transitions' declared chance (see
+    /// [`ChanceMode`](crate::ChanceMode)). Inert for games that declare no `chance_outcomes`.
+    pub chance: crate::policies::mcts::ChanceMode,
 }
 
 pub struct AlphaZero {
@@ -76,6 +79,8 @@ where
         cfg.gamma,
         cfg.max_depth,
         &guidance,
+        cfg.chance,
+        seed,
         requests,
         eval,
     )
@@ -128,5 +133,6 @@ impl Policy for AlphaZero {
         stats.sum_shared_rows += s.shared_rows;
         stats.sum_fresh_rows += s.fresh_rows;
         stats.sum_hit_rows += s.hit_rows;
+        stats.sum_fan_extra_rows += s.fan_extra_rows;
     }
 }

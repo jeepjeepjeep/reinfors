@@ -19,10 +19,10 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
 use reinfors_core::{
-    ActBy, AlphaZero, AlphaZeroConfig, AlphaZeroLearner, AlphaZeroRecord, AlwaysInitialState, Dqn,
-    DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game, InferCache, Learner, Mcts,
-    MctsConfig, Opponent, Policy, ReachedStateBuffer, Reward, SearchConfig, SelectiveExpectimax,
-    Space, StartDistribution, StateEncoder, TreeStrap, TreeStrapRecord,
+    ActBy, AlphaZero, AlphaZeroConfig, AlphaZeroLearner, AlphaZeroRecord, AlwaysInitialState,
+    ChanceMode, Dqn, DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game, InferCache,
+    Learner, Mcts, MctsConfig, Opponent, Policy, ReachedStateBuffer, Reward, SearchConfig,
+    SelectiveExpectimax, Space, StartDistribution, StateEncoder, TreeStrap, TreeStrapRecord,
 };
 use reinfors_games::snake::{Cell, DeathCause};
 use reinfors_games::{
@@ -968,6 +968,8 @@ fn build_telemetry<'py>(
     telemetry.set_item("shared_rows", stats.sum_shared_rows)?;
     telemetry.set_item("fresh_rows", stats.sum_fresh_rows)?;
     telemetry.set_item("hit_rows", stats.sum_hit_rows)?;
+    // ExpandAll chance fans: rows beyond one per simulation (the identity subtracts this term).
+    telemetry.set_item("fan_extra_rows", stats.sum_fan_extra_rows)?;
     Ok(telemetry)
 }
 
@@ -1202,6 +1204,7 @@ enum PolicySpec {
         act_by: ActBy,
         temperature: f64,
         temperature_drop: u32,
+        chance: ChanceMode,
     },
     AlphaZero {
         num_simulations: usize,
@@ -1211,6 +1214,7 @@ enum PolicySpec {
         noise_alpha: f64,
         temperature: f64,
         temperature_drop: u32,
+        chance: ChanceMode,
     },
 }
 
@@ -1333,6 +1337,7 @@ where
                 act_by,
                 temperature,
                 temperature_drop,
+                chance,
             },
             LearnerSpec::TreeStrap {
                 gamma,
@@ -1368,6 +1373,7 @@ where
                     max_depth,
                     temperature,
                     temperature_drop,
+                    chance,
                 },
                 act_by,
             );
@@ -1396,6 +1402,7 @@ where
                 noise_alpha,
                 temperature,
                 temperature_drop,
+                chance,
             },
             LearnerSpec::AlphaZero { gamma },
         ) => {
@@ -1431,6 +1438,7 @@ where
                 noise_alpha,
                 temperature,
                 temperature_drop,
+                chance,
             });
             let learner = AlphaZeroLearner::new(gamma);
             Ok(Box::new(EngineImpl {
@@ -2274,9 +2282,16 @@ impl PolicyHandle {
     /// (AlphaZero-style): the first `temperature_drop` plies of each episode are sampled
     /// `∝ visits^(1/temperature)` from the seeded acting RNG (later plies act greedily);
     /// `temperature_drop=None` applies it to the whole episode. Same seed → same games.
+    /// `chance_mode` (games with declared `chance_outcomes` only; inert otherwise) picks how the
+    /// search consumes stochastic transitions: `"always_resample"` (fresh draw ∝ probability every
+    /// descent — unbiased, the asymptotically correct default), `"committed"` (freeze
+    /// `chance_samples` draws at edge expansion and plan deeply inside them — expectimax's
+    /// `food_samples` treatment, for fans wide relative to the sim budget), or `"expand_all"`
+    /// (evaluate every outcome at expansion — exact, for narrow fans).
     #[staticmethod]
-    #[pyo3(signature = (num_simulations=64, uct_c=2.0, max_depth=64, act_by="value", temperature=0.0, temperature_drop=None))]
+    #[pyo3(signature = (num_simulations=64, uct_c=2.0, max_depth=64, act_by="value", temperature=0.0, temperature_drop=None, chance_mode="always_resample", chance_samples=4))]
     #[pyo3(name = "Mcts")]
+    #[allow(clippy::too_many_arguments)]
     fn mcts(
         num_simulations: usize,
         uct_c: f64,
@@ -2284,6 +2299,8 @@ impl PolicyHandle {
         act_by: &str,
         temperature: f64,
         temperature_drop: Option<u32>,
+        chance_mode: &str,
+        chance_samples: usize,
     ) -> PyResult<Self> {
         let act_by = match act_by {
             "value" => ActBy::Value,
@@ -2302,6 +2319,7 @@ impl PolicyHandle {
                 act_by,
                 temperature,
                 temperature_drop: temperature_drop.unwrap_or(u32::MAX),
+                chance: parse_chance_mode(chance_mode, chance_samples)?,
             },
         })
     }
@@ -2312,9 +2330,11 @@ impl PolicyHandle {
     /// supplies search-level exploration (drawn from the seeded stream — collects stay reproducible);
     /// the acting temperature (same semantics as `Mcts`) supplies move-level diversity. Acting is by
     /// visit count (classic AlphaZero).
+    /// `chance_mode` / `chance_samples`: as on `Mcts`.
     #[staticmethod]
-    #[pyo3(signature = (num_simulations=64, c_puct=1.5, max_depth=64, noise_epsilon=0.25, noise_alpha=0.3, temperature=1.0, temperature_drop=8))]
+    #[pyo3(signature = (num_simulations=64, c_puct=1.5, max_depth=64, noise_epsilon=0.25, noise_alpha=0.3, temperature=1.0, temperature_drop=8, chance_mode="always_resample", chance_samples=4))]
     #[pyo3(name = "AlphaZero")]
+    #[allow(clippy::too_many_arguments)]
     fn alphazero(
         num_simulations: usize,
         c_puct: f64,
@@ -2323,8 +2343,10 @@ impl PolicyHandle {
         noise_alpha: f64,
         temperature: f64,
         temperature_drop: Option<u32>,
-    ) -> Self {
-        PolicyHandle {
+        chance_mode: &str,
+        chance_samples: usize,
+    ) -> PyResult<Self> {
+        Ok(PolicyHandle {
             spec: PolicySpec::AlphaZero {
                 num_simulations,
                 c_puct,
@@ -2333,8 +2355,28 @@ impl PolicyHandle {
                 noise_alpha,
                 temperature,
                 temperature_drop: temperature_drop.unwrap_or(u32::MAX),
+                chance: parse_chance_mode(chance_mode, chance_samples)?,
             },
+        })
+    }
+}
+
+/// Parse the Python-surface chance-mode string (see the `Mcts` handle docs for semantics).
+fn parse_chance_mode(mode: &str, samples: usize) -> PyResult<ChanceMode> {
+    match mode {
+        "always_resample" => Ok(ChanceMode::AlwaysResample),
+        "committed" => {
+            if samples < 1 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "chance_samples must be >= 1",
+                ));
+            }
+            Ok(ChanceMode::Committed { samples })
         }
+        "expand_all" => Ok(ChanceMode::ExpandAll),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown chance_mode {other:?}; expected \"always_resample\", \"committed\", or \"expand_all\""
+        ))),
     }
 }
 
