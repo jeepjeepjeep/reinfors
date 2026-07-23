@@ -127,5 +127,8 @@ impl Policy for AlphaZero {
         stats.sum_leaves += s.leaves as f64;
         stats.sum_rounds += s.rounds as f64;
         stats.sum_expansions += s.expansions as f64;
+        stats.sum_terminal_sims += s.terminal_sims;
+        stats.sum_depthcap_sims += s.depthcap_sims;
+        stats.sum_shared_rows += s.shared_rows;
     }
 }

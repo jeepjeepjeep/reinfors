@@ -174,7 +174,8 @@ impl<S> Node<S> {
 /// depth-capped node) and can be backed up immediately.
 enum Reached {
     Eval,
-    Cached(f64),
+    Terminal,         // in-tree terminal: exact value 0 for the mover-to-be (no forward)
+    DepthCapped(f64), // depth cap: the node's cached net value (no forward)
 }
 
 struct Tree<S> {
@@ -183,6 +184,11 @@ struct Tree<S> {
     path: Vec<(usize, usize)>, // (node idx, action) edges from root to the current leaf
     leaf: usize,
     max_depth_seen: i32,
+    // Per-search sim-fate counters (the per-move identity `sims = forwards + cache hits +
+    // shared rows + terminal + depth-capped` — see the collect telemetry).
+    terminal_sims: usize,
+    depthcap_sims: usize,
+    shared_rows: usize,
 }
 
 impl<S: Clone> Tree<S> {
@@ -200,6 +206,9 @@ impl<S: Clone> Tree<S> {
             path: Vec::new(),
             leaf: 0,
             max_depth_seen: 0,
+            terminal_sims: 0,
+            depthcap_sims: 0,
+            shared_rows: 0,
         }
     }
 
@@ -225,7 +234,7 @@ impl<S: Clone> Tree<S> {
             self.max_depth_seen = self.max_depth_seen.max(node.depth);
             if node.terminal {
                 self.leaf = ni;
-                return Reached::Cached(0.0);
+                return Reached::Terminal;
             }
             if matches!(guidance, Guidance::Puct { .. }) && node.prior.is_empty() {
                 self.leaf = ni; // un-evaluated PUCT node (the root on sim 1): evaluate it in place
@@ -233,7 +242,7 @@ impl<S: Clone> Tree<S> {
             }
             if node.depth >= max_depth {
                 self.leaf = ni; // depth cap: use the cached net value evaluated when this node was created
-                return Reached::Cached(node.value);
+                return Reached::DepthCapped(node.value);
             }
             let a = select_edge(node, guidance);
             self.path.push((ni, a));
@@ -241,7 +250,7 @@ impl<S: Clone> Tree<S> {
                 let child = self.expand(game, enc, reward, ni, a);
                 self.leaf = child;
                 return if self.arena[child].terminal {
-                    Reached::Cached(0.0)
+                    Reached::Terminal
                 } else {
                     Reached::Eval // its obs is staged for the pooled forward
                 };
@@ -322,6 +331,9 @@ impl<S: Clone> Tree<S> {
             leaves: self.sims,
             rounds: self.sims,
             sigma_sum: 0.0,
+            terminal_sims: self.terminal_sims,
+            depthcap_sims: self.depthcap_sims,
+            shared_rows: self.shared_rows,
         };
         SearchEvaluation {
             values: vec![values],
@@ -455,7 +467,14 @@ where
             while tree.sims < num_simulations {
                 tree.sims += 1;
                 match tree.select_expand(game, enc, reward, max_depth, guidance) {
-                    Reached::Cached(v) => tree.backprop(gamma, v),
+                    Reached::Terminal => {
+                        tree.terminal_sims += 1;
+                        tree.backprop(gamma, 0.0);
+                    }
+                    Reached::DepthCapped(v) => {
+                        tree.depthcap_sims += 1;
+                        tree.backprop(gamma, v);
+                    }
                     Reached::Eval => {
                         if let Some(c) = cache.as_deref_mut() {
                             let key = InferCache::key(&tree.arena[tree.leaf].obs);
@@ -465,6 +484,7 @@ where
                             }
                             // Within-batch dedup: identical positions across trees share one row.
                             if let Some(&slot) = staged.get(&key) {
+                                tree.shared_rows += 1;
                                 consumers[slot].push(ti);
                                 break;
                             }
@@ -621,6 +641,9 @@ impl Policy for Mcts {
         stats.sum_leaves += s.leaves as f64;
         stats.sum_rounds += s.rounds as f64;
         stats.sum_expansions += s.expansions as f64;
+        stats.sum_terminal_sims += s.terminal_sims;
+        stats.sum_depthcap_sims += s.depthcap_sims;
+        stats.sum_shared_rows += s.shared_rows;
     }
 }
 
@@ -649,6 +672,9 @@ mod tests {
                 leaves: 1,
                 rounds: 1,
                 sigma_sum: 0.0,
+                terminal_sims: 0,
+                depthcap_sims: 0,
+                shared_rows: 0,
             },
         }
     }

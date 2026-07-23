@@ -960,6 +960,11 @@ fn build_telemetry<'py>(
     // rows-per-state falls as the hit rate rises.
     telemetry.set_item("cache_lookups", stats.cache_lookups)?;
     telemetry.set_item("cache_hits", stats.cache_hits)?;
+    // Tree-search sim fates: decisions × num_simulations =
+    //   infer_rows + cache_hits + shared_rows + terminal_sims + depthcap_sims.
+    telemetry.set_item("terminal_sims", stats.sum_terminal_sims)?;
+    telemetry.set_item("depthcap_sims", stats.sum_depthcap_sims)?;
+    telemetry.set_item("shared_rows", stats.sum_shared_rows)?;
     Ok(telemetry)
 }
 

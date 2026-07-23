@@ -63,6 +63,13 @@ pub struct SearchStats {
     /// Sum of per-leaf sigma (head-disagreement std) over all expanded leaves; `sigma_sum / leaves`
     /// is the search's mean leaf epistemic uncertainty (matches snake_RL's `mean_sigma`).
     pub sigma_sum: f64,
+    /// Tree-search sim fates (0 for the expectimax family): simulations resolved without a net
+    /// forward — in-tree terminals, depth caps, and within-batch shared (deduped) rows. Together
+    /// with `infer_rows` and `cache_hits` these complete the per-collect identity
+    /// `decisions × num_simulations = infer_rows + cache_hits + shared_rows + terminal_sims + depthcap_sims`.
+    pub terminal_sims: usize,
+    pub depthcap_sims: usize,
+    pub shared_rows: usize,
 }
 
 /// An interior MAX node's TreeStrap target: its observation and per-head backed-up action values

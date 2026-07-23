@@ -61,6 +61,10 @@ pub struct CollectStats {
     // rows-per-state falls as the hit rate rises — visible without any harness change.
     pub cache_lookups: usize,
     pub cache_hits: usize,
+    // Tree-search sim fates summed over the collect (0 for non-tree policies) — see `SearchStats`.
+    pub sum_terminal_sims: usize,
+    pub sum_depthcap_sims: usize,
+    pub sum_shared_rows: usize,
 }
 
 /// Engine-level rollout knobs. The truncation horizon is the game's (`truncation_horizon`), not an
