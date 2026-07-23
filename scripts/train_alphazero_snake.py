@@ -19,6 +19,10 @@ Differences from the connect4 reference, all snake-driven:
     measurement on the same budget;
   - eval plays the raw policy head against a uniform-random opponent in an `rf.Env` and reports
     the net side's mean episode reward (food - death), the analogue of the reference's win rate.
+    Known limitation, kept as instruction: on snake the searchless head is a weak probe — the
+    game's reactive safety lives in the search, so the self-play reward/length curve is the
+    primary training signal, and a search-backed eval (net + small-sim search vs random) is the
+    right future probe.
 
     uv run --with torch python scripts/train_alphazero_snake.py --iterations 30
     uv run --with torch python scripts/train_alphazero_snake.py --chance-mode always_resample
