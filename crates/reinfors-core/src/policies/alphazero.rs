@@ -16,7 +16,7 @@ use crate::engine::CollectStats;
 use crate::evaluator::Evaluator;
 use crate::game::{Game, Rng};
 use crate::policies::expectimax::SearchEvaluation;
-use crate::policies::mcts::{sample_visits, search_many, Guidance};
+use crate::policies::mcts::{sample_visits, search_many, Guidance, NoiseScope};
 use crate::policy::{argmax, Policy};
 use crate::reward::Reward;
 
@@ -38,6 +38,9 @@ pub struct AlphaZeroConfig {
     /// How the search consumes stochastic transitions' declared chance (see
     /// [`ChanceMode`](crate::ChanceMode)). Inert for games that declare no `chance_outcomes`.
     pub chance: crate::policies::mcts::ChanceMode,
+    /// Simultaneous games: which root prior(s) the Dirichlet noise perturbs. Irrelevant for
+    /// sequential games (one root table).
+    pub noise_scope: NoiseScope,
 }
 
 pub struct AlphaZero {
@@ -70,6 +73,7 @@ where
     let guidance = Guidance::Puct {
         c: cfg.c_puct,
         noise: Some((cfg.noise_epsilon, cfg.noise_alpha, seed)),
+        noise_both: matches!(cfg.noise_scope, NoiseScope::Both),
     };
     search_many(
         game,
@@ -133,6 +137,6 @@ impl Policy for AlphaZero {
         stats.sum_shared_rows += s.shared_rows;
         stats.sum_fresh_rows += s.fresh_rows;
         stats.sum_hit_rows += s.hit_rows;
-        stats.sum_fan_extra_rows += s.fan_extra_rows;
+        stats.sum_extra_eval_rows += s.extra_eval_rows;
     }
 }

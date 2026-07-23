@@ -161,8 +161,7 @@ fn mcts_pools_multiple_requests() {
 }
 
 #[test]
-#[should_panic(expected = "sequential/single-agent")]
-fn mcts_rejects_simultaneous_games() {
+fn mcts_searches_simultaneous_snake() {
     let snake = Snake {
         grid_size: 8,
         initial_length: 3,
@@ -182,13 +181,15 @@ fn mcts_rejects_simultaneous_games() {
         survival: 0.0,
     };
     let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 3];
-    let _ = mcts_many(
+    let evals = mcts_many(
         &snake,
         &EgocentricSnake { grid_size: 8 },
         &reward,
-        &cfg(8),
+        &cfg(16),
         vec![(state, 0)],
         0,
         &mut Evaluator::new(&mut infer, None),
     );
+    assert_eq!(evals[0].visits.len(), 3);
+    assert!(evals[0].visits.iter().sum::<f64>() > 0.0);
 }

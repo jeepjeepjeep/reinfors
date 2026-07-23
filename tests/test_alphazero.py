@@ -118,15 +118,36 @@ def test_gridworld_composes() -> None:
     assert pi.shape[1] == 4 and obs.shape[0] == z.shape[0] >= 30
 
 
-def test_rejects_simultaneous_snake() -> None:
-    with pytest.raises(ValueError, match="sequential"):
-        rf.Engine(
-            rf.games.Snake(grid_size=8),
-            rf.Reward(food=1.0, loss=-1.0),
-            rf.policies.AlphaZero(),
-            rf.learners.AlphaZero(),
-            n_games=2,
-        )
+def test_alphazero_trains_on_simultaneous_stochastic_snake() -> None:
+    # Snake composes the DUCT (simultaneous) and declared-chance tree capabilities: an engine-level
+    # collect must run and produce per-agent AZ targets: pi over 3 actions, finite z (snake's food
+    # rewards accumulate at gamma=1, so z is a return, not a bounded outcome).
+    def infer(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        return np.zeros((arr.shape[0], 3)), np.zeros(arr.shape[0])
+
+    engine = rf.Engine(
+        rf.games.Snake(grid_size=8, max_ticks=40),
+        rf.Reward(food=1.0, loss=-1.0),
+        rf.policies.AlphaZero(num_simulations=12, chance_mode="committed", chance_samples=2),
+        rf.learners.AlphaZero(),
+        n_games=2,
+        seed=0,
+    )
+    batch = engine.collect(60, infer)
+    assert isinstance(batch, rf._reinfors.AlphaZeroBatch)
+    assert batch.obs.shape[0] >= 60
+    assert batch.policy_targets.shape[1] == 3
+    rows = batch.policy_targets.sum(axis=1)
+    assert np.allclose(rows[rows > 0], 1.0)  # visit distributions normalize
+    assert np.all(np.isfinite(batch.value_targets))
+    assert batch.value_targets.min() >= -1.0 - 1e-9  # a death is the worst single outcome
+
+
+def test_noise_scope_kwarg() -> None:
+    rf.policies.AlphaZero(noise_scope="requester")
+    rf.policies.AlphaZero(noise_scope="both")
+    with pytest.raises(ValueError, match="noise_scope"):
+        rf.policies.AlphaZero(noise_scope="all")
 
 
 @pytest.mark.parametrize(

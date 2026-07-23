@@ -276,16 +276,22 @@ def test_mcts_pairs_with_treestrap_on_sequential_games(game: rf._reinfors.GameHa
     assert telemetry["decisions"] > 0
 
 
-def test_mcts_rejects_simultaneous_snake() -> None:
-    # MCTS assumes sequential/single-agent play; pairing it with snake (simultaneous) fails at build.
-    with pytest.raises(ValueError, match="sequential"):
-        rf.Engine(
-            rf.games.Snake(grid_size=8),
-            rf.Reward(food=1.0, loss=-1.0),
-            rf.policies.Mcts(num_simulations=8),
-            rf.learners.TreeStrap(),
-            n_games=2,
-        )
+def test_mcts_collects_on_simultaneous_snake() -> None:
+    # DUCT: UCT+TreeStrap now pairs with snake (simultaneous + declared chance).
+    def infer(arr: np.ndarray) -> np.ndarray:
+        return np.zeros((arr.shape[0], 1, 3))
+
+    engine = rf.Engine(
+        rf.games.Snake(grid_size=8, max_ticks=30),
+        rf.Reward(food=1.0, loss=-1.0),
+        rf.policies.Mcts(num_simulations=8, chance_mode="committed", chance_samples=2),
+        rf.learners.TreeStrap(),
+        n_games=2,
+        seed=0,
+    )
+    obs, _targets, _masks, telemetry = engine.collect(40, infer)
+    assert obs.shape[0] >= 40
+    assert telemetry["decisions"] > 0
 
 
 def _mcts_engine(temperature: float, seed: int = 0, drop: int | None = None) -> rf.Engine:

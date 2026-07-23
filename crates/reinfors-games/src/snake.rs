@@ -564,6 +564,41 @@ impl Snake {
         }
         food.insert((idx as i32 / g, idx as i32 % g));
     }
+
+    /// Occupied cell ids (food + both bodies) of a state, sorted + deduped — the same set
+    /// `spawn_one` skips, so free-cell indices here match its draw exactly.
+    fn occupied_cells(&self, state: &SnakeState) -> Vec<usize> {
+        let g = self.grid_size;
+        let mut occupied: Vec<usize> = state
+            .food
+            .iter()
+            .map(|&(r, c)| (r * g + c) as usize)
+            .collect();
+        for s in &state.snakes {
+            occupied.extend(s.body.iter().map(|&(r, c)| (r * g + c) as usize));
+        }
+        occupied.sort_unstable();
+        occupied.dedup();
+        occupied
+    }
+
+    fn free_cell_count(&self, state: &SnakeState) -> usize {
+        (self.grid_size * self.grid_size) as usize - self.occupied_cells(state).len()
+    }
+
+    /// The `i`-th free cell in row-major order — `spawn_one`'s indexing, declared.
+    fn nth_free_cell(&self, state: &SnakeState, i: usize) -> Cell {
+        let g = self.grid_size;
+        let mut idx = i;
+        for &o in &self.occupied_cells(state) {
+            if o <= idx {
+                idx += 1;
+            } else {
+                break;
+            }
+        }
+        (idx as i32 / g, idx as i32 % g)
+    }
 }
 
 impl Game for Snake {
@@ -636,6 +671,69 @@ impl Game for Snake {
             snakes: next.snakes.clone(),
             food,
         })
+    }
+
+    /// The declared form of the respawn chance (the tree searches' seam), exactly mirroring
+    /// `sample_chance`'s sequential `spawn_one` draws. One respawn: uniform over the free cells of
+    /// the post-step state, indexed in `spawn_one`'s row-major order. Two respawns (both agents eat
+    /// on one tick — the maximum, each head eats at most one apple): uniform over ORDERED pairs
+    /// (first placement from the n free cells, second from the remaining n−1), matching the two
+    /// sequential draws bijectively — n·(n−1) outcomes, so wide boards pay a transiently large
+    /// probs vector on the rare double-eat edges. A full board degenerates to one no-op outcome
+    /// (`spawn_one` can't place), keeping the sampler/declaration agreement exact.
+    fn chance_outcomes(
+        &self,
+        state: &SnakeState,
+        transition: &Transition<SnakeState, StepEvent>,
+    ) -> Option<Vec<f64>> {
+        let next = &transition.next_state;
+        let eaten = state.food.len().saturating_sub(next.food.len());
+        if eaten == 0 || transition.terminal {
+            return None;
+        }
+        assert!(
+            eaten <= 2,
+            "at most two apples (one per head) can be eaten per tick"
+        );
+        let n = self.free_cell_count(next);
+        let outcomes = match (eaten, n) {
+            (_, 0) | (2, 1) => 1, // no (or only one) placeable cell: the tail draws no-op
+            (1, _) => n,
+            (2, _) => n * (n - 1),
+            _ => unreachable!(),
+        };
+        Some(vec![1.0 / outcomes as f64; outcomes])
+    }
+
+    fn apply_chance(
+        &self,
+        state: &SnakeState,
+        transition: &Transition<SnakeState, StepEvent>,
+        outcome: usize,
+    ) -> SnakeState {
+        let next = &transition.next_state;
+        let eaten = state.food.len().saturating_sub(next.food.len());
+        let n = self.free_cell_count(next);
+        let mut out = SnakeState {
+            snakes: next.snakes.clone(),
+            food: next.food.clone(),
+        };
+        match (eaten, n) {
+            (_, 0) => {}
+            (1, _) | (2, 1) => {
+                let cell = self.nth_free_cell(&out, outcome % n.max(1));
+                out.food.insert(cell);
+            }
+            (2, _) => {
+                let (i, j) = (outcome / (n - 1), outcome % (n - 1));
+                let first = self.nth_free_cell(&out, i);
+                out.food.insert(first);
+                let second = self.nth_free_cell(&out, j);
+                out.food.insert(second);
+            }
+            _ => unreachable!(),
+        }
+        out
     }
 
     fn initial_state(&self, rng: &mut dyn Rng) -> SnakeState {
