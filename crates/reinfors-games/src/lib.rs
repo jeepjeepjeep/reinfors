@@ -7,7 +7,9 @@ pub mod connect4;
 pub mod gridworld;
 pub mod snake;
 
-pub use chess::{Chess, ChessEvent, ChessPlanesMinimal, ChessReward, ChessState, CHESS_ACTIONS};
+pub use chess::{
+    Chess, ChessEvent, ChessPlanesAz119, ChessPlanesMinimal, ChessReward, ChessState, CHESS_ACTIONS,
+};
 pub use connect4::{Connect4, Connect4Event, Connect4Planes, Connect4Reward, Connect4State};
 pub use gridworld::{GridEvent, GridState, GridWorld, GridWorldPlanes, GridWorldReward};
 pub use snake::{

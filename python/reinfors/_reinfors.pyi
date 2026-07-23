@@ -39,11 +39,13 @@ class GameHandle:
     ) -> GameHandle: ...
     @staticmethod
     def Connect4() -> GameHandle: ...
-    # Standard chess (cozy-chess rules). Obs (19, 8, 8) minimal planes; actions = the AlphaZero
-    # 8x8x73 = 4672 encoding (~35 legal per position — the tree searches mask to the legal set).
-    # max_ticks defaults to 512 (weak-net self-play can shuffle inside the fifty-move window).
+    # Standard chess (cozy-chess rules). Actions = the AlphaZero 8x8x73 = 4672 encoding (~35 legal
+    # per position — the tree searches mask to the legal set). `encoder` is an rf.encoders.* handle
+    # picking the observation view (default MinimalChess, (19, 8, 8)); the state's history
+    # bookkeeping follows the selected encoder. max_ticks defaults to 512 (weak-net self-play
+    # shuffles inside the fifty-move window).
     @staticmethod
-    def Chess(max_ticks: int | None = ...) -> GameHandle: ...
+    def Chess(max_ticks: int | None = ..., encoder: EncoderHandle | None = ...) -> GameHandle: ...
     @staticmethod
     def GridWorld(
         size: int = ...,
@@ -56,6 +58,15 @@ class GameHandle:
     # The truncation horizon (episode cap); None = never truncate (only for games that always end,
     # like Connect-4). Loop-prone games default to a finite cap.
     def truncation_horizon(self) -> int | None: ...
+
+class EncoderHandle:
+    # Observation-encoder handles, passed to a game handle's `encoder=` kwarg. Game-specific; any
+    # state bookkeeping a view needs is enabled in the game automatically when selected.
+    @staticmethod
+    def MinimalChess() -> EncoderHandle: ...
+    # AlphaZero's chess view: 14*history_length + 7 planes; history_length=8 = the paper's 119.
+    @staticmethod
+    def AlphaZeroChess(history_length: int = ...) -> EncoderHandle: ...
 
 class PolicyHandle:
     @staticmethod

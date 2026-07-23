@@ -32,6 +32,40 @@ def test_spaces() -> None:
     assert game.action_space().n == _A
     assert game.truncation_horizon() == 512
     assert rf.games.Chess(max_ticks=None).truncation_horizon() is None
+    az = rf.encoders.AlphaZeroChess()
+    assert tuple(rf.games.Chess(encoder=az).observation_space().shape) == (119, 8, 8)
+    short = rf.encoders.AlphaZeroChess(history_length=2)
+    assert tuple(rf.games.Chess(encoder=short).observation_space().shape) == (35, 8, 8)  # 14*2+7
+    assert tuple(rf.games.Chess(encoder=rf.encoders.MinimalChess()).observation_space().shape) == (19, 8, 8)
+    with pytest.raises(ValueError, match="history_length"):
+        rf.encoders.AlphaZeroChess(history_length=0)
+
+
+def test_az119_engine_collects() -> None:
+    def infer(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        assert arr.shape[1] == 119 * 8 * 8  # the history-bearing view reaches the net
+        return np.zeros((arr.shape[0], _A)), np.zeros(arr.shape[0])
+
+    engine = rf.Engine(
+        rf.games.Chess(max_ticks=40, encoder=rf.encoders.AlphaZeroChess()),
+        rf.Reward(win=1.0, loss=-1.0),
+        rf.policies.AlphaZero(num_simulations=8),
+        rf.learners.AlphaZero(),
+        n_games=1,
+        seed=0,
+    )
+    obs, pi, _, _ = engine.collect(20, infer)
+    assert obs.shape == (obs.shape[0], 119 * 8 * 8)
+    np.testing.assert_allclose(pi.sum(axis=1), 1.0, atol=1e-12)
+
+
+def test_az119_env_observation() -> None:
+    env = rf.Env(rf.games.Chess(encoder=rf.encoders.AlphaZeroChess()))
+    obs = env.observe(0)
+    assert obs.shape == (119, 8, 8)
+    assert obs[112].sum() == 64.0  # white to move
+    # history steps beyond t=0 are empty at the start position
+    assert obs[14:112].sum() == 0.0
 
 
 def test_alphazero_collect_masks_illegal_actions() -> None:
@@ -71,6 +105,12 @@ def test_collect_is_deterministic_per_seed() -> None:
     assert isinstance(b1, rf._reinfors.AlphaZeroBatch) and isinstance(b2, rf._reinfors.AlphaZeroBatch)
     assert np.array_equal(b1.obs, b2.obs)
     assert np.array_equal(b1.policy_targets, b2.policy_targets)
+
+
+def test_make_encoder_by_name() -> None:
+    assert rf.encoders.registered() == ["alphazero_chess", "minimal_chess"]
+    enc = rf.encoders.make("alphazero_chess", history_length=4)
+    assert tuple(rf.games.Chess(encoder=enc).observation_space().shape) == (63, 8, 8)  # 14*4+7
 
 
 def test_env_plays_uci_like_moves() -> None:
