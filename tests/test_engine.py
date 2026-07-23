@@ -5,6 +5,8 @@ suite already validates).
 No oracle needed — validates reinfors against itself, so it runs in CI.
 """
 
+from typing import Any
+
 import numpy as np
 import pytest
 import reinfors
@@ -132,7 +134,7 @@ def test_survival_bonus_propagates_through_z_mixing_on_truncation() -> None:
     # exactly the bonus, and only in the executed action's entry: survival changes neither the search
     # values, the chosen action, nor the z-tail. Guards the previously-dead survival reward.
     bonus = 0.25
-    kw = {"food": 0, "max_ticks": 1, "outcome_weight": 1.0, "interior": False}
+    kw: dict[str, Any] = {"food": 0, "max_ticks": 1, "outcome_weight": 1.0, "interior": False}
     _, t0, _, _ = _engine(0, survival=0.0, **kw).collect(4, _infer)
     _, ts, _, _ = _engine(0, survival=bonus, **kw).collect(4, _infer)
     assert t0.shape == ts.shape and t0.shape[0] >= 4
@@ -149,7 +151,7 @@ def test_collect_returns_telemetry() -> None:
     # aggregates. Interior off so episodes finish within the record budget (with it on, the floor is
     # hit via interior targets before any episode completes).
     eng = _engine(11, interior=False)
-    episodes: list = []
+    episodes: list[tuple[list[float], int, bool]] = []
     decisions = 0
     for _ in range(4):
         _obs, _tgt, _mask, stats = eng.collect(400, _infer)
@@ -198,7 +200,7 @@ def test_telemetry_is_deterministic_for_a_seed() -> None:
         {"bootstrap_p": -0.1},
     ],
 )
-def test_engine_rejects_degenerate_params(bad: dict) -> None:
+def test_engine_rejects_degenerate_params(bad: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
         _engine(0, **bad)
 

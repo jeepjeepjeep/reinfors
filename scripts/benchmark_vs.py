@@ -360,7 +360,7 @@ class OpenSpielBackend:
         return self._run_bot(game, bot, decisions, repeats)
 
 
-BACKENDS = [ReinforsBackend(), PgxBackend(), OpenSpielBackend()]
+BACKENDS: list[Any] = [ReinforsBackend(), PgxBackend(), OpenSpielBackend()]
 
 
 def _warn_if_not_release() -> None:

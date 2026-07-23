@@ -3,6 +3,7 @@
 Hand-maintained for now; once the API surface grows we can generate these from the Rust bindings.
 """
 
+from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
@@ -119,6 +120,7 @@ class AlphaZeroBatch:
     telemetry: dict[str, Any]
     def __len__(self) -> int: ...
     def __getitem__(self, i: int) -> Any: ...
+    def __iter__(self) -> Iterator[Any]: ...  # positional unpacking (runtime: sequence protocol)
 
 class TreeStrapBatch:
     """`Engine.collect` result for the TreeStrap family. Also unpacks positionally as
@@ -130,6 +132,7 @@ class TreeStrapBatch:
     telemetry: dict[str, Any]
     def __len__(self) -> int: ...
     def __getitem__(self, i: int) -> Any: ...
+    def __iter__(self) -> Iterator[Any]: ...  # positional unpacking (runtime: sequence protocol)
 
 class DqnBatch:
     """`Engine.collect` result for the DQN family. Also unpacks positionally as
@@ -144,6 +147,7 @@ class DqnBatch:
     telemetry: dict[str, Any]
     def __len__(self) -> int: ...
     def __getitem__(self, i: int) -> Any: ...
+    def __iter__(self) -> Iterator[Any]: ...  # positional unpacking (runtime: sequence protocol)
 
 class Engine:
     def __init__(

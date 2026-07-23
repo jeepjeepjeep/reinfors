@@ -11,7 +11,7 @@ def test_connect4_played_to_a_win() -> None:
     # P0 stacks column 0, P1 column 1; P0 completes four-in-a-column first. Moves alternate, matching
     # the turn order `active_agents` reports.
     moves = [(0, 0), (1, 1), (0, 0), (1, 1), (0, 0), (1, 1), (0, 0)]
-    last: list = []
+    last: list[object] = []
     for agent, col in moves:
         assert env.active_agents() == [agent]  # sequential: one mover per tick
         last = env.step({agent: col})  # per-agent events (Env holds no reward)

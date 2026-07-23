@@ -3,6 +3,7 @@ noise/temperature-driven self-play diversity under seeded determinism, and pairi
 """
 
 from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import pytest
@@ -77,6 +78,7 @@ def test_value_targets_are_signed_outcomes() -> None:
 def test_collect_is_deterministic_per_seed_with_noise_on() -> None:
     b1 = _engine(7).collect(60, _uniform_infer)
     b2 = _engine(7).collect(60, _uniform_infer)
+    assert isinstance(b1, rf._reinfors.AlphaZeroBatch) and isinstance(b2, rf._reinfors.AlphaZeroBatch)
     assert np.array_equal(b1.obs, b2.obs)
     assert np.array_equal(b1.policy_targets, b2.policy_targets)
     assert np.array_equal(b1.value_targets, b2.value_targets)
@@ -136,7 +138,7 @@ def test_rejects_simultaneous_snake() -> None:
         (rf.policies.EpsilonGreedyQ(), rf.learners.AlphaZero()),
     ],
 )
-def test_rejects_mismatched_pairings(policy: object, learner: object) -> None:
+def test_rejects_mismatched_pairings(policy: rf._reinfors.PolicyHandle, learner: rf._reinfors.LearnerHandle) -> None:
     with pytest.raises(ValueError, match="incompatible"):
         rf.Engine(rf.games.Connect4(), None, policy, learner, n_games=1)
 
@@ -149,13 +151,14 @@ def test_rejects_mismatched_pairings(policy: object, learner: object) -> None:
         {"temperature": -1.0},
     ],
 )
-def test_rejects_degenerate_params(bad: dict) -> None:
+def test_rejects_degenerate_params(bad: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
         _engine(0, **bad)
 
 
 def test_rejects_bad_noise_alpha_and_c_puct() -> None:
-    for kwargs in ({"noise_alpha": 0.0}, {"c_puct": -1.0}):
+    bad_cases: tuple[dict[str, Any], ...] = ({"noise_alpha": 0.0}, {"c_puct": -1.0})
+    for kwargs in bad_cases:
         with pytest.raises(ValueError):
             rf.Engine(
                 rf.games.Connect4(),
@@ -174,7 +177,7 @@ def test_rejects_bad_noise_alpha_and_c_puct() -> None:
         lambda arr: (np.zeros((arr.shape[0], _A)), np.zeros(arr.shape[0] + 1)),  # wrong N
     ],
 )
-def test_rejects_malformed_infer_output(bad_infer: Callable) -> None:
+def test_rejects_malformed_infer_output(bad_infer: Callable[[np.ndarray], object]) -> None:
     with pytest.raises((ValueError, TypeError)):
         _engine().collect(10, bad_infer)
 

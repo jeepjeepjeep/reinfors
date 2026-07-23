@@ -41,7 +41,8 @@ class ExampleNet(nn.Module):
         self.head = nn.Linear(16 * h * w, n_heads * n_actions)
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        return self.head(self.trunk(obs)).view(-1, self.n_heads, self.n_actions)
+        out: torch.Tensor = self.head(self.trunk(obs)).view(-1, self.n_heads, self.n_actions)
+        return out
 
 
 def make_infer(net: ExampleNet, device: str = "cpu") -> Callable[[np.ndarray], np.ndarray]:
@@ -58,7 +59,8 @@ def make_infer(net: ExampleNet, device: str = "cpu") -> Callable[[np.ndarray], n
             x = torch.from_numpy(np.ascontiguousarray(obs_batch)).reshape(-1, c, h, w).to(device)
             q = net(x)
         net.train(was_training)
-        return q.cpu().double().numpy()
+        out: np.ndarray = q.cpu().double().numpy()
+        return out
 
     return infer
 
@@ -95,7 +97,7 @@ def train_step(
     m = torch.from_numpy(mask).to(device)
     loss = treestrap_loss(net(o), t, m)
     optimizer.zero_grad()
-    loss.backward()
+    loss.backward()  # type: ignore[no-untyped-call]  # torch stubs leave Tensor.backward untyped
     optimizer.step()
     return float(loss.item())
 
