@@ -39,11 +39,13 @@ class GameHandle:
     ) -> GameHandle: ...
     @staticmethod
     def Connect4() -> GameHandle: ...
-    # Standard chess (cozy-chess rules). Obs (19, 8, 8) minimal planes; actions = the AlphaZero
-    # 8x8x73 = 4672 encoding (~35 legal per position — the tree searches mask to the legal set).
-    # max_ticks defaults to 512 (weak-net self-play can shuffle inside the fifty-move window).
+    # Standard chess (cozy-chess rules). Actions = the AlphaZero 8x8x73 = 4672 encoding (~35 legal
+    # per position — the tree searches mask to the legal set). encoding: "minimal" -> (19, 8, 8)
+    # planes; "az119" -> AlphaZero's (119, 8, 8) with an 8-position history (kept in the state only
+    # when selected). max_ticks defaults to 512 (weak-net self-play shuffles inside the fifty-move
+    # window).
     @staticmethod
-    def Chess(max_ticks: int | None = ...) -> GameHandle: ...
+    def Chess(max_ticks: int | None = ..., encoding: str = ...) -> GameHandle: ...
     @staticmethod
     def GridWorld(
         size: int = ...,

@@ -32,6 +32,36 @@ def test_spaces() -> None:
     assert game.action_space().n == _A
     assert game.truncation_horizon() == 512
     assert rf.games.Chess(max_ticks=None).truncation_horizon() is None
+    assert tuple(rf.games.Chess(encoding="az119").observation_space().shape) == (119, 8, 8)
+    with pytest.raises(ValueError, match="encoding"):
+        rf.games.Chess(encoding="huge")
+
+
+def test_az119_engine_collects() -> None:
+    def infer(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        assert arr.shape[1] == 119 * 8 * 8  # the history-bearing view reaches the net
+        return np.zeros((arr.shape[0], _A)), np.zeros(arr.shape[0])
+
+    engine = rf.Engine(
+        rf.games.Chess(max_ticks=40, encoding="az119"),
+        rf.Reward(win=1.0, loss=-1.0),
+        rf.policies.AlphaZero(num_simulations=8),
+        rf.learners.AlphaZero(),
+        n_games=1,
+        seed=0,
+    )
+    obs, pi, _, _ = engine.collect(20, infer)
+    assert obs.shape == (obs.shape[0], 119 * 8 * 8)
+    np.testing.assert_allclose(pi.sum(axis=1), 1.0, atol=1e-12)
+
+
+def test_az119_env_observation() -> None:
+    env = rf.Env(rf.games.Chess(encoding="az119"))
+    obs = env.observe(0)
+    assert obs.shape == (119, 8, 8)
+    assert obs[112].sum() == 64.0  # white to move
+    # history steps beyond t=0 are empty at the start position
+    assert obs[14:112].sum() == 0.0
 
 
 def test_alphazero_collect_masks_illegal_actions() -> None:

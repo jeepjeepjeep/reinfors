@@ -26,10 +26,10 @@ use reinfors_core::{
 };
 use reinfors_games::snake::{Cell, DeathCause};
 use reinfors_games::{
-    snake_length_cell, Action, Chess, ChessEvent, ChessPlanesMinimal, ChessReward, ChessState,
-    Connect4, Connect4Event, Connect4Planes, Connect4Reward, Connect4State, EgocentricSnake,
-    GridEvent, GridState, GridWorld, GridWorldPlanes, GridWorldReward, Snake, SnakeReward,
-    SnakeState, StepEvent,
+    snake_length_cell, Action, Chess, ChessEvent, ChessPlanesAz119, ChessPlanesMinimal,
+    ChessReward, ChessState, Connect4, Connect4Event, Connect4Planes, Connect4Reward,
+    Connect4State, EgocentricSnake, GridEvent, GridState, GridWorld, GridWorldPlanes,
+    GridWorldReward, Snake, SnakeReward, SnakeState, StepEvent,
 };
 
 /// Absolute `Action` -> its `u8` code (Up/Down/Left/Right = 0/1/2/3), for native-state marshalling.
@@ -392,6 +392,24 @@ impl PyEngine {
             engine: slf.clone().unbind(),
         })
     }
+}
+
+/// The chess game + encoder pair for an encoding choice — `keep_history` is enabled exactly when
+/// the AZ-119 encoder (which reads it) is selected, so the two cannot drift apart.
+fn chess_parts(
+    max_ticks: Option<usize>,
+    az_planes: bool,
+) -> (Chess, Box<dyn StateEncoder<State = ChessState>>) {
+    let game = Chess {
+        max_ticks,
+        keep_history: az_planes,
+    };
+    let enc: Box<dyn StateEncoder<State = ChessState>> = if az_planes {
+        Box::new(ChessPlanesAz119)
+    } else {
+        Box::new(ChessPlanesMinimal)
+    };
+    (game, enc)
 }
 
 fn stream_active_err() -> PyErr {
@@ -991,6 +1009,7 @@ enum GameSpec {
     Connect4,
     Chess {
         max_ticks: Option<usize>,
+        az_planes: bool, // false = minimal (19,8,8); true = AZ-119 with 8-position history
     },
     GridWorld {
         size: i32,
@@ -1029,7 +1048,13 @@ impl GameSpec {
                 &EgocentricSnake { grid_size },
             ),
             GameSpec::Connect4 => of(Connect4, &Connect4Planes),
-            GameSpec::Chess { max_ticks } => of(Chess { max_ticks }, &ChessPlanesMinimal),
+            GameSpec::Chess {
+                max_ticks,
+                az_planes,
+            } => {
+                let (game, enc) = chess_parts(max_ticks, az_planes);
+                of(game, &*enc)
+            }
             GameSpec::GridWorld {
                 size,
                 goal,
@@ -1468,15 +1493,24 @@ fn build_engine(
             learner,
             engine_params,
         ),
-        (GameSpec::Chess { max_ticks }, RewardBox::Chess(reward)) => build_for_game(
-            Chess { max_ticks },
-            Box::new(ChessPlanesMinimal),
-            Box::new(reward),
-            Box::new(AlwaysInitialState),
-            policy,
-            learner,
-            engine_params,
-        ),
+        (
+            GameSpec::Chess {
+                max_ticks,
+                az_planes,
+            },
+            RewardBox::Chess(reward),
+        ) => {
+            let (game, enc) = chess_parts(max_ticks, az_planes);
+            build_for_game(
+                game,
+                enc,
+                Box::new(reward),
+                Box::new(AlwaysInitialState),
+                policy,
+                learner,
+                engine_params,
+            )
+        }
         (
             GameSpec::GridWorld {
                 size,
@@ -1867,10 +1901,14 @@ fn build_env(game: GameSpec, reward: Option<PyReward>, seed: u64) -> PyResult<Bo
                 last_rewards: None,
             })
         }
-        GameSpec::Chess { max_ticks } => {
-            let obs_shape = ChessPlanesMinimal.obs_shape();
+        GameSpec::Chess {
+            max_ticks,
+            az_planes,
+        } => {
+            let (game, enc) = chess_parts(max_ticks, az_planes);
+            let obs_shape = enc.obs_shape();
             Box::new(EnvImpl {
-                inner: Env::new(Chess { max_ticks }, Box::new(ChessPlanesMinimal), seed),
+                inner: Env::new(game, enc, seed),
                 obs_shape,
                 reward: reward.map(|rb| match rb {
                     RewardBox::Chess(r) => Box::new(r) as Box<dyn Reward<Event = ChessEvent>>,
@@ -2060,13 +2098,27 @@ impl GameHandle {
 
     #[staticmethod]
     // Weak-net self-play can shuffle indefinitely inside the fifty-move window, so `max_ticks`
-    // defaults to a finite cap (pass `max_ticks=None` to opt into never truncating).
-    #[pyo3(signature = (max_ticks=512))]
+    // defaults to a finite cap (pass `max_ticks=None` to opt into never truncating). `encoding`
+    // picks the observation view: "minimal" (19,8,8) or "az119" (AlphaZero's 119 planes with an
+    // 8-position history, maintained in the state only when selected).
+    #[pyo3(signature = (max_ticks=512, encoding="minimal"))]
     #[pyo3(name = "Chess")]
-    fn chess(max_ticks: Option<usize>) -> Self {
-        GameHandle {
-            spec: GameSpec::Chess { max_ticks },
-        }
+    fn chess(max_ticks: Option<usize>, encoding: &str) -> PyResult<Self> {
+        let az_planes = match encoding {
+            "minimal" => false,
+            "az119" => true,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown chess encoding {other:?}; expected \"minimal\" or \"az119\""
+                )))
+            }
+        };
+        Ok(GameHandle {
+            spec: GameSpec::Chess {
+                max_ticks,
+                az_planes,
+            },
+        })
     }
 
     #[staticmethod]
@@ -2107,7 +2159,7 @@ impl GameHandle {
     fn truncation_horizon(&self) -> Option<usize> {
         match self.spec {
             GameSpec::Snake { max_ticks, .. }
-            | GameSpec::Chess { max_ticks }
+            | GameSpec::Chess { max_ticks, .. }
             | GameSpec::GridWorld { max_ticks, .. } => max_ticks,
             GameSpec::Connect4 => None,
         }

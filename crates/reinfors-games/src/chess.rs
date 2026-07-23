@@ -159,6 +159,12 @@ pub struct ChessState {
     /// Position hashes since the last irreversible move (pawn move / capture / castling-rights
     /// change resets the halfmove clock, which we mirror) — the threefold-repetition window.
     hashes: Vec<u64>,
+    /// The last up-to-8 positions (newest last) with each position's repetition count AS OF that
+    /// moment (computed against the then-current threefold window, so history planes are exact even
+    /// across irreversible-move resets). Maintained only when the game was built with
+    /// `keep_history` (the AZ-119 encoder's input); empty otherwise, so the minimal-encoder path
+    /// pays nothing for it in tree-node clones.
+    recent: Vec<(Board, u8)>,
     finished: Option<ChessOutcome>,
 }
 
@@ -201,12 +207,16 @@ impl Reward for ChessReward {
 /// indefinitely inside the fifty-move window.
 pub struct Chess {
     pub max_ticks: Option<usize>,
+    /// Maintain the 8-position history the [`ChessPlanesAz119`] encoder reads. Off by default —
+    /// the factory enables it exactly when that encoder is selected, so the two can't drift apart.
+    pub keep_history: bool,
 }
 
 impl Default for Chess {
     fn default() -> Self {
         Chess {
             max_ticks: Some(512),
+            keep_history: false,
         }
     }
 }
@@ -309,6 +319,13 @@ impl Game for Chess {
             next.hashes.clear();
         }
         next.hashes.push(next.board.hash());
+        if self.keep_history {
+            let count = next.repetition_count().min(u8::MAX as usize) as u8;
+            next.recent.push((next.board.clone(), count));
+            if next.recent.len() > 8 {
+                next.recent.remove(0);
+            }
+        }
 
         let outcome = match next.board.status() {
             GameStatus::Won => Some(ChessOutcome::WonBy(mover)), // side to move is mated
@@ -344,9 +361,15 @@ impl Game for Chess {
     fn initial_state(&self, _rng: &mut dyn Rng) -> ChessState {
         let board = Board::default();
         let hashes = vec![board.hash()];
+        let recent = if self.keep_history {
+            vec![(board.clone(), 1)]
+        } else {
+            Vec::new()
+        };
         ChessState {
             board,
             hashes,
+            recent,
             finished: None,
         }
     }
@@ -407,6 +430,84 @@ impl StateEncoder for ChessPlanesMinimal {
 
     fn obs_shape(&self) -> (usize, usize, usize) {
         (19, 8, 8)
+    }
+}
+
+/// AlphaZero's 119-plane chess observation `(119, 8, 8)`, in this framework's ABSOLUTE orientation
+/// (the paper flips the board to the mover's perspective; a flipped view belongs together with a
+/// flipped action mapping, which is game-level, not encoder-level — so both stay absolute here and
+/// plane 112 carries side-to-move instead):
+///   0..112   8 history steps, NEWEST FIRST (t=0 = current position), 14 planes each:
+///            6 White pieces (P N B R Q K), 6 Black pieces, repeated-once (count >= 2),
+///            repeated-twice (count >= 3) — all-ones indicator planes, counted in the
+///            threefold window. Steps before the game start are all-zero.
+///   112      side to move (all-ones when White)
+///   113      fullmove number / 100
+///   114..118 castling rights: W short, W long, B short, B long
+///   118      halfmove clock / 100
+/// Requires a `Chess { keep_history: true, .. }` game (the factory pairs them); with history off
+/// only the t=0 step is populated.
+pub struct ChessPlanesAz119;
+
+impl ChessPlanesAz119 {
+    /// Piece + repetition planes for one historical position into `obs[base..base + 14*64]`.
+    /// `count` is that position's repetition count as of its own moment.
+    fn step_planes(obs: &mut [f32], base: usize, board: &Board, count: usize) {
+        const PLANE: usize = 64;
+        for (ci, color) in [Color::White, Color::Black].into_iter().enumerate() {
+            for (pi, piece) in Piece::ALL.into_iter().enumerate() {
+                let bb = board.pieces(piece) & board.colors(color);
+                for sq in bb {
+                    obs[base + (ci * 6 + pi) * PLANE + sq_index(sq)] = 1.0;
+                }
+            }
+        }
+        if count >= 2 {
+            obs[base + 12 * PLANE..base + 13 * PLANE].fill(1.0);
+        }
+        if count >= 3 {
+            obs[base + 13 * PLANE..base + 14 * PLANE].fill(1.0);
+        }
+    }
+}
+
+impl StateEncoder for ChessPlanesAz119 {
+    type State = ChessState;
+
+    fn encode(&self, state: &ChessState, _agent: usize) -> Vec<f32> {
+        const PLANE: usize = 64;
+        let mut obs = vec![0.0f32; 119 * PLANE];
+        let board = &state.board;
+        // History steps, newest first. `recent` ends with the current position when history is on;
+        // with history off, synthesize the single current step so t=0 is always populated.
+        if state.recent.is_empty() {
+            Self::step_planes(&mut obs, 0, board, state.repetition_count());
+        } else {
+            for (t, (past, count)) in state.recent.iter().rev().take(8).enumerate() {
+                Self::step_planes(&mut obs, t * 14 * PLANE, past, *count as usize);
+            }
+        }
+        if board.side_to_move() == Color::White {
+            obs[112 * PLANE..113 * PLANE].fill(1.0);
+        }
+        let fullmove = f32::from(board.fullmove_number()) / 100.0;
+        obs[113 * PLANE..114 * PLANE].fill(fullmove);
+        for (i, color) in [Color::White, Color::Black].into_iter().enumerate() {
+            let rights = board.castle_rights(color);
+            if rights.short.is_some() {
+                obs[(114 + i * 2) * PLANE..(115 + i * 2) * PLANE].fill(1.0);
+            }
+            if rights.long.is_some() {
+                obs[(115 + i * 2) * PLANE..(116 + i * 2) * PLANE].fill(1.0);
+            }
+        }
+        let hm = f32::from(board.halfmove_clock()) / 100.0;
+        obs[118 * PLANE..119 * PLANE].fill(hm);
+        obs
+    }
+
+    fn obs_shape(&self) -> (usize, usize, usize) {
+        (119, 8, 8)
     }
 }
 
@@ -573,6 +674,7 @@ mod tests {
         let state = ChessState {
             board,
             hashes,
+            recent: Vec::new(),
             finished: None,
         };
         assert!(insufficient_material(&state.board));
@@ -584,5 +686,110 @@ mod tests {
         let t = game.step(&state, &joint);
         assert!(t.terminal);
         assert_eq!(t.events[0], ChessEvent::Draw);
+    }
+}
+
+#[cfg(test)]
+mod az119_tests {
+    use super::*;
+
+    struct NoRng;
+    impl Rng for NoRng {
+        fn below(&mut self, _: usize) -> usize {
+            0
+        }
+        fn unit(&mut self) -> f64 {
+            0.0
+        }
+    }
+
+    fn hist_game() -> (Chess, ChessState) {
+        let game = Chess {
+            max_ticks: Some(512),
+            keep_history: true,
+        };
+        let state = game.initial_state(&mut NoRng);
+        (game, state)
+    }
+
+    fn play(game: &Chess, state: ChessState, moves: &[&str]) -> ChessState {
+        let mut s = state;
+        for uci in moves {
+            let mv: Move = uci.parse().unwrap();
+            let action = encode_move(mv, s.board.side_to_move());
+            let mover = s.turn();
+            let mut joint = vec![0usize; 2];
+            joint[mover] = action;
+            s = game.step(&s, &joint).next_state;
+        }
+        s
+    }
+
+    const PLANE: usize = 64;
+
+    #[test]
+    fn shape_and_current_step_matches_minimal_pieces() {
+        let (_, state) = hist_game();
+        let az = ChessPlanesAz119.encode(&state, 0);
+        assert_eq!(az.len(), 119 * PLANE);
+        let minimal = ChessPlanesMinimal.encode(&state, 0);
+        // t=0 piece planes (0..12) must equal the minimal encoder's piece planes.
+        assert_eq!(&az[..12 * PLANE], &minimal[..12 * PLANE]);
+    }
+
+    #[test]
+    fn history_step_one_is_the_previous_position() {
+        let (game, state) = hist_game();
+        let before = ChessPlanesAz119.encode(&state, 0);
+        let after = ChessPlanesAz119.encode(&play(&game, state, &["e2e4"]), 0);
+        // t=1 of the new obs = t=0 of the old obs (piece planes).
+        assert_eq!(&after[14 * PLANE..26 * PLANE], &before[..12 * PLANE]);
+        // and t=0 changed (the pawn moved).
+        assert_ne!(&after[..12 * PLANE], &before[..12 * PLANE]);
+    }
+
+    #[test]
+    fn repetition_planes_activate_exactly_when_positions_recur() {
+        let (game, state) = hist_game();
+        let shuffle = ["g1f3", "g8f6", "f3g1", "f6g8"];
+        // After 4 plies the start position has occurred twice -> t=0 repeated-once plane on.
+        let s4 = play(&game, state, &shuffle);
+        let obs4 = ChessPlanesAz119.encode(&s4, 0);
+        assert!(obs4[12 * PLANE..13 * PLANE].iter().all(|&v| v == 1.0));
+        assert!(obs4[13 * PLANE..14 * PLANE].iter().all(|&v| v == 0.0));
+        // The half-shuffled positions in between occurred once -> their history rep planes stay 0.
+        assert!(obs4[(14 + 12) * PLANE..(14 + 13) * PLANE]
+            .iter()
+            .all(|&v| v == 0.0));
+        // The start position's FIRST occurrence (t=4 in history) must NOT be flagged — its count
+        // was 1 at the time (the exactness the per-step stored counts buy).
+        let t4 = 4 * 14 * PLANE;
+        assert!(obs4[t4 + 12 * PLANE..t4 + 13 * PLANE]
+            .iter()
+            .all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn aux_planes() {
+        let (game, state) = hist_game();
+        let obs = ChessPlanesAz119.encode(&state, 0);
+        assert!(obs[112 * PLANE..113 * PLANE].iter().all(|&v| v == 1.0)); // white to move
+        assert!((obs[113 * PLANE] - 0.01).abs() < 1e-6); // fullmove 1 / 100
+        for p in 114..118 {
+            assert!(obs[p * PLANE..(p + 1) * PLANE].iter().all(|&v| v == 1.0)); // all rights
+        }
+        let s = play(&game, state, &["e2e4"]);
+        let obs = ChessPlanesAz119.encode(&s, 0);
+        assert!(obs[112 * PLANE..113 * PLANE].iter().all(|&v| v == 0.0)); // black to move
+    }
+
+    #[test]
+    fn history_off_populates_only_the_current_step() {
+        let game = Chess::default(); // keep_history: false
+        let state = game.initial_state(&mut NoRng);
+        let s = play(&game, state, &["e2e4", "e7e5"]);
+        let obs = ChessPlanesAz119.encode(&s, 0);
+        assert!(obs[..12 * PLANE].contains(&1.0)); // t=0 present
+        assert!(obs[14 * PLANE..112 * PLANE].iter().all(|&v| v == 0.0)); // no history steps
     }
 }
