@@ -51,25 +51,27 @@ pub struct CollectStats {
     pub sum_expansions: f64,
     pub sum_sigma: f64,
     pub sum_disagreement: f64,
-    // Time (and shape) spent inside the `infer` callback across this collect — the value-net forward.
+    // Global Evaluator throughput for this collect — every forward from every consumer (search
+    // leaves, episode-tail bootstraps, plain policy forwards), measured at the single choke point.
     // Timing the `collect()` call and subtracting `infer_seconds` gives the search (game sim + tree
-    // expansion + assembly) cost; `infer_rows / infer_calls` is the mean batch size.
+    // expansion + assembly) cost; `infer_rows / infer_calls` is the mean batch size. With the infer
+    // cache enabled, `infer_rows` counts only MISS rows, so rows-per-state falls as the hit rate
+    // rises. `cache_lookups`/`cache_hits` are likewise global (0 when the cache is disabled).
     pub infer_seconds: f64,
     pub infer_calls: usize,
     pub infer_rows: usize,
-    // Infer-cache telemetry (0 when the cache is disabled): `infer_rows` counts only MISS rows, so
-    // rows-per-state falls as the hit rate rises — visible without any harness change.
     pub cache_lookups: usize,
     pub cache_hits: usize,
-    // Tree-search sim fates summed over the collect (0 for non-tree policies) — see `SearchStats`.
+    // Tree-search sim fates summed over the collect (0 for non-tree policies), counted by the
+    // trees themselves — see `SearchStats`. These alone assemble the exact per-collect identity
+    // `decisions × num_simulations =
+    //   sum_fresh_rows + sum_hit_rows + sum_shared_rows + sum_terminal_sims + sum_depthcap_sims`;
+    // no global counter appears in it, so non-search forwards cannot unbalance it.
     pub sum_terminal_sims: usize,
     pub sum_depthcap_sims: usize,
     pub sum_shared_rows: usize,
-    /// Rows forwarded for episode-tail bootstraps (truncation z-seeding) — part of `infer_rows` but
-    /// NOT search simulations, so the sim-fate identity subtracts them:
-    /// `decisions × num_simulations = (infer_rows − tail_rows) + cache_hits + shared_rows +
-    ///  terminal_sims + depthcap_sims`.
-    pub tail_rows: usize,
+    pub sum_fresh_rows: usize,
+    pub sum_hit_rows: usize,
 }
 
 /// Engine-level rollout knobs. The truncation horizon is the game's (`truncation_horizon`), not an
@@ -91,12 +93,10 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     // disjoint from `search_rng` and the per-game env RNGs, so an enabled buffer never perturbs the
     // env-chance draw order — and `AlwaysInitialState` never draws it, so it stays bit-identical.
     start_dist: Box<dyn StartDistribution<G::State>>,
-    // Optional net-evaluation cache (see `infer_cache`); policies with pooled leaf evaluation
-    // consult it. Lifetime spans collects; cleared when the shared weights generation is bumped
-    // (`weights_updated` at the binding).
+    // Optional net-evaluation cache (see `infer_cache`), applied inside the per-collect
+    // `Evaluator` — the single path every consumer's forwards take. Lifetime spans collects;
+    // cleared when the shared weights generation is bumped (`weights_updated` at the binding).
     infer_cache: Option<crate::infer_cache::InferCache>,
-    // Tail-bootstrap rows forwarded during the current collect (see `CollectStats::tail_rows`).
-    pending_tail_rows: usize,
     buffer_rng: SplitMix64,
     seeded: Vec<bool>, // per game: was the current episode seeded from the start buffer?
     policy_states: Vec<P::PolicyState>, // per-game acting state for the current episode (Thompson head)
@@ -149,7 +149,6 @@ where
             search_rng,
             start_dist: Box::new(AlwaysInitialState),
             infer_cache: None,
-            pending_tail_rows: 0,
             buffer_rng,
             seeded,
             policy_states,
@@ -188,22 +187,16 @@ where
         let mut stats = CollectStats::default();
         let num_agents = self.game.num_agents();
         let collect_interior = self.learner.needs_interior();
-        if let Some(cache) = self.infer_cache.as_mut() {
-            cache.begin_collect();
+        // Take the cache out of `self` for the collect so the Evaluator (which lives across the
+        // whole loop) can hold it without pinning a long-lived borrow of `self`; restored at the end.
+        let mut cache = self.infer_cache.take();
+        if let Some(c) = cache.as_mut() {
+            c.begin_collect();
         }
-        self.pending_tail_rows = 0;
-
-        // Time every `infer` invocation once here, so both call sites (pooled `evaluate`, tail-values)
-        // and every collect path (Python callback or Rust-native net) are measured identically.
-        let (mut infer_seconds, mut infer_calls, mut infer_rows) = (0.0f64, 0usize, 0usize);
-        let mut timed = |obs: Vec<f32>, n: usize| -> Vec<f64> {
-            let t = std::time::Instant::now();
-            let r = infer(obs, n);
-            infer_seconds += t.elapsed().as_secs_f64();
-            infer_calls += 1;
-            infer_rows += n;
-            r
-        };
+        // The single evaluation service for this collect: every consumer's forwards (search
+        // leaves, episode-tail bootstraps, plain policy forwards) route through it, picking up
+        // caching, within-batch dedup, and throughput telemetry uniformly.
+        let mut evaluator = crate::evaluator::Evaluator::new(&mut infer, cache.as_mut());
 
         while out.len() < n_records {
             // 1. Gather one search request per active agent across all games.
@@ -230,8 +223,7 @@ where
                 requests,
                 search_seed,
                 collect_interior,
-                self.infer_cache.as_mut(),
-                &mut timed,
+                &mut evaluator,
             );
 
             // 3. Per decision: fold its telemetry, emit the learner's immediate records,
@@ -313,15 +305,13 @@ where
                 }
             }
 
-            self.flush_finished(&finished, &mut out, &mut stats, &mut timed);
+            self.flush_finished(&finished, &mut out, &mut stats, &mut evaluator);
         }
         (stats.infer_seconds, stats.infer_calls, stats.infer_rows) =
-            (infer_seconds, infer_calls, infer_rows);
-        if let Some(cache) = self.infer_cache.as_ref() {
-            stats.cache_lookups = cache.lookups;
-            stats.cache_hits = cache.hits;
-        }
-        stats.tail_rows = self.pending_tail_rows;
+            (evaluator.seconds, evaluator.calls, evaluator.rows);
+        (stats.cache_lookups, stats.cache_hits) =
+            (evaluator.cache_lookups(), evaluator.cache_hits());
+        self.infer_cache = cache; // the evaluator's borrow ends above; put the cache back
         (out, stats)
     }
 
@@ -333,11 +323,11 @@ where
         finished: &[(usize, bool)],
         out: &mut Vec<L::Record>,
         stats: &mut CollectStats,
-        infer: &mut F,
+        evaluator: &mut crate::evaluator::Evaluator<'_, F>,
     ) where
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
-        let tails = self.tail_values(finished, infer);
+        let tails = self.tail_values(finished, evaluator);
         let num_agents = self.game.num_agents();
 
         for &(gi, _) in finished {
@@ -382,10 +372,12 @@ where
     /// Per-(game, agent) z-tail: the net's per-head value `max_a Q(final_obs)` for agents still active
     /// at a truncation (terminal episodes and inactive agents seed with 0, so they are absent here).
     /// Empty when `outcome_weight == 0`, where the tail never enters the (no-op) blend.
+    /// An ordinary [`Evaluator`](crate::evaluator::Evaluator) consumer: the final state was almost
+    /// always just evaluated by the last search, so with the cache on this is typically hit-served.
     fn tail_values<F>(
         &mut self,
         finished: &[(usize, bool)],
-        infer: &mut F,
+        evaluator: &mut crate::evaluator::Evaluator<'_, F>,
     ) -> HashMap<(usize, usize), Vec<f64>>
     where
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
@@ -410,8 +402,7 @@ where
             }
         }
         if !meta.is_empty() {
-            self.pending_tail_rows += meta.len(); // non-search forwards: excluded from the sim-fate identity
-            let q = infer(obs_flat, meta.len()); // one flat row per state; layout = the family's contract
+            let q = evaluator.forward(obs_flat, meta.len()); // one flat row per state; layout = the family's contract
             let stride = q.len() / meta.len();
             for (i, &key) in meta.iter().enumerate() {
                 let row = &q[i * stride..(i + 1) * stride];

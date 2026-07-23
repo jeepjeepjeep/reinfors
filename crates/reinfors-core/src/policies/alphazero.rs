@@ -13,6 +13,7 @@
 
 use crate::encoder::StateEncoder;
 use crate::engine::CollectStats;
+use crate::evaluator::Evaluator;
 use crate::game::{Game, Rng};
 use crate::policies::expectimax::SearchEvaluation;
 use crate::policies::mcts::{sample_visits, search_many, Guidance};
@@ -49,7 +50,6 @@ impl AlphaZero {
 /// Pooled PUCT over a batch of `(state, agent)` requests — the AlphaZero counterpart of `mcts_many`.
 /// `infer` must return `n·(A+1)` values: per row, `A` policy logits then the state value. `seed`
 /// drives the root-noise Dirichlet draws (disjoint per tree).
-#[allow(clippy::too_many_arguments)]
 pub fn alphazero_many<G, F>(
     game: &G,
     enc: &dyn StateEncoder<State = G::State>,
@@ -57,8 +57,7 @@ pub fn alphazero_many<G, F>(
     cfg: &AlphaZeroConfig,
     requests: Vec<(G::State, usize)>,
     seed: u64,
-    cache: Option<&mut crate::infer_cache::InferCache>,
-    infer: &mut F,
+    eval: &mut Evaluator<'_, F>,
 ) -> Vec<SearchEvaluation>
 where
     G: Game + Sync,
@@ -78,8 +77,7 @@ where
         cfg.max_depth,
         &guidance,
         requests,
-        cache,
-        infer,
+        eval,
     )
 }
 
@@ -91,7 +89,6 @@ impl Policy for AlphaZero {
         0
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn evaluate<G, F>(
         &self,
         game: &G,
@@ -100,15 +97,14 @@ impl Policy for AlphaZero {
         requests: Vec<(G::State, usize)>,
         seed: u64,
         _collect_interior: bool,
-        cache: Option<&mut crate::infer_cache::InferCache>,
-        infer: &mut F,
+        eval: &mut Evaluator<'_, F>,
     ) -> Vec<SearchEvaluation>
     where
         G: Game + Sync,
         G::State: Send,
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
-        alphazero_many(game, enc, reward, &self.cfg, requests, seed, cache, infer)
+        alphazero_many(game, enc, reward, &self.cfg, requests, seed, eval)
     }
 
     /// Classic AlphaZero acting: by visit count — sampled under the opening temperature, greedy after.
@@ -130,5 +126,7 @@ impl Policy for AlphaZero {
         stats.sum_terminal_sims += s.terminal_sims;
         stats.sum_depthcap_sims += s.depthcap_sims;
         stats.sum_shared_rows += s.shared_rows;
+        stats.sum_fresh_rows += s.fresh_rows;
+        stats.sum_hit_rows += s.hit_rows;
     }
 }

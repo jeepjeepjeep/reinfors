@@ -68,24 +68,27 @@ def test_weights_updated_is_safe_without_cache_and_during_stream() -> None:
 
 
 def _identity(t: dict[str, int], sims: int) -> tuple[int, int]:
+    # Search-local and exact on any workload: every simulation lands in exactly one bucket,
+    # counted by the trees themselves — no global counter (and so no truncation caveat) involved.
     lhs = t["decisions"] * sims
-    rhs = (
-        t["infer_rows"] - t["tail_rows"] + t["cache_hits"] + t["shared_rows"] + t["terminal_sims"] + t["depthcap_sims"]
-    )
+    rhs = t["fresh_rows"] + t["hit_rows"] + t["shared_rows"] + t["terminal_sims"] + t["depthcap_sims"]
     return lhs, rhs
 
 
 def test_sim_fate_identity_holds_without_truncation() -> None:
-    # connect4 terminates naturally: tail_rows must be 0 and the identity exact.
+    # connect4 terminates naturally: no tail bootstraps, so the global Evaluator counters coincide
+    # with the search-local ones.
     t = _engine(1 << 16).collect(120, _infer).telemetry
-    assert t["tail_rows"] == 0
     lhs, rhs = _identity(t, 16)
     assert lhs == rhs
+    assert t["infer_rows"] == t["fresh_rows"]
+    assert t["cache_hits"] == t["hit_rows"]
 
 
 def test_sim_fate_identity_holds_under_truncation() -> None:
-    # chess with a tight max_ticks truncates constantly (the reviewer's repro): tail-bootstrap
-    # forwards ride infer_rows, and the identity must close exactly once tail_rows is subtracted.
+    # chess with a tight max_ticks truncates constantly: tail-bootstrap forwards flow through the
+    # same Evaluator (global counters) but are not search sims, so the identity closes with no
+    # correction term — and the global-minus-search gap is exactly the tail activity.
     def infer(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         return np.zeros((arr.shape[0], 4672)), np.zeros(arr.shape[0])
 
@@ -99,6 +102,7 @@ def test_sim_fate_identity_holds_under_truncation() -> None:
         infer_cache=1 << 14,
     )
     t = engine.collect(80, infer).telemetry
-    assert t["tail_rows"] > 0, "a truncating workload must record tail-bootstrap rows"
     lhs, rhs = _identity(t, 8)
     assert lhs == rhs, f"identity broken under truncation: {lhs} != {rhs}"
+    tail_activity = (t["infer_rows"] - t["fresh_rows"]) + (t["cache_hits"] - t["hit_rows"])
+    assert tail_activity > 0, "a truncating workload must show tail-bootstrap forwards or hits"

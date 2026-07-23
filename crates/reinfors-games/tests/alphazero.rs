@@ -2,7 +2,7 @@
 //! search, root noise diversifies it deterministically, and simultaneous games are rejected —
 //! mirroring the UCT suite in `mcts.rs`.
 
-use reinfors_core::{alphazero_many, Actor, AlphaZeroConfig, Game, Rng};
+use reinfors_core::{alphazero_many, Actor, AlphaZeroConfig, Evaluator, Game, Rng};
 use reinfors_games::{Connect4, Connect4Planes, Connect4Reward, EgocentricSnake, Snake};
 
 struct NoRng;
@@ -82,8 +82,7 @@ fn finds_the_forced_connect4_win() {
         &cfg(96, 0.0),
         vec![(forced_win_state(), 0)],
         7,
-        None,
-        &mut uniform_infer,
+        &mut Evaluator::new(&mut uniform_infer, None),
     );
     assert_eq!(
         argmax(&evals[0].visits),
@@ -106,8 +105,7 @@ fn priors_steer_visits() {
             &cfg(32, 0.0),
             vec![(state.clone(), 0)],
             7,
-            None,
-            &mut sharp_infer(col),
+            &mut Evaluator::new(&mut sharp_infer(col), None),
         );
         assert_eq!(
             argmax(&evals[0].visits),
@@ -129,8 +127,7 @@ fn search_is_deterministic_per_seed_and_noise_diversifies_across_seeds() {
             &cfg(48, eps),
             vec![(state.clone(), 0)],
             seed,
-            None,
-            &mut uniform_infer,
+            &mut Evaluator::new(&mut uniform_infer, None),
         )
         .remove(0)
         .visits
@@ -159,8 +156,7 @@ fn pooled_trees_draw_independent_noise() {
         &cfg(48, 0.9),
         vec![(state.clone(), 0), (state, 0)],
         11,
-        None,
-        &mut uniform_infer,
+        &mut Evaluator::new(&mut uniform_infer, None),
     );
     assert_ne!(
         evals[0].visits, evals[1].visits,
@@ -196,8 +192,7 @@ fn rejects_simultaneous_snake() {
         &cfg(4, 0.0),
         vec![(state, 0)],
         0,
-        None,
-        &mut uniform_infer,
+        &mut Evaluator::new(&mut uniform_infer, None),
     );
 }
 
@@ -218,8 +213,7 @@ fn infer_cache_is_behavior_identical_and_hits() {
             &cfg(48, 0.5),
             requests.clone(),
             9,
-            cache,
-            &mut uniform_infer,
+            &mut Evaluator::new(&mut uniform_infer, cache),
         )
     };
     let plain = run(None);

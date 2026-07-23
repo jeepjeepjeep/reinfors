@@ -956,17 +956,18 @@ fn build_telemetry<'py>(
     telemetry.set_item("infer_seconds", stats.infer_seconds)?;
     telemetry.set_item("infer_calls", stats.infer_calls)?;
     telemetry.set_item("infer_rows", stats.infer_rows)?;
-    // Infer-cache telemetry (zeros when disabled). `infer_rows` counts only miss rows, so
-    // rows-per-state falls as the hit rate rises.
+    // Global infer-cache telemetry, all consumers (zeros when disabled). `infer_rows` counts only
+    // miss rows, so rows-per-state falls as the hit rate rises.
     telemetry.set_item("cache_lookups", stats.cache_lookups)?;
     telemetry.set_item("cache_hits", stats.cache_hits)?;
-    // Tree-search sim fates: decisions × num_simulations =
-    //   (infer_rows − tail_rows) + cache_hits + shared_rows + terminal_sims + depthcap_sims
-    // (tail_rows = episode-tail bootstrap forwards on truncation — in infer_rows, not search sims).
+    // Tree-search sim fates, counted by the trees themselves (search-local, exact):
+    //   decisions × num_simulations =
+    //     fresh_rows + hit_rows + shared_rows + terminal_sims + depthcap_sims
     telemetry.set_item("terminal_sims", stats.sum_terminal_sims)?;
     telemetry.set_item("depthcap_sims", stats.sum_depthcap_sims)?;
     telemetry.set_item("shared_rows", stats.sum_shared_rows)?;
-    telemetry.set_item("tail_rows", stats.tail_rows)?;
+    telemetry.set_item("fresh_rows", stats.sum_fresh_rows)?;
+    telemetry.set_item("hit_rows", stats.sum_hit_rows)?;
     Ok(telemetry)
 }
 

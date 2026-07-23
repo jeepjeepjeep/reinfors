@@ -23,14 +23,13 @@
 
 use crate::encoder::StateEncoder;
 use crate::engine::CollectStats;
+use crate::evaluator::{Evaluator, Resolve};
 use crate::game::{Actor, Game, Rng};
-use crate::infer_cache::InferCache;
 use crate::policies::expectimax::search::SearchStats;
 use crate::policies::expectimax::SearchEvaluation;
 use crate::policy::{argmax, Policy};
 use crate::reward::Reward;
 use crate::rng::{dirichlet, SplitMix64};
-use std::collections::HashMap;
 
 /// Which rule guides selection, and what the net returns per leaf. The tree machinery below is shared;
 /// this is the only axis the UCT (`Mcts`) and PUCT (`AlphaZero`) policies differ on.
@@ -46,16 +45,6 @@ pub(crate) enum Guidance {
         c: f64,
         noise: Option<(f64, f64, u64)>,
     },
-}
-
-impl Guidance {
-    /// Elements per net-output row: `K·A` Q-values (UCT, `k` heads) or `A+1` logits+value (PUCT).
-    fn row_stride(&self, n_rows: usize, out_len: usize, actions: usize) -> usize {
-        match self {
-            Guidance::Uct { .. } => out_len / n_rows.max(1),
-            Guidance::Puct { .. } => actions + 1,
-        }
-    }
 }
 
 /// Numerically stable softmax — the PUCT prior over the full action space (every action is legal by
@@ -184,11 +173,14 @@ struct Tree<S> {
     path: Vec<(usize, usize)>, // (node idx, action) edges from root to the current leaf
     leaf: usize,
     max_depth_seen: i32,
-    // Per-search sim-fate counters (the per-move identity `sims = forwards + cache hits +
-    // shared rows + terminal + depth-capped` — see the collect telemetry).
+    // Per-search sim-fate counters, one bucket per simulation (the per-move identity `sims =
+    // fresh rows + cache hits + shared rows + terminal + depth-capped` — see `SearchStats`). The
+    // tree counts them at the moment each sim resolves, so the identity is search-local and exact.
     terminal_sims: usize,
     depthcap_sims: usize,
     shared_rows: usize,
+    fresh_rows: usize,
+    hit_rows: usize,
 }
 
 impl<S: Clone> Tree<S> {
@@ -209,6 +201,8 @@ impl<S: Clone> Tree<S> {
             terminal_sims: 0,
             depthcap_sims: 0,
             shared_rows: 0,
+            fresh_rows: 0,
+            hit_rows: 0,
         }
     }
 
@@ -334,6 +328,8 @@ impl<S: Clone> Tree<S> {
             terminal_sims: self.terminal_sims,
             depthcap_sims: self.depthcap_sims,
             shared_rows: self.shared_rows,
+            fresh_rows: self.fresh_rows,
+            hit_rows: self.hit_rows,
         };
         SearchEvaluation {
             values: vec![values],
@@ -398,8 +394,7 @@ pub fn mcts_many<G, F>(
     reward: &dyn Reward<Event = G::Event>,
     cfg: &MctsConfig,
     requests: Vec<(G::State, usize)>,
-    cache: Option<&mut InferCache>,
-    infer: &mut F,
+    eval: &mut Evaluator<'_, F>,
 ) -> Vec<SearchEvaluation>
 where
     G: Game + Sync,
@@ -416,15 +411,15 @@ where
         cfg.max_depth,
         &guidance,
         requests,
-        cache,
-        infer,
+        eval,
     )
 }
 
 /// The shared pooled search loop behind both `mcts_many` (UCT) and `alphazero_many` (PUCT): each round
-/// advances every active tree by one simulation, batching the new leaves' observations into a single
-/// `infer` forward, then consumes each returned row per the guidance mode (UCT: Q rows → leaf value;
-/// PUCT: logits+value → node prior + backed-up value, with root noise mixed in once per tree).
+/// advances every active tree by one simulation, staging the new leaves' observations on one
+/// [`Evaluator`] batch (which dedupes identical positions and serves infer-cache hits inline), then
+/// consumes each committed row per the guidance mode (UCT: Q rows → leaf value; PUCT: logits+value →
+/// node prior + backed-up value, with root noise mixed in once per tree).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn search_many<G, F>(
     game: &G,
@@ -435,8 +430,7 @@ pub(crate) fn search_many<G, F>(
     max_depth: i32,
     guidance: &Guidance,
     requests: Vec<(G::State, usize)>,
-    mut cache: Option<&mut InferCache>,
-    infer: &mut F,
+    eval: &mut Evaluator<'_, F>,
 ) -> Vec<SearchEvaluation>
 where
     G: Game + Sync,
@@ -450,14 +444,8 @@ where
         .collect();
 
     while trees.iter().any(|t| t.sims < num_simulations) {
-        if let Some(c) = cache.as_deref_mut() {
-            c.sync_generation(); // a weights bump (possibly mid-collect, under streaming) clears here
-        }
-        let mut obs_flat: Vec<f32> = Vec::new();
-        let mut row_keys: Vec<u128> = Vec::new(); // per staged row (cache on): key for insert/dedup
-        let mut consumers: Vec<Vec<usize>> = Vec::new(); // per staged row: tree indices awaiting it
-        let mut staged: HashMap<u128, usize> = HashMap::new(); // within-batch dedup (cache on)
-        let mut row_dim = 0usize;
+        let mut batch = eval.batch();
+        let mut consumers: Vec<Vec<usize>> = Vec::new(); // per ticket: tree indices awaiting the row
 
         for (ti, tree) in trees.iter_mut().enumerate() {
             // Advance-until-miss: keep simulating this tree — terminals, depth caps, and cache
@@ -475,43 +463,32 @@ where
                         tree.depthcap_sims += 1;
                         tree.backprop(gamma, v);
                     }
-                    Reached::Eval => {
-                        if let Some(c) = cache.as_deref_mut() {
-                            let key = InferCache::key(&tree.arena[tree.leaf].obs);
-                            if let Some(row) = c.lookup(key) {
-                                consume_row(tree, &row, guidance, gamma, a, ti);
-                                continue; // resolved from cache — keep advancing this tree
-                            }
-                            // Within-batch dedup: identical positions across trees share one row.
-                            if let Some(&slot) = staged.get(&key) {
-                                tree.shared_rows += 1;
-                                consumers[slot].push(ti);
-                                break;
-                            }
-                            staged.insert(key, consumers.len());
-                            row_keys.push(key);
+                    Reached::Eval => match batch.resolve_or_stage(&tree.arena[tree.leaf].obs) {
+                        Resolve::Resolved(row) => {
+                            tree.hit_rows += 1;
+                            consume_row(tree, &row, guidance, gamma, a, ti);
+                            // resolved from cache — keep advancing this tree
                         }
-                        row_dim = tree.arena[tree.leaf].obs.len();
-                        obs_flat.extend_from_slice(&tree.arena[tree.leaf].obs);
-                        consumers.push(vec![ti]);
-                        break; // this tree waits on the pooled forward
-                    }
+                        Resolve::Staged(ticket) => {
+                            if ticket < consumers.len() {
+                                // Within-batch dedup: an identical position across trees shares
+                                // the earlier tree's staged row.
+                                tree.shared_rows += 1;
+                                consumers[ticket].push(ti);
+                            } else {
+                                tree.fresh_rows += 1;
+                                consumers.push(vec![ti]);
+                            }
+                            break; // this tree waits on the pooled forward
+                        }
+                    },
                 }
             }
         }
-        if consumers.is_empty() {
-            continue;
-        }
-        let n = obs_flat.len() / row_dim.max(1);
-        let out = infer(obs_flat, n);
-        let stride = guidance.row_stride(n, out.len(), a);
-        for (row, waiting) in consumers.iter().enumerate() {
-            let row_data = &out[row * stride..(row + 1) * stride];
-            if let Some(c) = cache.as_deref_mut() {
-                c.insert(row_keys[row], row_data);
-            }
+        let rows = batch.commit();
+        for (ticket, waiting) in consumers.iter().enumerate() {
             for &ti in waiting {
-                consume_row(&mut trees[ti], row_data, guidance, gamma, a, ti);
+                consume_row(&mut trees[ti], rows.row(ticket), guidance, gamma, a, ti);
             }
         }
     }
@@ -603,7 +580,6 @@ impl Policy for Mcts {
         0
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn evaluate<G, F>(
         &self,
         game: &G,
@@ -612,15 +588,14 @@ impl Policy for Mcts {
         requests: Vec<(G::State, usize)>,
         _seed: u64,
         _collect_interior: bool,
-        cache: Option<&mut InferCache>,
-        infer: &mut F,
+        eval: &mut Evaluator<'_, F>,
     ) -> Vec<SearchEvaluation>
     where
         G: Game + Sync,
         G::State: Send,
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
-        mcts_many(game, enc, reward, &self.cfg, requests, cache, infer)
+        mcts_many(game, enc, reward, &self.cfg, requests, eval)
     }
 
     fn select(&self, eval: &SearchEvaluation, state: &mut u32, rng: &mut dyn Rng) -> usize {
@@ -644,6 +619,8 @@ impl Policy for Mcts {
         stats.sum_terminal_sims += s.terminal_sims;
         stats.sum_depthcap_sims += s.depthcap_sims;
         stats.sum_shared_rows += s.shared_rows;
+        stats.sum_fresh_rows += s.fresh_rows;
+        stats.sum_hit_rows += s.hit_rows;
     }
 }
 
@@ -672,9 +649,7 @@ mod tests {
                 leaves: 1,
                 rounds: 1,
                 sigma_sum: 0.0,
-                terminal_sims: 0,
-                depthcap_sims: 0,
-                shared_rows: 0,
+                ..SearchStats::default()
             },
         }
     }
@@ -883,6 +858,7 @@ mod masking_tests {
                 vec![0.0; n * 10] // K=1 Q rows
             }
         };
+        let mut eval = Evaluator::new(&mut infer, None);
         let evals = if guidance_puct {
             let cfg = AlphaZeroConfig {
                 num_simulations: 40,
@@ -901,8 +877,7 @@ mod masking_tests {
                 &cfg,
                 vec![(St(0), 0)],
                 7,
-                None,
-                &mut infer,
+                &mut eval,
             )
         } else {
             let cfg = MctsConfig {
@@ -919,8 +894,7 @@ mod masking_tests {
                 &Passthrough,
                 &cfg,
                 vec![(St(0), 0)],
-                None,
-                &mut infer,
+                &mut eval,
             )
         };
         evals.into_iter().next().unwrap()

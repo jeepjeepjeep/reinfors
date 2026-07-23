@@ -1,7 +1,7 @@
 //! The MCTS (UCT) planner on real games: it finds a forced connect4 win, is deterministic, and rejects
 //! simultaneous games. Mirrors how the binding pairs `Mcts` with a sequential game.
 
-use reinfors_core::{mcts_many, Actor, Game, MctsConfig, Rng};
+use reinfors_core::{mcts_many, Actor, Evaluator, Game, MctsConfig, Rng};
 use reinfors_games::{Connect4, Connect4Planes, Connect4Reward, EgocentricSnake, Snake};
 
 struct NoRng;
@@ -67,8 +67,7 @@ fn mcts_finds_a_forced_connect4_win() {
         &reward(),
         &cfg(128),
         vec![(forced_win_state(), 0)],
-        None,
-        &mut zeros_infer,
+        &mut Evaluator::new(&mut zeros_infer, None),
     );
     let values = &evals[0].values[0];
     assert_eq!(
@@ -109,8 +108,7 @@ fn mcts_blocks_opponent_win() {
         &reward(),
         &cfg(400),
         vec![(opponent_threat_state(), 0)],
-        None,
-        &mut zeros_infer,
+        &mut Evaluator::new(&mut zeros_infer, None),
     );
     let values = &evals[0].values[0];
     assert_eq!(
@@ -133,8 +131,7 @@ fn mcts_is_deterministic() {
             &reward(),
             &cfg(64),
             vec![(forced_win_state(), 0)],
-            None,
-            &mut zeros_infer,
+            &mut Evaluator::new(&mut zeros_infer, None),
         )[0]
         .values[0]
             .clone()
@@ -151,8 +148,7 @@ fn mcts_pools_multiple_requests() {
         &reward(),
         &cfg(128),
         vec![(forced_win_state(), 0), (forced_win_state(), 0)],
-        None,
-        &mut zeros_infer,
+        &mut Evaluator::new(&mut zeros_infer, None),
     );
     assert_eq!(evals.len(), 2);
     assert_eq!(argmax(&evals[0].values[0]), 3);
@@ -187,7 +183,6 @@ fn mcts_rejects_simultaneous_games() {
         &reward,
         &cfg(8),
         vec![(state, 0)],
-        None,
-        &mut infer,
+        &mut Evaluator::new(&mut infer, None),
     );
 }

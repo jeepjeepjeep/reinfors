@@ -8,6 +8,7 @@ pub mod search;
 
 use crate::encoder::StateEncoder;
 use crate::engine::CollectStats;
+use crate::evaluator::Evaluator;
 use crate::game::{Game, Rng};
 use crate::policy::{argmax, Policy};
 use crate::reward::Reward;
@@ -56,7 +57,6 @@ impl Policy for SelectiveExpectimax {
         rng.below(self.n_heads)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn evaluate<G, F>(
         &self,
         game: &G,
@@ -65,14 +65,15 @@ impl Policy for SelectiveExpectimax {
         requests: Vec<(G::State, usize)>,
         seed: u64,
         collect_interior: bool,
-        _cache: Option<&mut crate::infer_cache::InferCache>,
-        infer: &mut F,
+        eval: &mut Evaluator<'_, F>,
     ) -> Vec<SearchEvaluation>
     where
         G: Game + Sync,
         G::State: Send,
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
+        // The expectimax search pools per round through its own loop; routing each pooled call
+        // through the Evaluator gives it the same caching/dedup/telemetry as every other consumer.
         search_many(
             game,
             enc,
@@ -81,7 +82,7 @@ impl Policy for SelectiveExpectimax {
             requests,
             collect_interior,
             seed,
-            infer,
+            &mut |obs, n| eval.forward(obs, n),
         )
         .into_iter()
         .map(|(values, interior, stats)| {
