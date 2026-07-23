@@ -13,6 +13,7 @@
 
 use crate::encoder::StateEncoder;
 use crate::engine::CollectStats;
+use crate::evaluator::Evaluator;
 use crate::game::{Game, Rng};
 use crate::policies::expectimax::SearchEvaluation;
 use crate::policies::mcts::{sample_visits, search_many, Guidance};
@@ -56,7 +57,7 @@ pub fn alphazero_many<G, F>(
     cfg: &AlphaZeroConfig,
     requests: Vec<(G::State, usize)>,
     seed: u64,
-    infer: &mut F,
+    eval: &mut Evaluator<'_, F>,
 ) -> Vec<SearchEvaluation>
 where
     G: Game + Sync,
@@ -76,7 +77,7 @@ where
         cfg.max_depth,
         &guidance,
         requests,
-        infer,
+        eval,
     )
 }
 
@@ -88,7 +89,6 @@ impl Policy for AlphaZero {
         0
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn evaluate<G, F>(
         &self,
         game: &G,
@@ -97,14 +97,14 @@ impl Policy for AlphaZero {
         requests: Vec<(G::State, usize)>,
         seed: u64,
         _collect_interior: bool,
-        infer: &mut F,
+        eval: &mut Evaluator<'_, F>,
     ) -> Vec<SearchEvaluation>
     where
         G: Game + Sync,
         G::State: Send,
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
-        alphazero_many(game, enc, reward, &self.cfg, requests, seed, infer)
+        alphazero_many(game, enc, reward, &self.cfg, requests, seed, eval)
     }
 
     /// Classic AlphaZero acting: by visit count — sampled under the opening temperature, greedy after.
@@ -123,5 +123,10 @@ impl Policy for AlphaZero {
         stats.sum_leaves += s.leaves as f64;
         stats.sum_rounds += s.rounds as f64;
         stats.sum_expansions += s.expansions as f64;
+        stats.sum_terminal_sims += s.terminal_sims;
+        stats.sum_depthcap_sims += s.depthcap_sims;
+        stats.sum_shared_rows += s.shared_rows;
+        stats.sum_fresh_rows += s.fresh_rows;
+        stats.sum_hit_rows += s.hit_rows;
     }
 }

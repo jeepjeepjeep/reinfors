@@ -3,6 +3,7 @@
 //! non-search case; the matching `Dqn` (in `crate::learners::dqn`) consumes it into transitions.
 
 use crate::encoder::StateEncoder;
+use crate::evaluator::Evaluator;
 use crate::game::{Game, Rng};
 use crate::policy::{argmax, Policy};
 use crate::reward::Reward;
@@ -36,7 +37,6 @@ impl Policy for EpsilonGreedyQ {
         rng.below(self.n_heads)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn evaluate<G, F>(
         &self,
         game: &G,
@@ -45,7 +45,7 @@ impl Policy for EpsilonGreedyQ {
         requests: Vec<(G::State, usize)>,
         _seed: u64,
         _collect_interior: bool, // DQN has no interior targets — a plain forward, nothing to collect
-        infer: &mut F,
+        eval: &mut Evaluator<'_, F>,
     ) -> Vec<QEvaluation>
     where
         G: Game + Sync,
@@ -61,7 +61,7 @@ impl Policy for EpsilonGreedyQ {
         for (state, agent) in &requests {
             obs_flat.extend(enc.encode(state, *agent));
         }
-        let q = infer(obs_flat, n); // flat [n, K, A]
+        let q = eval.forward(obs_flat, n); // flat [n, K, A]
         let k = q.len() / (n * a);
         (0..n)
             .map(|i| {

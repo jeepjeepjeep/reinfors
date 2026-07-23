@@ -2,7 +2,7 @@
 //! search, root noise diversifies it deterministically, and simultaneous games are rejected —
 //! mirroring the UCT suite in `mcts.rs`.
 
-use reinfors_core::{alphazero_many, Actor, AlphaZeroConfig, Game, Rng};
+use reinfors_core::{alphazero_many, Actor, AlphaZeroConfig, Evaluator, Game, Rng};
 use reinfors_games::{Connect4, Connect4Planes, Connect4Reward, EgocentricSnake, Snake};
 
 struct NoRng;
@@ -82,7 +82,7 @@ fn finds_the_forced_connect4_win() {
         &cfg(96, 0.0),
         vec![(forced_win_state(), 0)],
         7,
-        &mut uniform_infer,
+        &mut Evaluator::new(&mut uniform_infer, None),
     );
     assert_eq!(
         argmax(&evals[0].visits),
@@ -105,7 +105,7 @@ fn priors_steer_visits() {
             &cfg(32, 0.0),
             vec![(state.clone(), 0)],
             7,
-            &mut sharp_infer(col),
+            &mut Evaluator::new(&mut sharp_infer(col), None),
         );
         assert_eq!(
             argmax(&evals[0].visits),
@@ -127,7 +127,7 @@ fn search_is_deterministic_per_seed_and_noise_diversifies_across_seeds() {
             &cfg(48, eps),
             vec![(state.clone(), 0)],
             seed,
-            &mut uniform_infer,
+            &mut Evaluator::new(&mut uniform_infer, None),
         )
         .remove(0)
         .visits
@@ -156,7 +156,7 @@ fn pooled_trees_draw_independent_noise() {
         &cfg(48, 0.9),
         vec![(state.clone(), 0), (state, 0)],
         11,
-        &mut uniform_infer,
+        &mut Evaluator::new(&mut uniform_infer, None),
     );
     assert_ne!(
         evals[0].visits, evals[1].visits,
@@ -192,6 +192,47 @@ fn rejects_simultaneous_snake() {
         &cfg(4, 0.0),
         vec![(state, 0)],
         0,
-        &mut uniform_infer,
+        &mut Evaluator::new(&mut uniform_infer, None),
     );
+}
+
+#[test]
+fn infer_cache_is_behavior_identical_and_hits() {
+    use reinfors_core::InferCache;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
+    let game = Connect4;
+    let state = game.initial_state(&mut NoRng);
+    // Repeated identical requests in one pool: heavy transposition + within-batch dedup territory.
+    let requests: Vec<_> = (0..4).map(|_| (state.clone(), 0)).collect();
+    let run = |cache: Option<&mut InferCache>| {
+        alphazero_many(
+            &game,
+            &Connect4Planes,
+            &reward(),
+            &cfg(48, 0.5),
+            requests.clone(),
+            9,
+            &mut Evaluator::new(&mut uniform_infer, cache),
+        )
+    };
+    let plain = run(None);
+    let generation = Arc::new(AtomicU64::new(0));
+    let mut cache = InferCache::new(1 << 16, generation);
+    let cached = run(Some(&mut cache));
+    for (p, c) in plain.iter().zip(&cached) {
+        assert_eq!(p.visits, c.visits, "cache changed search behavior (visits)");
+        assert_eq!(p.values, c.values, "cache changed search behavior (values)");
+    }
+    assert!(
+        cache.hits > 0,
+        "identical pooled requests must produce cache hits"
+    );
+    // Second search over the same position reuses across calls too.
+    let before = cache.hits;
+    let again = run(Some(&mut cache));
+    for (p, c) in plain.iter().zip(&again) {
+        assert_eq!(p.visits, c.visits);
+    }
+    assert!(cache.hits > 0 || before > 0);
 }

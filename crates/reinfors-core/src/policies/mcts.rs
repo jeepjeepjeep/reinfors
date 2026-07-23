@@ -23,6 +23,7 @@
 
 use crate::encoder::StateEncoder;
 use crate::engine::CollectStats;
+use crate::evaluator::{Evaluator, Resolve};
 use crate::game::{Actor, Game, Rng};
 use crate::policies::expectimax::search::SearchStats;
 use crate::policies::expectimax::SearchEvaluation;
@@ -44,16 +45,6 @@ pub(crate) enum Guidance {
         c: f64,
         noise: Option<(f64, f64, u64)>,
     },
-}
-
-impl Guidance {
-    /// Elements per net-output row: `K·A` Q-values (UCT, `k` heads) or `A+1` logits+value (PUCT).
-    fn row_stride(&self, n_rows: usize, out_len: usize, actions: usize) -> usize {
-        match self {
-            Guidance::Uct { .. } => out_len / n_rows.max(1),
-            Guidance::Puct { .. } => actions + 1,
-        }
-    }
 }
 
 /// Numerically stable softmax — the PUCT prior over the full action space (every action is legal by
@@ -172,7 +163,8 @@ impl<S> Node<S> {
 /// depth-capped node) and can be backed up immediately.
 enum Reached {
     Eval,
-    Cached(f64),
+    Terminal,         // in-tree terminal: exact value 0 for the mover-to-be (no forward)
+    DepthCapped(f64), // depth cap: the node's cached net value (no forward)
 }
 
 struct Tree<S> {
@@ -181,6 +173,14 @@ struct Tree<S> {
     path: Vec<(usize, usize)>, // (node idx, action) edges from root to the current leaf
     leaf: usize,
     max_depth_seen: i32,
+    // Per-search sim-fate counters, one bucket per simulation (the per-move identity `sims =
+    // fresh rows + cache hits + shared rows + terminal + depth-capped` — see `SearchStats`). The
+    // tree counts them at the moment each sim resolves, so the identity is search-local and exact.
+    terminal_sims: usize,
+    depthcap_sims: usize,
+    shared_rows: usize,
+    fresh_rows: usize,
+    hit_rows: usize,
 }
 
 impl<S: Clone> Tree<S> {
@@ -198,6 +198,11 @@ impl<S: Clone> Tree<S> {
             path: Vec::new(),
             leaf: 0,
             max_depth_seen: 0,
+            terminal_sims: 0,
+            depthcap_sims: 0,
+            shared_rows: 0,
+            fresh_rows: 0,
+            hit_rows: 0,
         }
     }
 
@@ -223,7 +228,7 @@ impl<S: Clone> Tree<S> {
             self.max_depth_seen = self.max_depth_seen.max(node.depth);
             if node.terminal {
                 self.leaf = ni;
-                return Reached::Cached(0.0);
+                return Reached::Terminal;
             }
             if matches!(guidance, Guidance::Puct { .. }) && node.prior.is_empty() {
                 self.leaf = ni; // un-evaluated PUCT node (the root on sim 1): evaluate it in place
@@ -231,7 +236,7 @@ impl<S: Clone> Tree<S> {
             }
             if node.depth >= max_depth {
                 self.leaf = ni; // depth cap: use the cached net value evaluated when this node was created
-                return Reached::Cached(node.value);
+                return Reached::DepthCapped(node.value);
             }
             let a = select_edge(node, guidance);
             self.path.push((ni, a));
@@ -239,7 +244,7 @@ impl<S: Clone> Tree<S> {
                 let child = self.expand(game, enc, reward, ni, a);
                 self.leaf = child;
                 return if self.arena[child].terminal {
-                    Reached::Cached(0.0)
+                    Reached::Terminal
                 } else {
                     Reached::Eval // its obs is staged for the pooled forward
                 };
@@ -320,6 +325,11 @@ impl<S: Clone> Tree<S> {
             leaves: self.sims,
             rounds: self.sims,
             sigma_sum: 0.0,
+            terminal_sims: self.terminal_sims,
+            depthcap_sims: self.depthcap_sims,
+            shared_rows: self.shared_rows,
+            fresh_rows: self.fresh_rows,
+            hit_rows: self.hit_rows,
         };
         SearchEvaluation {
             values: vec![values],
@@ -384,7 +394,7 @@ pub fn mcts_many<G, F>(
     reward: &dyn Reward<Event = G::Event>,
     cfg: &MctsConfig,
     requests: Vec<(G::State, usize)>,
-    infer: &mut F,
+    eval: &mut Evaluator<'_, F>,
 ) -> Vec<SearchEvaluation>
 where
     G: Game + Sync,
@@ -401,14 +411,15 @@ where
         cfg.max_depth,
         &guidance,
         requests,
-        infer,
+        eval,
     )
 }
 
 /// The shared pooled search loop behind both `mcts_many` (UCT) and `alphazero_many` (PUCT): each round
-/// advances every active tree by one simulation, batching the new leaves' observations into a single
-/// `infer` forward, then consumes each returned row per the guidance mode (UCT: Q rows → leaf value;
-/// PUCT: logits+value → node prior + backed-up value, with root noise mixed in once per tree).
+/// advances every active tree by one simulation, staging the new leaves' observations on one
+/// [`Evaluator`] batch (which dedupes identical positions and serves infer-cache hits inline), then
+/// consumes each committed row per the guidance mode (UCT: Q rows → leaf value; PUCT: logits+value →
+/// node prior + backed-up value, with root noise mixed in once per tree).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn search_many<G, F>(
     game: &G,
@@ -419,7 +430,7 @@ pub(crate) fn search_many<G, F>(
     max_depth: i32,
     guidance: &Guidance,
     requests: Vec<(G::State, usize)>,
-    infer: &mut F,
+    eval: &mut Evaluator<'_, F>,
 ) -> Vec<SearchEvaluation>
 where
     G: Game + Sync,
@@ -433,68 +444,103 @@ where
         .collect();
 
     while trees.iter().any(|t| t.sims < num_simulations) {
-        let mut obs_flat: Vec<f32> = Vec::new();
-        let mut eval_rows: Vec<usize> = Vec::new(); // trees awaiting this round's forward
+        let mut batch = eval.batch();
+        let mut consumers: Vec<Vec<usize>> = Vec::new(); // per ticket: tree indices awaiting the row
+
         for (ti, tree) in trees.iter_mut().enumerate() {
-            if tree.sims >= num_simulations {
-                continue;
-            }
-            tree.sims += 1;
-            match tree.select_expand(game, enc, reward, max_depth, guidance) {
-                Reached::Cached(v) => tree.backprop(gamma, v),
-                Reached::Eval => {
-                    obs_flat.extend_from_slice(&tree.arena[tree.leaf].obs);
-                    eval_rows.push(ti);
-                }
-            }
-        }
-        if eval_rows.is_empty() {
-            continue;
-        }
-        let n = eval_rows.len();
-        let out = infer(obs_flat, n);
-        let stride = guidance.row_stride(n, out.len(), a);
-        for (row, &ti) in eval_rows.iter().enumerate() {
-            let tree = &mut trees[ti];
-            let row_data = &out[row * stride..(row + 1) * stride];
-            match guidance {
-                Guidance::Uct { .. } => {
-                    let v = leaf_value(row_data, stride / a, a, &tree.arena[tree.leaf].actions);
-                    tree.backprop(gamma, v);
-                }
-                Guidance::Puct { noise, .. } => {
-                    let (logits, value) = row_data.split_at(a);
-                    // Prior over the LEGAL set only: gather the leaf's legal actions' logits and
-                    // softmax those — illegal moves get zero mass by construction (the AlphaZero
-                    // convention), and the net never needs to learn to suppress them.
-                    let leaf_actions = &tree.arena[tree.leaf].actions;
-                    let legal_logits: Vec<f64> =
-                        leaf_actions.iter().map(|&act| logits[act]).collect();
-                    let mut prior = softmax(&legal_logits);
-                    if tree.leaf == 0 {
-                        // The root's one eval: mix in the Dirichlet exploration noise (per-tree
-                        // stream, so pooled searches stay deterministic and independent), drawn
-                        // over the legal set (AlphaZero's noise dimension).
-                        if let Some((eps, alpha, seed)) = noise {
-                            if *eps > 0.0 {
-                                let mut rng = SplitMix64::new(
-                                    seed ^ (ti as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
-                                );
-                                let noise_draw = dirichlet(&mut rng, *alpha, prior.len());
-                                for (p, d) in prior.iter_mut().zip(noise_draw) {
-                                    *p = (1.0 - eps) * *p + eps * d;
-                                }
-                            }
-                        }
+            // Advance-until-miss: keep simulating this tree — terminals, depth caps, and cache
+            // hits all resolve synchronously — until it needs a real forward (or its budget ends).
+            // Hits therefore reduce the number of pooled calls, not just their width (which is
+            // what matters on latency-bound devices), and terminal-heavy rounds no longer idle.
+            while tree.sims < num_simulations {
+                tree.sims += 1;
+                match tree.select_expand(game, enc, reward, max_depth, guidance) {
+                    Reached::Terminal => {
+                        tree.terminal_sims += 1;
+                        tree.backprop(gamma, 0.0);
                     }
-                    tree.arena[tree.leaf].prior = prior;
-                    tree.backprop(gamma, value[0]);
+                    Reached::DepthCapped(v) => {
+                        tree.depthcap_sims += 1;
+                        tree.backprop(gamma, v);
+                    }
+                    Reached::Eval => match batch.resolve_or_stage(&tree.arena[tree.leaf].obs) {
+                        Resolve::Resolved(row) => {
+                            tree.hit_rows += 1;
+                            consume_row(tree, &row, guidance, gamma, a, ti);
+                            // resolved from cache — keep advancing this tree
+                        }
+                        Resolve::Staged(ticket) => {
+                            if ticket < consumers.len() {
+                                // Within-batch dedup: an identical position across trees shares
+                                // the earlier tree's staged row.
+                                tree.shared_rows += 1;
+                                consumers[ticket].push(ti);
+                            } else {
+                                tree.fresh_rows += 1;
+                                consumers.push(vec![ti]);
+                            }
+                            break; // this tree waits on the pooled forward
+                        }
+                    },
                 }
+            }
+        }
+        let rows = batch.commit();
+        for (ticket, waiting) in consumers.iter().enumerate() {
+            for &ti in waiting {
+                consume_row(&mut trees[ti], rows.row(ticket), guidance, gamma, a, ti);
             }
         }
     }
 
     trees.into_iter().map(|t| t.evaluation(a)).collect()
+}
+
+/// Deliver one net-output row to the tree whose current leaf awaits it: UCT backs up the legal-max
+/// head-mean Q; PUCT stores the legal-set prior (with per-tree root Dirichlet noise) and backs up
+/// the value. One code path for fresh forwards, cache hits, and deduped rows — so caching cannot
+/// change search behavior.
+fn consume_row<S: Clone>(
+    tree: &mut Tree<S>,
+    row_data: &[f64],
+    guidance: &Guidance,
+    gamma: f64,
+    a: usize,
+    ti: usize,
+) {
+    match guidance {
+        Guidance::Uct { .. } => {
+            let k = row_data.len() / a;
+            let v = leaf_value(row_data, k, a, &tree.arena[tree.leaf].actions);
+            tree.backprop(gamma, v);
+        }
+        Guidance::Puct { noise, .. } => {
+            let (logits, value) = row_data.split_at(a);
+            // Prior over the LEGAL set only: gather the leaf's legal actions' logits and softmax
+            // those — illegal moves get zero mass by construction (the AlphaZero convention), and
+            // the net never needs to learn to suppress them.
+            let leaf_actions = &tree.arena[tree.leaf].actions;
+            let legal_logits: Vec<f64> = leaf_actions.iter().map(|&act| logits[act]).collect();
+            let mut prior = softmax(&legal_logits);
+            if tree.leaf == 0 {
+                // The root's one eval: mix in the Dirichlet exploration noise (per-tree stream, so
+                // pooled searches stay deterministic and independent — and cached root rows renoise
+                // identically, since the cache stores raw logits), drawn over the legal set.
+                if let Some((eps, alpha, seed)) = noise {
+                    if *eps > 0.0 {
+                        let mut rng =
+                            SplitMix64::new(seed ^ (ti as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                        let noise_draw = dirichlet(&mut rng, *alpha, prior.len());
+                        for (p, d) in prior.iter_mut().zip(noise_draw) {
+                            *p = (1.0 - eps) * *p + eps * d;
+                        }
+                    }
+                }
+            }
+            tree.arena[tree.leaf].prior = prior;
+            tree.backprop(gamma, value[0]);
+        }
+    }
 }
 
 /// Sample an action `∝ visits^(1/temperature)`. Weights are max-normalized before the power so a
@@ -534,7 +580,6 @@ impl Policy for Mcts {
         0
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn evaluate<G, F>(
         &self,
         game: &G,
@@ -543,14 +588,14 @@ impl Policy for Mcts {
         requests: Vec<(G::State, usize)>,
         _seed: u64,
         _collect_interior: bool,
-        infer: &mut F,
+        eval: &mut Evaluator<'_, F>,
     ) -> Vec<SearchEvaluation>
     where
         G: Game + Sync,
         G::State: Send,
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
-        mcts_many(game, enc, reward, &self.cfg, requests, infer)
+        mcts_many(game, enc, reward, &self.cfg, requests, eval)
     }
 
     fn select(&self, eval: &SearchEvaluation, state: &mut u32, rng: &mut dyn Rng) -> usize {
@@ -571,6 +616,11 @@ impl Policy for Mcts {
         stats.sum_leaves += s.leaves as f64;
         stats.sum_rounds += s.rounds as f64;
         stats.sum_expansions += s.expansions as f64;
+        stats.sum_terminal_sims += s.terminal_sims;
+        stats.sum_depthcap_sims += s.depthcap_sims;
+        stats.sum_shared_rows += s.shared_rows;
+        stats.sum_fresh_rows += s.fresh_rows;
+        stats.sum_hit_rows += s.hit_rows;
     }
 }
 
@@ -599,6 +649,7 @@ mod tests {
                 leaves: 1,
                 rounds: 1,
                 sigma_sum: 0.0,
+                ..SearchStats::default()
             },
         }
     }
@@ -807,6 +858,7 @@ mod masking_tests {
                 vec![0.0; n * 10] // K=1 Q rows
             }
         };
+        let mut eval = Evaluator::new(&mut infer, None);
         let evals = if guidance_puct {
             let cfg = AlphaZeroConfig {
                 num_simulations: 40,
@@ -825,7 +877,7 @@ mod masking_tests {
                 &cfg,
                 vec![(St(0), 0)],
                 7,
-                &mut infer,
+                &mut eval,
             )
         } else {
             let cfg = MctsConfig {
@@ -842,7 +894,7 @@ mod masking_tests {
                 &Passthrough,
                 &cfg,
                 vec![(St(0), 0)],
-                &mut infer,
+                &mut eval,
             )
         };
         evals.into_iter().next().unwrap()

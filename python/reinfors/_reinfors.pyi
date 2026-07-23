@@ -180,7 +180,15 @@ class Engine:
         start_buffer: bool = ...,
         start_buffer_capacity: int = ...,
         p_fresh: float = ...,
+        # Net-evaluation cache (entries; 0 = off): position-keyed reuse of net rows across the
+        # search, cleared when weights_updated() is called. Raises effective throughput in
+        # transposition-rich games; behavior-identical given fixed weights.
+        infer_cache: int = ...,
     ) -> None: ...
+    # Tell the engine the net's weights changed (call after every weight sync — e.g. right after
+    # load_state_dict onto the collector net). Clears the infer cache at the next round boundary;
+    # thread-safe, callable while a collect_stream is active; no-op when the cache is off.
+    def weights_updated(self) -> None: ...
     # The batch is learner-shaped: the TreeStrap family yields a `TreeStrapBatch`, the DQN family a
     # `DqnBatch`. Both expose named fields and also unpack positionally (back-compat with the old tuple).
     def collect(self, n_records: int, infer: Any) -> TreeStrapBatch | DqnBatch | AlphaZeroBatch: ...
