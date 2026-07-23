@@ -395,7 +395,9 @@ impl PyEngine {
 
 fn stream_active_err() -> PyErr {
     pyo3::exceptions::PyRuntimeError::new_err(
-        "a collect_stream holds this engine; call stream.stop() first",
+        "this engine is held by a collect_stream (call its stop() to get the engine back) — or was \
+         permanently forfeited by a stream that was dropped without stop(); in that case create a \
+         new Engine",
     )
 }
 
@@ -435,9 +437,20 @@ impl StreamChannel {
 
 /// A running background collection (see `Engine.collect_stream`). `next()` blocks (GIL released)
 /// until the worker's next batch is ready and marshals it on this thread; iteration is equivalent.
-/// `stop()` ends the worker and returns the engine to its `Engine` — also on `with`-exit. A dropped,
-/// never-stopped stream detaches its worker (which drains GIL-free via the stop flag) and forfeits
-/// the engine.
+/// `stop()` ends the worker and returns the engine to its `Engine` — also on `with`-exit.
+///
+/// **Single-consumer contract:** one consumer thread loops `next()` (or iterates) and owns `stop()`.
+/// Other Python threads run freely while `next()` waits (the GIL is released) — but they must not
+/// touch the stream object itself: `next()` holds the pyclass borrow across its wait, so a
+/// concurrent `stop()` raises pyo3's `RuntimeError: Already borrowed` rather than interrupting it
+/// (and by design `stop()` could not interrupt a blocked `next()` anyway — the wait only ends when
+/// a batch arrives or the worker exits). Concurrent `next()` calls from two threads are not
+/// prevented, but batch order between them is arbitrary and `pending()` becomes advisory-only —
+/// don't build a multi-thread consumer on this.
+///
+/// A dropped, never-stopped stream detaches its worker (which drains GIL-free via the stop flag)
+/// and permanently forfeits the engine — always stop streams (the `with` form makes this hard to
+/// get wrong).
 #[pyclass]
 struct CollectStream {
     rx: Option<std::sync::Mutex<std::sync::mpsc::Receiver<PyResult<BatchThunk>>>>,

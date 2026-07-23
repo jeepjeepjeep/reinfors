@@ -173,7 +173,12 @@ class Engine:
 class CollectStream:
     """A running background collection. `next()` blocks (GIL released) for the worker's next batch;
     iterating yields batches until `stop()`. Context-manager exit stops the stream and returns the
-    engine to its `Engine`."""
+    engine to its `Engine`.
+
+    Single-consumer: one thread loops `next()` and owns `stop()`. Other threads run freely during
+    the wait but must not touch the stream object (a concurrent `stop()` raises RuntimeError
+    "Already borrowed" and could not interrupt a blocked `next()` anyway). A stream dropped without
+    `stop()` permanently forfeits its engine — prefer the `with` form."""
 
     def next(self) -> TreeStrapBatch | DqnBatch | AlphaZeroBatch: ...
     def pending(self) -> int: ...
