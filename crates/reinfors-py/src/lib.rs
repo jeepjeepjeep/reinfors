@@ -20,9 +20,9 @@ use pyo3::types::{PyDict, PyTuple};
 
 use reinfors_core::{
     ActBy, AlphaZero, AlphaZeroConfig, AlphaZeroLearner, AlphaZeroRecord, AlwaysInitialState, Dqn,
-    DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game, Learner, Mcts, MctsConfig,
-    Opponent, Policy, ReachedStateBuffer, Reward, SearchConfig, SelectiveExpectimax, Space,
-    StartDistribution, StateEncoder, TreeStrap, TreeStrapRecord,
+    DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game, InferCache, Learner, Mcts,
+    MctsConfig, Opponent, Policy, ReachedStateBuffer, Reward, SearchConfig, SelectiveExpectimax,
+    Space, StartDistribution, StateEncoder, TreeStrap, TreeStrapRecord,
 };
 use reinfors_games::snake::{Cell, DeathCause};
 use reinfors_games::{
@@ -264,12 +264,16 @@ fn parse_opponent(opponent: &str, opp_temperature: f64, opp_floor: f64) -> PyRes
 struct PyEngine {
     // `None` while a `CollectStream` holds the engine on its worker thread; `stop()` returns it.
     inner: Option<Box<dyn ErasedEngine>>,
+    // Weights-version counter shared with the infer cache (if enabled). Held here — OUTSIDE the
+    // movable engine — so `weights_updated()` works from the consumer thread while a stream's
+    // worker owns the engine.
+    weights_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[pymethods]
 impl PyEngine {
     #[new]
-    #[pyo3(signature = (game, reward, policy, learner, n_games, seed=0, start_buffer=false, start_buffer_capacity=1000, p_fresh=0.05))]
+    #[pyo3(signature = (game, reward, policy, learner, n_games, seed=0, start_buffer=false, start_buffer_capacity=1000, p_fresh=0.05, infer_cache=0))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         game: GameHandle,
@@ -281,6 +285,7 @@ impl PyEngine {
         start_buffer: bool,
         start_buffer_capacity: usize,
         p_fresh: f64,
+        infer_cache: usize,
     ) -> PyResult<Self> {
         if n_games < 1 {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -304,6 +309,9 @@ impl PyEngine {
             None
         };
         let engine_params = EngineParams { n_games, seed };
+        let weights_generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let cache =
+            (infer_cache > 0).then(|| InferCache::new(infer_cache, weights_generation.clone()));
         Ok(PyEngine {
             inner: Some(build_engine(
                 game.spec,
@@ -312,8 +320,21 @@ impl PyEngine {
                 learner.spec,
                 engine_params,
                 start_buffer,
+                cache,
             )?),
+            weights_generation,
         })
+    }
+
+    /// Tell the engine the net's weights changed (call after every weight sync — e.g. right after
+    /// `load_state_dict` onto the collector net). Bumps a shared version counter that clears the
+    /// infer cache at the next search-round boundary; safe to call from any thread, including while
+    /// a `collect_stream` worker holds the engine. A no-op when the cache is disabled. Never calling
+    /// it asserts the weights never changed — correct, not stale. Future weight-dependent features
+    /// hang off the same signal.
+    fn weights_updated(&self) {
+        self.weights_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Roll forward until at least `n_records` records are gathered. `infer` maps an (N, C*H*W) float32
@@ -935,6 +956,10 @@ fn build_telemetry<'py>(
     telemetry.set_item("infer_seconds", stats.infer_seconds)?;
     telemetry.set_item("infer_calls", stats.infer_calls)?;
     telemetry.set_item("infer_rows", stats.infer_rows)?;
+    // Infer-cache telemetry (zeros when disabled). `infer_rows` counts only miss rows, so
+    // rows-per-state falls as the hit rate rises.
+    telemetry.set_item("cache_lookups", stats.cache_lookups)?;
+    telemetry.set_item("cache_hits", stats.cache_hits)?;
     Ok(telemetry)
 }
 
@@ -1232,6 +1257,7 @@ fn build_for_game<G: Game + Send + Sync + 'static>(
     policy: PolicySpec,
     learner: LearnerSpec,
     engine_params: EngineParams,
+    infer_cache: Option<InferCache>,
 ) -> PyResult<Box<dyn ErasedEngine>>
 where
     G::State: Send + Sync,
@@ -1277,8 +1303,14 @@ where
             let policy = SelectiveExpectimax::new(cfg, n_heads, epsilon);
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
             Ok(Box::new(EngineImpl {
-                inner: Engine::new(game, enc, reward, policy, learner, engine_params)
-                    .with_start_distribution(start_dist),
+                inner: {
+                    let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
+                        .with_start_distribution(start_dist);
+                    if let Some(c) = infer_cache {
+                        e = e.with_infer_cache(c);
+                    }
+                    e
+                },
                 dim,
                 action_count,
                 n_heads,
@@ -1333,8 +1365,14 @@ where
             );
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, false);
             Ok(Box::new(EngineImpl {
-                inner: Engine::new(game, enc, reward, policy, learner, engine_params)
-                    .with_start_distribution(start_dist),
+                inner: {
+                    let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
+                        .with_start_distribution(start_dist);
+                    if let Some(c) = infer_cache {
+                        e = e.with_infer_cache(c);
+                    }
+                    e
+                },
                 dim,
                 action_count,
                 n_heads: 1,
@@ -1388,8 +1426,14 @@ where
             });
             let learner = AlphaZeroLearner::new(gamma);
             Ok(Box::new(EngineImpl {
-                inner: Engine::new(game, enc, reward, policy, learner, engine_params)
-                    .with_start_distribution(start_dist),
+                inner: {
+                    let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
+                        .with_start_distribution(start_dist);
+                    if let Some(c) = infer_cache {
+                        e = e.with_infer_cache(c);
+                    }
+                    e
+                },
                 dim,
                 action_count,
                 n_heads: 1, // single value head; π targets are (M, A), no bootstrap masks
@@ -1405,8 +1449,14 @@ where
             let policy = EpsilonGreedyQ::new(n_heads, epsilon);
             let learner = Dqn::new(n_heads, bootstrap_p);
             Ok(Box::new(EngineImpl {
-                inner: Engine::new(game, enc, reward, policy, learner, engine_params)
-                    .with_start_distribution(start_dist),
+                inner: {
+                    let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
+                        .with_start_distribution(start_dist);
+                    if let Some(c) = infer_cache {
+                        e = e.with_infer_cache(c);
+                    }
+                    e
+                },
                 dim,
                 action_count,
                 n_heads,
@@ -1437,6 +1487,7 @@ fn build_engine(
     learner: LearnerSpec,
     engine_params: EngineParams,
     start_buffer: Option<StartBufferConfig>,
+    infer_cache: Option<InferCache>,
 ) -> PyResult<Box<dyn ErasedEngine>> {
     let reward = build_reward(&game, reward)?;
     // The reached-state buffer needs a game-specific cell key; only snake supplies one in v1.
@@ -1492,6 +1543,7 @@ fn build_engine(
                 policy,
                 learner,
                 engine_params,
+                infer_cache,
             )
         }
         (GameSpec::Connect4, RewardBox::Connect4(reward)) => build_for_game(
@@ -1502,6 +1554,7 @@ fn build_engine(
             policy,
             learner,
             engine_params,
+            infer_cache,
         ),
         (GameSpec::Chess { max_ticks, encoder }, RewardBox::Chess(reward)) => {
             let (game, enc) = chess_parts(max_ticks, encoder);
@@ -1513,6 +1566,7 @@ fn build_engine(
                 policy,
                 learner,
                 engine_params,
+                infer_cache,
             )
         }
         (
@@ -1534,6 +1588,7 @@ fn build_engine(
             policy,
             learner,
             engine_params,
+            infer_cache,
         ),
         // `build_reward` returns the matching `RewardBox` arm for each game, so other pairings are unreachable.
         _ => unreachable!("build_reward returns the reward variant matching the game"),

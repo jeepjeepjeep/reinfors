@@ -24,11 +24,13 @@
 use crate::encoder::StateEncoder;
 use crate::engine::CollectStats;
 use crate::game::{Actor, Game, Rng};
+use crate::infer_cache::InferCache;
 use crate::policies::expectimax::search::SearchStats;
 use crate::policies::expectimax::SearchEvaluation;
 use crate::policy::{argmax, Policy};
 use crate::reward::Reward;
 use crate::rng::{dirichlet, SplitMix64};
+use std::collections::HashMap;
 
 /// Which rule guides selection, and what the net returns per leaf. The tree machinery below is shared;
 /// this is the only axis the UCT (`Mcts`) and PUCT (`AlphaZero`) policies differ on.
@@ -384,6 +386,7 @@ pub fn mcts_many<G, F>(
     reward: &dyn Reward<Event = G::Event>,
     cfg: &MctsConfig,
     requests: Vec<(G::State, usize)>,
+    cache: Option<&mut InferCache>,
     infer: &mut F,
 ) -> Vec<SearchEvaluation>
 where
@@ -401,6 +404,7 @@ where
         cfg.max_depth,
         &guidance,
         requests,
+        cache,
         infer,
     )
 }
@@ -419,6 +423,7 @@ pub(crate) fn search_many<G, F>(
     max_depth: i32,
     guidance: &Guidance,
     requests: Vec<(G::State, usize)>,
+    mut cache: Option<&mut InferCache>,
     infer: &mut F,
 ) -> Vec<SearchEvaluation>
 where
@@ -433,68 +438,112 @@ where
         .collect();
 
     while trees.iter().any(|t| t.sims < num_simulations) {
+        if let Some(c) = cache.as_deref_mut() {
+            c.sync_generation(); // a weights bump (possibly mid-collect, under streaming) clears here
+        }
         let mut obs_flat: Vec<f32> = Vec::new();
-        let mut eval_rows: Vec<usize> = Vec::new(); // trees awaiting this round's forward
+        let mut row_keys: Vec<u128> = Vec::new(); // per staged row (cache on): key for insert/dedup
+        let mut consumers: Vec<Vec<usize>> = Vec::new(); // per staged row: tree indices awaiting it
+        let mut staged: HashMap<u128, usize> = HashMap::new(); // within-batch dedup (cache on)
+        let mut row_dim = 0usize;
+
         for (ti, tree) in trees.iter_mut().enumerate() {
-            if tree.sims >= num_simulations {
-                continue;
-            }
-            tree.sims += 1;
-            match tree.select_expand(game, enc, reward, max_depth, guidance) {
-                Reached::Cached(v) => tree.backprop(gamma, v),
-                Reached::Eval => {
-                    obs_flat.extend_from_slice(&tree.arena[tree.leaf].obs);
-                    eval_rows.push(ti);
+            // Advance-until-miss: keep simulating this tree — terminals, depth caps, and cache
+            // hits all resolve synchronously — until it needs a real forward (or its budget ends).
+            // Hits therefore reduce the number of pooled calls, not just their width (which is
+            // what matters on latency-bound devices), and terminal-heavy rounds no longer idle.
+            while tree.sims < num_simulations {
+                tree.sims += 1;
+                match tree.select_expand(game, enc, reward, max_depth, guidance) {
+                    Reached::Cached(v) => tree.backprop(gamma, v),
+                    Reached::Eval => {
+                        if let Some(c) = cache.as_deref_mut() {
+                            let key = InferCache::key(&tree.arena[tree.leaf].obs);
+                            if let Some(row) = c.lookup(key) {
+                                consume_row(tree, &row, guidance, gamma, a, ti);
+                                continue; // resolved from cache — keep advancing this tree
+                            }
+                            // Within-batch dedup: identical positions across trees share one row.
+                            if let Some(&slot) = staged.get(&key) {
+                                consumers[slot].push(ti);
+                                break;
+                            }
+                            staged.insert(key, consumers.len());
+                            row_keys.push(key);
+                        }
+                        row_dim = tree.arena[tree.leaf].obs.len();
+                        obs_flat.extend_from_slice(&tree.arena[tree.leaf].obs);
+                        consumers.push(vec![ti]);
+                        break; // this tree waits on the pooled forward
+                    }
                 }
             }
         }
-        if eval_rows.is_empty() {
+        if consumers.is_empty() {
             continue;
         }
-        let n = eval_rows.len();
+        let n = obs_flat.len() / row_dim.max(1);
         let out = infer(obs_flat, n);
         let stride = guidance.row_stride(n, out.len(), a);
-        for (row, &ti) in eval_rows.iter().enumerate() {
-            let tree = &mut trees[ti];
+        for (row, waiting) in consumers.iter().enumerate() {
             let row_data = &out[row * stride..(row + 1) * stride];
-            match guidance {
-                Guidance::Uct { .. } => {
-                    let v = leaf_value(row_data, stride / a, a, &tree.arena[tree.leaf].actions);
-                    tree.backprop(gamma, v);
-                }
-                Guidance::Puct { noise, .. } => {
-                    let (logits, value) = row_data.split_at(a);
-                    // Prior over the LEGAL set only: gather the leaf's legal actions' logits and
-                    // softmax those — illegal moves get zero mass by construction (the AlphaZero
-                    // convention), and the net never needs to learn to suppress them.
-                    let leaf_actions = &tree.arena[tree.leaf].actions;
-                    let legal_logits: Vec<f64> =
-                        leaf_actions.iter().map(|&act| logits[act]).collect();
-                    let mut prior = softmax(&legal_logits);
-                    if tree.leaf == 0 {
-                        // The root's one eval: mix in the Dirichlet exploration noise (per-tree
-                        // stream, so pooled searches stay deterministic and independent), drawn
-                        // over the legal set (AlphaZero's noise dimension).
-                        if let Some((eps, alpha, seed)) = noise {
-                            if *eps > 0.0 {
-                                let mut rng = SplitMix64::new(
-                                    seed ^ (ti as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
-                                );
-                                let noise_draw = dirichlet(&mut rng, *alpha, prior.len());
-                                for (p, d) in prior.iter_mut().zip(noise_draw) {
-                                    *p = (1.0 - eps) * *p + eps * d;
-                                }
-                            }
-                        }
-                    }
-                    tree.arena[tree.leaf].prior = prior;
-                    tree.backprop(gamma, value[0]);
-                }
+            if let Some(c) = cache.as_deref_mut() {
+                c.insert(row_keys[row], row_data);
+            }
+            for &ti in waiting {
+                consume_row(&mut trees[ti], row_data, guidance, gamma, a, ti);
             }
         }
     }
 
     trees.into_iter().map(|t| t.evaluation(a)).collect()
+}
+
+/// Deliver one net-output row to the tree whose current leaf awaits it: UCT backs up the legal-max
+/// head-mean Q; PUCT stores the legal-set prior (with per-tree root Dirichlet noise) and backs up
+/// the value. One code path for fresh forwards, cache hits, and deduped rows — so caching cannot
+/// change search behavior.
+fn consume_row<S: Clone>(
+    tree: &mut Tree<S>,
+    row_data: &[f64],
+    guidance: &Guidance,
+    gamma: f64,
+    a: usize,
+    ti: usize,
+) {
+    match guidance {
+        Guidance::Uct { .. } => {
+            let k = row_data.len() / a;
+            let v = leaf_value(row_data, k, a, &tree.arena[tree.leaf].actions);
+            tree.backprop(gamma, v);
+        }
+        Guidance::Puct { noise, .. } => {
+            let (logits, value) = row_data.split_at(a);
+            // Prior over the LEGAL set only: gather the leaf's legal actions' logits and softmax
+            // those — illegal moves get zero mass by construction (the AlphaZero convention), and
+            // the net never needs to learn to suppress them.
+            let leaf_actions = &tree.arena[tree.leaf].actions;
+            let legal_logits: Vec<f64> = leaf_actions.iter().map(|&act| logits[act]).collect();
+            let mut prior = softmax(&legal_logits);
+            if tree.leaf == 0 {
+                // The root's one eval: mix in the Dirichlet exploration noise (per-tree stream, so
+                // pooled searches stay deterministic and independent — and cached root rows renoise
+                // identically, since the cache stores raw logits), drawn over the legal set.
+                if let Some((eps, alpha, seed)) = noise {
+                    if *eps > 0.0 {
+                        let mut rng =
+                            SplitMix64::new(seed ^ (ti as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                        let noise_draw = dirichlet(&mut rng, *alpha, prior.len());
+                        for (p, d) in prior.iter_mut().zip(noise_draw) {
+                            *p = (1.0 - eps) * *p + eps * d;
+                        }
+                    }
+                }
+            }
+            tree.arena[tree.leaf].prior = prior;
+            tree.backprop(gamma, value[0]);
+        }
+    }
 }
 
 /// Sample an action `∝ visits^(1/temperature)`. Weights are max-normalized before the power so a
@@ -543,6 +592,7 @@ impl Policy for Mcts {
         requests: Vec<(G::State, usize)>,
         _seed: u64,
         _collect_interior: bool,
+        cache: Option<&mut InferCache>,
         infer: &mut F,
     ) -> Vec<SearchEvaluation>
     where
@@ -550,7 +600,7 @@ impl Policy for Mcts {
         G::State: Send,
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
-        mcts_many(game, enc, reward, &self.cfg, requests, infer)
+        mcts_many(game, enc, reward, &self.cfg, requests, cache, infer)
     }
 
     fn select(&self, eval: &SearchEvaluation, state: &mut u32, rng: &mut dyn Rng) -> usize {
@@ -825,6 +875,7 @@ mod masking_tests {
                 &cfg,
                 vec![(St(0), 0)],
                 7,
+                None,
                 &mut infer,
             )
         } else {
@@ -842,6 +893,7 @@ mod masking_tests {
                 &Passthrough,
                 &cfg,
                 vec![(St(0), 0)],
+                None,
                 &mut infer,
             )
         };

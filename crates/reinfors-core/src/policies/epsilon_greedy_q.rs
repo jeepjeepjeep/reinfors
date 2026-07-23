@@ -45,6 +45,7 @@ impl Policy for EpsilonGreedyQ {
         requests: Vec<(G::State, usize)>,
         _seed: u64,
         _collect_interior: bool, // DQN has no interior targets — a plain forward, nothing to collect
+        _cache: Option<&mut crate::infer_cache::InferCache>, // no leaf pooling to cache
         infer: &mut F,
     ) -> Vec<QEvaluation>
     where

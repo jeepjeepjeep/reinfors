@@ -67,6 +67,7 @@ fn mcts_finds_a_forced_connect4_win() {
         &reward(),
         &cfg(128),
         vec![(forced_win_state(), 0)],
+        None,
         &mut zeros_infer,
     );
     let values = &evals[0].values[0];
@@ -108,6 +109,7 @@ fn mcts_blocks_opponent_win() {
         &reward(),
         &cfg(400),
         vec![(opponent_threat_state(), 0)],
+        None,
         &mut zeros_infer,
     );
     let values = &evals[0].values[0];
@@ -131,6 +133,7 @@ fn mcts_is_deterministic() {
             &reward(),
             &cfg(64),
             vec![(forced_win_state(), 0)],
+            None,
             &mut zeros_infer,
         )[0]
         .values[0]
@@ -148,6 +151,7 @@ fn mcts_pools_multiple_requests() {
         &reward(),
         &cfg(128),
         vec![(forced_win_state(), 0), (forced_win_state(), 0)],
+        None,
         &mut zeros_infer,
     );
     assert_eq!(evals.len(), 2);
@@ -183,6 +187,7 @@ fn mcts_rejects_simultaneous_games() {
         &reward,
         &cfg(8),
         vec![(state, 0)],
+        None,
         &mut infer,
     );
 }

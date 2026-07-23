@@ -65,6 +65,7 @@ impl Policy for SelectiveExpectimax {
         requests: Vec<(G::State, usize)>,
         seed: u64,
         collect_interior: bool,
+        _cache: Option<&mut crate::infer_cache::InferCache>,
         infer: &mut F,
     ) -> Vec<SearchEvaluation>
     where

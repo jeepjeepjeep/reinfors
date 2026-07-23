@@ -57,6 +57,10 @@ pub struct CollectStats {
     pub infer_seconds: f64,
     pub infer_calls: usize,
     pub infer_rows: usize,
+    // Infer-cache telemetry (0 when the cache is disabled): `infer_rows` counts only MISS rows, so
+    // rows-per-state falls as the hit rate rises — visible without any harness change.
+    pub cache_lookups: usize,
+    pub cache_hits: usize,
 }
 
 /// Engine-level rollout knobs. The truncation horizon is the game's (`truncation_horizon`), not an
@@ -78,6 +82,10 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     // disjoint from `search_rng` and the per-game env RNGs, so an enabled buffer never perturbs the
     // env-chance draw order — and `AlwaysInitialState` never draws it, so it stays bit-identical.
     start_dist: Box<dyn StartDistribution<G::State>>,
+    // Optional net-evaluation cache (see `infer_cache`); policies with pooled leaf evaluation
+    // consult it. Lifetime spans collects; cleared when the shared weights generation is bumped
+    // (`weights_updated` at the binding).
+    infer_cache: Option<crate::infer_cache::InferCache>,
     buffer_rng: SplitMix64,
     seeded: Vec<bool>, // per game: was the current episode seeded from the start buffer?
     policy_states: Vec<P::PolicyState>, // per-game acting state for the current episode (Thompson head)
@@ -129,6 +137,7 @@ where
             episodes,
             search_rng,
             start_dist: Box::new(AlwaysInitialState),
+            infer_cache: None,
             buffer_rng,
             seeded,
             policy_states,
@@ -149,6 +158,12 @@ where
         self
     }
 
+    /// Enable the net-evaluation cache (consuming builder, like `with_start_distribution`).
+    pub fn with_infer_cache(mut self, cache: crate::infer_cache::InferCache) -> Self {
+        self.infer_cache = Some(cache);
+        self
+    }
+
     /// Roll the games forward until at least `n_records` training records have been collected,
     /// returning each record's observation (a flat `[C*H*W]` buffer), per-head target `[K][A]`,
     /// and per-head bootstrap mask `[K]`. Executed decisions are z-mixed at episode end; interior MAX
@@ -161,6 +176,9 @@ where
         let mut stats = CollectStats::default();
         let num_agents = self.game.num_agents();
         let collect_interior = self.learner.needs_interior();
+        if let Some(cache) = self.infer_cache.as_mut() {
+            cache.begin_collect();
+        }
 
         // Time every `infer` invocation once here, so both call sites (pooled `evaluate`, tail-values)
         // and every collect path (Python callback or Rust-native net) are measured identically.
@@ -199,6 +217,7 @@ where
                 requests,
                 search_seed,
                 collect_interior,
+                self.infer_cache.as_mut(),
                 &mut timed,
             );
 
@@ -285,6 +304,10 @@ where
         }
         (stats.infer_seconds, stats.infer_calls, stats.infer_rows) =
             (infer_seconds, infer_calls, infer_rows);
+        if let Some(cache) = self.infer_cache.as_ref() {
+            stats.cache_lookups = cache.lookups;
+            stats.cache_hits = cache.hits;
+        }
         (out, stats)
     }
 

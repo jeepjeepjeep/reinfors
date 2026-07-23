@@ -49,6 +49,7 @@ impl AlphaZero {
 /// Pooled PUCT over a batch of `(state, agent)` requests — the AlphaZero counterpart of `mcts_many`.
 /// `infer` must return `n·(A+1)` values: per row, `A` policy logits then the state value. `seed`
 /// drives the root-noise Dirichlet draws (disjoint per tree).
+#[allow(clippy::too_many_arguments)]
 pub fn alphazero_many<G, F>(
     game: &G,
     enc: &dyn StateEncoder<State = G::State>,
@@ -56,6 +57,7 @@ pub fn alphazero_many<G, F>(
     cfg: &AlphaZeroConfig,
     requests: Vec<(G::State, usize)>,
     seed: u64,
+    cache: Option<&mut crate::infer_cache::InferCache>,
     infer: &mut F,
 ) -> Vec<SearchEvaluation>
 where
@@ -76,6 +78,7 @@ where
         cfg.max_depth,
         &guidance,
         requests,
+        cache,
         infer,
     )
 }
@@ -97,6 +100,7 @@ impl Policy for AlphaZero {
         requests: Vec<(G::State, usize)>,
         seed: u64,
         _collect_interior: bool,
+        cache: Option<&mut crate::infer_cache::InferCache>,
         infer: &mut F,
     ) -> Vec<SearchEvaluation>
     where
@@ -104,7 +108,7 @@ impl Policy for AlphaZero {
         G::State: Send,
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
-        alphazero_many(game, enc, reward, &self.cfg, requests, seed, infer)
+        alphazero_many(game, enc, reward, &self.cfg, requests, seed, cache, infer)
     }
 
     /// Classic AlphaZero acting: by visit count — sampled under the opening temperature, greedy after.
