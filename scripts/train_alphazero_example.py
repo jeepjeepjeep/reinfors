@@ -174,6 +174,7 @@ def run_iteration(
     batch: rf._reinfors.AlphaZeroBatch,
 ) -> None:
     obs, pi, z = batch.obs, batch.policy_targets, batch.value_targets
+    policy_loss = value_loss = float("nan")  # --train-passes 0 = collect-only; nothing to report
     for _ in range(args.train_passes):
         policy_loss, value_loss = train_pass(net, optimizer, obs, pi, z, args.batch_size, args.device)
     print(
