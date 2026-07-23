@@ -21,7 +21,12 @@
 //!
 //! **Termination**: checkmate (mover wins), stalemate, the fifty-move rule (both via
 //! `Board::status`), threefold repetition (a hash history kept in the state, reset on irreversible
-//! moves), and a simple insufficient-material draw (bare kings, or king + single minor vs king).
+//! moves), and an insufficient-material draw covering every no-pawn/rook/queen position with at
+//! most one minor piece PER SIDE — bare kings, K+minor vs K, and K+minor vs K+minor. The last is a
+//! deliberate liberty vs strict FIDE (KNvKN / opposite-bishop KBvKB admit helpmates, so FIDE would
+//! play on): checkmate is detected before this branch, so no mate is ever mis-scored — it only
+//! adjudicates practically-dead endgames early, where the value target is ~0 anyway. A common
+//! self-play adjudication.
 //! An illegal action id (impossible through the masked searches; reachable through a raw `Env`)
 //! is an immediate loss for the mover — the same posture as connect4's full-column rule.
 
@@ -213,7 +218,9 @@ fn agent_of(color: Color) -> usize {
     }
 }
 
-/// King + at most one minor piece per side and no other material — no mate is forceable.
+/// King + at most one minor piece per side and no other material. Broader than FIDE's dead-position
+/// rule (K+minor vs K+minor can still be helpmated) — see the module doc for why that liberty is
+/// safe and intended.
 fn insufficient_material(board: &Board) -> bool {
     if !(board.pieces(Piece::Pawn) | board.pieces(Piece::Rook) | board.pieces(Piece::Queen))
         .is_empty()
