@@ -394,22 +394,35 @@ impl PyEngine {
     }
 }
 
-/// The chess game + encoder pair for an encoding choice — `keep_history` is enabled exactly when
-/// the AZ-119 encoder (which reads it) is selected, so the two cannot drift apart.
+/// The chess observation view, carried by an `rf.encoders.*` handle (game-handle kwarg).
+#[derive(Clone, Copy)]
+enum ChessEncoderSpec {
+    Minimal,
+    AlphaZero { history: usize },
+}
+
+/// The chess game + encoder pair for an encoder choice — the game's `history_len` is set to exactly
+/// what the selected encoder reads, so the two cannot drift apart.
 fn chess_parts(
     max_ticks: Option<usize>,
-    az_planes: bool,
+    encoder: ChessEncoderSpec,
 ) -> (Chess, Box<dyn StateEncoder<State = ChessState>>) {
-    let game = Chess {
-        max_ticks,
-        keep_history: az_planes,
-    };
-    let enc: Box<dyn StateEncoder<State = ChessState>> = if az_planes {
-        Box::new(ChessPlanesAz119)
-    } else {
-        Box::new(ChessPlanesMinimal)
-    };
-    (game, enc)
+    match encoder {
+        ChessEncoderSpec::Minimal => (
+            Chess {
+                max_ticks,
+                history_len: 0,
+            },
+            Box::new(ChessPlanesMinimal),
+        ),
+        ChessEncoderSpec::AlphaZero { history } => (
+            Chess {
+                max_ticks,
+                history_len: history,
+            },
+            Box::new(ChessPlanesAz119 { history }),
+        ),
+    }
 }
 
 fn stream_active_err() -> PyErr {
@@ -1009,7 +1022,7 @@ enum GameSpec {
     Connect4,
     Chess {
         max_ticks: Option<usize>,
-        az_planes: bool, // false = minimal (19,8,8); true = AZ-119 with 8-position history
+        encoder: ChessEncoderSpec,
     },
     GridWorld {
         size: i32,
@@ -1048,11 +1061,8 @@ impl GameSpec {
                 &EgocentricSnake { grid_size },
             ),
             GameSpec::Connect4 => of(Connect4, &Connect4Planes),
-            GameSpec::Chess {
-                max_ticks,
-                az_planes,
-            } => {
-                let (game, enc) = chess_parts(max_ticks, az_planes);
+            GameSpec::Chess { max_ticks, encoder } => {
+                let (game, enc) = chess_parts(max_ticks, encoder);
                 of(game, &*enc)
             }
             GameSpec::GridWorld {
@@ -1493,14 +1503,8 @@ fn build_engine(
             learner,
             engine_params,
         ),
-        (
-            GameSpec::Chess {
-                max_ticks,
-                az_planes,
-            },
-            RewardBox::Chess(reward),
-        ) => {
-            let (game, enc) = chess_parts(max_ticks, az_planes);
+        (GameSpec::Chess { max_ticks, encoder }, RewardBox::Chess(reward)) => {
+            let (game, enc) = chess_parts(max_ticks, encoder);
             build_for_game(
                 game,
                 enc,
@@ -1901,11 +1905,8 @@ fn build_env(game: GameSpec, reward: Option<PyReward>, seed: u64) -> PyResult<Bo
                 last_rewards: None,
             })
         }
-        GameSpec::Chess {
-            max_ticks,
-            az_planes,
-        } => {
-            let (game, enc) = chess_parts(max_ticks, az_planes);
+        GameSpec::Chess { max_ticks, encoder } => {
+            let (game, enc) = chess_parts(max_ticks, encoder);
             let obs_shape = enc.obs_shape();
             Box::new(EnvImpl {
                 inner: Env::new(game, enc, seed),
@@ -2098,27 +2099,16 @@ impl GameHandle {
 
     #[staticmethod]
     // Weak-net self-play can shuffle indefinitely inside the fifty-move window, so `max_ticks`
-    // defaults to a finite cap (pass `max_ticks=None` to opt into never truncating). `encoding`
-    // picks the observation view: "minimal" (19,8,8) or "az119" (AlphaZero's 119 planes with an
-    // 8-position history, maintained in the state only when selected).
-    #[pyo3(signature = (max_ticks=512, encoding="minimal"))]
+    // defaults to a finite cap (pass `max_ticks=None` to opt into never truncating). `encoder` is an
+    // `rf.encoders.*` handle picking the observation view (default: `MinimalChess`); the state's
+    // history bookkeeping follows the selected encoder automatically.
+    #[pyo3(signature = (max_ticks=512, encoder=None))]
     #[pyo3(name = "Chess")]
-    fn chess(max_ticks: Option<usize>, encoding: &str) -> PyResult<Self> {
-        let az_planes = match encoding {
-            "minimal" => false,
-            "az119" => true,
-            other => {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "unknown chess encoding {other:?}; expected \"minimal\" or \"az119\""
-                )))
-            }
-        };
-        Ok(GameHandle {
-            spec: GameSpec::Chess {
-                max_ticks,
-                az_planes,
-            },
-        })
+    fn chess(max_ticks: Option<usize>, encoder: Option<EncoderHandle>) -> Self {
+        let encoder = encoder.map_or(ChessEncoderSpec::Minimal, |e| e.chess);
+        GameHandle {
+            spec: GameSpec::Chess { max_ticks, encoder },
+        }
     }
 
     #[staticmethod]
@@ -2335,6 +2325,45 @@ impl LearnerHandle {
     }
 }
 
+/// Observation-encoder handle (`rf.encoders.*`): a configurable view of a game's state, passed to
+/// the game handle (e.g. `rf.games.Chess(encoder=rf.encoders.AlphaZeroChess(history_length=8))`).
+/// Encoders are game-specific; the game handle validates the pairing.
+#[pyclass]
+#[derive(Clone)]
+struct EncoderHandle {
+    chess: ChessEncoderSpec,
+}
+
+#[pymethods]
+impl EncoderHandle {
+    /// The default chess view: (19, 8, 8) piece/castling/ep/clock planes, no history.
+    #[staticmethod]
+    #[pyo3(name = "MinimalChess")]
+    fn minimal_chess() -> Self {
+        EncoderHandle {
+            chess: ChessEncoderSpec::Minimal,
+        }
+    }
+
+    /// AlphaZero's chess view: `14·history_length + 7` planes (12 piece + 2 repetition planes per
+    /// history step, newest first, + 7 auxiliaries). `history_length=8` reproduces the paper's 119.
+    #[staticmethod]
+    #[pyo3(signature = (history_length=8))]
+    #[pyo3(name = "AlphaZeroChess")]
+    fn alphazero_chess(history_length: usize) -> PyResult<Self> {
+        if history_length < 1 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "history_length must be >= 1",
+            ));
+        }
+        Ok(EncoderHandle {
+            chess: ChessEncoderSpec::AlphaZero {
+                history: history_length,
+            },
+        })
+    }
+}
+
 #[pyfunction]
 fn core_version() -> &'static str {
     reinfors_core::version()
@@ -2365,6 +2394,7 @@ fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TreeStrapBatch>()?;
     m.add_class::<AlphaZeroBatch>()?;
     m.add_class::<CollectStream>()?;
+    m.add_class::<EncoderHandle>()?;
     m.add_class::<DqnBatch>()?;
     m.add_class::<PyBox>()?;
     m.add_class::<PyDiscrete>()?;
