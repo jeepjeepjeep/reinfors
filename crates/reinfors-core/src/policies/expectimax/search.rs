@@ -65,8 +65,10 @@ pub struct SearchStats {
     pub sigma_sum: f64,
     /// Tree-search sim fates (0 for the expectimax family): simulations resolved without a net
     /// forward — in-tree terminals, depth caps, and within-batch shared (deduped) rows. Together
-    /// with `infer_rows` and `cache_hits` these complete the per-collect identity
-    /// `decisions × num_simulations = infer_rows + cache_hits + shared_rows + terminal_sims + depthcap_sims`.
+    /// with `infer_rows`, `cache_hits`, and `CollectStats::tail_rows` (episode-tail bootstrap
+    /// forwards, which ride `infer_rows` but are not search sims) these complete the per-collect
+    /// identity `decisions × num_simulations =
+    ///   (infer_rows − tail_rows) + cache_hits + shared_rows + terminal_sims + depthcap_sims`.
     pub terminal_sims: usize,
     pub depthcap_sims: usize,
     pub shared_rows: usize,

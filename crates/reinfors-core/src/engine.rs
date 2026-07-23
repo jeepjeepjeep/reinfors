@@ -65,6 +65,11 @@ pub struct CollectStats {
     pub sum_terminal_sims: usize,
     pub sum_depthcap_sims: usize,
     pub sum_shared_rows: usize,
+    /// Rows forwarded for episode-tail bootstraps (truncation z-seeding) — part of `infer_rows` but
+    /// NOT search simulations, so the sim-fate identity subtracts them:
+    /// `decisions × num_simulations = (infer_rows − tail_rows) + cache_hits + shared_rows +
+    ///  terminal_sims + depthcap_sims`.
+    pub tail_rows: usize,
 }
 
 /// Engine-level rollout knobs. The truncation horizon is the game's (`truncation_horizon`), not an
@@ -90,6 +95,8 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     // consult it. Lifetime spans collects; cleared when the shared weights generation is bumped
     // (`weights_updated` at the binding).
     infer_cache: Option<crate::infer_cache::InferCache>,
+    // Tail-bootstrap rows forwarded during the current collect (see `CollectStats::tail_rows`).
+    pending_tail_rows: usize,
     buffer_rng: SplitMix64,
     seeded: Vec<bool>, // per game: was the current episode seeded from the start buffer?
     policy_states: Vec<P::PolicyState>, // per-game acting state for the current episode (Thompson head)
@@ -142,6 +149,7 @@ where
             search_rng,
             start_dist: Box::new(AlwaysInitialState),
             infer_cache: None,
+            pending_tail_rows: 0,
             buffer_rng,
             seeded,
             policy_states,
@@ -183,6 +191,7 @@ where
         if let Some(cache) = self.infer_cache.as_mut() {
             cache.begin_collect();
         }
+        self.pending_tail_rows = 0;
 
         // Time every `infer` invocation once here, so both call sites (pooled `evaluate`, tail-values)
         // and every collect path (Python callback or Rust-native net) are measured identically.
@@ -312,6 +321,7 @@ where
             stats.cache_lookups = cache.lookups;
             stats.cache_hits = cache.hits;
         }
+        stats.tail_rows = self.pending_tail_rows;
         (out, stats)
     }
 
@@ -400,6 +410,7 @@ where
             }
         }
         if !meta.is_empty() {
+            self.pending_tail_rows += meta.len(); // non-search forwards: excluded from the sim-fate identity
             let q = infer(obs_flat, meta.len()); // one flat row per state; layout = the family's contract
             let stride = q.len() / meta.len();
             for (i, &key) in meta.iter().enumerate() {

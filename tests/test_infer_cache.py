@@ -65,3 +65,40 @@ def test_weights_updated_is_safe_without_cache_and_during_stream() -> None:
         stream.next()
         eng.weights_updated()  # callable while the worker holds the engine
         stream.next()
+
+
+def _identity(t: dict[str, int], sims: int) -> tuple[int, int]:
+    lhs = t["decisions"] * sims
+    rhs = (
+        t["infer_rows"] - t["tail_rows"] + t["cache_hits"] + t["shared_rows"] + t["terminal_sims"] + t["depthcap_sims"]
+    )
+    return lhs, rhs
+
+
+def test_sim_fate_identity_holds_without_truncation() -> None:
+    # connect4 terminates naturally: tail_rows must be 0 and the identity exact.
+    t = _engine(1 << 16).collect(120, _infer).telemetry
+    assert t["tail_rows"] == 0
+    lhs, rhs = _identity(t, 16)
+    assert lhs == rhs
+
+
+def test_sim_fate_identity_holds_under_truncation() -> None:
+    # chess with a tight max_ticks truncates constantly (the reviewer's repro): tail-bootstrap
+    # forwards ride infer_rows, and the identity must close exactly once tail_rows is subtracted.
+    def infer(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        return np.zeros((arr.shape[0], 4672)), np.zeros(arr.shape[0])
+
+    engine = rf.Engine(
+        rf.games.Chess(max_ticks=30),
+        rf.Reward(win=1.0, loss=-1.0),
+        rf.policies.AlphaZero(num_simulations=8),
+        rf.learners.AlphaZero(),
+        n_games=2,
+        seed=0,
+        infer_cache=1 << 14,
+    )
+    t = engine.collect(80, infer).telemetry
+    assert t["tail_rows"] > 0, "a truncating workload must record tail-bootstrap rows"
+    lhs, rhs = _identity(t, 8)
+    assert lhs == rhs, f"identity broken under truncation: {lhs} != {rhs}"

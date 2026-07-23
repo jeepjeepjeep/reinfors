@@ -961,10 +961,12 @@ fn build_telemetry<'py>(
     telemetry.set_item("cache_lookups", stats.cache_lookups)?;
     telemetry.set_item("cache_hits", stats.cache_hits)?;
     // Tree-search sim fates: decisions × num_simulations =
-    //   infer_rows + cache_hits + shared_rows + terminal_sims + depthcap_sims.
+    //   (infer_rows − tail_rows) + cache_hits + shared_rows + terminal_sims + depthcap_sims
+    // (tail_rows = episode-tail bootstrap forwards on truncation — in infer_rows, not search sims).
     telemetry.set_item("terminal_sims", stats.sum_terminal_sims)?;
     telemetry.set_item("depthcap_sims", stats.sum_depthcap_sims)?;
     telemetry.set_item("shared_rows", stats.sum_shared_rows)?;
+    telemetry.set_item("tail_rows", stats.tail_rows)?;
     Ok(telemetry)
 }
 
