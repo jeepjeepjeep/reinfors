@@ -26,9 +26,10 @@ use reinfors_core::{
 };
 use reinfors_games::snake::{Cell, DeathCause};
 use reinfors_games::{
-    snake_length_cell, Action, Connect4, Connect4Event, Connect4Planes, Connect4Reward,
-    Connect4State, EgocentricSnake, GridEvent, GridState, GridWorld, GridWorldPlanes,
-    GridWorldReward, Snake, SnakeReward, SnakeState, StepEvent,
+    snake_length_cell, Action, Chess, ChessEvent, ChessPlanesMinimal, ChessReward, ChessState,
+    Connect4, Connect4Event, Connect4Planes, Connect4Reward, Connect4State, EgocentricSnake,
+    GridEvent, GridState, GridWorld, GridWorldPlanes, GridWorldReward, Snake, SnakeReward,
+    SnakeState, StepEvent,
 };
 
 /// Absolute `Action` -> its `u8` code (Up/Down/Left/Right = 0/1/2/3), for native-state marshalling.
@@ -988,6 +989,9 @@ enum GameSpec {
         max_ticks: Option<usize>,
     },
     Connect4,
+    Chess {
+        max_ticks: Option<usize>,
+    },
     GridWorld {
         size: i32,
         goal: (i32, i32),
@@ -1025,6 +1029,7 @@ impl GameSpec {
                 &EgocentricSnake { grid_size },
             ),
             GameSpec::Connect4 => of(Connect4, &Connect4Planes),
+            GameSpec::Chess { max_ticks } => of(Chess { max_ticks }, &ChessPlanesMinimal),
             GameSpec::GridWorld {
                 size,
                 goal,
@@ -1077,6 +1082,14 @@ fn build_reward(game: &GameSpec, reward: Option<PyReward>) -> PyResult<RewardBox
                 draw: r[2],
             })
         }
+        GameSpec::Chess { .. } => {
+            let r = resolve_reward(reward, &[("win", 1.0), ("loss", -1.0), ("draw", 0.0)])?;
+            RewardBox::Chess(ChessReward {
+                win: r[0],
+                loss: r[1],
+                draw: r[2],
+            })
+        }
         GameSpec::GridWorld { .. } => {
             let r = resolve_reward(reward, &[("step", 0.0), ("goal", 1.0)])?;
             RewardBox::GridWorld(GridWorldReward {
@@ -1092,6 +1105,7 @@ fn build_reward(game: &GameSpec, reward: Option<PyReward>) -> PyResult<RewardBox
 enum RewardBox {
     Snake(SnakeReward),
     Connect4(Connect4Reward),
+    Chess(ChessReward),
     GridWorld(GridWorldReward),
 }
 
@@ -1454,6 +1468,15 @@ fn build_engine(
             learner,
             engine_params,
         ),
+        (GameSpec::Chess { max_ticks }, RewardBox::Chess(reward)) => build_for_game(
+            Chess { max_ticks },
+            Box::new(ChessPlanesMinimal),
+            Box::new(reward),
+            Box::new(AlwaysInitialState),
+            policy,
+            learner,
+            engine_params,
+        ),
         (
             GameSpec::GridWorld {
                 size,
@@ -1627,6 +1650,16 @@ impl NativeState for Connect4State {
     }
 }
 
+impl NativeState for ChessState {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("fen", self.fen())?;
+        d.set_item("turn", self.turn())?;
+        d.set_item("done", self.is_done())?;
+        Ok(d)
+    }
+}
+
 impl NativeState for GridState {
     fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
@@ -1673,6 +1706,18 @@ impl NativeEvent for Connect4Event {
             Connect4Event::Win => "win",
             Connect4Event::Loss => "loss",
             Connect4Event::Draw => "draw",
+        };
+        Ok(s.into_pyobject(py)?.into_any())
+    }
+}
+
+impl NativeEvent for ChessEvent {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let s = match self {
+            ChessEvent::Ongoing => "ongoing",
+            ChessEvent::Win => "win",
+            ChessEvent::Loss => "loss",
+            ChessEvent::Draw => "draw",
         };
         Ok(s.into_pyobject(py)?.into_any())
     }
@@ -1817,6 +1862,18 @@ fn build_env(game: GameSpec, reward: Option<PyReward>, seed: u64) -> PyResult<Bo
                 obs_shape,
                 reward: reward.map(|rb| match rb {
                     RewardBox::Connect4(r) => Box::new(r) as Box<dyn Reward<Event = Connect4Event>>,
+                    _ => unreachable!("build_reward returns the reward variant matching the game"),
+                }),
+                last_rewards: None,
+            })
+        }
+        GameSpec::Chess { max_ticks } => {
+            let obs_shape = ChessPlanesMinimal.obs_shape();
+            Box::new(EnvImpl {
+                inner: Env::new(Chess { max_ticks }, Box::new(ChessPlanesMinimal), seed),
+                obs_shape,
+                reward: reward.map(|rb| match rb {
+                    RewardBox::Chess(r) => Box::new(r) as Box<dyn Reward<Event = ChessEvent>>,
                     _ => unreachable!("build_reward returns the reward variant matching the game"),
                 }),
                 last_rewards: None,
@@ -2002,6 +2059,17 @@ impl GameHandle {
     }
 
     #[staticmethod]
+    // Weak-net self-play can shuffle indefinitely inside the fifty-move window, so `max_ticks`
+    // defaults to a finite cap (pass `max_ticks=None` to opt into never truncating).
+    #[pyo3(signature = (max_ticks=512))]
+    #[pyo3(name = "Chess")]
+    fn chess(max_ticks: Option<usize>) -> Self {
+        GameHandle {
+            spec: GameSpec::Chess { max_ticks },
+        }
+    }
+
+    #[staticmethod]
     // GridWorld can wander forever without reaching the goal, so `max_ticks` defaults to a finite cap
     // (pass `max_ticks=None` to opt into never truncating).
     #[pyo3(signature = (size=5, goal_row=4, goal_col=4, max_ticks=1000))]
@@ -2038,7 +2106,9 @@ impl GameHandle {
     /// finite cap so `Engine.collect` can't spin on a non-terminating episode.
     fn truncation_horizon(&self) -> Option<usize> {
         match self.spec {
-            GameSpec::Snake { max_ticks, .. } | GameSpec::GridWorld { max_ticks, .. } => max_ticks,
+            GameSpec::Snake { max_ticks, .. }
+            | GameSpec::Chess { max_ticks }
+            | GameSpec::GridWorld { max_ticks, .. } => max_ticks,
             GameSpec::Connect4 => None,
         }
     }
