@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+cozy-chess = "0.3.4"
 reinfors-core = { path = "../reinfors-core" }
 
 [dev-dependencies]

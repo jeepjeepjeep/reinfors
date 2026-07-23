@@ -13,11 +13,13 @@ from typing import Any
 from . import _reinfors
 
 Snake = _reinfors.GameHandle.Snake
+Chess = _reinfors.GameHandle.Chess
 Connect4 = _reinfors.GameHandle.Connect4
 GridWorld = _reinfors.GameHandle.GridWorld
 
 _REGISTRY: dict[str, Callable[..., Any]] = {
     "snake": Snake,
+    "chess": Chess,
     "connect4": Connect4,
     "gridworld": GridWorld,
 }
