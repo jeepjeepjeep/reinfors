@@ -67,6 +67,14 @@ select = [
 quote-style = "double"
 indent-style = "space"
 
+# Pyright (what VS Code / Pylance runs) reads this so IDE and CLI agree: resolve the project venv
+# (a bare `uvx pyright` otherwise reports a silent 0/0/0 with imports unresolved) and pin basic mode
+# — strict typing is mypy's job (below); pyright adds the analyses mypy lacks (e.g. possibly-unbound).
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "basic"
+
 [tool.mypy]
 # Type-check against 3.12 (the CI/dev interpreter — see `--interpreter python3.12` in the build): recent
 # numpy stubs use PEP 695 `type` statements that mypy refuses to parse under an older target. Runtime
