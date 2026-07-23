@@ -9,9 +9,9 @@
 //! per-tree root noise identically to a fresh forward. Cache-on and cache-off searches are
 //! bit-identical given the same weights (guarded by tests).
 //!
-//! **Efficiency** (the point of the feature): keys are 128-bit FNV-1a hashes of the observation
-//! bytes (~0.1 µs vs a 100+ µs forward; collision odds ~2⁻¹²⁸, so no stored-obs comparison and no
-//! obs memory), values are f32 rows (net precision anyway), and eviction is generational — two
+//! **Efficiency** (the point of the feature): keys are 128-bit hashes of the observation bytes
+//! (~0.1 µs vs a 100+ µs forward; no stored-obs comparison and no obs memory), values are f32 rows
+//! (net precision anyway), and eviction is generational — two
 //! rotating half-capacity maps with promote-on-old-hit — O(1) with zero per-hit bookkeeping,
 //! unlike a strict LRU's list splice on every hit. Single-threaded by design (it lives inside the
 //! engine's collect loop); no locks.
@@ -22,28 +22,50 @@
 //! counter (an atomic, so it works from the consumer thread while a `collect_stream` worker owns
 //! the engine); the cache clears at the next round boundary. Never calling it asserts "weights
 //! never changed" — which makes it correct, not stale.
+//!
+//! **The collision bet, stated for future maintainers**: no observation is stored, so a key
+//! collision would silently return the WRONG row — a corrupted value backpropagated into training
+//! data, with no crash. The 128-bit key width is what makes that negligible (collision-safe at
+//! cache scale: even pessimistic effective-entropy estimates put the probability around 1e-12 or
+//! below at realistic cache sizes — the same bet chess engines make with 64-bit transposition
+//! keys, with far more margin). Do not shrink the key or weaken the mixer without weighing that
+//! failure mode.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// 128-bit FNV-1a over a byte slice (two independent 64-bit streams with distinct offsets/primes'
-/// seeds — cheap, deterministic, and collision-safe at cache scale).
-fn fnv128(bytes: &[u8]) -> u128 {
-    const PRIME: u64 = 0x0000_0100_0000_01B3;
+/// splitmix64 finalizer: full-avalanche mixing of a 64-bit accumulator (each input bit flips each
+/// output bit with ~50% probability) — repairs the weak diffusion of multiply-xor stream hashes.
+fn avalanche(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// 128-bit content hash: two multiply-xor streams with *distinct odd multipliers* (FNV-1a prime;
+/// the golden-ratio constant) and distinct offsets, each finalized with a splitmix64 avalanche and
+/// salted with the length. Deterministic, dependency-free, and collision-safe at cache scale —
+/// deliberately NOT claimed to be a full 2⁻¹²⁸ guarantee (the streams are strong but not proven
+/// independent); see the module doc for what a collision would cost and why the margin suffices.
+fn hash128(bytes: &[u8]) -> u128 {
+    const PRIME_A: u64 = 0x0000_0100_0000_01B3; // FNV-1a 64
+    const PRIME_B: u64 = 0x9E37_79B9_7F4A_7C15; // 2^64 / golden ratio (odd)
     let mut a: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut b: u64 = 0x84222325_cbf29ce4;
+    let mut b: u64 = 0x6a09_e667_f3bc_c909; // sqrt(2) fractional bits
     for &x in bytes {
-        a = (a ^ u64::from(x)).wrapping_mul(PRIME);
-        b = (b ^ u64::from(x.wrapping_add(0x9E))).wrapping_mul(PRIME);
+        a = (a ^ u64::from(x)).wrapping_mul(PRIME_A);
+        b = (b ^ u64::from(x)).wrapping_mul(PRIME_B);
     }
+    let a = avalanche(a ^ bytes.len() as u64);
+    let b = avalanche(b.rotate_left(32) ^ bytes.len() as u64);
     (u128::from(a) << 64) | u128::from(b)
 }
 
 fn obs_key(obs: &[f32]) -> u128 {
     // Observations are deterministic encoder output; bit-exact keying over the raw f32 bytes.
     let bytes = unsafe { std::slice::from_raw_parts(obs.as_ptr().cast::<u8>(), obs.len() * 4) };
-    fnv128(bytes)
+    hash128(bytes)
 }
 
 pub struct InferCache {
@@ -155,6 +177,21 @@ mod tests {
         c.insert(key, &[1.5, -2.0]);
         assert_eq!(c.lookup(key), Some(vec![1.5, -2.0]));
         assert_eq!((c.lookups, c.hits), (2, 1));
+    }
+
+    #[test]
+    fn near_identical_observations_diverge_in_both_key_halves() {
+        // The failure mode a weak mixer invites: related inputs (one plane bit flipped — the
+        // typical single-piece board delta) yielding related keys. Both 64-bit halves must differ.
+        let base = vec![0.0f32; 64];
+        let base_key = InferCache::key(&base);
+        for i in 0..64 {
+            let mut flipped = base.clone();
+            flipped[i] = 1.0;
+            let k = InferCache::key(&flipped);
+            assert_ne!(k as u64, base_key as u64, "low half collided on flip {i}");
+            assert_ne!(k >> 64, base_key >> 64, "high half collided on flip {i}");
+        }
     }
 
     #[test]
