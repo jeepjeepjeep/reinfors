@@ -343,7 +343,9 @@ impl Snake {
         }
         let g = self.grid_size;
         let cells = g as i64 * g as i64;
-        if g >= 1 && N_CHANNELS as i64 * cells > i32::MAX as i64 {
+        // u128: `N_CHANNELS as i64 * cells` overflows i64 for g above ~1.36e9 — a panic in debug
+        // builds and, worse, a wrap in release that bypasses this very ceiling
+        if g >= 1 && N_CHANNELS as u128 * cells as u128 > i32::MAX as u128 {
             return Err(format!(
                 "grid_size {g} makes the observation tensor exceed 2^31 elements"
             ));
@@ -836,6 +838,8 @@ mod game_tests {
         assert!(cfg(3, 3, 4).validate().is_err()); // food exceeds the 3 free cells
         assert!(cfg(8, 3, 1usize << 63).validate().is_err()); // would wrap an i64 food cast
         assert!(cfg(46_000, 3, 1).validate().is_err()); // obs tensor over 2^31 elements
+        assert!(cfg(1_500_000_000, 3, 1).validate().is_err()); // past the i64 5*g^2 overflow point
+        assert!(cfg(i32::MAX, 3, 1).validate().is_err());
 
         // Long bodies wrap the perimeter into each other without exhausting the trace — the
         // disjointness of the *constructed* placement is what catches it.

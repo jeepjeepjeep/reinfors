@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 import reinfors as rf
 
-INT_EDGES = [-(2**63), -1, 0, 1, 2**31, 2**63]
+INT_EDGES = [-(2**63), -1, 0, 1, 2**31 - 1, 2**31, 2**63]  # 2**31-1 reaches Rust; 2**31 dies at pyo3 i32 conversion
 FLOAT_EDGES = [float("nan"), float("inf"), float("-inf"), -1e308, -1.0, 0.0]
 
 # (constructor, is_game, {param: edge values}) — each param is perturbed alone, others at defaults.
@@ -130,3 +130,9 @@ def test_observation_size_ceiling() -> None:
         rf.games.Snake(grid_size=46_000)
     with pytest.raises(ValueError, match="2\\^31"):
         rf.encoders.AlphaZeroChess(history_length=3_000_000)
+    # Past the point where the ceiling arithmetic itself would overflow i64 (5*g^2 at g ~1.36e9):
+    # the check must reject, not panic (debug) or wrap past itself (release).
+    with pytest.raises(ValueError, match="2\\^31"):
+        rf.games.Snake(grid_size=1_500_000_000)
+    with pytest.raises(ValueError, match="2\\^31"):
+        rf.games.GridWorld(size=2**31 - 1)

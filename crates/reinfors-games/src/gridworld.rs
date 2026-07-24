@@ -60,8 +60,10 @@ impl GridWorld {
         if self.size < 2 {
             return Err(format!("size must be >= 2, got {}", self.size));
         }
-        let cells = self.size as i64 * self.size as i64;
-        if N_CHANNELS as i64 * cells > i32::MAX as i64 {
+        // u128 like the other ceilings: for 2 channels the i64 product happens to fit for every
+        // valid i32, but only by a factor of 1.00001 — don't leave it load-bearing
+        let cells = self.size as u128 * self.size as u128;
+        if N_CHANNELS as u128 * cells > i32::MAX as u128 {
             return Err(format!(
                 "size {} makes the observation tensor exceed 2^31 elements",
                 self.size
@@ -415,7 +417,8 @@ mod tests {
             (1, (0, 0)),  // no non-goal start cell: initial_state would spin forever
             (0, (0, 0)),
             (-3, (0, 0)),
-            (40_000, (0, 0)), // obs tensor would exceed 2^31 elements
+            (40_000, (0, 0)),   // obs tensor would exceed 2^31 elements
+            (i32::MAX, (0, 0)), // the 2*size^2 product must not be trusted to fit i64
         ] {
             assert!(
                 ok(size, goal).validate().is_err(),
