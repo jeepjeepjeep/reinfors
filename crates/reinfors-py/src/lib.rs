@@ -2142,10 +2142,15 @@ struct PyReward {
 impl PyReward {
     #[new]
     #[pyo3(signature = (**weights))]
-    fn new(weights: Option<HashMap<String, f64>>) -> Self {
-        PyReward {
-            weights: weights.unwrap_or_default(),
+    fn new(weights: Option<HashMap<String, f64>>) -> PyResult<Self> {
+        let weights = weights.unwrap_or_default();
+        // NaN/inf don't panic — worse, they silently poison every value they touch downstream.
+        if let Some((k, v)) = weights.iter().find(|(_, v)| !v.is_finite()) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "reward weight {k:?} must be finite, got {v}"
+            )));
         }
+        Ok(PyReward { weights })
     }
 }
 
@@ -2250,6 +2255,17 @@ impl GameHandle {
         max_ticks: Option<usize>,
     ) -> PyResult<Self> {
         check_max_ticks(max_ticks)?;
+        // Validate by constructing: the game's own invariants are the single source of truth.
+        Snake {
+            grid_size,
+            initial_length,
+            initial_food_count: food,
+            play_to_last,
+            win_food_lead,
+            max_ticks,
+        }
+        .validate()
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
         Ok(GameHandle {
             spec: GameSpec::Snake {
                 grid_size,
@@ -2277,11 +2293,12 @@ impl GameHandle {
     // history bookkeeping follows the selected encoder automatically.
     #[pyo3(signature = (max_ticks=512, encoder=None))]
     #[pyo3(name = "Chess")]
-    fn chess(max_ticks: Option<usize>, encoder: Option<EncoderHandle>) -> Self {
+    fn chess(max_ticks: Option<usize>, encoder: Option<EncoderHandle>) -> PyResult<Self> {
+        check_max_ticks(max_ticks)?;
         let encoder = encoder.map_or(ChessEncoderSpec::Minimal, |e| e.chess);
-        GameHandle {
+        Ok(GameHandle {
             spec: GameSpec::Chess { max_ticks, encoder },
-        }
+        })
     }
 
     #[staticmethod]
@@ -2299,20 +2316,32 @@ impl GameHandle {
 
     #[staticmethod]
     // GridWorld can wander forever without reaching the goal, so `max_ticks` defaults to a finite cap
-    // (pass `max_ticks=None` to opt into never truncating).
-    #[pyo3(signature = (size=5, goal_row=4, goal_col=4, max_ticks=1000))]
+    // (pass `max_ticks=None` to opt into never truncating). The goal defaults to the far corner,
+    // DERIVED from `size` — an absolute default would silently sit mid-grid (or out of it) for other
+    // sizes.
+    #[pyo3(signature = (size=5, goal_row=None, goal_col=None, max_ticks=1000))]
     #[pyo3(name = "GridWorld")]
     fn gridworld(
         size: i32,
-        goal_row: i32,
-        goal_col: i32,
+        goal_row: Option<i32>,
+        goal_col: Option<i32>,
         max_ticks: Option<usize>,
     ) -> PyResult<Self> {
         check_max_ticks(max_ticks)?;
+        // saturating: a nonsense `size` must reach validate() as an error, not overflow here
+        let corner = size.saturating_sub(1);
+        let goal = (goal_row.unwrap_or(corner), goal_col.unwrap_or(corner));
+        GridWorld {
+            size,
+            goal,
+            max_ticks,
+        }
+        .validate()
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
         Ok(GameHandle {
             spec: GameSpec::GridWorld {
                 size,
-                goal: (goal_row, goal_col),
+                goal,
                 max_ticks,
             },
         })
@@ -2671,6 +2700,11 @@ impl EncoderHandle {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "history_length must be >= 1",
             ));
+        }
+        if (history_length as u128 * 14 + 7) * 64 > i32::MAX as u128 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "history_length {history_length} makes the observation tensor exceed 2^31 elements"
+            )));
         }
         Ok(EncoderHandle {
             chess: ChessEncoderSpec::AlphaZero {
