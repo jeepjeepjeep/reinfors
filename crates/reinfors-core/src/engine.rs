@@ -72,7 +72,7 @@ pub struct CollectStats {
     pub sum_shared_rows: usize,
     pub sum_fresh_rows: usize,
     pub sum_hit_rows: usize,
-    pub sum_fan_extra_rows: usize,
+    pub sum_extra_eval_rows: usize,
 }
 
 /// Engine-level rollout knobs. The truncation horizon is the game's (`truncation_horizon`), not an

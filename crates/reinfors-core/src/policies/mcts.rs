@@ -5,11 +5,13 @@
 //! per-action values `values[1][A]` ("MCTS-strap") — and pools its leaf evaluations across games into
 //! one `infer` per round, exactly like the expectimax search.
 //!
-//! **Sequential + single-agent games only** (simultaneous support is planned; see the binding's
-//! rejection). MCTS here assumes strictly alternating turns (or one agent), so a node's actor is a
-//! single [`Actor::Agent`]; `Actor::Simultaneous` and `Actor::Chance` (the explicit chance *player*)
-//! are rejected — this module panics as a backstop for direct core use. Two-player games are treated
-//! as zero-sum (negamax backup) — correct for connect4.
+//! **Sequential, single-agent, and simultaneous games.** Sequential two-player games are treated
+//! as zero-sum (negamax backup — correct for connect4/chess). Simultaneous games (snake) use
+//! **decoupled statistics (DUCT)**: each node keeps one [`AgentTable`] per agent, each agent
+//! independently applies the ordinary UCT/PUCT rule over its OWN table, the pair steps the game as
+//! a joint action, and backup is per-agent own-perspective (general-sum — no negamax). A game must
+//! be uniformly one or the other (asserted); `Actor::Chance` (the explicit chance *player*) remains
+//! rejected — declare post-transition chance via `Game::chance_outcomes` instead.
 //!
 //! **Stochastic transitions** (post-move environment chance, e.g. a spawn after a move) are
 //! supported through the game's *declared* distribution — [`Game::chance_outcomes`] +
@@ -50,7 +52,22 @@ pub(crate) enum Guidance {
     Puct {
         c: f64,
         noise: Option<(f64, f64, u64)>,
+        // Simultaneous roots: noise both agents' priors, or only the requester's (see NoiseScope).
+        noise_both: bool,
     },
+}
+
+/// Which root prior(s) receive Dirichlet exploration noise in a *simultaneous* search tree.
+/// Sequential trees have one root table (the requester's), so the scope is irrelevant there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum NoiseScope {
+    /// Noise the requesting agent's root prior only: exploration for the agent whose pi target
+    /// this tree produces, while the in-tree opponent model keeps the net's honest beliefs.
+    #[default]
+    Requester,
+    /// Noise both agents' root priors: more joint-space exploration, at the cost of deliberately
+    /// perturbed opponent beliefs baked into the search.
+    Both,
 }
 
 /// How the tree search consumes a stochastic transition's declared distribution
@@ -152,17 +169,6 @@ impl Mcts {
     }
 }
 
-/// The single-agent index of a node's `Actor`; MCTS supports only sequential/single-agent play.
-fn sole_actor(actor: Actor) -> usize {
-    match actor {
-        Actor::Agent(a) => a,
-        other => panic!(
-            "MCTS supports only sequential/single-agent games (Actor::Agent); got {other:?}. \
-             Use SelectiveExpectimax for simultaneous/chance games."
-        ),
-    }
-}
-
 /// One search tree node, sparse over the mover's LEGAL actions: `actions` holds the legal action ids
 /// (from `Game::legal_actions`), and `child`/`reward`/`visits`/`value_sum`/`prior` are parallel to it.
 /// For the always-fully-legal games (snake, connect4, gridworld) `actions` is `0..A` and behavior is
@@ -186,10 +192,12 @@ struct Node<S> {
     prior: Vec<f64>, // [L] PUCT prior (softmaxed net logits over the legal set); empty under UCT, and empty = not yet evaluated under PUCT
 }
 
-/// A node is either a decision (an agent to move — the layout above) or a **chance node** sitting
-/// between a decision edge and its outcome children. A chance node reuses `child` for its outcome
-/// children (`-1` = not yet materialized) and is transparent to backup: no reward, no discount, no
-/// stats — the action edge above it carries all of those.
+/// A node is a decision (an agent to move — the layout above), a **chance node** sitting between a
+/// decision edge and its outcome children, or a **simultaneous node** where both agents move at
+/// once (decoupled DUCT statistics — see [`SimNode`]). Chance nodes reuse `child` for their outcome
+/// children (`-1` = not yet materialized) and are transparent to backup: no reward, no discount, no
+/// stats — the action edge above them carries all of those. Simultaneous nodes keep everything in
+/// their `SimNode`; the flat `Node` arrays are unused.
 enum NodeKind {
     Decision,
     Chance {
@@ -200,6 +208,44 @@ enum NodeKind {
         /// Empty in the other modes, where `child` is parallel to `probs`.
         committed: Vec<usize>,
     },
+    Simultaneous(Box<SimNode>),
+}
+
+/// One agent's decoupled statistics at a simultaneous node — the same sparse legal-set layout as a
+/// decision node's flat arrays, one copy per agent. Each agent selects over its OWN table with the
+/// ordinary UCT/PUCT rule (Decoupled UCT): the opponent inside this tree is *searched*, not modeled
+/// as a fixed distribution the way expectimax's `Opponent` is — its statistics sharpen as
+/// simulations accumulate.
+struct AgentTable {
+    actions: Vec<usize>, // [L] this agent's legal action ids here
+    visits: Vec<u32>,
+    value_sum: Vec<f64>, // own-perspective backed-up values (no negamax — simultaneous ≠ zero-sum)
+    prior: Vec<f64>,     // PUCT prior over the legal set; empty = not yet evaluated
+    obs: Vec<f32>,       // this agent's staged observation (per-agent egocentric encoding)
+    value: f64,          // this agent's net value here (leaf eval / depth-cap source)
+    total_visits: u32,
+}
+
+/// A simultaneous node's state: two decoupled [`AgentTable`]s plus joint-action children. A node
+/// evaluation consumes TWO net rows (one per agent's observation) — the sim-fate identity counts
+/// the second under `extra_eval_rows`. Children and per-agent edge rewards are keyed by the joint
+/// slot `s0 · L1 + s1` (slots into each table's legal set).
+struct SimNode {
+    tables: [AgentTable; 2],
+    child: Vec<i64>,       // [L0·L1]
+    reward: Vec<[f64; 2]>, // [L0·L1] per-agent immediate rewards for the joint action
+}
+
+impl SimNode {
+    fn l1(&self) -> usize {
+        self.tables[1].actions.len()
+    }
+    fn joint(&self, slot: usize) -> (usize, usize) {
+        (slot / self.l1(), slot % self.l1())
+    }
+    fn evaluated(&self) -> bool {
+        !self.tables[0].prior.is_empty()
+    }
 }
 
 impl<S> Node<S> {
@@ -241,10 +287,10 @@ impl<S> Node<S> {
 /// depth-capped node) and can be backed up immediately, or an `ExpandAll` chance fan whose outcome
 /// children all await the pooled forward at once.
 enum Reached {
-    Eval,
-    Terminal,         // in-tree terminal: exact value 0 for the mover-to-be (no forward)
-    DepthCapped(f64), // depth cap: use the node's cached net value (no forward)
-    Fan,              // ExpandAll chance node at `leaf`: every outcome child staged for evaluation
+    Eval, // fresh leaf (or un-evaluated PUCT node) at `leaf`: 1 row (decision) or 2 (simultaneous)
+    Terminal, // in-tree terminal: exact value 0 (per agent) — no forward
+    DepthCapped([f64; 2]), // depth cap: the node's cached net value(s); [v, –] for decision nodes
+    Fan,  // ExpandAll chance node at `leaf`: every outcome child staged for evaluation
 }
 
 /// What expanding a decision edge produced: a plain child leaf, a fresh chance node to descend
@@ -255,20 +301,32 @@ enum Expanded {
     Fan(usize),
 }
 
+/// What a completed multi-row evaluation does once its last row lands: an `ExpandAll` fan backs up
+/// the exact outcome expectation; a simultaneous-node evaluation backs up both agents' leaf values.
+enum PendingWork {
+    Fan,            // the chance node at `leaf` whose outcome children await rows
+    SimEval(usize), // simultaneous node awaiting its two per-agent rows
+}
+
 struct Tree<S> {
     arena: Vec<Node<S>>,
     sims: usize,
     path: Vec<(usize, usize)>, // (node idx, slot) edges from root to the current leaf
     leaf: usize,
+    // The agent this tree answers for (the engine's request): a simultaneous root densifies THIS
+    // agent's table into the returned evaluation. Decision roots ignore it (the mover's arrays are
+    // the evaluation, as before).
+    requester: usize,
+    // Whether this tree's game is simultaneous (fixed by the root; v1 forbids mixing dynamics).
+    sim: bool,
     max_depth_seen: i32,
     // This search's chance stream (outcome draws), seeded per request — disjoint from the PUCT
     // noise stream, never drawn for games that declare no chance (deterministic games bit-identical).
     rng: SplitMix64,
-    // An in-flight ExpandAll fan: (chance node, rows still awaited). The sim's backup runs when the
-    // count reaches zero (see `fan_backprop`).
-    pending_fan: Option<(usize, usize)>,
+    // An in-flight multi-row evaluation: (what completes, rows still awaited) — see `PendingWork`.
+    pending: Option<(PendingWork, usize)>,
     // Per-search sim-fate counters, one bucket per simulation (the per-move identity `sims =
-    // fresh rows + cache hits + shared rows + terminal + depth-capped − fan_extra_rows` — see
+    // fresh rows + cache hits + shared rows + terminal + depth-capped − extra_eval_rows` — see
     // `SearchStats`). The tree counts them at the moment each sim resolves, so the identity is
     // search-local and exact.
     terminal_sims: usize,
@@ -276,32 +334,97 @@ struct Tree<S> {
     shared_rows: usize,
     fresh_rows: usize,
     hit_rows: usize,
-    fan_extra_rows: usize,
+    extra_eval_rows: usize,
+}
+
+/// Build one agent's decoupled table at a simultaneous state.
+fn agent_table<G: Game>(
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    state: &G::State,
+    agent: usize,
+) -> AgentTable {
+    let mut actions = game.legal_actions(state, agent);
+    if actions.is_empty() {
+        // An inactive agent (e.g. a dead snake in a play-to-last game) has no legal moves but the
+        // node is still simultaneous: give it a single placeholder slot — the engine substitutes
+        // action 0 for non-actors, and the game ignores an inactive agent's move by contract.
+        actions = vec![0];
+    }
+    let width = actions.len();
+    AgentTable {
+        actions,
+        visits: vec![0; width],
+        value_sum: vec![0.0; width],
+        prior: Vec::new(),
+        obs: enc.encode(state, agent),
+        value: 0.0,
+        total_visits: 0,
+    }
+}
+
+/// A fresh simultaneous node (both agents' tables + empty joint-child arrays).
+fn sim_leaf<G: Game>(
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    state: G::State,
+    depth: i32,
+) -> Node<G::State> {
+    let tables = [
+        agent_table(game, enc, &state, 0),
+        agent_table(game, enc, &state, 1),
+    ];
+    let width = tables[0].actions.len() * tables[1].actions.len();
+    let mut node = Node::leaf(state, 0, depth, false, vec![0], Vec::new());
+    node.actions = Vec::new();
+    node.child = Vec::new();
+    node.kind = NodeKind::Simultaneous(Box::new(SimNode {
+        tables,
+        child: vec![-1; width],
+        reward: vec![[0.0; 2]; width],
+    }));
+    node
 }
 
 impl<S: Clone> Tree<S> {
-    fn new<G>(game: &G, enc: &dyn StateEncoder<State = S>, state: S, chance_seed: u64) -> Tree<S>
+    fn new<G>(
+        game: &G,
+        enc: &dyn StateEncoder<State = S>,
+        state: S,
+        requester: usize,
+        chance_seed: u64,
+    ) -> Tree<S>
     where
         G: Game<State = S>,
     {
-        let actor = sole_actor(game.actor(&state));
-        let obs = enc.encode(&state, actor);
-        let legal = game.legal_actions(&state, actor);
-        let root = Node::leaf(state, actor, 0, false, legal, obs);
+        let (root, sim) = match game.actor(&state) {
+            Actor::Agent(actor) => {
+                let obs = enc.encode(&state, actor);
+                let legal = game.legal_actions(&state, actor);
+                (Node::leaf(state, actor, 0, false, legal, obs), false)
+            }
+            Actor::Simultaneous => (sim_leaf(game, enc, state, 0), true),
+            Actor::Chance => panic!(
+                "MCTS does not support Actor::Chance (an explicit chance player); declare \
+                 post-transition chance via Game::chance_outcomes instead"
+            ),
+        };
         Tree {
             arena: vec![root],
             sims: 0,
             path: Vec::new(),
             leaf: 0,
+            requester,
+            sim,
             max_depth_seen: 0,
             rng: SplitMix64::new(chance_seed),
-            pending_fan: None,
+            pending: None,
             terminal_sims: 0,
             depthcap_sims: 0,
             shared_rows: 0,
             fresh_rows: 0,
             hit_rows: 0,
-            fan_extra_rows: 0,
+            extra_eval_rows: 0,
         }
     }
 
@@ -369,13 +492,54 @@ impl<S: Clone> Tree<S> {
                 self.leaf = ni;
                 return Reached::Terminal;
             }
+            if let NodeKind::Simultaneous(sim) = &node.kind {
+                // Decoupled (DUCT) descent: each agent independently scores its OWN table with the
+                // ordinary rule; the pair is the joint edge.
+                if matches!(guidance, Guidance::Puct { .. }) && !sim.evaluated() {
+                    self.leaf = ni; // un-evaluated PUCT node: both agents' rows, in place
+                    return Reached::Eval;
+                }
+                if node.depth >= max_depth {
+                    self.leaf = ni;
+                    return Reached::DepthCapped([sim.tables[0].value, sim.tables[1].value]);
+                }
+                let s0 = select_table(&sim.tables[0], guidance);
+                let s1 = select_table(&sim.tables[1], guidance);
+                let js = s0 * sim.l1() + s1;
+                self.path.push((ni, js));
+                if sim.child[js] < 0 {
+                    match self.expand(game, enc, reward, ni, js, chance) {
+                        Expanded::Leaf(child) => {
+                            self.leaf = child;
+                            return if self.arena[child].terminal {
+                                Reached::Terminal
+                            } else {
+                                Reached::Eval
+                            };
+                        }
+                        Expanded::Chance(cni) => {
+                            ni = cni;
+                            continue;
+                        }
+                        Expanded::Fan(cni) => {
+                            self.leaf = cni;
+                            return Reached::Fan;
+                        }
+                    }
+                }
+                let NodeKind::Simultaneous(sim) = &self.arena[ni].kind else {
+                    unreachable!()
+                };
+                ni = sim.child[js] as usize;
+                continue;
+            }
             if matches!(guidance, Guidance::Puct { .. }) && node.prior.is_empty() {
                 self.leaf = ni; // un-evaluated PUCT node (the root on sim 1): evaluate it in place
                 return Reached::Eval;
             }
             if node.depth >= max_depth {
                 self.leaf = ni; // depth cap: use the cached net value evaluated when this node was created
-                return Reached::DepthCapped(node.value);
+                return Reached::DepthCapped([node.value, 0.0]);
             }
             let a = select_edge(node, guidance);
             self.path.push((ni, a));
@@ -439,27 +603,81 @@ impl<S: Clone> Tree<S> {
         } else {
             committed[slot]
         };
-        // The chance node's parent decision edge is the path entry just above it.
+        // The chance node's parent action edge is the path entry just above it.
         let &(pni, pa) = self
             .path
             .iter()
             .rev()
             .find(|&&(n, _)| n != cni)
-            .expect("chance node with no parent decision edge on the path");
-        let mover = self.arena[pni].actor;
-        let mut joint = vec![0usize; game.num_agents()];
-        joint[mover] = self.arena[pni].actions[pa];
+            .expect("chance node with no parent action edge on the path");
+        let (joint, mover) = self.edge_joint(game, pni, pa);
         let t = game.step(&self.arena[pni].state, &joint);
         let state = game.apply_chance(&self.arena[pni].state, &t, outcome);
-        let child = self.decision_leaf(game, enc, state, mover, self.arena[cni].depth + 1, false);
+        let child = self.child_leaf(game, enc, state, mover, self.arena[cni].depth + 1, false);
         let idx = self.arena.len();
         self.arena.push(child);
         self.arena[cni].child[slot] = idx as i64;
         idx
     }
 
-    /// A fresh decision leaf for `state` (terminal or with its obs staged for evaluation).
-    fn decision_leaf<G>(
+    /// The joint action (and mover hint) for edge `ai` of node `ni` — a one-hot joint for a
+    /// decision node, both agents' actions for a simultaneous one.
+    fn edge_joint<G>(&self, game: &G, ni: usize, ai: usize) -> (Vec<usize>, usize)
+    where
+        G: Game<State = S>,
+    {
+        match &self.arena[ni].kind {
+            NodeKind::Simultaneous(sim) => {
+                let (s0, s1) = sim.joint(ai);
+                (
+                    vec![sim.tables[0].actions[s0], sim.tables[1].actions[s1]],
+                    0,
+                )
+            }
+            _ => {
+                let mover = self.arena[ni].actor;
+                let mut joint = vec![0usize; game.num_agents()];
+                joint[mover] = self.arena[ni].actions[ai];
+                (joint, mover)
+            }
+        }
+    }
+
+    /// Record edge `ai`'s immediate reward(s) on node `ni` from the transition's events.
+    fn record_edge_reward<G>(
+        &mut self,
+        reward: &dyn Reward<Event = G::Event>,
+        ni: usize,
+        ai: usize,
+        t: &crate::game::Transition<S, G::Event>,
+    ) where
+        G: Game<State = S>,
+    {
+        match &mut self.arena[ni].kind {
+            NodeKind::Simultaneous(sim) => {
+                sim.reward[ai] = [
+                    reward.step_reward(&t.events[0], 0),
+                    reward.step_reward(&t.events[1], 1),
+                ];
+            }
+            _ => {
+                let mover = self.arena[ni].actor;
+                self.arena[ni].reward[ai] = reward.step_reward(&t.events[mover], mover);
+            }
+        }
+    }
+
+    /// Store edge `ai`'s child index on node `ni` (dispatching on the node's child storage).
+    fn set_edge_child(&mut self, ni: usize, ai: usize, idx: usize) {
+        match &mut self.arena[ni].kind {
+            NodeKind::Simultaneous(sim) => sim.child[ai] = idx as i64,
+            _ => self.arena[ni].child[ai] = idx as i64,
+        }
+    }
+
+    /// A fresh child leaf for `state` — terminal, sequential decision, or simultaneous, per the
+    /// game's actor there. v1 forbids mixing sequential and simultaneous dynamics in one game.
+    fn child_leaf<G>(
         &self,
         game: &G,
         enc: &dyn StateEncoder<State = S>,
@@ -472,12 +690,29 @@ impl<S: Clone> Tree<S> {
         G: Game<State = S>,
     {
         if terminal {
-            Node::leaf(state, mover, depth, true, Vec::new(), Vec::new())
-        } else {
-            let actor = sole_actor(game.actor(&state));
-            let obs = enc.encode(&state, actor);
-            let legal = game.legal_actions(&state, actor);
-            Node::leaf(state, actor, depth, false, legal, obs)
+            return Node::leaf(state, mover, depth, true, Vec::new(), Vec::new());
+        }
+        match game.actor(&state) {
+            Actor::Agent(actor) => {
+                assert!(
+                    !self.sim,
+                    "mixed simultaneous/sequential dynamics are not supported"
+                );
+                let obs = enc.encode(&state, actor);
+                let legal = game.legal_actions(&state, actor);
+                Node::leaf(state, actor, depth, false, legal, obs)
+            }
+            Actor::Simultaneous => {
+                assert!(
+                    self.sim,
+                    "mixed simultaneous/sequential dynamics are not supported"
+                );
+                sim_leaf(game, enc, state, depth)
+            }
+            Actor::Chance => panic!(
+                "MCTS does not support Actor::Chance (an explicit chance player); declare \
+                 post-transition chance via Game::chance_outcomes instead"
+            ),
         }
     }
 
@@ -497,22 +732,19 @@ impl<S: Clone> Tree<S> {
     where
         G: Game<State = S>,
     {
-        let mover = self.arena[ni].actor;
-        let action = self.arena[ni].actions[ai];
-        let mut joint = vec![0usize; game.num_agents()];
-        joint[mover] = action;
+        let (joint, mover) = self.edge_joint(game, ni, ai);
         let t = game.step(&self.arena[ni].state, &joint);
-        self.arena[ni].reward[ai] = reward.step_reward(&t.events[mover], mover);
+        self.record_edge_reward::<G>(reward, ni, ai, &t);
         let depth = self.arena[ni].depth + 1;
         if let Some(probs) = game.chance_outcomes(&self.arena[ni].state, &t) {
             debug_assert!(!t.terminal, "chance_outcomes on a terminal transition");
             debug_assert!(!probs.is_empty());
             return self.expand_chance(game, enc, ni, ai, &t, probs, chance);
         }
-        let child = self.decision_leaf(game, enc, t.next_state, mover, depth, t.terminal);
+        let child = self.child_leaf(game, enc, t.next_state, mover, depth, t.terminal);
         let idx = self.arena.len();
         self.arena.push(child);
-        self.arena[ni].child[ai] = idx as i64;
+        self.set_edge_child(ni, ai, idx);
         Expanded::Leaf(idx)
     }
 
@@ -536,7 +768,10 @@ impl<S: Clone> Tree<S> {
     where
         G: Game<State = S>,
     {
-        let mover = self.arena[ni].actor;
+        let mover = match self.arena[ni].kind {
+            NodeKind::Simultaneous(_) => 0,
+            _ => self.arena[ni].actor,
+        };
         let depth = self.arena[ni].depth;
         let committed = match chance {
             ChanceMode::Committed { samples } => {
@@ -565,13 +800,13 @@ impl<S: Clone> Tree<S> {
         chance_node.child = vec![-1; width];
         let cni = self.arena.len();
         self.arena.push(chance_node);
-        self.arena[ni].child[ai] = cni as i64;
+        self.set_edge_child(ni, ai, cni);
         if let ChanceMode::ExpandAll = chance {
             // Materialize every outcome now; the caller stages all their observations at once and
             // `fan_backprop` seeds the edge with the exact weighted expectation when they arrive.
             for slot in 0..width {
                 let state = game.apply_chance(&self.arena[ni].state, t, slot);
-                let child = self.decision_leaf(game, enc, state, mover, depth + 1, false);
+                let child = self.child_leaf(game, enc, state, mover, depth + 1, false);
                 let idx = self.arena.len();
                 self.arena.push(child);
                 self.arena[cni].child[slot] = idx as i64;
@@ -605,24 +840,72 @@ impl<S: Clone> Tree<S> {
         }
     }
 
+    /// Back a simulation up the path with the right scheme for this tree: scalar negamax for
+    /// sequential games (`vals[0]` from the leaf actor's perspective), per-agent own-perspective
+    /// vector backup for simultaneous ones (no negamax — simultaneous games are general-sum; each
+    /// agent's edge statistics take its own reward stream).
+    fn backup(&mut self, gamma: f64, vals: [f64; 2]) {
+        if self.sim {
+            self.backprop_sim(gamma, vals);
+        } else {
+            self.backprop(gamma, vals[0]);
+        }
+    }
+
+    /// The simultaneous (DUCT) backup: per path edge, each agent's table takes
+    /// `qᵢ = rewardᵢ + γ·gᵢ` on its OWN selected slot. Chance hops stay transparent.
+    fn backprop_sim(&mut self, gamma: f64, leaf_vals: [f64; 2]) {
+        let mut g = leaf_vals;
+        for &(ni, slot) in self.path.iter().rev() {
+            match &mut self.arena[ni].kind {
+                NodeKind::Chance { .. } => continue,
+                NodeKind::Simultaneous(sim) => {
+                    let (s0, s1) = sim.joint(slot);
+                    for (ag, s) in [s0, s1].into_iter().enumerate() {
+                        let q = sim.reward[slot][ag] + gamma * g[ag];
+                        sim.tables[ag].value_sum[s] += q;
+                        sim.tables[ag].visits[s] += 1;
+                        sim.tables[ag].total_visits += 1;
+                        g[ag] = q;
+                    }
+                }
+                NodeKind::Decision => {
+                    unreachable!("decision node on a simultaneous tree's path (mixed dynamics)")
+                }
+            }
+        }
+    }
+
     /// Complete an `ExpandAll` fan once every outcome child's evaluation has arrived: the sim backs
     /// up the exact probability-weighted expectation of the children's values (each from its own
-    /// actor's perspective — the contract fixes one actor across a transition's outcomes).
+    /// actor's perspective — the contract fixes one actor across a transition's outcomes; per-agent
+    /// values mix independently on a simultaneous tree).
     fn fan_backprop(&mut self, gamma: f64) {
         let cni = self.leaf;
         let NodeKind::Chance { probs, .. } = &self.arena[cni].kind else {
             unreachable!("fan_backprop on a decision node");
         };
+        let probs = probs.clone();
         let total: f64 = probs.iter().sum();
-        let mut mix = 0.0;
+        let mut mix = [0.0f64; 2];
         let mut child_actor = self.arena[cni].actor;
-        for (slot, &p) in probs.clone().iter().enumerate() {
+        for (slot, &p) in probs.iter().enumerate() {
             let child = self.arena[cni].child[slot] as usize;
-            mix += p / total * self.arena[child].value;
-            child_actor = self.arena[child].actor;
+            match &self.arena[child].kind {
+                NodeKind::Simultaneous(sim) => {
+                    mix[0] += p / total * sim.tables[0].value;
+                    mix[1] += p / total * sim.tables[1].value;
+                }
+                _ => {
+                    mix[0] += p / total * self.arena[child].value;
+                    child_actor = self.arena[child].actor;
+                }
+            }
         }
-        self.arena[cni].actor = child_actor; // fan value is from the outcome children's perspective
-        self.backprop(gamma, mix);
+        if !self.sim {
+            self.arena[cni].actor = child_actor; // fan value: the outcome children's perspective
+        }
+        self.backup(gamma, mix);
     }
 
     /// The finished tree's root evaluation: per-action mean value `values[1][A]` (0 for any unvisited
@@ -634,11 +917,20 @@ impl<S: Clone> Tree<S> {
         let root = &self.arena[0];
         let mut values = vec![0.0f64; actions];
         let mut visits = vec![0.0f64; actions];
-        for (slot, &action) in root.actions.iter().enumerate() {
-            if root.visits[slot] > 0 {
-                values[action] = root.value_sum[slot] / root.visits[slot] as f64;
+        // A simultaneous root densifies the REQUESTING agent's decoupled table; a decision root's
+        // flat arrays are the evaluation, as before.
+        let (r_actions, r_visits, r_sums) = match &root.kind {
+            NodeKind::Simultaneous(sim) => {
+                let t = &sim.tables[self.requester];
+                (&t.actions, &t.visits, &t.value_sum)
             }
-            visits[action] = root.visits[slot] as f64;
+            _ => (&root.actions, &root.visits, &root.value_sum),
+        };
+        for (slot, &action) in r_actions.iter().enumerate() {
+            if r_visits[slot] > 0 {
+                values[action] = r_sums[slot] / f64::from(r_visits[slot]);
+            }
+            visits[action] = f64::from(r_visits[slot]);
         }
         let stats = SearchStats {
             max_depth: self.max_depth_seen,
@@ -651,7 +943,7 @@ impl<S: Clone> Tree<S> {
             shared_rows: self.shared_rows,
             fresh_rows: self.fresh_rows,
             hit_rows: self.hit_rows,
-            fan_extra_rows: self.fan_extra_rows,
+            extra_eval_rows: self.extra_eval_rows,
         };
         SearchEvaluation {
             values: vec![values],
@@ -667,28 +959,45 @@ impl<S: Clone> Tree<S> {
 /// `Q = 0` (the AlphaZero convention) — the prior, not optimism, drives first visits; `N_total` is
 /// floored at 1 so the very first selection is prior-ordered rather than degenerate.
 fn select_edge<S>(node: &Node<S>, guidance: &Guidance) -> usize {
+    select_scored(
+        &node.visits,
+        &node.value_sum,
+        &node.prior,
+        node.total_visits,
+        guidance,
+    )
+}
+
+/// One agent's decoupled selection at a simultaneous node — the identical rule over its own table.
+fn select_table(t: &AgentTable, guidance: &Guidance) -> usize {
+    select_scored(&t.visits, &t.value_sum, &t.prior, t.total_visits, guidance)
+}
+
+fn select_scored(
+    visits: &[u32],
+    value_sum: &[f64],
+    prior: &[f64],
+    total_visits: u32,
+    guidance: &Guidance,
+) -> usize {
     let mut best = 0;
     let mut best_score = f64::NEG_INFINITY;
-    for a in 0..node.child.len() {
+    for a in 0..visits.len() {
         let score = match guidance {
             Guidance::Uct { c } => {
-                if node.visits[a] == 0 {
+                if visits[a] == 0 {
                     f64::INFINITY
                 } else {
-                    let n = node.visits[a] as f64;
-                    let ln_n = (node.total_visits.max(1) as f64).ln();
-                    node.value_sum[a] / n + c * (ln_n / n).sqrt()
+                    let n = f64::from(visits[a]);
+                    let ln_n = f64::from(total_visits.max(1)).ln();
+                    value_sum[a] / n + c * (ln_n / n).sqrt()
                 }
             }
             Guidance::Puct { c, .. } => {
-                let n = node.visits[a] as f64;
-                let q = if node.visits[a] > 0 {
-                    node.value_sum[a] / n
-                } else {
-                    0.0
-                };
-                let sqrt_total = (node.total_visits.max(1) as f64).sqrt();
-                q + c * node.prior[a] * sqrt_total / (1.0 + n)
+                let n = f64::from(visits[a]);
+                let q = if visits[a] > 0 { value_sum[a] / n } else { 0.0 };
+                let sqrt_total = f64::from(total_visits.max(1)).sqrt();
+                q + c * prior[a] * sqrt_total / (1.0 + n)
             }
         };
         if score > best_score {
@@ -769,19 +1078,20 @@ where
     let mut trees: Vec<Tree<G::State>> = requests
         .into_iter()
         .enumerate()
-        .map(|(ti, (state, _agent))| {
+        .map(|(ti, (state, agent))| {
             // Per-tree chance stream, disjoint from the PUCT root-noise stream (different salt).
             let chance_seed =
                 seed ^ 0x53A3_C5A9_1D87_2F6B ^ (ti as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-            Tree::new(game, enc, state, chance_seed)
+            Tree::new(game, enc, state, agent, chance_seed)
         })
         .collect();
 
     while trees.iter().any(|t| t.sims < num_simulations) {
         let mut batch = eval.batch();
-        // Per ticket: the (tree, node) pairs awaiting the row — the node is the tree's single
-        // pending leaf, or one outcome child of an ExpandAll fan.
-        let mut consumers: Vec<Vec<(usize, usize)>> = Vec::new();
+        // Per ticket: the (tree, node, table-slot) triples awaiting the row — the node is the
+        // tree's pending leaf, an ExpandAll fan's outcome child, or a simultaneous node (slot =
+        // which agent's table the row feeds; 0 for decision rows).
+        let mut consumers: Vec<Vec<(usize, usize, usize)>> = Vec::new();
 
         for (ti, tree) in trees.iter_mut().enumerate() {
             // Advance-until-miss: keep simulating this tree — terminals, depth caps, and cache
@@ -793,51 +1103,91 @@ where
                 match tree.select_expand(game, enc, reward, max_depth, guidance, chance) {
                     Reached::Terminal => {
                         tree.terminal_sims += 1;
-                        tree.backprop(gamma, 0.0);
+                        tree.backup(gamma, [0.0; 2]);
                     }
                     Reached::DepthCapped(v) => {
                         tree.depthcap_sims += 1;
-                        tree.backprop(gamma, v);
+                        tree.backup(gamma, v);
                     }
                     Reached::Eval => {
                         let leaf = tree.leaf;
-                        match batch.resolve_or_stage(&tree.arena[leaf].obs) {
-                            Resolve::Resolved(row) => {
-                                tree.hit_rows += 1;
-                                consume_row(tree, leaf, &row, guidance, gamma, a, ti);
-                                // resolved from cache — keep advancing this tree
+                        if matches!(tree.arena[leaf].kind, NodeKind::Simultaneous(_)) {
+                            // A simultaneous node evaluates BOTH agents' observations — two rows
+                            // for one simulation (the second lands in `extra_eval_rows`). The
+                            // count is set before any row is consumed, so an early cache hit
+                            // cannot complete the evaluation prematurely.
+                            tree.extra_eval_rows += 1;
+                            tree.pending = Some((PendingWork::SimEval(leaf), 2));
+                            for ag in 0..2 {
+                                let obs = {
+                                    let NodeKind::Simultaneous(sim) = &mut tree.arena[leaf].kind
+                                    else {
+                                        unreachable!()
+                                    };
+                                    std::mem::take(&mut sim.tables[ag].obs)
+                                };
+                                match batch.resolve_or_stage(&obs) {
+                                    Resolve::Resolved(row) => {
+                                        tree.hit_rows += 1;
+                                        consume_row(tree, leaf, ag, &row, guidance, gamma, a, ti);
+                                    }
+                                    Resolve::Staged(ticket) => {
+                                        stage(tree, ti, leaf, ag, ticket, &mut consumers);
+                                    }
+                                }
                             }
-                            Resolve::Staged(ticket) => {
-                                stage(tree, ti, leaf, ticket, &mut consumers);
-                                break; // this tree waits on the pooled forward
+                            if tree.pending.is_some() {
+                                break; // one or both rows await the pooled forward
+                            }
+                        } else {
+                            match batch.resolve_or_stage(&tree.arena[leaf].obs) {
+                                Resolve::Resolved(row) => {
+                                    tree.hit_rows += 1;
+                                    consume_row(tree, leaf, 0, &row, guidance, gamma, a, ti);
+                                    // resolved from cache — keep advancing this tree
+                                }
+                                Resolve::Staged(ticket) => {
+                                    stage(tree, ti, leaf, 0, ticket, &mut consumers);
+                                    break; // this tree waits on the pooled forward
+                                }
                             }
                         }
                     }
                     Reached::Fan => {
-                        // ExpandAll: stage every outcome child of the chance node at `leaf`; the
-                        // sim's backup (`fan_backprop`) runs once the last row arrives — which may
-                        // be immediately, if the cache serves them all.
+                        // ExpandAll: stage every outcome child of the chance node at `leaf` — one
+                        // row per decision child, two per simultaneous child. The sim's backup
+                        // (`fan_backprop`) runs once the last row arrives — which may be
+                        // immediately, if the cache serves them all.
                         let cni = tree.leaf;
                         let kids: Vec<usize> =
                             tree.arena[cni].child.iter().map(|&c| c as usize).collect();
-                        tree.fan_extra_rows += kids.len().saturating_sub(1);
-                        // The count covers EVERY child before any row is consumed, so an early
-                        // cache hit cannot trigger the fan's backup prematurely; `consume_row`
-                        // decrements per delivered row and fires `fan_backprop` on the last one.
-                        tree.pending_fan = Some((cni, kids.len()));
+                        let rows_per_child = if tree.sim { 2 } else { 1 };
+                        let total_rows = kids.len() * rows_per_child;
+                        tree.extra_eval_rows += total_rows.saturating_sub(1);
+                        // The count covers EVERY row before any is consumed, so an early cache hit
+                        // cannot trigger the fan's backup prematurely; `consume_row` decrements
+                        // per delivered row and fires `fan_backprop` on the last one.
+                        tree.pending = Some((PendingWork::Fan, total_rows));
                         for child in kids {
-                            let obs = std::mem::take(&mut tree.arena[child].obs);
-                            match batch.resolve_or_stage(&obs) {
-                                Resolve::Resolved(row) => {
-                                    tree.hit_rows += 1;
-                                    consume_row(tree, child, &row, guidance, gamma, a, ti);
-                                }
-                                Resolve::Staged(ticket) => {
-                                    stage(tree, ti, child, ticket, &mut consumers);
+                            for ag in 0..rows_per_child {
+                                let obs = match &mut tree.arena[child].kind {
+                                    NodeKind::Simultaneous(sim) => {
+                                        std::mem::take(&mut sim.tables[ag].obs)
+                                    }
+                                    _ => std::mem::take(&mut tree.arena[child].obs),
+                                };
+                                match batch.resolve_or_stage(&obs) {
+                                    Resolve::Resolved(row) => {
+                                        tree.hit_rows += 1;
+                                        consume_row(tree, child, ag, &row, guidance, gamma, a, ti);
+                                    }
+                                    Resolve::Staged(ticket) => {
+                                        stage(tree, ti, child, ag, ticket, &mut consumers);
+                                    }
                                 }
                             }
                         }
-                        if tree.pending_fan.is_some() {
+                        if tree.pending.is_some() {
                             break; // some rows await the pooled forward
                         }
                         // fully cache-served: the fan completed in place — keep advancing
@@ -847,10 +1197,11 @@ where
         }
         let rows = batch.commit();
         for (ticket, waiting) in consumers.iter().enumerate() {
-            for &(ti, node) in waiting {
+            for &(ti, node, slot) in waiting {
                 consume_row(
                     &mut trees[ti],
                     node,
+                    slot,
                     rows.row(ticket),
                     guidance,
                     gamma,
@@ -870,15 +1221,16 @@ fn stage<S>(
     tree: &mut Tree<S>,
     ti: usize,
     node: usize,
+    slot: usize,
     ticket: usize,
-    consumers: &mut Vec<Vec<(usize, usize)>>,
+    consumers: &mut Vec<Vec<(usize, usize, usize)>>,
 ) {
     if ticket < consumers.len() {
         tree.shared_rows += 1;
-        consumers[ticket].push((ti, node));
+        consumers[ticket].push((ti, node, slot));
     } else {
         tree.fresh_rows += 1;
-        consumers.push(vec![(ti, node)]);
+        consumers.push(vec![(ti, node, slot)]);
     }
 }
 
@@ -891,33 +1243,52 @@ fn stage<S>(
 fn consume_row<S: Clone>(
     tree: &mut Tree<S>,
     ni: usize,
+    slot: usize,
     row_data: &[f64],
     guidance: &Guidance,
     gamma: f64,
     a: usize,
     ti: usize,
 ) {
+    let is_sim_node = matches!(tree.arena[ni].kind, NodeKind::Simultaneous(_));
     let value = match guidance {
         Guidance::Uct { .. } => {
             let k = row_data.len() / a;
-            leaf_value(row_data, k, a, &tree.arena[ni].actions)
+            let actions: &[usize] = match &tree.arena[ni].kind {
+                NodeKind::Simultaneous(sim) => &sim.tables[slot].actions,
+                _ => &tree.arena[ni].actions,
+            };
+            leaf_value(row_data, k, a, actions)
         }
-        Guidance::Puct { noise, .. } => {
+        Guidance::Puct {
+            noise, noise_both, ..
+        } => {
             let (logits, value) = row_data.split_at(a);
             // Prior over the LEGAL set only: gather the node's legal actions' logits and softmax
             // those — illegal moves get zero mass by construction (the AlphaZero convention), and
-            // the net never needs to learn to suppress them.
-            let node_actions = &tree.arena[ni].actions;
+            // the net never needs to learn to suppress them. At a simultaneous node the row feeds
+            // ONE agent's table (its own legal set and egocentric observation).
+            let node_actions: &[usize] = match &tree.arena[ni].kind {
+                NodeKind::Simultaneous(sim) => &sim.tables[slot].actions,
+                _ => &tree.arena[ni].actions,
+            };
             let legal_logits: Vec<f64> = node_actions.iter().map(|&act| logits[act]).collect();
             let mut prior = softmax(&legal_logits);
-            if ni == 0 {
-                // The root's one eval: mix in the Dirichlet exploration noise (per-tree stream, so
-                // pooled searches stay deterministic and independent — and cached root rows renoise
-                // identically, since the cache stores raw logits), drawn over the legal set.
+            // Root noise scope: a decision root's one table always gets it; a simultaneous root's
+            // tables get it per `noise_scope` — the requester's always, the opponent's only under
+            // `Both` (a deliberately perturbed opponent model is opt-in).
+            let noised = ni == 0 && (!is_sim_node || slot == tree.requester || *noise_both);
+            if noised {
+                // Mix in the Dirichlet exploration noise (per-tree stream, so pooled searches stay
+                // deterministic and independent — and cached root rows renoise identically, since
+                // the cache stores raw logits), drawn over the legal set. A simultaneous root's
+                // two tables draw disjoint streams (slot-salted).
                 if let Some((eps, alpha, seed)) = noise {
                     if *eps > 0.0 {
-                        let mut rng =
-                            SplitMix64::new(seed ^ (ti as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                        let mut rng = SplitMix64::new(
+                            seed ^ (ti as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                                ^ (slot as u64).wrapping_mul(0xD1B5_4A32_D192_ED03),
+                        );
                         let noise_draw = dirichlet(&mut rng, *alpha, prior.len());
                         for (p, d) in prior.iter_mut().zip(noise_draw) {
                             *p = (1.0 - eps) * *p + eps * d;
@@ -925,23 +1296,45 @@ fn consume_row<S: Clone>(
                     }
                 }
             }
-            tree.arena[ni].prior = prior;
+            match &mut tree.arena[ni].kind {
+                NodeKind::Simultaneous(sim) => sim.tables[slot].prior = prior,
+                _ => tree.arena[ni].prior = prior,
+            }
             value[0]
         }
     };
-    match tree.pending_fan.as_mut() {
+    // Store the value where completion will read it.
+    match &mut tree.arena[ni].kind {
+        NodeKind::Simultaneous(sim) => sim.tables[slot].value = value,
+        _ => tree.arena[ni].value = value,
+    }
+    match tree.pending.as_mut() {
         Some((_, missing)) => {
-            tree.arena[ni].value = value;
             if *missing > 0 {
                 *missing -= 1;
             }
-            if matches!(tree.pending_fan, Some((_, 0))) {
-                tree.pending_fan = None;
-                tree.fan_backprop(gamma);
+            if matches!(tree.pending, Some((_, 0))) {
+                let Some((work, _)) = tree.pending.take() else {
+                    unreachable!()
+                };
+                match work {
+                    PendingWork::Fan => tree.fan_backprop(gamma),
+                    PendingWork::SimEval(sni) => {
+                        let NodeKind::Simultaneous(sim) = &tree.arena[sni].kind else {
+                            unreachable!()
+                        };
+                        let vals = [sim.tables[0].value, sim.tables[1].value];
+                        tree.backprop_sim(gamma, vals);
+                    }
+                }
             }
         }
         None => {
             debug_assert_eq!(ni, tree.leaf, "single-leaf row delivered to the wrong node");
+            debug_assert!(
+                !is_sim_node,
+                "simultaneous rows must flow through a pending eval"
+            );
             tree.backprop(gamma, value);
         }
     }
@@ -1025,7 +1418,7 @@ impl Policy for Mcts {
         stats.sum_shared_rows += s.shared_rows;
         stats.sum_fresh_rows += s.fresh_rows;
         stats.sum_hit_rows += s.hit_rows;
-        stats.sum_fan_extra_rows += s.fan_extra_rows;
+        stats.sum_extra_eval_rows += s.extra_eval_rows;
     }
 }
 
@@ -1157,7 +1550,8 @@ mod tests {
                 &node,
                 &Guidance::Puct {
                     c: 1.5,
-                    noise: None
+                    noise: None,
+                    noise_both: false
                 }
             ),
             1
@@ -1172,6 +1566,7 @@ mod tests {
         let g = Guidance::Puct {
             c: 2.0,
             noise: None,
+            noise_both: false,
         };
         assert_eq!(select_edge(&node, &g), 0);
     }
@@ -1184,7 +1579,8 @@ mod tests {
                 &node,
                 &Guidance::Puct {
                     c: 0.1,
-                    noise: None
+                    noise: None,
+                    noise_both: false
                 }
             ),
             0
@@ -1277,6 +1673,7 @@ mod masking_tests {
                 temperature: 0.0,
                 temperature_drop: u32::MAX,
                 chance: ChanceMode::AlwaysResample,
+                noise_scope: NoiseScope::Requester,
             };
             alphazero_many(
                 &EvenOnly,
@@ -1540,13 +1937,13 @@ mod chance_tests {
             out.values[0][1], 1.5,
             "fan backup must be the exact weighted expectation"
         );
-        assert_eq!(out.stats.fan_extra_rows, 1); // 2 outcomes, 1 row beyond the sim's own
-                                                 // Sim-fate identity with the fan term: sims = fresh + hit + shared + term + cap − extra.
+        assert_eq!(out.stats.extra_eval_rows, 1); // 2 outcomes, 1 row beyond the sim's own
+                                                  // Sim-fate identity with the fan term: sims = fresh + hit + shared + term + cap − extra.
         let s = &out.stats;
         assert_eq!(
             2,
             s.fresh_rows + s.hit_rows + s.shared_rows + s.terminal_sims + s.depthcap_sims
-                - s.fan_extra_rows
+                - s.extra_eval_rows
         );
     }
 
@@ -1566,6 +1963,7 @@ mod chance_tests {
             temperature: 0.0,
             temperature_drop: u32::MAX,
             chance: ChanceMode::AlwaysResample,
+            noise_scope: NoiseScope::Requester,
         };
         let out = alphazero_many(
             &RiskyGame,
@@ -1580,6 +1978,206 @@ mod chance_tests {
         assert!(
             out.visits[1] > out.visits[0],
             "PUCT should favor the E=1.5 risky action"
+        );
+    }
+}
+
+#[cfg(test)]
+mod duct_tests {
+    //! Decoupled simultaneous (DUCT) search on a synthetic one-shot matrix game with a dominant
+    //! action per agent: both agents pick between "good" (+1 for self) and "bad" (0), payoffs
+    //! independent — so each agent's own table must discover its dominant action regardless of the
+    //! opponent's behavior, and the two per-request trees must agree from either seat.
+    use super::*;
+    use crate::encoder::StateEncoder;
+    use crate::game::{Actor, Game, Rng, Transition};
+    use crate::policies::alphazero::{alphazero_many, AlphaZeroConfig};
+    use crate::reward::Reward as RewardTrait;
+
+    #[derive(Clone)]
+    struct St {
+        done: bool,
+    }
+    struct MatrixGame;
+
+    impl Game for MatrixGame {
+        type State = St;
+        type Event = [f64; 2];
+        fn num_agents(&self) -> usize {
+            2
+        }
+        fn action_count(&self) -> usize {
+            2
+        }
+        fn actor(&self, _s: &St) -> Actor {
+            Actor::Simultaneous
+        }
+        fn legal_actions(&self, _s: &St, _agent: usize) -> Vec<usize> {
+            vec![0, 1]
+        }
+        fn step(&self, _s: &St, actions: &[usize]) -> Transition<St, [f64; 2]> {
+            // Agent 1's action 1 is dominant (+1 to itself); agent 0 is paid for COORDINATING with
+            // agent 1 — so agent 0's values depend on the in-tree opponent model, which is what the
+            // noise-scope test needs, while both seats still converge on action 1 in equilibrium.
+            let coord = f64::from(u8::from(actions[0] == actions[1]));
+            Transition {
+                next_state: St { done: true },
+                events: vec![[coord, 0.0], [f64::from(actions[1] as u8), 0.0]],
+                terminal: true,
+            }
+        }
+        fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+            St { done: false }
+        }
+    }
+
+    struct Enc;
+    impl StateEncoder for Enc {
+        type State = St;
+        fn encode(&self, s: &St, agent: usize) -> Vec<f32> {
+            vec![f32::from(u8::from(s.done)), agent as f32] // per-agent egocentric obs
+        }
+        fn obs_shape(&self) -> (usize, usize, usize) {
+            (1, 1, 2)
+        }
+    }
+
+    struct Passthrough;
+    impl RewardTrait for Passthrough {
+        type Event = [f64; 2];
+        fn step_reward(&self, event: &[f64; 2], _agent: usize) -> f64 {
+            event[0]
+        }
+    }
+
+    fn az_cfg(sims: usize, eps: f64, scope: NoiseScope) -> AlphaZeroConfig {
+        AlphaZeroConfig {
+            num_simulations: sims,
+            c_puct: 2.0,
+            gamma: 1.0,
+            max_depth: 8,
+            noise_epsilon: eps,
+            noise_alpha: 0.3,
+            temperature: 0.0,
+            temperature_drop: u32::MAX,
+            chance: ChanceMode::AlwaysResample,
+            noise_scope: scope,
+        }
+    }
+
+    #[test]
+    fn uct_finds_each_requesters_dominant_action() {
+        let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+        let mut eval = Evaluator::new(&mut infer, None);
+        let cfg = MctsConfig {
+            num_simulations: 60,
+            uct_c: 2.0,
+            gamma: 1.0,
+            max_depth: 8,
+            temperature: 0.0,
+            temperature_drop: u32::MAX,
+            chance: ChanceMode::AlwaysResample,
+        };
+        // Both seats' requests pooled — each tree answers for its own agent.
+        let evals = mcts_many(
+            &MatrixGame,
+            &Enc,
+            &Passthrough,
+            &cfg,
+            vec![(St { done: false }, 0), (St { done: false }, 1)],
+            5,
+            &mut eval,
+        );
+        for (seat, e) in evals.iter().enumerate() {
+            assert!(
+                e.visits[1] > e.visits[0],
+                "seat {seat} should favor action 1 (dominant / coordinate-with-dominant), visits {:?}",
+                e.visits
+            );
+        }
+    }
+
+    #[test]
+    fn puct_finds_the_dominant_action_and_is_deterministic() {
+        let run = |seed: u64| {
+            let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 3];
+            let mut eval = Evaluator::new(&mut infer, None);
+            alphazero_many(
+                &MatrixGame,
+                &Enc,
+                &Passthrough,
+                &az_cfg(60, 0.25, NoiseScope::Requester),
+                vec![(St { done: false }, 0)],
+                seed,
+                &mut eval,
+            )
+            .remove(0)
+        };
+        let a = run(3);
+        assert!(a.visits[1] > a.visits[0]);
+        let b = run(3);
+        assert_eq!(a.visits, b.visits, "same seed, same simultaneous search");
+        assert_eq!(a.values, b.values);
+    }
+
+    #[test]
+    fn noise_scope_changes_only_the_opponent_stream() {
+        // With noise on, Requester vs Both must differ (the opponent's prior is perturbed under
+        // Both), while noise-off searches are scope-independent.
+        let run = |eps: f64, scope: NoiseScope| {
+            let mut infer = |obs: Vec<f32>, n: usize| -> Vec<f64> {
+                // mildly obs-dependent logits so priors are not uniform
+                (0..n)
+                    .flat_map(|i| [f64::from(obs[i * 2 + 1]), 0.5, 0.0])
+                    .collect()
+            };
+            let mut eval = Evaluator::new(&mut infer, None);
+            alphazero_many(
+                &MatrixGame,
+                &Enc,
+                &Passthrough,
+                &az_cfg(40, eps, scope),
+                vec![(St { done: false }, 0)],
+                9,
+                &mut eval,
+            )
+            .remove(0)
+        };
+        assert_eq!(
+            run(0.0, NoiseScope::Requester).visits,
+            run(0.0, NoiseScope::Both).visits,
+            "noise off: scope must be inert"
+        );
+        assert_ne!(
+            run(0.6, NoiseScope::Requester).visits,
+            run(0.6, NoiseScope::Both).visits,
+            "noise on: Both must perturb the opponent's selection stream"
+        );
+    }
+
+    #[test]
+    fn simultaneous_eval_rows_close_the_identity() {
+        let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 3];
+        let mut eval = Evaluator::new(&mut infer, None);
+        let out = alphazero_many(
+            &MatrixGame,
+            &Enc,
+            &Passthrough,
+            &az_cfg(20, 0.0, NoiseScope::Requester),
+            vec![(St { done: false }, 0)],
+            1,
+            &mut eval,
+        )
+        .remove(0);
+        let s = &out.stats;
+        assert!(
+            s.extra_eval_rows > 0,
+            "two-perspective evals must record extra rows"
+        );
+        assert_eq!(
+            20,
+            s.fresh_rows + s.hit_rows + s.shared_rows + s.terminal_sims + s.depthcap_sims
+                - s.extra_eval_rows
         );
     }
 }

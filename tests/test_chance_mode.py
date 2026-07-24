@@ -48,7 +48,7 @@ def test_chance_mode_inert_for_deterministic_games() -> None:
         assert np.array_equal(batches[0].obs, b.obs)
         assert np.array_equal(batches[0].policy_targets, b.policy_targets)
         assert np.array_equal(batches[0].value_targets, b.value_targets)
-    assert all(b.telemetry["fan_extra_rows"] == 0 for b in batches)
+    assert all(b.telemetry["extra_eval_rows"] == 0 for b in batches)
 
 
 def test_identity_includes_fan_term() -> None:
@@ -60,6 +60,6 @@ def test_identity_includes_fan_term() -> None:
         + t["shared_rows"]
         + t["terminal_sims"]
         + t["depthcap_sims"]
-        - t["fan_extra_rows"]
+        - t["extra_eval_rows"]
     )
     assert lhs == rhs

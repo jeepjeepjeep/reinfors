@@ -21,8 +21,9 @@ use pyo3::types::{PyDict, PyTuple};
 use reinfors_core::{
     ActBy, AlphaZero, AlphaZeroConfig, AlphaZeroLearner, AlphaZeroRecord, AlwaysInitialState,
     ChanceMode, Dqn, DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game, InferCache,
-    Learner, Mcts, MctsConfig, Opponent, Policy, ReachedStateBuffer, Reward, SearchConfig,
-    SelectiveExpectimax, Space, StartDistribution, StateEncoder, TreeStrap, TreeStrapRecord,
+    Learner, Mcts, MctsConfig, NoiseScope, Opponent, Policy, ReachedStateBuffer, Reward,
+    SearchConfig, SelectiveExpectimax, Space, StartDistribution, StateEncoder, TreeStrap,
+    TreeStrapRecord,
 };
 use reinfors_games::snake::{Cell, DeathCause};
 use reinfors_games::{
@@ -969,7 +970,7 @@ fn build_telemetry<'py>(
     telemetry.set_item("fresh_rows", stats.sum_fresh_rows)?;
     telemetry.set_item("hit_rows", stats.sum_hit_rows)?;
     // ExpandAll chance fans: rows beyond one per simulation (the identity subtracts this term).
-    telemetry.set_item("fan_extra_rows", stats.sum_fan_extra_rows)?;
+    telemetry.set_item("extra_eval_rows", stats.sum_extra_eval_rows)?;
     Ok(telemetry)
 }
 
@@ -1215,6 +1216,7 @@ enum PolicySpec {
         temperature: f64,
         temperature_drop: u32,
         chance: ChanceMode,
+        noise_scope: NoiseScope,
     },
 }
 
@@ -1403,6 +1405,7 @@ where
                 temperature,
                 temperature_drop,
                 chance,
+                noise_scope,
             },
             LearnerSpec::AlphaZero { gamma },
         ) => {
@@ -1439,6 +1442,7 @@ where
                 temperature,
                 temperature_drop,
                 chance,
+                noise_scope,
             });
             let learner = AlphaZeroLearner::new(gamma);
             Ok(Box::new(EngineImpl {
@@ -1510,18 +1514,6 @@ fn build_engine(
     if start_buffer.is_some() && !matches!(game, GameSpec::Snake { .. }) {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "start_buffer is only supported for the snake game",
-        ));
-    }
-    // The tree searches (MCTS, AlphaZero) assume strictly sequential / single-agent play; snake is
-    // simultaneous (with chance), so reject the pairing here rather than let it panic mid-rollout.
-    if matches!(
-        policy,
-        PolicySpec::Mcts { .. } | PolicySpec::AlphaZero { .. }
-    ) && matches!(game, GameSpec::Snake { .. })
-    {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "Mcts/AlphaZero support only sequential / single-agent games (connect4, gridworld); \
-             snake is simultaneous — use SelectiveExpectimax for snake",
         ));
     }
     match (game, reward) {
@@ -2275,8 +2267,8 @@ impl PolicyHandle {
         }
     }
 
-    /// Monte-Carlo Tree Search (UCT). Pairs with `TreeStrap`. Sequential / single-agent games only
-    /// (connect4, gridworld) — rejected for snake. `act_by` is `"value"` (argmax mean action value) or
+    /// Monte-Carlo Tree Search (UCT). Pairs with `TreeStrap`. Sequential, single-agent, and
+    /// simultaneous games (decoupled/DUCT per-agent statistics — snake included). `act_by` is `"value"` (argmax mean action value) or
     /// `"visits"` (argmax visit count). Acting defaults to deterministic (temperature 0) — ideal for
     /// evaluation and benchmarking. For training self-play diversity set `temperature > 0`
     /// (AlphaZero-style): the first `temperature_drop` plies of each episode are sampled
@@ -2324,15 +2316,15 @@ impl PolicyHandle {
         })
     }
 
-    /// AlphaZero (PUCT) planner; pairs with `rf.learners.AlphaZero`; sequential/single-agent games
-    /// only. The net callback returns a `(policy_logits (N, A), values (N,))` tuple — one forward,
+    /// AlphaZero (PUCT) planner; pairs with `rf.learners.AlphaZero`; sequential, single-agent,
+    /// and simultaneous (decoupled/DUCT) games. The net callback returns a `(policy_logits (N, A), values (N,))` tuple — one forward,
     /// both heads. Root Dirichlet noise `(1-noise_epsilon)·P + noise_epsilon·Dir(noise_alpha)`
     /// supplies search-level exploration (drawn from the seeded stream — collects stay reproducible);
     /// the acting temperature (same semantics as `Mcts`) supplies move-level diversity. Acting is by
     /// visit count (classic AlphaZero).
     /// `chance_mode` / `chance_samples`: as on `Mcts`.
     #[staticmethod]
-    #[pyo3(signature = (num_simulations=64, c_puct=1.5, max_depth=64, noise_epsilon=0.25, noise_alpha=0.3, temperature=1.0, temperature_drop=8, chance_mode="always_resample", chance_samples=4))]
+    #[pyo3(signature = (num_simulations=64, c_puct=1.5, max_depth=64, noise_epsilon=0.25, noise_alpha=0.3, temperature=1.0, temperature_drop=8, chance_mode="always_resample", chance_samples=4, noise_scope="requester"))]
     #[pyo3(name = "AlphaZero")]
     #[allow(clippy::too_many_arguments)]
     fn alphazero(
@@ -2345,7 +2337,17 @@ impl PolicyHandle {
         temperature_drop: Option<u32>,
         chance_mode: &str,
         chance_samples: usize,
+        noise_scope: &str,
     ) -> PyResult<Self> {
+        let noise_scope = match noise_scope {
+            "requester" => NoiseScope::Requester,
+            "both" => NoiseScope::Both,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown noise_scope {other:?}; expected \"requester\" or \"both\""
+                )))
+            }
+        };
         Ok(PolicyHandle {
             spec: PolicySpec::AlphaZero {
                 num_simulations,
@@ -2356,6 +2358,7 @@ impl PolicyHandle {
                 temperature,
                 temperature_drop: temperature_drop.unwrap_or(u32::MAX),
                 chance: parse_chance_mode(chance_mode, chance_samples)?,
+                noise_scope,
             },
         })
     }

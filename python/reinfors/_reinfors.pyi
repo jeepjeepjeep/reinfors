@@ -84,7 +84,8 @@ class PolicyHandle:
     ) -> PolicyHandle: ...
     @staticmethod
     def EpsilonGreedyQ(n_heads: int = ..., epsilon: float = ...) -> PolicyHandle: ...
-    # MCTS (UCT); pairs with TreeStrap; sequential/single-agent games only. act_by: "value" | "visits".
+    # MCTS (UCT); pairs with TreeStrap; sequential, single-agent, AND simultaneous (decoupled/DUCT
+    # per-agent statistics) games. act_by: "value" | "visits".
     # temperature > 0 (AlphaZero-style) samples the first temperature_drop plies of each episode
     # ∝ visits^(1/temperature) for training self-play diversity (None = whole episode); 0 = greedy.
     # chance_mode (declared-chance games): "always_resample" (fresh draw ∝ p per descent, unbiased
@@ -101,7 +102,9 @@ class PolicyHandle:
         chance_mode: str = ...,
         chance_samples: int = ...,
     ) -> PolicyHandle: ...
-    # AlphaZero (PUCT); pairs with learners.AlphaZero; sequential/single-agent games only. The infer
+    # AlphaZero (PUCT); pairs with learners.AlphaZero; sequential, single-agent, and simultaneous
+    # (DUCT) games — noise_scope: "requester" (default) | "both" picks which root priors the
+    # Dirichlet noise perturbs in a simultaneous tree. The infer
     # callback returns a (policy_logits (N, A) f64, values (N,) f64) tuple — one forward, both heads.
     # Root Dirichlet noise (noise_epsilon/noise_alpha) + acting temperature drive self-play diversity;
     # acting is by visit count. temperature_drop=None applies the temperature to whole episodes.
@@ -116,6 +119,7 @@ class PolicyHandle:
         temperature_drop: int | None = ...,
         chance_mode: str = ...,
         chance_samples: int = ...,
+        noise_scope: str = ...,
     ) -> PolicyHandle: ...
 
 class LearnerHandle:

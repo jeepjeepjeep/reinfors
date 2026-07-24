@@ -564,6 +564,41 @@ impl Snake {
         }
         food.insert((idx as i32 / g, idx as i32 % g));
     }
+
+    /// Occupied cell ids (food + both bodies) of a state, sorted + deduped — the same set
+    /// `spawn_one` skips, so free-cell indices here match its draw exactly.
+    fn occupied_cells(&self, state: &SnakeState) -> Vec<usize> {
+        let g = self.grid_size;
+        let mut occupied: Vec<usize> = state
+            .food
+            .iter()
+            .map(|&(r, c)| (r * g + c) as usize)
+            .collect();
+        for s in &state.snakes {
+            occupied.extend(s.body.iter().map(|&(r, c)| (r * g + c) as usize));
+        }
+        occupied.sort_unstable();
+        occupied.dedup();
+        occupied
+    }
+
+    fn free_cell_count(&self, state: &SnakeState) -> usize {
+        (self.grid_size * self.grid_size) as usize - self.occupied_cells(state).len()
+    }
+
+    /// The `i`-th free cell in row-major order — `spawn_one`'s indexing, declared.
+    fn nth_free_cell(&self, state: &SnakeState, i: usize) -> Cell {
+        let g = self.grid_size;
+        let mut idx = i;
+        for &o in &self.occupied_cells(state) {
+            if o <= idx {
+                idx += 1;
+            } else {
+                break;
+            }
+        }
+        (idx as i32 / g, idx as i32 % g)
+    }
 }
 
 impl Game for Snake {
@@ -636,6 +671,69 @@ impl Game for Snake {
             snakes: next.snakes.clone(),
             food,
         })
+    }
+
+    /// The declared form of the respawn chance (the tree searches' seam), exactly mirroring
+    /// `sample_chance`'s sequential `spawn_one` draws. One respawn: uniform over the free cells of
+    /// the post-step state, indexed in `spawn_one`'s row-major order. Two respawns (both agents eat
+    /// on one tick — the maximum, each head eats at most one apple): uniform over ORDERED pairs
+    /// (first placement from the n free cells, second from the remaining n−1), matching the two
+    /// sequential draws bijectively — n·(n−1) outcomes, so wide boards pay a transiently large
+    /// probs vector on the rare double-eat edges. A full board degenerates to one no-op outcome
+    /// (`spawn_one` can't place), keeping the sampler/declaration agreement exact.
+    fn chance_outcomes(
+        &self,
+        state: &SnakeState,
+        transition: &Transition<SnakeState, StepEvent>,
+    ) -> Option<Vec<f64>> {
+        let next = &transition.next_state;
+        let eaten = state.food.len().saturating_sub(next.food.len());
+        if eaten == 0 || transition.terminal {
+            return None;
+        }
+        assert!(
+            eaten <= 2,
+            "at most two apples (one per head) can be eaten per tick"
+        );
+        let n = self.free_cell_count(next);
+        let outcomes = match (eaten, n) {
+            (_, 0) | (2, 1) => 1, // no (or only one) placeable cell: the tail draws no-op
+            (1, _) => n,
+            (2, _) => n * (n - 1),
+            _ => unreachable!(),
+        };
+        Some(vec![1.0 / outcomes as f64; outcomes])
+    }
+
+    fn apply_chance(
+        &self,
+        state: &SnakeState,
+        transition: &Transition<SnakeState, StepEvent>,
+        outcome: usize,
+    ) -> SnakeState {
+        let next = &transition.next_state;
+        let eaten = state.food.len().saturating_sub(next.food.len());
+        let n = self.free_cell_count(next);
+        let mut out = SnakeState {
+            snakes: next.snakes.clone(),
+            food: next.food.clone(),
+        };
+        match (eaten, n) {
+            (_, 0) => {}
+            (1, _) | (2, 1) => {
+                let cell = self.nth_free_cell(&out, outcome % n.max(1));
+                out.food.insert(cell);
+            }
+            (2, _) => {
+                let (i, j) = (outcome / (n - 1), outcome % (n - 1));
+                let first = self.nth_free_cell(&out, i);
+                out.food.insert(first);
+                let second = self.nth_free_cell(&out, j);
+                out.food.insert(second);
+            }
+            _ => unreachable!(),
+        }
+        out
     }
 
     fn initial_state(&self, rng: &mut dyn Rng) -> SnakeState {
@@ -750,6 +848,81 @@ mod game_tests {
             1,
             "respawn restored the count"
         );
+    }
+
+    /// A scripted rng: hands out preset `below` draws in order (each must be in range).
+    struct Forced(std::vec::IntoIter<usize>);
+    impl Rng for Forced {
+        fn below(&mut self, n: usize) -> usize {
+            let v = self.0.next().expect("Forced rng exhausted");
+            assert!(v < n.max(1), "forced draw {v} out of range {n}");
+            v
+        }
+        fn unit(&mut self) -> f64 {
+            0.0
+        }
+    }
+
+    #[test]
+    fn declared_chance_agrees_with_the_sampler_single_eat() {
+        // The seam's foundational contract: `chance_outcomes`/`apply_chance` (the searches'
+        // declared form) and `sample_chance` (the env's realized draw) are THE SAME distribution.
+        // Exhaustive, not statistical: forcing the sampler's `below(n)` draw to d must equal
+        // `apply_chance(d)` for EVERY d — index-for-index — so a refactor of `spawn_one`'s
+        // indexing that misses `nth_free_cell` (or vice versa) fails loudly here instead of
+        // silently training the search on a different chance model than the game produces.
+        let g = game();
+        let st = initial_state(&[(4, 3)]); // in front of A: Forward eats
+        let t = g.step(&st, &[0, 0]);
+        let probs = g
+            .chance_outcomes(&st, &t)
+            .expect("an eaten apple declares chance");
+        let n = empty_cells(&t.next_state.snakes, &t.next_state.food, G).len();
+        assert_eq!(probs.len(), n);
+        assert!((probs.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+        assert!(probs.iter().all(|&p| (p - 1.0 / n as f64).abs() < 1e-15));
+        for d in 0..n {
+            let sampled = g
+                .sample_chance(&st, &t, &mut Forced(vec![d].into_iter()))
+                .unwrap();
+            assert_eq!(sampled, g.apply_chance(&st, &t, d), "outcome {d} diverged");
+        }
+    }
+
+    #[test]
+    fn declared_chance_agrees_with_the_sampler_double_eat() {
+        // The intricate path: both heads eat on one tick -> ordered placement pairs, second draw
+        // over the board reduced by the first. `outcome = i*(n-1) + j` must equal forcing the
+        // sampler's two sequential draws to (i, j), for EVERY pair — the full bijection.
+        let g = game();
+        let st = initial_state(&[(4, 3), (4, 5)]); // in front of A (faces Right) and B (faces Left)
+        let t = g.step(&st, &[0, 0]);
+        assert_eq!(
+            st.food.len() - t.next_state.food.len(),
+            2,
+            "both heads must eat this tick"
+        );
+        let probs = g.chance_outcomes(&st, &t).expect("eats declare chance");
+        let n = empty_cells(&t.next_state.snakes, &t.next_state.food, G).len();
+        assert_eq!(
+            probs.len(),
+            n * (n - 1),
+            "ordered pairs over the free cells"
+        );
+        assert!((probs.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+        for i in 0..n {
+            for j in 0..(n - 1) {
+                let outcome = i * (n - 1) + j;
+                let sampled = g
+                    .sample_chance(&st, &t, &mut Forced(vec![i, j].into_iter()))
+                    .unwrap();
+                assert_eq!(
+                    sampled,
+                    g.apply_chance(&st, &t, outcome),
+                    "pair ({i},{j}) diverged"
+                );
+            }
+        }
     }
 
     #[test]
