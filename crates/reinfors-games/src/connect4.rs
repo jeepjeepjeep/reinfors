@@ -275,6 +275,71 @@ mod tests {
     }
 
     #[test]
+    fn search_is_invariant_to_illegal_action_values() {
+        // The review oracle: two nets IDENTICAL on legal columns and wildly different only on the
+        // full column's phantom slot must produce identical search output — root values, interior
+        // TreeStrap targets, and their count. Guards every legality seam at once: leaf bootstraps
+        // (per-head max over the mover's legal set), the distributional opponent (softmax gathered
+        // to the legal set, weights summing to 1), and densified targets.
+        let mut cells = [0u8; 42];
+        for r in 0..ROWS {
+            at(&mut cells, r, 0, if r % 2 == 0 { 1 } else { 2 });
+        }
+        let state = Connect4State {
+            cells,
+            turn: 0,
+            done: false,
+        };
+        for opponent in [
+            Opponent::Uniform,
+            Opponent::Distributional {
+                temperature: 1.0,
+                floor: 0.05,
+            },
+        ] {
+            let cfg = SearchConfig {
+                gamma: 0.99,
+                beta: 1.0,
+                expansion_budget: 16,
+                top_k: 4,
+                max_depth: 4,
+                chance: ChanceMode::Committed { samples: 1 },
+                opponent,
+            };
+            let run = |phantom: f64| {
+                let mut infer = move |_obs: Vec<f32>, n: usize| -> Vec<f64> {
+                    let mut out = Vec::with_capacity(n * 7);
+                    for _ in 0..n {
+                        out.push(phantom); // column 0 is full (illegal) throughout this subtree
+                        for c in 1..7 {
+                            out.push(-0.5 + 0.1 * c as f64); // all-negative legal values
+                        }
+                    }
+                    out
+                };
+                search_many(
+                    &Connect4,
+                    &Connect4Planes,
+                    &Connect4Reward::default(),
+                    &cfg,
+                    vec![(state.clone(), 0)],
+                    true,
+                    3,
+                    &mut infer,
+                )
+                .remove(0)
+            };
+            let (lo_v, lo_i, _) = run(-100.0);
+            let (hi_v, hi_i, _) = run(100.0);
+            assert_eq!(lo_v, hi_v, "root values must ignore the phantom slot");
+            assert_eq!(lo_i.len(), hi_i.len(), "record counts must match");
+            assert_eq!(lo_i, hi_i, "interior targets must ignore the phantom slot");
+            // and the phantom slot itself is a densified zero, never the max of anything
+            assert_eq!(lo_v[0][0], 0.0);
+        }
+    }
+
+    #[test]
     fn drop_win_full_column_and_turn_flip() {
         let g = Connect4;
         let empty = Connect4State {
