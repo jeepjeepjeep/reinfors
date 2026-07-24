@@ -72,6 +72,22 @@ class EncoderHandle:
     @staticmethod
     def AlphaZeroChess(history_length: int = ...) -> EncoderHandle: ...
 
+class ChanceModeHandle:
+    # How a search consumes declared chance (rf.chance_modes.*; policy `chance=` kwarg). Expand-once
+    # searches (SelectiveExpectimax) reject per-traversal modes (AlwaysResample) at construction.
+    @staticmethod
+    def AlwaysResample() -> ChanceModeHandle: ...
+    @staticmethod
+    def Committed(samples: int = ...) -> ChanceModeHandle: ...
+    @staticmethod
+    def ExpandAll() -> ChanceModeHandle: ...
+
+class NoiseHandle:
+    # Root exploration noise (rf.noise.*; AlphaZero `noise=` kwarg — None disables, omitted = the
+    # self-play default Dirichlet(0.25, 0.3, "requester")). scope: "requester" | "both".
+    @staticmethod
+    def Dirichlet(epsilon: float = ..., alpha: float = ..., scope: str = ...) -> NoiseHandle: ...
+
 class PolicyHandle:
     # Best-first selective expectimax (expand-once). chance_mode: "committed" (default; the
     # historical food_samples estimator) | "expand_all" (exact fan). "always_resample" is rejected —
@@ -82,8 +98,7 @@ class PolicyHandle:
         top_k: int = ...,
         max_depth: int = ...,
         beta: float = ...,
-        chance_mode: str = ...,
-        chance_samples: int = ...,
+        chance: ChanceModeHandle | None = ...,
         n_heads: int = ...,
         epsilon: float = ...,
         opponent: str = ...,
@@ -107,8 +122,7 @@ class PolicyHandle:
         act_by: str = ...,
         temperature: float = ...,
         temperature_drop: int | None = ...,
-        chance_mode: str = ...,
-        chance_samples: int = ...,
+        chance: ChanceModeHandle | None = ...,
     ) -> PolicyHandle: ...
     # AlphaZero (PUCT); pairs with learners.AlphaZero; sequential, single-agent, and simultaneous
     # (DUCT) games — noise_scope: "requester" (default) | "both" picks which root priors the
@@ -121,13 +135,10 @@ class PolicyHandle:
         num_simulations: int = ...,
         c_puct: float = ...,
         max_depth: int = ...,
-        noise_epsilon: float = ...,
-        noise_alpha: float = ...,
         temperature: float = ...,
         temperature_drop: int | None = ...,
-        chance_mode: str = ...,
-        chance_samples: int = ...,
-        noise_scope: str = ...,
+        chance: ChanceModeHandle | None = ...,
+        noise: NoiseHandle | None = ...,
     ) -> PolicyHandle: ...
 
 class LearnerHandle:

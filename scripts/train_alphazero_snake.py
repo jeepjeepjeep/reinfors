@@ -88,8 +88,11 @@ def build_engine(args: argparse.Namespace) -> rf.Engine:
             c_puct=2.0,
             temperature=1.0,
             temperature_drop=args.temperature_drop,
-            chance_mode=args.chance_mode,
-            chance_samples=args.chance_samples,
+            # CLI strings stay ergonomic; the typed handles are the API
+            chance=rf.chance_modes.make(
+                args.chance_mode,
+                **({"samples": args.chance_samples} if args.chance_mode == "committed" else {}),
+            ),
         ),
         rf.learners.AlphaZero(gamma=args.gamma),
         n_games=args.n_games,

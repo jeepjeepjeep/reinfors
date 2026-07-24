@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import _reinfors, encoders, games, gym, learners, policies, spaces
+from . import _reinfors, chance_modes, encoders, games, gym, learners, noise, policies, spaces
 from ._reinfors import Engine, Env, Reward, core_build_profile, core_version
 
 
@@ -92,6 +92,7 @@ __all__ = [
     "Env",
     "Reward",
     "_reinfors",
+    "chance_modes",
     "core_build_profile",
     "core_version",
     "encoders",
@@ -102,6 +103,7 @@ __all__ = [
     "make_game",
     "make_learner",
     "make_policy",
+    "noise",
     "policies",
     "registered_games",
     "registered_learners",

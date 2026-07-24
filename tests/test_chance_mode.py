@@ -25,24 +25,32 @@ def _collect(policy: PolicyHandle) -> AlphaZeroBatch:
     return batch
 
 
-def test_chance_mode_kwargs_accepted() -> None:
-    for mode in ("always_resample", "committed", "expand_all"):
-        rf.policies.Mcts(chance_mode=mode)
-        rf.policies.AlphaZero(chance_mode=mode, chance_samples=2)
+def test_chance_mode_handles_accepted() -> None:
+    for mode in (
+        rf.chance_modes.AlwaysResample(),
+        rf.chance_modes.Committed(samples=2),
+        rf.chance_modes.ExpandAll(),
+    ):
+        rf.policies.Mcts(chance=mode)
+        rf.policies.AlphaZero(chance=mode)
 
 
-def test_invalid_chance_mode_rejected() -> None:
-    with pytest.raises(ValueError, match="chance_mode"):
-        rf.policies.Mcts(chance_mode="sample")
-    with pytest.raises(ValueError, match="chance_samples"):
-        rf.policies.AlphaZero(chance_mode="committed", chance_samples=0)
+def test_invalid_chance_config_rejected() -> None:
+    with pytest.raises(ValueError, match="samples"):
+        rf.chance_modes.Committed(samples=0)
+    with pytest.raises(KeyError, match="unknown chance mode"):
+        rf.chance_modes.make("bogus")
 
 
 def test_chance_mode_inert_for_deterministic_games() -> None:
     # connect4 declares no chance: every mode must produce bit-identical batches, zero fan rows.
     batches = [
-        _collect(rf.policies.AlphaZero(num_simulations=8, chance_mode=mode, chance_samples=2))
-        for mode in ("always_resample", "committed", "expand_all")
+        _collect(rf.policies.AlphaZero(num_simulations=8, chance=mode))
+        for mode in (
+            rf.chance_modes.AlwaysResample(),
+            rf.chance_modes.Committed(samples=2),
+            rf.chance_modes.ExpandAll(),
+        )
     ]
     for b in batches[1:]:
         assert np.array_equal(batches[0].obs, b.obs)

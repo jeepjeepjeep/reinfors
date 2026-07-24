@@ -32,7 +32,7 @@ def _selective() -> rf._reinfors.PolicyHandle:
         top_k=4,
         max_depth=6,
         beta=1.0,
-        chance_samples=1,
+        chance=rf.chance_modes.Committed(samples=1),
         n_heads=_K,
         epsilon=0.0,
         opponent="uniform",
@@ -284,7 +284,7 @@ def test_mcts_collects_on_simultaneous_snake() -> None:
     engine = rf.Engine(
         rf.games.Snake(grid_size=8, max_ticks=30),
         rf.Reward(food=1.0, loss=-1.0),
-        rf.policies.Mcts(num_simulations=8, chance_mode="committed", chance_samples=2),
+        rf.policies.Mcts(num_simulations=8, chance=rf.chance_modes.Committed(samples=2)),
         rf.learners.TreeStrap(),
         n_games=2,
         seed=0,
@@ -346,7 +346,6 @@ def test_mcts_rejects_unknown_act_by() -> None:
         {"expansion_budget": 0},
         {"top_k": 0},
         {"max_depth": 0},
-        {"chance_samples": 0},
         {"beta": 1.5},
     ],
 )
@@ -357,7 +356,7 @@ def test_engine_rejects_degenerate_search_params(bad: dict[str, float]) -> None:
         "top_k": 4,
         "max_depth": 6,
         "beta": 1.0,
-        "chance_samples": 1,
+        "chance": rf.chance_modes.Committed(samples=1),
         "n_heads": _K,
         **bad,
     }
@@ -431,7 +430,7 @@ def test_dqn_transitions_drive_a_td_step() -> None:
 def test_expectimax_rejects_per_traversal_chance_mode() -> None:
     # Expand-once search: no traversal event to redraw on — the paradigm property, not a mode list.
     with pytest.raises(ValueError, match="per-traversal"):
-        rf.policies.SelectiveExpectimax(chance_mode="always_resample")
+        rf.policies.SelectiveExpectimax(chance=rf.chance_modes.AlwaysResample())
 
 
 def test_expectimax_expand_all_runs_on_snake() -> None:
@@ -442,7 +441,7 @@ def test_expectimax_expand_all_runs_on_snake() -> None:
     engine = rf.Engine(
         rf.games.Snake(grid_size=6, max_ticks=30),
         rf.Reward(food=1.0, loss=-1.0),
-        rf.policies.SelectiveExpectimax(expansion_budget=12, top_k=2, chance_mode="expand_all"),
+        rf.policies.SelectiveExpectimax(expansion_budget=12, top_k=2, chance=rf.chance_modes.ExpandAll()),
         rf.learners.TreeStrap(),
         n_games=2,
         seed=0,

@@ -76,7 +76,13 @@ def build_engine(grid: int, n_heads: int, n_games: int, seed: int) -> rf.Engine:
     game = rf.games.Snake(grid_size=grid, max_ticks=200)  # truncation horizon is the game's now
     reward = rf.Reward(food=1.0, loss=-10.0, win=10.0, draw=-5.0)
     policy = rf.policies.SelectiveExpectimax(
-        expansion_budget=32, top_k=4, max_depth=6, beta=1.0, chance_samples=1, n_heads=n_heads, epsilon=0.1
+        expansion_budget=32,
+        top_k=4,
+        max_depth=6,
+        beta=1.0,
+        chance=rf.chance_modes.Committed(samples=1),
+        n_heads=n_heads,
+        epsilon=0.1,
     )
     learner = rf.learners.TreeStrap(gamma=0.99, outcome_weight=0.3, bootstrap_p=1.0, interior_targets=False)
     return rf.Engine(game, reward, policy, learner, n_games=n_games, seed=seed)
