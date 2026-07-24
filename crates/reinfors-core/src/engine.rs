@@ -411,10 +411,18 @@ where
         if !meta.is_empty() {
             let q = evaluator.forward(obs_flat, meta.len()); // one flat row per state; layout = the family's contract
             let stride = q.len() / meta.len();
-            for (i, &key) in meta.iter().enumerate() {
+            for (i, &(gi, si)) in meta.iter().enumerate() {
                 let row = &q[i * stride..(i + 1) * stride];
-                // The learner knows its family's row layout (default: [K][A] Q-rows, per-head max).
-                tails.insert(key, self.learner.tail_from_row(row, a));
+                // The learner knows its family's row layout (default: [K][A] Q-rows, per-head max
+                // over the state's LEGAL actions — the mover-convention set, so a truncation tail
+                // on a sparse-action game cannot bootstrap a phantom illegal Q).
+                let state = &self.episodes[gi].state;
+                let legal = match self.game.actor(state) {
+                    crate::game::Actor::Agent(mover) => self.game.legal_actions(state, mover),
+                    crate::game::Actor::Simultaneous => self.game.legal_actions(state, si),
+                    crate::game::Actor::Chance => unreachable!("chance actors are not searched"),
+                };
+                tails.insert((gi, si), self.learner.tail_from_row(row, a, &legal));
             }
         }
         tails

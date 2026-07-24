@@ -29,15 +29,18 @@ pub trait Learner<E> {
 
     /// Extract the z-tail values from one net-output row for the final state. The row layout is the
     /// policy family's infer contract, which the paired learner knows: the default reads `[K][A]`
-    /// Q-rows (per-head `max_a`, the value-family bootstrap); the AlphaZero learner overrides to read
-    /// the value slot of its `[A]-logits + value` row.
-    fn tail_from_row(&self, row: &[f64], action_count: usize) -> Vec<f64> {
+    /// Q-rows — per-head `max_a` over the state's LEGAL actions (`legal`, the mover-convention set
+    /// the engine supplies; a dense max would bootstrap a phantom illegal Q on sparse-action
+    /// games). The AlphaZero learner overrides to read the value slot of its `[A]-logits + value`
+    /// row, ignoring `legal`.
+    fn tail_from_row(&self, row: &[f64], action_count: usize, legal: &[usize]) -> Vec<f64> {
         let k = row.len() / action_count;
         (0..k)
             .map(|h| {
-                row[h * action_count..(h + 1) * action_count]
+                let head = &row[h * action_count..(h + 1) * action_count];
+                legal
                     .iter()
-                    .copied()
+                    .map(|&aid| head[aid])
                     .fold(f64::NEG_INFINITY, f64::max)
             })
             .collect()

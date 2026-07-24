@@ -133,6 +133,7 @@ mod tests {
             values,
             visits: Vec::new(),
             interior,
+            legal: (0..3).collect(),
             stats: SearchStats::default(),
         }
     }

@@ -43,7 +43,7 @@ impl Learner<SearchEvaluation> for AlphaZeroLearner {
     }
 
     /// The net row is `[A]` policy logits + the state value — the tail is that single value.
-    fn tail_from_row(&self, row: &[f64], action_count: usize) -> Vec<f64> {
+    fn tail_from_row(&self, row: &[f64], action_count: usize, _legal: &[usize]) -> Vec<f64> {
         vec![row[action_count]]
     }
 
@@ -85,10 +85,12 @@ mod tests {
     use crate::rng::SplitMix64;
 
     fn eval(visits: Vec<f64>) -> SearchEvaluation {
+        let n = visits.len();
         SearchEvaluation {
-            values: vec![vec![0.0; visits.len()]],
+            values: vec![vec![0.0; n]],
             visits,
             interior: Vec::new(),
+            legal: (0..n).collect(),
             stats: SearchStats::default(),
         }
     }
@@ -141,7 +143,10 @@ mod tests {
     fn tail_from_row_reads_the_value_slot() {
         let learner = AlphaZeroLearner::new(1.0);
         // row = [logit, logit, logit, value]
-        assert_eq!(learner.tail_from_row(&[9.0, 9.0, 9.0, 0.4], 3), vec![0.4]);
+        assert_eq!(
+            learner.tail_from_row(&[9.0, 9.0, 9.0, 0.4], 3, &[0, 1, 2]),
+            vec![0.4]
+        );
     }
 
     #[test]

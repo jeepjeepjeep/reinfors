@@ -10,7 +10,7 @@ use crate::encoder::StateEncoder;
 use crate::engine::CollectStats;
 use crate::evaluator::Evaluator;
 use crate::game::{Game, Rng};
-use crate::policy::{argmax, ChanceMode, Policy, SearchPolicy};
+use crate::policy::{ChanceMode, Policy, SearchPolicy};
 use crate::reward::Reward;
 use search::{search_many, InteriorTarget, SearchConfig, SearchStats};
 
@@ -27,6 +27,10 @@ pub struct SearchEvaluation {
     /// into immediate records), produced here only because the search is what generates them. Empty
     /// unless the learner asked for them via `needs_interior` (threaded into `evaluate`).
     pub interior: Vec<InteriorTarget>,
+    /// The root's legal action ids — acting masks to this set. `values`/`visits` are densified
+    /// over the FULL action space with 0 on illegal slots, and a 0 can out-argmax all-negative
+    /// legal values in a losing position, so a dense argmax is not merely wasteful but wrong.
+    pub legal: Vec<usize>,
     pub stats: SearchStats,
 }
 
@@ -83,6 +87,11 @@ impl Policy for SelectiveExpectimax {
         G::State: Send,
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
+        // Root legal sets for acting (the search densifies its values over the full space).
+        let legal: Vec<Vec<usize>> = requests
+            .iter()
+            .map(|(state, agent)| game.legal_actions(state, *agent))
+            .collect();
         // The expectimax search pools per round through its own loop; routing each pooled call
         // through the Evaluator gives it the same caching/dedup/telemetry as every other consumer.
         search_many(
@@ -96,7 +105,8 @@ impl Policy for SelectiveExpectimax {
             &mut |obs, n| eval.forward(obs, n),
         )
         .into_iter()
-        .map(|(values, interior, stats)| {
+        .zip(legal)
+        .map(|((values, interior, stats), legal)| {
             // A search whose root children are all terminal evaluates no leaves, so it cannot infer
             // the head count and returns a single (head-agnostic) row. Broadcast it to `n_heads` so
             // every emitted target is `[n_heads][A]`. Searches that evaluated leaves already return
@@ -110,17 +120,27 @@ impl Policy for SelectiveExpectimax {
                 values,
                 visits: Vec::new(), // expectimax acts by value
                 interior,
+                legal,
                 stats,
             }
         })
         .collect()
     }
 
+    /// Thompson-head argmax over the LEGAL set (epsilon explores uniformly over it) — the
+    /// densified rows carry 0 on illegal slots, which must never win the argmax.
     fn select(&self, eval: &SearchEvaluation, head: &mut usize, rng: &mut dyn Rng) -> usize {
         let k = eval.values.len();
-        let mut rel = argmax(&eval.values[(*head).min(k - 1)]);
+        let row = &eval.values[(*head).min(k - 1)];
+        debug_assert!(!eval.legal.is_empty());
+        let mut rel = eval.legal[0];
+        for &a in &eval.legal {
+            if row[a] > row[rel] {
+                rel = a;
+            }
+        }
         if self.epsilon > 0.0 && rng.unit() < self.epsilon {
-            rel = rng.below(eval.values[0].len()); // uniform over the action space
+            rel = eval.legal[rng.below(eval.legal.len())]; // uniform over the legal set
         }
         rel
     }
@@ -132,7 +152,7 @@ impl Policy for SelectiveExpectimax {
         if s.leaves > 0 {
             stats.sum_sigma += s.sigma_sum / s.leaves as f64;
         }
-        stats.sum_disagreement += root_disagreement(&eval.values);
+        stats.sum_disagreement += root_disagreement(&eval.values, &eval.legal);
     }
 }
 
@@ -144,21 +164,23 @@ impl SearchPolicy for SelectiveExpectimax {
 
 /// Root head-disagreement: the per-action population std across heads of the root values `[K][A]`,
 /// averaged over actions (`values.std(axis=0).mean()` in snake_RL). 0 with fewer than two heads.
-fn root_disagreement(values: &[Vec<f64>]) -> f64 {
+fn root_disagreement(values: &[Vec<f64>], legal: &[usize]) -> f64 {
+    // Averaged over the LEGAL actions only: the densified rows carry identical zeros on illegal
+    // slots (std 0 across heads), which would dilute the mean — on chess by ~133x (35 of 4672).
     let k = values.len();
-    if k < 2 || values[0].is_empty() {
+    if k < 2 || values[0].is_empty() || legal.is_empty() {
         return 0.0;
     }
-    let a = values[0].len();
     let inv_k = 1.0 / k as f64;
-    let total: f64 = (0..a)
-        .map(|ai| {
+    let total: f64 = legal
+        .iter()
+        .map(|&ai| {
             let mean = values.iter().map(|h| h[ai]).sum::<f64>() * inv_k;
             let var = values.iter().map(|h| (h[ai] - mean).powi(2)).sum::<f64>() * inv_k;
             var.sqrt()
         })
         .sum();
-    total / a as f64
+    total / legal.len() as f64
 }
 
 #[cfg(test)]
@@ -168,9 +190,56 @@ mod tests {
     #[test]
     fn root_disagreement_matches_population_std_definition() {
         // Single action so the per-action std is the whole metric: heads [0, 2] -> mean 1, std 1.
-        assert!((root_disagreement(&[vec![0.0], vec![2.0]]) - 1.0).abs() < 1e-12);
+        assert!((root_disagreement(&[vec![0.0], vec![2.0]], &[0]) - 1.0).abs() < 1e-12);
         // Identical heads disagree by zero; a single head has no spread.
-        assert_eq!(root_disagreement(&[vec![5.0, 5.0], vec![5.0, 5.0]]), 0.0);
-        assert_eq!(root_disagreement(&[vec![1.0, 2.0, 3.0]]), 0.0);
+        assert_eq!(
+            root_disagreement(&[vec![5.0, 5.0], vec![5.0, 5.0]], &[0, 1]),
+            0.0
+        );
+        assert_eq!(root_disagreement(&[vec![1.0, 2.0, 3.0]], &[0, 1, 2]), 0.0);
+        // Legal-only averaging: a densified illegal zero (std 0) must not dilute the mean —
+        // heads disagree by std 1 on the single legal action; the illegal slot is excluded.
+        let heads = [vec![0.0, 0.0], vec![0.0, 2.0]];
+        assert!((root_disagreement(&heads, &[1]) - 1.0).abs() < 1e-12);
+        assert!((root_disagreement(&heads, &[0, 1]) - 0.5).abs() < 1e-12); // the dilution, shown
+    }
+}
+
+#[cfg(test)]
+mod select_masking_tests {
+    use super::*;
+    use crate::rng::SplitMix64;
+    use search::SearchStats;
+
+    #[test]
+    fn select_never_picks_an_illegal_zero_in_a_losing_position() {
+        // Densified rows carry 0 on illegal slots. In a losing position every LEGAL value is
+        // negative, so a dense argmax would "prefer" the illegal 0 — the bug class this masks.
+        let policy = SelectiveExpectimax::new(
+            SearchConfig {
+                gamma: 1.0,
+                beta: 1.0,
+                expansion_budget: 4,
+                top_k: 2,
+                max_depth: 2,
+                chance: crate::policy::ChanceMode::Committed { samples: 1 },
+                opponent: search::Opponent::Uniform,
+            },
+            1,
+            0.0,
+        );
+        let eval = SearchEvaluation {
+            values: vec![vec![0.0, -0.6, -0.9]], // slot 0 illegal (densified zero)
+            visits: Vec::new(),
+            interior: Vec::new(),
+            legal: vec![1, 2],
+            stats: SearchStats::default(),
+        };
+        let mut head = 0;
+        assert_eq!(
+            policy.select(&eval, &mut head, &mut SplitMix64::new(0)),
+            1,
+            "the best LEGAL action, not the illegal densified zero"
+        );
     }
 }
