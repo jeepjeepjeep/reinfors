@@ -12,9 +12,10 @@
 //!
 //! Per-game diversity comes from each game's own per-episode policy state and
 //! its own RNG environment chance: games start from the same deterministic
-//! placement, so without this they would be identical. `step_env`/`initial_state` draw the true env
-//! chance from each game's own RNG — the same `sample_chance` the search Monte-Carlos in-tree (from its
-//! own seeded stream), so env and search share one chance model; see `search`. When a game hits its
+//! placement, so without this they would be identical. The framework realizes env chance
+//! (`game::step_env`, one draw from the game's DECLARED distribution) from each game's own RNG —
+//! the same `chance_outcomes` the searches consume from their own seeded streams, so env and
+//! search share one chance model by construction. When a game hits its
 //! `truncation_horizon`, the engine has it `mark_truncation` the tick's events (e.g. snake's survival
 //! flag) so the `Reward` scores the bonus, which the `Learner`'s z-mix carries back to earlier steps.
 
@@ -72,6 +73,7 @@ pub struct CollectStats {
     pub sum_shared_rows: usize,
     pub sum_fresh_rows: usize,
     pub sum_hit_rows: usize,
+    pub sum_extra_eval_rows: usize,
 }
 
 /// Engine-level rollout knobs. The truncation horizon is the game's (`truncation_horizon`), not an

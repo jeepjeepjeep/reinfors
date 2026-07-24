@@ -32,7 +32,7 @@ def _selective() -> rf._reinfors.PolicyHandle:
         top_k=4,
         max_depth=6,
         beta=1.0,
-        food_samples=1,
+        chance_samples=1,
         n_heads=_K,
         epsilon=0.0,
         opponent="uniform",
@@ -276,16 +276,22 @@ def test_mcts_pairs_with_treestrap_on_sequential_games(game: rf._reinfors.GameHa
     assert telemetry["decisions"] > 0
 
 
-def test_mcts_rejects_simultaneous_snake() -> None:
-    # MCTS assumes sequential/single-agent play; pairing it with snake (simultaneous) fails at build.
-    with pytest.raises(ValueError, match="sequential"):
-        rf.Engine(
-            rf.games.Snake(grid_size=8),
-            rf.Reward(food=1.0, loss=-1.0),
-            rf.policies.Mcts(num_simulations=8),
-            rf.learners.TreeStrap(),
-            n_games=2,
-        )
+def test_mcts_collects_on_simultaneous_snake() -> None:
+    # DUCT: UCT+TreeStrap now pairs with snake (simultaneous + declared chance).
+    def infer(arr: np.ndarray) -> np.ndarray:
+        return np.zeros((arr.shape[0], 1, 3))
+
+    engine = rf.Engine(
+        rf.games.Snake(grid_size=8, max_ticks=30),
+        rf.Reward(food=1.0, loss=-1.0),
+        rf.policies.Mcts(num_simulations=8, chance_mode="committed", chance_samples=2),
+        rf.learners.TreeStrap(),
+        n_games=2,
+        seed=0,
+    )
+    obs, _targets, _masks, telemetry = engine.collect(40, infer)
+    assert obs.shape[0] >= 40
+    assert telemetry["decisions"] > 0
 
 
 def _mcts_engine(temperature: float, seed: int = 0, drop: int | None = None) -> rf.Engine:
@@ -340,7 +346,7 @@ def test_mcts_rejects_unknown_act_by() -> None:
         {"expansion_budget": 0},
         {"top_k": 0},
         {"max_depth": 0},
-        {"food_samples": 0},
+        {"chance_samples": 0},
         {"beta": 1.5},
     ],
 )
@@ -351,7 +357,7 @@ def test_engine_rejects_degenerate_search_params(bad: dict[str, float]) -> None:
         "top_k": 4,
         "max_depth": 6,
         "beta": 1.0,
-        "food_samples": 1,
+        "chance_samples": 1,
         "n_heads": _K,
         **bad,
     }
@@ -420,3 +426,27 @@ def test_dqn_transitions_drive_a_td_step() -> None:
     loss.backward()
     opt.step()
     assert torch.isfinite(loss)
+
+
+def test_expectimax_rejects_per_traversal_chance_mode() -> None:
+    # Expand-once search: no traversal event to redraw on — the paradigm property, not a mode list.
+    with pytest.raises(ValueError, match="per-traversal"):
+        rf.policies.SelectiveExpectimax(chance_mode="always_resample")
+
+
+def test_expectimax_expand_all_runs_on_snake() -> None:
+    # The exact fan on a real declared distribution (snake respawn) — small grid keeps it cheap.
+    def infer(arr: np.ndarray) -> np.ndarray:
+        return np.zeros((arr.shape[0], 1, 3))
+
+    engine = rf.Engine(
+        rf.games.Snake(grid_size=6, max_ticks=30),
+        rf.Reward(food=1.0, loss=-1.0),
+        rf.policies.SelectiveExpectimax(expansion_budget=12, top_k=2, chance_mode="expand_all"),
+        rf.learners.TreeStrap(),
+        n_games=2,
+        seed=0,
+    )
+    obs, _targets, _masks, telemetry = engine.collect(40, infer)
+    assert obs.shape[0] >= 40
+    assert telemetry["decisions"] > 0

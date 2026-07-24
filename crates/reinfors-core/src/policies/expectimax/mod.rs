@@ -10,7 +10,7 @@ use crate::encoder::StateEncoder;
 use crate::engine::CollectStats;
 use crate::evaluator::Evaluator;
 use crate::game::{Game, Rng};
-use crate::policy::{argmax, Policy};
+use crate::policy::{argmax, ChanceMode, Policy, SearchPolicy};
 use crate::reward::Reward;
 use search::{search_many, InteriorTarget, SearchConfig, SearchStats};
 
@@ -41,11 +41,22 @@ pub struct SelectiveExpectimax {
 
 impl SelectiveExpectimax {
     pub fn new(cfg: SearchConfig, n_heads: usize, epsilon: f64) -> Self {
+        assert!(
+            Self::supports_chance_mode(cfg.chance),
+            "SelectiveExpectimax expands each node exactly once (best-first) and cannot express \
+             per-traversal chance modes; use Committed or ExpandAll"
+        );
         SelectiveExpectimax {
             cfg,
             n_heads: n_heads.max(1),
             epsilon,
         }
+    }
+
+    /// Paradigm capability, queryable without an instance (the binding validates handles with it):
+    /// an expand-once search cannot express modes that redraw per traversal.
+    pub fn supports_chance_mode(mode: ChanceMode) -> bool {
+        !mode.requires_repeated_traversal()
     }
 }
 
@@ -115,15 +126,19 @@ impl Policy for SelectiveExpectimax {
     }
 
     fn fold_telemetry(&self, eval: &SearchEvaluation, stats: &mut CollectStats) {
+        Self::fold_search_stats(eval, stats);
+        // The expectimax extras: leaf epistemic uncertainty and root head-disagreement.
         let s = &eval.stats;
-        stats.max_depth = stats.max_depth.max(s.max_depth);
-        stats.sum_leaves += s.leaves as f64;
-        stats.sum_rounds += s.rounds as f64;
-        stats.sum_expansions += s.expansions as f64;
         if s.leaves > 0 {
             stats.sum_sigma += s.sigma_sum / s.leaves as f64;
         }
         stats.sum_disagreement += root_disagreement(&eval.values);
+    }
+}
+
+impl SearchPolicy for SelectiveExpectimax {
+    fn supports_chance(&self, mode: ChanceMode) -> bool {
+        Self::supports_chance_mode(mode)
     }
 }
 

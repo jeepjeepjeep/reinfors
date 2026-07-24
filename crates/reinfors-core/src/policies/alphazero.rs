@@ -16,8 +16,8 @@ use crate::engine::CollectStats;
 use crate::evaluator::Evaluator;
 use crate::game::{Game, Rng};
 use crate::policies::expectimax::SearchEvaluation;
-use crate::policies::mcts::{sample_visits, search_many, Guidance};
-use crate::policy::{argmax, Policy};
+use crate::policies::mcts::{sample_visits, search_many, Guidance, NoiseScope};
+use crate::policy::{argmax, ChanceMode, Policy, SearchPolicy};
 use crate::reward::Reward;
 
 #[derive(Clone, Copy, Debug)]
@@ -35,6 +35,12 @@ pub struct AlphaZeroConfig {
     /// `∝ visits^(1/temperature)` for the first `temperature_drop` plies, 0 acts greedily.
     pub temperature: f64,
     pub temperature_drop: u32,
+    /// How the search consumes stochastic transitions' declared chance (see
+    /// [`ChanceMode`](crate::ChanceMode)). Inert for games that declare no `chance_outcomes`.
+    pub chance: crate::policy::ChanceMode,
+    /// Simultaneous games: which root prior(s) the Dirichlet noise perturbs. Irrelevant for
+    /// sequential games (one root table).
+    pub noise_scope: NoiseScope,
 }
 
 pub struct AlphaZero {
@@ -67,6 +73,7 @@ where
     let guidance = Guidance::Puct {
         c: cfg.c_puct,
         noise: Some((cfg.noise_epsilon, cfg.noise_alpha, seed)),
+        noise_both: matches!(cfg.noise_scope, NoiseScope::Both),
     };
     search_many(
         game,
@@ -76,6 +83,8 @@ where
         cfg.gamma,
         cfg.max_depth,
         &guidance,
+        cfg.chance,
+        seed,
         requests,
         eval,
     )
@@ -118,15 +127,12 @@ impl Policy for AlphaZero {
     }
 
     fn fold_telemetry(&self, eval: &SearchEvaluation, stats: &mut CollectStats) {
-        let s = &eval.stats;
-        stats.max_depth = stats.max_depth.max(s.max_depth);
-        stats.sum_leaves += s.leaves as f64;
-        stats.sum_rounds += s.rounds as f64;
-        stats.sum_expansions += s.expansions as f64;
-        stats.sum_terminal_sims += s.terminal_sims;
-        stats.sum_depthcap_sims += s.depthcap_sims;
-        stats.sum_shared_rows += s.shared_rows;
-        stats.sum_fresh_rows += s.fresh_rows;
-        stats.sum_hit_rows += s.hit_rows;
+        Self::fold_search_stats(eval, stats);
+    }
+}
+
+impl SearchPolicy for AlphaZero {
+    fn supports_chance(&self, _mode: ChanceMode) -> bool {
+        true // sampled-trajectory search: every mode is expressible
     }
 }

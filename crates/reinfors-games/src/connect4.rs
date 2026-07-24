@@ -1,7 +1,7 @@
 //! Connect-4 — a sequential 2-player zero-sum `Game`, the first adversarial non-snake game. It
 //! validates the search's sequential path: alternating `Actor::Agent(0)` / `Actor::Agent(1)` nodes
 //! (the searching agent's MAX turns vs the opponent's modeled-chance turns), driven through the same
-//! generic search + rollout engine as snake. Deterministic, so `sample_chance` is the default
+//! generic search + rollout engine as snake. Deterministic, so declared chance is the default
 //! (`None`). Action legality is fixed — all 7 columns are always selectable; a move into a full column
 //! is an immediate loss for the mover — so the framework needs no action masking here.
 
@@ -205,7 +205,7 @@ impl Game for Connect4 {
         }
     }
 
-    // Deterministic: no `sample_chance` / `step_env` override needed (the trait defaults suffice).
+    // Deterministic: no `chance_outcomes` declaration needed (the trait default suffices).
 }
 
 /// The default Connect-4 observation: two own/opponent piece planes from the mover's perspective.
@@ -242,7 +242,8 @@ impl StateEncoder for Connect4Planes {
 mod tests {
     use super::*;
     use reinfors_core::{
-        search_many, Engine, EngineParams, Opponent, SearchConfig, SelectiveExpectimax, TreeStrap,
+        search_many, ChanceMode, Engine, EngineParams, Opponent, SearchConfig, SelectiveExpectimax,
+        TreeStrap,
     };
 
     fn cfg() -> SearchConfig {
@@ -252,7 +253,7 @@ mod tests {
             expansion_budget: 48,
             top_k: 4,
             max_depth: 8,
-            food_samples: 1,
+            chance: ChanceMode::Committed { samples: 1 },
             opponent: Opponent::Uniform,
         }
     }

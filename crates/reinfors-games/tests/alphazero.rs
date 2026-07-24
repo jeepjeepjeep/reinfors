@@ -2,7 +2,9 @@
 //! search, root noise diversifies it deterministically, and simultaneous games are rejected —
 //! mirroring the UCT suite in `mcts.rs`.
 
-use reinfors_core::{alphazero_many, Actor, AlphaZeroConfig, Evaluator, Game, Rng};
+use reinfors_core::{
+    alphazero_many, Actor, AlphaZeroConfig, ChanceMode, Evaluator, Game, NoiseScope, Rng,
+};
 use reinfors_games::{Connect4, Connect4Planes, Connect4Reward, EgocentricSnake, Snake};
 
 struct NoRng;
@@ -25,6 +27,8 @@ fn cfg(num_simulations: usize, noise_epsilon: f64) -> AlphaZeroConfig {
         noise_alpha: 0.3,
         temperature: 0.0,
         temperature_drop: u32::MAX,
+        chance: ChanceMode::AlwaysResample,
+        noise_scope: NoiseScope::Requester,
     }
 }
 
@@ -165,8 +169,10 @@ fn pooled_trees_draw_independent_noise() {
 }
 
 #[test]
-#[should_panic(expected = "sequential/single-agent")]
-fn rejects_simultaneous_snake() {
+fn searches_simultaneous_stochastic_snake() {
+    // Snake composes BOTH new tree capabilities: simultaneous moves (decoupled DUCT tables) and
+    // declared respawn chance. Both seats' pooled requests must produce sane per-agent
+    // evaluations, deterministically per seed.
     let snake = Snake {
         grid_size: 8,
         initial_length: 3,
@@ -178,22 +184,50 @@ fn rejects_simultaneous_snake() {
     let state = snake.initial_state(&mut NoRng);
     let reward = reinfors_games::SnakeReward {
         step: 0.0,
-        food: 0.0,
-        loss: 0.0,
+        food: 1.0,
+        loss: -1.0,
         draw: 0.0,
         kill: 0.0,
-        win: 0.0,
+        win: 1.0,
         survival: 0.0,
     };
-    let _ = alphazero_many(
-        &snake,
-        &EgocentricSnake { grid_size: 8 },
-        &reward,
-        &cfg(4, 0.0),
-        vec![(state, 0)],
-        0,
-        &mut Evaluator::new(&mut uniform_infer, None),
-    );
+    let run = |seed: u64| {
+        let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 4]; // A=3 logits + value
+        alphazero_many(
+            &snake,
+            &EgocentricSnake { grid_size: 8 },
+            &reward,
+            &AlphaZeroConfig {
+                num_simulations: 32,
+                c_puct: 2.0,
+                gamma: 0.99,
+                max_depth: 10,
+                noise_epsilon: 0.25,
+                noise_alpha: 0.3,
+                temperature: 0.0,
+                temperature_drop: u32::MAX,
+                chance: ChanceMode::Committed { samples: 2 },
+                noise_scope: NoiseScope::Requester,
+            },
+            vec![(state.clone(), 0), (state.clone(), 1)],
+            seed,
+            &mut Evaluator::new(&mut infer, None),
+        )
+    };
+    let evals = run(7);
+    assert_eq!(evals.len(), 2);
+    for e in &evals {
+        assert_eq!(e.visits.len(), 3);
+        assert!(e.visits.iter().sum::<f64>() > 0.0);
+        assert!(e.values[0].iter().all(|v| v.is_finite()));
+    }
+    let again = run(7);
+    for (a, b) in evals.iter().zip(&again) {
+        assert_eq!(
+            a.visits, b.visits,
+            "seeded snake search must be deterministic"
+        );
+    }
 }
 
 #[test]

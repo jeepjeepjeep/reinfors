@@ -69,13 +69,17 @@ class EncoderHandle:
     def AlphaZeroChess(history_length: int = ...) -> EncoderHandle: ...
 
 class PolicyHandle:
+    # Best-first selective expectimax (expand-once). chance_mode: "committed" (default; the
+    # historical food_samples estimator) | "expand_all" (exact fan). "always_resample" is rejected —
+    # an expand-once search has no traversal event to redraw on.
     @staticmethod
     def SelectiveExpectimax(
         expansion_budget: int = ...,
         top_k: int = ...,
         max_depth: int = ...,
         beta: float = ...,
-        food_samples: int = ...,
+        chance_mode: str = ...,
+        chance_samples: int = ...,
         n_heads: int = ...,
         epsilon: float = ...,
         opponent: str = ...,
@@ -84,9 +88,13 @@ class PolicyHandle:
     ) -> PolicyHandle: ...
     @staticmethod
     def EpsilonGreedyQ(n_heads: int = ..., epsilon: float = ...) -> PolicyHandle: ...
-    # MCTS (UCT); pairs with TreeStrap; sequential/single-agent games only. act_by: "value" | "visits".
+    # MCTS (UCT); pairs with TreeStrap; sequential, single-agent, AND simultaneous (decoupled/DUCT
+    # per-agent statistics) games. act_by: "value" | "visits".
     # temperature > 0 (AlphaZero-style) samples the first temperature_drop plies of each episode
     # ∝ visits^(1/temperature) for training self-play diversity (None = whole episode); 0 = greedy.
+    # chance_mode (declared-chance games): "always_resample" (fresh draw ∝ p per descent, unbiased
+    # default) | "committed" (freeze chance_samples draws per edge — food_samples-style, for wide
+    # fans) | "expand_all" (evaluate every outcome at expansion — exact, narrow fans).
     @staticmethod
     def Mcts(
         num_simulations: int = ...,
@@ -95,8 +103,12 @@ class PolicyHandle:
         act_by: str = ...,
         temperature: float = ...,
         temperature_drop: int | None = ...,
+        chance_mode: str = ...,
+        chance_samples: int = ...,
     ) -> PolicyHandle: ...
-    # AlphaZero (PUCT); pairs with learners.AlphaZero; sequential/single-agent games only. The infer
+    # AlphaZero (PUCT); pairs with learners.AlphaZero; sequential, single-agent, and simultaneous
+    # (DUCT) games — noise_scope: "requester" (default) | "both" picks which root priors the
+    # Dirichlet noise perturbs in a simultaneous tree. The infer
     # callback returns a (policy_logits (N, A) f64, values (N,) f64) tuple — one forward, both heads.
     # Root Dirichlet noise (noise_epsilon/noise_alpha) + acting temperature drive self-play diversity;
     # acting is by visit count. temperature_drop=None applies the temperature to whole episodes.
@@ -109,6 +121,9 @@ class PolicyHandle:
         noise_alpha: float = ...,
         temperature: float = ...,
         temperature_drop: int | None = ...,
+        chance_mode: str = ...,
+        chance_samples: int = ...,
+        noise_scope: str = ...,
     ) -> PolicyHandle: ...
 
 class LearnerHandle:

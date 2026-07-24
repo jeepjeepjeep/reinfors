@@ -19,10 +19,11 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
 use reinfors_core::{
-    ActBy, AlphaZero, AlphaZeroConfig, AlphaZeroLearner, AlphaZeroRecord, AlwaysInitialState, Dqn,
-    DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game, InferCache, Learner, Mcts,
-    MctsConfig, Opponent, Policy, ReachedStateBuffer, Reward, SearchConfig, SelectiveExpectimax,
-    Space, StartDistribution, StateEncoder, TreeStrap, TreeStrapRecord,
+    ActBy, AlphaZero, AlphaZeroConfig, AlphaZeroLearner, AlphaZeroRecord, AlwaysInitialState,
+    ChanceMode, Dqn, DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game, InferCache,
+    Learner, Mcts, MctsConfig, NoiseScope, Opponent, Policy, ReachedStateBuffer, Reward,
+    SearchConfig, SelectiveExpectimax, Space, StartDistribution, StateEncoder, TreeStrap,
+    TreeStrapRecord,
 };
 use reinfors_games::snake::{Cell, DeathCause};
 use reinfors_games::{
@@ -52,7 +53,6 @@ fn validate_search_params(
     top_k: usize,
     max_depth: i32,
     beta: f64,
-    food_samples: usize,
 ) -> PyResult<()> {
     use pyo3::exceptions::PyValueError;
     if expansion_budget < 1 {
@@ -63,9 +63,6 @@ fn validate_search_params(
     }
     if max_depth < 1 {
         return Err(PyValueError::new_err("max_depth must be >= 1"));
-    }
-    if food_samples < 1 {
-        return Err(PyValueError::new_err("food_samples must be >= 1"));
     }
     if !(0.0..=1.0).contains(&beta) {
         return Err(PyValueError::new_err("beta must be in [0, 1]"));
@@ -968,6 +965,8 @@ fn build_telemetry<'py>(
     telemetry.set_item("shared_rows", stats.sum_shared_rows)?;
     telemetry.set_item("fresh_rows", stats.sum_fresh_rows)?;
     telemetry.set_item("hit_rows", stats.sum_hit_rows)?;
+    // ExpandAll chance fans: rows beyond one per simulation (the identity subtracts this term).
+    telemetry.set_item("extra_eval_rows", stats.sum_extra_eval_rows)?;
     Ok(telemetry)
 }
 
@@ -1186,7 +1185,7 @@ enum PolicySpec {
         expansion_budget: usize,
         top_k: usize,
         max_depth: i32,
-        food_samples: usize,
+        chance: ChanceMode,
         opponent: Opponent,
         n_heads: usize,
         epsilon: f64,
@@ -1202,6 +1201,7 @@ enum PolicySpec {
         act_by: ActBy,
         temperature: f64,
         temperature_drop: u32,
+        chance: ChanceMode,
     },
     AlphaZero {
         num_simulations: usize,
@@ -1211,6 +1211,8 @@ enum PolicySpec {
         noise_alpha: f64,
         temperature: f64,
         temperature_drop: u32,
+        chance: ChanceMode,
+        noise_scope: NoiseScope,
     },
 }
 
@@ -1280,7 +1282,7 @@ where
                 expansion_budget,
                 top_k,
                 max_depth,
-                food_samples,
+                chance,
                 opponent,
                 n_heads,
                 epsilon,
@@ -1292,7 +1294,7 @@ where
                 interior_targets,
             },
         ) => {
-            validate_search_params(expansion_budget, top_k, max_depth, beta, food_samples)?;
+            validate_search_params(expansion_budget, top_k, max_depth, beta)?;
             if n_heads < 1 {
                 return Err(pyo3::exceptions::PyValueError::new_err("n_heads must be >= 1"));
             }
@@ -1305,7 +1307,7 @@ where
                 expansion_budget,
                 top_k,
                 max_depth,
-                food_samples,
+                chance,
                 opponent,
             };
             let policy = SelectiveExpectimax::new(cfg, n_heads, epsilon);
@@ -1333,6 +1335,7 @@ where
                 act_by,
                 temperature,
                 temperature_drop,
+                chance,
             },
             LearnerSpec::TreeStrap {
                 gamma,
@@ -1368,6 +1371,7 @@ where
                     max_depth,
                     temperature,
                     temperature_drop,
+                    chance,
                 },
                 act_by,
             );
@@ -1396,6 +1400,8 @@ where
                 noise_alpha,
                 temperature,
                 temperature_drop,
+                chance,
+                noise_scope,
             },
             LearnerSpec::AlphaZero { gamma },
         ) => {
@@ -1431,6 +1437,8 @@ where
                 noise_alpha,
                 temperature,
                 temperature_drop,
+                chance,
+                noise_scope,
             });
             let learner = AlphaZeroLearner::new(gamma);
             Ok(Box::new(EngineImpl {
@@ -1502,18 +1510,6 @@ fn build_engine(
     if start_buffer.is_some() && !matches!(game, GameSpec::Snake { .. }) {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "start_buffer is only supported for the snake game",
-        ));
-    }
-    // The tree searches (MCTS, AlphaZero) assume strictly sequential / single-agent play; snake is
-    // simultaneous (with chance), so reject the pairing here rather than let it panic mid-rollout.
-    if matches!(
-        policy,
-        PolicySpec::Mcts { .. } | PolicySpec::AlphaZero { .. }
-    ) && matches!(game, GameSpec::Snake { .. })
-    {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "Mcts/AlphaZero support only sequential / single-agent games (connect4, gridworld); \
-             snake is simultaneous — use SelectiveExpectimax for snake",
         ));
     }
     match (game, reward) {
@@ -2229,7 +2225,7 @@ struct PolicyHandle {
 #[pymethods]
 impl PolicyHandle {
     #[staticmethod]
-    #[pyo3(signature = (expansion_budget=64, top_k=8, max_depth=12, beta=1.0, food_samples=1, n_heads=1, epsilon=0.0, opponent="uniform", opp_temperature=1.0, opp_floor=0.0))]
+    #[pyo3(signature = (expansion_budget=64, top_k=8, max_depth=12, beta=1.0, chance_mode="committed", chance_samples=1, n_heads=1, epsilon=0.0, opponent="uniform", opp_temperature=1.0, opp_floor=0.0))]
     #[pyo3(name = "SelectiveExpectimax")]
     #[allow(clippy::too_many_arguments)]
     fn selective_expectimax(
@@ -2237,20 +2233,28 @@ impl PolicyHandle {
         top_k: usize,
         max_depth: i32,
         beta: f64,
-        food_samples: usize,
+        chance_mode: &str,
+        chance_samples: usize,
         n_heads: usize,
         epsilon: f64,
         opponent: &str,
         opp_temperature: f64,
         opp_floor: f64,
     ) -> PyResult<Self> {
+        let chance = parse_chance_mode(chance_mode, chance_samples)?;
+        if !SelectiveExpectimax::supports_chance_mode(chance) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "SelectiveExpectimax expands each node exactly once (best-first) and cannot \
+                 express per-traversal chance modes; use \"committed\" or \"expand_all\"",
+            ));
+        }
         Ok(PolicyHandle {
             spec: PolicySpec::SelectiveExpectimax {
                 beta,
                 expansion_budget,
                 top_k,
                 max_depth,
-                food_samples,
+                chance,
                 opponent: parse_opponent(opponent, opp_temperature, opp_floor)?,
                 n_heads,
                 epsilon,
@@ -2267,16 +2271,23 @@ impl PolicyHandle {
         }
     }
 
-    /// Monte-Carlo Tree Search (UCT). Pairs with `TreeStrap`. Sequential / single-agent games only
-    /// (connect4, gridworld) — rejected for snake. `act_by` is `"value"` (argmax mean action value) or
+    /// Monte-Carlo Tree Search (UCT). Pairs with `TreeStrap`. Sequential, single-agent, and
+    /// simultaneous games (decoupled/DUCT per-agent statistics — snake included). `act_by` is `"value"` (argmax mean action value) or
     /// `"visits"` (argmax visit count). Acting defaults to deterministic (temperature 0) — ideal for
     /// evaluation and benchmarking. For training self-play diversity set `temperature > 0`
     /// (AlphaZero-style): the first `temperature_drop` plies of each episode are sampled
     /// `∝ visits^(1/temperature)` from the seeded acting RNG (later plies act greedily);
     /// `temperature_drop=None` applies it to the whole episode. Same seed → same games.
+    /// `chance_mode` (games with declared `chance_outcomes` only; inert otherwise) picks how the
+    /// search consumes stochastic transitions: `"always_resample"` (fresh draw ∝ probability every
+    /// descent — unbiased, the asymptotically correct default), `"committed"` (freeze
+    /// `chance_samples` draws at edge expansion and plan deeply inside them — expectimax's
+    /// `food_samples` treatment, for fans wide relative to the sim budget), or `"expand_all"`
+    /// (evaluate every outcome at expansion — exact, for narrow fans).
     #[staticmethod]
-    #[pyo3(signature = (num_simulations=64, uct_c=2.0, max_depth=64, act_by="value", temperature=0.0, temperature_drop=None))]
+    #[pyo3(signature = (num_simulations=64, uct_c=2.0, max_depth=64, act_by="value", temperature=0.0, temperature_drop=None, chance_mode="always_resample", chance_samples=4))]
     #[pyo3(name = "Mcts")]
+    #[allow(clippy::too_many_arguments)]
     fn mcts(
         num_simulations: usize,
         uct_c: f64,
@@ -2284,6 +2295,8 @@ impl PolicyHandle {
         act_by: &str,
         temperature: f64,
         temperature_drop: Option<u32>,
+        chance_mode: &str,
+        chance_samples: usize,
     ) -> PyResult<Self> {
         let act_by = match act_by {
             "value" => ActBy::Value,
@@ -2302,19 +2315,22 @@ impl PolicyHandle {
                 act_by,
                 temperature,
                 temperature_drop: temperature_drop.unwrap_or(u32::MAX),
+                chance: parse_chance_mode(chance_mode, chance_samples)?,
             },
         })
     }
 
-    /// AlphaZero (PUCT) planner; pairs with `rf.learners.AlphaZero`; sequential/single-agent games
-    /// only. The net callback returns a `(policy_logits (N, A), values (N,))` tuple — one forward,
+    /// AlphaZero (PUCT) planner; pairs with `rf.learners.AlphaZero`; sequential, single-agent,
+    /// and simultaneous (decoupled/DUCT) games. The net callback returns a `(policy_logits (N, A), values (N,))` tuple — one forward,
     /// both heads. Root Dirichlet noise `(1-noise_epsilon)·P + noise_epsilon·Dir(noise_alpha)`
     /// supplies search-level exploration (drawn from the seeded stream — collects stay reproducible);
     /// the acting temperature (same semantics as `Mcts`) supplies move-level diversity. Acting is by
     /// visit count (classic AlphaZero).
+    /// `chance_mode` / `chance_samples`: as on `Mcts`.
     #[staticmethod]
-    #[pyo3(signature = (num_simulations=64, c_puct=1.5, max_depth=64, noise_epsilon=0.25, noise_alpha=0.3, temperature=1.0, temperature_drop=8))]
+    #[pyo3(signature = (num_simulations=64, c_puct=1.5, max_depth=64, noise_epsilon=0.25, noise_alpha=0.3, temperature=1.0, temperature_drop=8, chance_mode="always_resample", chance_samples=4, noise_scope="requester"))]
     #[pyo3(name = "AlphaZero")]
+    #[allow(clippy::too_many_arguments)]
     fn alphazero(
         num_simulations: usize,
         c_puct: f64,
@@ -2323,8 +2339,20 @@ impl PolicyHandle {
         noise_alpha: f64,
         temperature: f64,
         temperature_drop: Option<u32>,
-    ) -> Self {
-        PolicyHandle {
+        chance_mode: &str,
+        chance_samples: usize,
+        noise_scope: &str,
+    ) -> PyResult<Self> {
+        let noise_scope = match noise_scope {
+            "requester" => NoiseScope::Requester,
+            "both" => NoiseScope::Both,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown noise_scope {other:?}; expected \"requester\" or \"both\""
+                )))
+            }
+        };
+        Ok(PolicyHandle {
             spec: PolicySpec::AlphaZero {
                 num_simulations,
                 c_puct,
@@ -2333,8 +2361,29 @@ impl PolicyHandle {
                 noise_alpha,
                 temperature,
                 temperature_drop: temperature_drop.unwrap_or(u32::MAX),
+                chance: parse_chance_mode(chance_mode, chance_samples)?,
+                noise_scope,
             },
+        })
+    }
+}
+
+/// Parse the Python-surface chance-mode string (see the `Mcts` handle docs for semantics).
+fn parse_chance_mode(mode: &str, samples: usize) -> PyResult<ChanceMode> {
+    match mode {
+        "always_resample" => Ok(ChanceMode::AlwaysResample),
+        "committed" => {
+            if samples < 1 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "chance_samples must be >= 1",
+                ));
+            }
+            Ok(ChanceMode::Committed { samples })
         }
+        "expand_all" => Ok(ChanceMode::ExpandAll),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown chance_mode {other:?}; expected \"always_resample\", \"committed\", or \"expand_all\""
+        ))),
     }
 }
 

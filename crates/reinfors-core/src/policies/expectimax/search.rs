@@ -11,20 +11,22 @@
 //! without fighting the borrow checker.
 //!
 //! The engine is generic over the [`Game`] trait: a `Node<S>` carries an opaque game state `S` and
-//! successors come from `Game::step` + `Game::sample_chance`. The public [`search_many`] +
+//! successors come from `Game::step` (+ the declared chance). The public [`search_many`] +
 //! [`SearchConfig`] are game-agnostic; concrete games (e.g. the snake `selective_search` wrappers in
 //! reinfors-games) build a `SearchConfig` and a `Game` and call [`search_many`].
 //!
-//! A game's `sample_chance` draws one (stochastic) successor of an eating-style transition — the same
-//! sampler the rollout env uses, so search and env never diverge. The search calls it `food_samples`
-//! times to fan the chance node into that many independent Monte-Carlo draws; a deterministic
-//! transition (`sample_chance` returns `None`) keeps a single child. Each search owns a seeded RNG, so
-//! results are reproducible from a seed.
+//! Chance comes from the game's *declared* distribution (`Game::chance_outcomes` +
+//! `apply_chance` — the game's only chance seam; the env realizes from the same declaration),
+//! fanned per the configured [`ChanceMode`]: `Committed{k}` draws k
+//! equal-weight realizations (the historical `food_samples` estimator), `ExpandAll` fans every
+//! outcome at its true probability (exact). A deterministic transition keeps a single child. Each
+//! search owns a seeded RNG, so results are reproducible from a seed.
 
 use rayon::prelude::*;
 
 use crate::encoder::StateEncoder;
 use crate::game::{Actor, Game, Rng};
+use crate::policy::ChanceMode;
 use crate::reward::Reward;
 use crate::rng::SplitMix64;
 
@@ -47,10 +49,13 @@ pub struct SearchConfig {
     pub expansion_budget: usize,
     pub top_k: usize,
     pub max_depth: i32,
-    /// Monte-Carlo chance samples per stochastic transition (>= 1): each is an independent
-    /// `sample_chance` draw, so the chance node is averaged over that many realizations; 1 keeps a
-    /// single sampled child. Inert for deterministic transitions (no chance node).
-    pub food_samples: usize,
+    /// How stochastic transitions' declared chance (`Game::chance_outcomes`) fans into branches
+    /// (see [`ChanceMode`](crate::ChanceMode)): `Committed{k}` draws k realizations at equal weight
+    /// (the historical `food_samples` estimator), `ExpandAll` fans every outcome at its true
+    /// probability — the exact exhaustive-expectimax treatment. `AlwaysResample` is rejected at
+    /// construction: an expand-once search has no traversal event to redraw on. Inert for
+    /// deterministic transitions.
+    pub chance: ChanceMode,
     pub opponent: Opponent,
 }
 
@@ -75,6 +80,10 @@ pub struct SearchStats {
     pub shared_rows: usize,
     pub fresh_rows: usize,
     pub hit_rows: usize,
+    /// Rows an `ExpandAll` chance fan consumed *beyond* the one its simulation already accounts
+    /// for (fan width − 1 per expanded chance edge; 0 in the other chance modes), so the identity
+    /// above generalizes by subtracting this term from the row-bucket side.
+    pub extra_eval_rows: usize,
 }
 
 /// An interior MAX node's TreeStrap target: its observation and per-head backed-up action values
@@ -87,8 +96,9 @@ pub type SearchResult = (Vec<Vec<f64>>, Vec<InteriorTarget>, SearchStats);
 
 /// A committed agent action's chance branch. `weight` is the resolved chance probability; for a
 /// deferred (distributional) opponent it is filled in during evaluation from `deferred = (opp obs
-/// index this round, opponent action index)`. `scale` (1/food_samples on a fanned-out branch, else 1)
-/// multiplies the deferred weight at resolution; fixed weights are pre-scaled at construction.
+/// index this round, opponent action index)`. `scale` (the branch's chance probability on a
+/// fanned-out edge, else 1) multiplies the deferred weight at resolution; fixed weights are
+/// pre-scaled at construction.
 struct Branch {
     weight: f64,
     deferred: Option<(usize, usize)>,
@@ -494,8 +504,8 @@ fn agent_branching<G: Game>(
 /// `bw` is the move's chance weight. `agent_out_terminal` decides whether "the searching agent has no
 /// legal actions in the child" counts as terminal: true for simultaneous play (it means the agent
 /// died), false for a sequential turn (it just means it is not the agent's move next). A stochastic
-/// transition fans into `food_samples` equally-weighted Monte-Carlo draws from `sample_chance` — the
-/// same chance model the env rollout uses, so search and env can never diverge.
+/// transition fans per the configured `ChanceMode` over the game's declared distribution — the
+/// same declaration the env realizes from, so search and env cannot diverge.
 #[allow(clippy::too_many_arguments)]
 fn push_branches<G: Game>(
     arena: &mut Vec<Node<G::State>>,
@@ -515,24 +525,47 @@ fn push_branches<G: Game>(
 ) {
     let t = game.step(state, joint);
     let step_reward = reward.step_reward(&t.events[agent], agent);
-    // Draw the chance children: the search owns the `food_samples` fan-out, calling `sample_chance`
-    // once per Monte-Carlo draw. `None` means the transition is deterministic — and since determinism
-    // is invariant across draws, the first `None` ends the fan-out, leaving a single `t.next_state`
-    // child. A stochastic transition yields `food_samples` distinct sampled states.
-    let mut children: Vec<G::State> = (0..cfg.food_samples.max(1))
-        .map_while(|_| game.sample_chance(state, &t, rng))
-        .collect();
-    if children.is_empty() {
-        children.push(t.next_state);
-    }
-    let n = children.len();
-    let (weight, deferred, scale) = match bw {
-        BranchWeight::Fixed(f) => (f / n as f64, None, 1.0),
-        BranchWeight::Deferred(oi, si) => (0.0, Some((oi, si)), 1.0 / n as f64),
+    // Fan the chance children from the game's DECLARED distribution (`chance_outcomes` +
+    // `apply_chance` — the same seam the tree searches consume), per the configured mode:
+    // `Committed{k}` draws k outcome indices proportionally to the declared probabilities (equal
+    // 1/k branch weights — the historical `food_samples` Monte-Carlo estimator); `ExpandAll` fans
+    // every outcome at its true probability (exact). `None` = deterministic: one child.
+    let children: Vec<(G::State, f64)> = match game.chance_outcomes(state, &t) {
+        None => vec![(t.next_state, 1.0)],
+        Some(probs) => match cfg.chance {
+            ChanceMode::Committed { samples } => {
+                let k = samples.max(1);
+                (0..k)
+                    .map(|_| {
+                        let idx = crate::rng::weighted_index(rng, &probs);
+                        (game.apply_chance(state, &t, idx), 1.0 / k as f64)
+                    })
+                    .collect()
+            }
+            ChanceMode::ExpandAll => {
+                let total: f64 = probs.iter().sum();
+                probs
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, &pr)| (game.apply_chance(state, &t, idx), pr / total))
+                    .collect()
+            }
+            ChanceMode::AlwaysResample => unreachable!(
+                "rejected at SelectiveExpectimax construction (no traversal event to redraw on)"
+            ),
+        },
     };
-    // Each sampled child is a distinct state, so its terminality and observation are computed per child
-    // (the food position differs across draws).
-    for child_state in children {
+    let (fixed, deferred) = match bw {
+        BranchWeight::Fixed(f) => (Some(f), None),
+        BranchWeight::Deferred(oi, si) => (None, Some((oi, si))),
+    };
+    // Each chance child is a distinct state, so its terminality and observation are computed per
+    // child (the food position differs across outcomes).
+    for (child_state, p) in children {
+        let (weight, scale) = match fixed {
+            Some(f) => (f * p, 1.0),
+            None => (0.0, p),
+        };
         let terminal = t.terminal
             || (agent_out_terminal && game.legal_actions(&child_state, agent).is_empty());
         let child = if terminal {
@@ -911,7 +944,7 @@ mod tests {
             expansion_budget,
             top_k: 2,
             max_depth: 4,
-            food_samples: 1,
+            chance: ChanceMode::Committed { samples: 1 },
             opponent: Opponent::Uniform,
         }
     }
@@ -1015,5 +1048,160 @@ mod tests {
         assert_eq!(values.len(), 1);
         assert!((values[0][0] - 0.9).abs() < 1e-9, "{values:?}");
         assert!((values[0][1] - 10.9).abs() < 1e-9, "{values:?}");
+    }
+}
+
+#[cfg(test)]
+mod chance_mode_tests {
+    //! The declared-chance modes in the expectimax fan: `ExpandAll` = exact probability-weighted
+    //! branches (the exhaustive treatment this search previously could not express), `Committed{k}`
+    //! = the historical `food_samples` estimator over the same declared distribution. Game: one
+    //! risky action whose value is pure expectation (outcomes +0/+3 at p=[.5,.5], E=1.5) vs a
+    //! certain +1, rewards landing on the NEXT ply so everything flows through chance branches.
+    use super::*;
+    use crate::encoder::StateEncoder;
+    use crate::game::{Actor, Game, Rng, Transition};
+    use crate::reward::Reward as RewardTrait;
+
+    #[derive(Clone)]
+    struct St {
+        total: i32,
+        ply: u8,
+    }
+    struct Risky;
+    impl Game for Risky {
+        type State = St;
+        type Event = f64;
+        fn num_agents(&self) -> usize {
+            1
+        }
+        fn action_count(&self) -> usize {
+            2
+        }
+        fn actor(&self, _: &St) -> Actor {
+            Actor::Agent(0)
+        }
+        fn legal_actions(&self, _: &St, agent: usize) -> Vec<usize> {
+            if agent == 0 {
+                vec![0, 1]
+            } else {
+                Vec::new()
+            }
+        }
+        fn step(&self, s: &St, actions: &[usize]) -> Transition<St, f64> {
+            if s.ply == 0 {
+                let total = if actions[0] == 0 {
+                    s.total + 1
+                } else {
+                    s.total
+                };
+                Transition {
+                    next_state: St { total, ply: 1 },
+                    events: vec![0.0],
+                    terminal: false,
+                }
+            } else {
+                Transition {
+                    next_state: St { ..*s },
+                    events: vec![f64::from(s.total)],
+                    terminal: true,
+                }
+            }
+        }
+        fn chance_outcomes(&self, s: &St, t: &Transition<St, f64>) -> Option<Vec<f64>> {
+            (s.ply == 0 && t.next_state.total == s.total).then(|| vec![0.5, 0.5])
+        }
+        fn apply_chance(&self, _s: &St, t: &Transition<St, f64>, outcome: usize) -> St {
+            St {
+                total: t.next_state.total + if outcome == 0 { 0 } else { 3 },
+                ply: t.next_state.ply,
+            }
+        }
+        fn initial_state(&self, _: &mut dyn Rng) -> St {
+            St { total: 0, ply: 0 }
+        }
+    }
+
+    struct Enc;
+    impl StateEncoder for Enc {
+        type State = St;
+        fn encode(&self, s: &St, _: usize) -> Vec<f32> {
+            vec![s.total as f32, f32::from(s.ply)]
+        }
+        fn obs_shape(&self) -> (usize, usize, usize) {
+            (1, 1, 2)
+        }
+    }
+    struct Passthrough;
+    impl RewardTrait for Passthrough {
+        type Event = f64;
+        fn step_reward(&self, e: &f64, _: usize) -> f64 {
+            *e
+        }
+    }
+
+    fn run(chance: ChanceMode, seed: u64) -> Vec<Vec<f64>> {
+        let cfg = SearchConfig {
+            gamma: 1.0,
+            beta: 1.0,
+            expansion_budget: 16,
+            top_k: 4,
+            max_depth: 4,
+            chance,
+            opponent: Opponent::Uniform,
+        };
+        let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2]; // K=1 zeros
+        search_many(
+            &Risky,
+            &Enc,
+            &Passthrough,
+            &cfg,
+            vec![(St { total: 0, ply: 0 }, 0)],
+            false,
+            seed,
+            &mut infer,
+        )
+        .remove(0)
+        .0
+    }
+
+    #[test]
+    fn expand_all_is_the_exact_expectation() {
+        let values = run(ChanceMode::ExpandAll, 7);
+        assert_eq!(
+            values[0][1], 1.5,
+            "risky = 0.5*0 + 0.5*3 exactly, no sampling"
+        );
+        assert_eq!(values[0][0], 1.0);
+    }
+
+    #[test]
+    fn committed_one_freezes_one_world() {
+        let (mut lo, mut hi) = (false, false);
+        for seed in 0..12 {
+            let q = run(ChanceMode::Committed { samples: 1 }, seed)[0][1];
+            assert!(
+                q == 0.0 || q == 3.0,
+                "one frozen world: q in {{0, 3}}, got {q}"
+            );
+            lo |= q == 0.0;
+            hi |= q == 3.0;
+        }
+        assert!(lo && hi, "both worlds should occur across seeds");
+    }
+
+    #[test]
+    #[should_panic(expected = "per-traversal chance modes")]
+    fn selective_expectimax_rejects_always_resample() {
+        let cfg = SearchConfig {
+            gamma: 1.0,
+            beta: 1.0,
+            expansion_budget: 8,
+            top_k: 2,
+            max_depth: 4,
+            chance: ChanceMode::AlwaysResample,
+            opponent: Opponent::Uniform,
+        };
+        let _ = crate::policies::expectimax::SelectiveExpectimax::new(cfg, 1, 0.0);
     }
 }
