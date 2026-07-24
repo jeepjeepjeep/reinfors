@@ -39,7 +39,7 @@ def test_invalid_chance_config_rejected() -> None:
     with pytest.raises(ValueError, match="samples"):
         rf.chance_modes.Committed(samples=0)
     with pytest.raises(KeyError, match="unknown chance mode"):
-        rf.chance_modes.make("sample")
+        rf.chance_modes.make("bogus")
 
 
 def test_chance_mode_inert_for_deterministic_games() -> None:
