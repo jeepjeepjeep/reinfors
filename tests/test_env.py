@@ -82,3 +82,30 @@ def test_reset_restarts_the_episode() -> None:
     env.step({1: 0})
     env.reset()
     assert not env.done() and env.active_agents() == [0]
+
+
+def test_agent_index_out_of_range_is_a_value_error() -> None:
+    # Pre-fix, snake panicked (indexes snakes[agent]) and connect4 silently encoded the position
+    # from player 0's perspective — a wrong answer is worse than a crash.
+    for game in [rf.games.Connect4(), rf.games.Snake(grid_size=8)]:
+        env = rf.Env(game, seed=0)
+        env.reset()
+        for agent in [env.num_agents(), 7]:
+            with pytest.raises(ValueError, match="out of range"):
+                env.observe(agent)
+            with pytest.raises(ValueError, match="out of range"):
+                env.legal_actions(agent)
+        env.observe(env.num_agents() - 1)  # in-range untouched
+
+
+def test_collect_zero_floor_returns_cleanly() -> None:
+    engine = rf.Engine(
+        rf.games.Connect4(),
+        rf.Reward(),
+        rf.policies.EpsilonGreedyQ(n_heads=2),
+        rf.learners.Dqn(),
+        n_games=2,
+        seed=0,
+    )
+    batch = engine.collect(0, lambda obs: np.zeros((obs.shape[0], 2, 7)))
+    assert batch.obs.shape[0] == 0  # empty batch, no hang, no panic
