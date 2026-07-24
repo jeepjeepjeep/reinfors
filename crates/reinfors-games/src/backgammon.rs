@@ -214,10 +214,22 @@ impl BackgammonState {
         if m.pos == PASS {
             return;
         }
+        // Loud guards, not u8 wraparound: an illegal half-move (no checker at the source) must
+        // panic with a message, never silently corrupt the board — the searches only produce
+        // legal ids and the Env boundary validates, so these are unreachable backstops.
         let next = if m.pos == BAR {
+            assert!(
+                self.bar[player] > 0,
+                "illegal half-move: no checker on the bar"
+            );
             self.bar[player] -= 1;
             Self::position_from(player, BAR, m.num)
         } else {
+            assert!(
+                self.board[player][m.pos as usize] > 0,
+                "illegal half-move: no checker at point {}",
+                m.pos
+            );
             self.board[player][m.pos as usize] -= 1;
             Self::position_from(player, m.pos, m.num)
         };
