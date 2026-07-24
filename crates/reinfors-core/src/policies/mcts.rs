@@ -35,7 +35,7 @@ use crate::evaluator::{Evaluator, Resolve};
 use crate::game::{Actor, Game, Rng};
 use crate::policies::expectimax::search::SearchStats;
 use crate::policies::expectimax::SearchEvaluation;
-use crate::policy::{argmax, Policy};
+use crate::policy::{argmax, Policy, SearchPolicy};
 use crate::reward::Reward;
 use crate::rng::{dirichlet, SplitMix64};
 
@@ -70,56 +70,7 @@ pub enum NoiseScope {
     Both,
 }
 
-/// How the tree search consumes a stochastic transition's declared distribution
-/// ([`Game::chance_outcomes`] + [`Game::apply_chance`]). The *game seam* is one thing — the
-/// distribution, declared; this enum is the *search policy* over it, and the right mode is decided
-/// by one ratio: **simulations-per-chance-edge vs. fan width** (the number of outcomes).
-///
-/// Worked contrast (snake, 3 free cells A/B/C for the respawn, V ≈ +0.9 / +0.3 / −0.3, 30 sims
-/// through the "eat" edge):
-/// - `AlwaysResample`: ~10 sims land in each world; Q(eat) → +0.3, the true expectation — but no
-///   single world gets enough visits to plan a deep route.
-/// - `Committed{1}`: one draw (say C) at expansion; all 30 sims plan deeply inside the C-world and
-///   conclude Q(eat) = −0.3. The other worlds *never exist* for this search. Deep but biased, and
-///   which bias is a coin flip.
-/// - `Committed{2}`: two of three worlds get 15 sims each; the missing world's value is simply
-///   absent from Q. k controls how tight that lottery is.
-/// - `ExpandAll`: all three outcome states are built and net-evaluated at expansion; the edge is
-///   seeded with the exact weighted expectation immediately. Three rows here — three *hundred* on
-///   a real snake board.
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
-pub enum ChanceMode {
-    /// Draw a **fresh** outcome ∝ probability on *every* descent through the edge (children keyed
-    /// by outcome index, so repeat draws accumulate). Visits per outcome ≈ `p·edge_visits`: with a
-    /// narrow or concentrated fan (backgammon's 21 rolls at 1000+ sims, 2048's spawn mass on 2s)
-    /// every relevant outcome grows a genuinely searched subtree. Two properties make it the
-    /// default: it is the only **asymptotically correct** mode (Q converges to the true expectation
-    /// as sims grow; `Committed` converges to the expectation over its frozen draws — wrong forever,
-    /// at any budget), and its training-target bias shrinks with budget instead of freezing in.
-    /// Its weakness is the wide-fan/small-budget regime, where visits scatter so thin that no
-    /// outcome's subtree deepens (snake: ~300 respawn cells at 64 sims ⇒ ~1 visit per world below
-    /// the eat edge — value right in expectation, plan nonexistent).
-    ///
-    /// NOT equivalent to `Committed{samples: 1}` — that mode freezes its single draw for the whole
-    /// search (a one-determinization search of a different, deterministic game); this mode
-    /// re-consults the true distribution every descent. `Committed{k}` only approaches this mode
-    /// as k → ∞.
-    #[default]
-    AlwaysResample,
-    /// Draw `samples` outcomes ∝ probability **once at edge expansion** (independent draws, WITH
-    /// replacement — the same estimator as expectimax's `food_samples`, snake's validated
-    /// treatment) and thereafter pick uniformly among those frozen realizations. Trades bias for
-    /// depth: the search conditions on k concrete futures and plans real routes inside them —
-    /// the right trade when the fan is wide relative to the budget. Duplicated draws keep separate
-    /// (equal-weight) branches, exactly like `food_samples`.
-    Committed { samples: usize },
-    /// Materialize and net-evaluate **every** outcome when the edge expands (one pooled batch —
-    /// the expectimax exhaustive treatment): the edge's first backup is the exact
-    /// probability-weighted expectation of the outcome values, and later descents pick ∝
-    /// probability to deepen. Exact and immediate for narrow fans (dice); the per-expansion cost
-    /// is one net row per outcome, which is ruinous on wide fans.
-    ExpandAll,
-}
+use crate::policy::ChanceMode;
 
 /// Numerically stable softmax — the PUCT prior over the full action space (every action is legal by
 /// framework contract; a bad-but-legal action's prior just learns toward zero).
@@ -430,19 +381,7 @@ impl<S: Clone> Tree<S> {
 
     /// Draw an index ∝ `probs` from this tree's chance stream.
     fn draw_outcome(&mut self, probs: &[f64]) -> usize {
-        let total: f64 = probs.iter().sum();
-        let mut r = self.rng.unit() * total;
-        let mut last = 0;
-        for (i, &p) in probs.iter().enumerate() {
-            if p > 0.0 {
-                last = i;
-                r -= p;
-                if r <= 0.0 {
-                    return i;
-                }
-            }
-        }
-        last // numeric fallback (r exhausted by rounding): the last positive-mass outcome
+        crate::rng::weighted_index(&mut self.rng, probs)
     }
 
     /// Select from the root down to an expandable edge (scored by `guidance`; chance nodes are
@@ -1403,17 +1342,13 @@ impl Policy for Mcts {
     }
 
     fn fold_telemetry(&self, eval: &SearchEvaluation, stats: &mut CollectStats) {
-        let s = &eval.stats;
-        stats.max_depth = stats.max_depth.max(s.max_depth);
-        stats.sum_leaves += s.leaves as f64;
-        stats.sum_rounds += s.rounds as f64;
-        stats.sum_expansions += s.expansions as f64;
-        stats.sum_terminal_sims += s.terminal_sims;
-        stats.sum_depthcap_sims += s.depthcap_sims;
-        stats.sum_shared_rows += s.shared_rows;
-        stats.sum_fresh_rows += s.fresh_rows;
-        stats.sum_hit_rows += s.hit_rows;
-        stats.sum_extra_eval_rows += s.extra_eval_rows;
+        Self::fold_search_stats(eval, stats);
+    }
+}
+
+impl SearchPolicy for Mcts {
+    fn supports_chance(&self, _mode: ChanceMode) -> bool {
+        true // sampled-trajectory search: every mode is expressible
     }
 }
 

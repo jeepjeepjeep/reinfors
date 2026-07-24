@@ -35,8 +35,8 @@ pub use policies::expectimax::search::{
     search_many, InteriorTarget, Opponent, SearchConfig, SearchResult, SearchStats,
 };
 pub use policies::expectimax::{SearchEvaluation, SelectiveExpectimax};
-pub use policies::mcts::{mcts_many, ActBy, ChanceMode, Mcts, MctsConfig, NoiseScope};
-pub use policy::Policy;
+pub use policies::mcts::{mcts_many, ActBy, Mcts, MctsConfig, NoiseScope};
+pub use policy::{ChanceMode, Policy, SearchPolicy};
 pub use reward::Reward;
 pub use space::Space;
 pub use start::{AlwaysInitialState, ReachedStateBuffer, Start, StartDistribution};

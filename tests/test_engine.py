@@ -67,7 +67,7 @@ def _engine(
             top_k=top_k,
             max_depth=max_depth,
             beta=beta,
-            food_samples=1,
+            chance_samples=1,
             n_heads=n_heads,
             epsilon=epsilon,
             opponent="uniform",

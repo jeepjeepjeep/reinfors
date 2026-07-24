@@ -3,8 +3,8 @@
 //! they build the engine via the public core API (`Engine`, `EngineParams`, `SelectiveExpectimax`,
 //! `TreeStrap`, `SearchConfig`) and a `Snake`.
 
+use reinfors_core::{ChanceMode, Opponent, SearchConfig};
 use reinfors_core::{Engine, EngineParams, ReachedStateBuffer, SelectiveExpectimax, TreeStrap};
-use reinfors_core::{Opponent, SearchConfig};
 use reinfors_games::{snake_length_cell, EgocentricSnake, Snake, SnakeReward};
 
 /// Test config bundle: the snake + search knobs the helpers below read (was `reinfors_games::
@@ -19,7 +19,7 @@ struct SearchParams {
     expansion_budget: usize,
     top_k: usize,
     max_depth: i32,
-    food_samples: usize,
+    chance: ChanceMode,
     max_ticks: Option<usize>,
     reward: SnakeReward,
     opponent: Opponent,
@@ -49,7 +49,7 @@ fn config(s: &SearchParams) -> SearchConfig {
         expansion_budget: s.expansion_budget,
         top_k: s.top_k,
         max_depth: s.max_depth,
-        food_samples: s.food_samples,
+        chance: s.chance,
         opponent: s.opponent,
     }
 }
@@ -70,7 +70,7 @@ fn search() -> SearchParams {
         expansion_budget: 24,
         top_k: 4,
         max_depth: 6,
-        food_samples: 1,
+        chance: ChanceMode::Committed { samples: 1 },
         max_ticks: Some(50),
         reward: SnakeReward {
             step: 0.0,
