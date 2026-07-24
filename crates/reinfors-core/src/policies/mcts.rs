@@ -429,9 +429,12 @@ impl<S: Clone> Tree<S> {
     }
 
     /// Draw an index ∝ `probs` from this tree's chance stream.
-    fn draw_outcome(&mut self, probs: &[f64]) -> usize {
+    /// Draw an index ∝ `probs`. An associated fn over the rng (not `&mut self`) so callers can
+    /// split-borrow: `probs` usually borrows the arena, and cloning ~fan-width floats per descent
+    /// just to appease the borrow checker would be a real cost on wide fans.
+    fn draw_outcome(rng: &mut SplitMix64, probs: &[f64]) -> usize {
         let total: f64 = probs.iter().sum();
-        let mut r = self.rng.unit() * total;
+        let mut r = rng.unit() * total;
         let mut last = 0;
         for (i, &p) in probs.iter().enumerate() {
             if p > 0.0 {
@@ -567,15 +570,15 @@ impl<S: Clone> Tree<S> {
     /// The outcome slot a descent takes through the chance node `ni`, per mode: `Committed` picks
     /// uniformly among its frozen draws; the resampling modes draw fresh ∝ probability.
     fn pick_chance_slot(&mut self, ni: usize, chance: ChanceMode) -> usize {
-        let NodeKind::Chance { probs, committed } = &self.arena[ni].kind else {
+        // Destructure for disjoint borrows: `probs`/`committed` borrow the arena while the draw
+        // needs the rng — no per-descent clone of a fan-width probs vector.
+        let Tree { arena, rng, .. } = self;
+        let NodeKind::Chance { probs, committed } = &arena[ni].kind else {
             unreachable!("pick_chance_slot on a decision node");
         };
         match chance {
-            ChanceMode::Committed { .. } => self.rng.below(committed.len()),
-            ChanceMode::AlwaysResample | ChanceMode::ExpandAll => {
-                let probs = probs.clone();
-                self.draw_outcome(&probs)
-            }
+            ChanceMode::Committed { .. } => rng.below(committed.len()),
+            ChanceMode::AlwaysResample | ChanceMode::ExpandAll => Self::draw_outcome(rng, probs),
         }
     }
 
@@ -748,7 +751,9 @@ impl<S: Clone> Tree<S> {
     /// Append the chance node for a declared-chance edge, shaped per mode: `Committed` freezes its
     /// draws now (children parallel to them, materialized lazily); the resampling modes key children
     /// by outcome index; `ExpandAll` additionally materializes every outcome child immediately so the
-    /// caller can stage them all for one pooled evaluation.
+    /// caller can stage them all for one pooled evaluation. The decision edge's reward was already
+    /// recorded from the pre-chance transition — outcome-invariant by the `chance_outcomes`
+    /// contract (chance that changed the reward would not fit this seam).
     #[allow(clippy::too_many_arguments)]
     fn expand_chance<G>(
         &mut self,
@@ -772,7 +777,7 @@ impl<S: Clone> Tree<S> {
             ChanceMode::Committed { samples } => {
                 debug_assert!(samples >= 1, "ChanceMode::Committed requires samples >= 1");
                 (0..samples.max(1))
-                    .map(|_| self.draw_outcome(&probs))
+                    .map(|_| Self::draw_outcome(&mut self.rng, &probs))
                     .collect()
             }
             _ => Vec::new(),

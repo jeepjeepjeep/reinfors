@@ -74,9 +74,13 @@ pub trait Game {
     /// must agree (a correct sampler is constructive proof the game knows this distribution; this
     /// is its declarative form, and tree searches consume it per their configured
     /// [`ChanceMode`](crate::ChanceMode)). Contract: probabilities are positive and sum to 1;
-    /// terminal transitions return `None`; outcomes only vary the chance element — they share the
-    /// transition's `terminal` flag and next actor. The default declares every transition
-    /// deterministic.
+    /// terminal transitions return `None`; and outcomes only vary the chance element — they share
+    /// the transition's `terminal` flag, next actor, **and events: rewards are edge-level and
+    /// outcome-invariant**. Searches score the action edge once from the pre-chance transition and
+    /// share that reward across every outcome (snake: the eat reward is the same wherever the food
+    /// respawns). A game whose chance element changes the reward — a stochastic payout — does not
+    /// fit this seam; that is chance-as-a-player (`Actor::Chance`) territory, currently out of
+    /// scope. The default declares every transition deterministic.
     fn chance_outcomes(
         &self,
         state: &Self::State,
