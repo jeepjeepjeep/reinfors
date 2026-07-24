@@ -850,6 +850,81 @@ mod game_tests {
         );
     }
 
+    /// A scripted rng: hands out preset `below` draws in order (each must be in range).
+    struct Forced(std::vec::IntoIter<usize>);
+    impl Rng for Forced {
+        fn below(&mut self, n: usize) -> usize {
+            let v = self.0.next().expect("Forced rng exhausted");
+            assert!(v < n.max(1), "forced draw {v} out of range {n}");
+            v
+        }
+        fn unit(&mut self) -> f64 {
+            0.0
+        }
+    }
+
+    #[test]
+    fn declared_chance_agrees_with_the_sampler_single_eat() {
+        // The seam's foundational contract: `chance_outcomes`/`apply_chance` (the searches'
+        // declared form) and `sample_chance` (the env's realized draw) are THE SAME distribution.
+        // Exhaustive, not statistical: forcing the sampler's `below(n)` draw to d must equal
+        // `apply_chance(d)` for EVERY d — index-for-index — so a refactor of `spawn_one`'s
+        // indexing that misses `nth_free_cell` (or vice versa) fails loudly here instead of
+        // silently training the search on a different chance model than the game produces.
+        let g = game();
+        let st = initial_state(&[(4, 3)]); // in front of A: Forward eats
+        let t = g.step(&st, &[0, 0]);
+        let probs = g
+            .chance_outcomes(&st, &t)
+            .expect("an eaten apple declares chance");
+        let n = empty_cells(&t.next_state.snakes, &t.next_state.food, G).len();
+        assert_eq!(probs.len(), n);
+        assert!((probs.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+        assert!(probs.iter().all(|&p| (p - 1.0 / n as f64).abs() < 1e-15));
+        for d in 0..n {
+            let sampled = g
+                .sample_chance(&st, &t, &mut Forced(vec![d].into_iter()))
+                .unwrap();
+            assert_eq!(sampled, g.apply_chance(&st, &t, d), "outcome {d} diverged");
+        }
+    }
+
+    #[test]
+    fn declared_chance_agrees_with_the_sampler_double_eat() {
+        // The intricate path: both heads eat on one tick -> ordered placement pairs, second draw
+        // over the board reduced by the first. `outcome = i*(n-1) + j` must equal forcing the
+        // sampler's two sequential draws to (i, j), for EVERY pair — the full bijection.
+        let g = game();
+        let st = initial_state(&[(4, 3), (4, 5)]); // in front of A (faces Right) and B (faces Left)
+        let t = g.step(&st, &[0, 0]);
+        assert_eq!(
+            st.food.len() - t.next_state.food.len(),
+            2,
+            "both heads must eat this tick"
+        );
+        let probs = g.chance_outcomes(&st, &t).expect("eats declare chance");
+        let n = empty_cells(&t.next_state.snakes, &t.next_state.food, G).len();
+        assert_eq!(
+            probs.len(),
+            n * (n - 1),
+            "ordered pairs over the free cells"
+        );
+        assert!((probs.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+        for i in 0..n {
+            for j in 0..(n - 1) {
+                let outcome = i * (n - 1) + j;
+                let sampled = g
+                    .sample_chance(&st, &t, &mut Forced(vec![i, j].into_iter()))
+                    .unwrap();
+                assert_eq!(
+                    sampled,
+                    g.apply_chance(&st, &t, outcome),
+                    "pair ({i},{j}) diverged"
+                );
+            }
+        }
+    }
+
     #[test]
     fn no_eat_is_deterministic() {
         let g = game();
