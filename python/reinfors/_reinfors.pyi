@@ -190,6 +190,11 @@ class DqnBatch:
     next_obs: NDArray[np.float32]
     dones: NDArray[np.bool_]
     masks: NDArray[np.float32]
+    # (M, A) 0/1 legality of obs / next_obs. TD targets MUST mask the bootstrap max:
+    #   q_next.masked_fill(next_legal_masks == 0, -inf).max(-1)
+    # (all-ones / all-zero-at-terminal on all-legal games; load-bearing on chess/backgammon).
+    legal_masks: NDArray[np.float32]
+    next_legal_masks: NDArray[np.float32]
     telemetry: dict[str, Any]
     def __len__(self) -> int: ...
     def __getitem__(self, i: int) -> Any: ...

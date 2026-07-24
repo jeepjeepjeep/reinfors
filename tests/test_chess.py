@@ -126,14 +126,15 @@ def test_env_plays_uci_like_moves() -> None:
     assert env.state()["turn"] == 1 and env.active_agents() == [1]
 
 
-def test_env_illegal_action_loses() -> None:
+def test_env_rejects_illegal_action_at_the_boundary() -> None:
+    # Illegal ids never enter the core: the Env validates against the legal set and raises
+    # (the game's internal illegal-move handling remains only as an unreachable backstop).
     env = rf.Env(rf.games.Chess(), reward=rf.Reward(win=1.0, loss=-1.0))
     legal = set(env.legal_actions(0))
     bogus = next(a for a in range(_A) if a not in legal)
-    events = env.step({0: bogus})
-    assert events == ["loss", "win"]
-    assert env.done()
-    assert env.rewards == [-1.0, 1.0]
+    with pytest.raises(ValueError, match="illegal"):
+        env.step({0: bogus})
+    assert not env.done()
 
 
 def test_start_buffer_rejected() -> None:

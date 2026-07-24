@@ -18,6 +18,21 @@ pub struct DqnRecord {
     pub next_obs: Vec<f32>,
     pub terminal: bool,
     pub mask: Vec<f32>,
+    /// Dense 0/1 legality over the action space for `obs` — all-ones on all-legal games.
+    pub legal_mask: Vec<f32>,
+    /// Legality for `next_obs`: the TD target `max_a Q(s', a)` MUST range over these only —
+    /// illegal actions' phantom Q values inflate the bootstrap on sparse-action games. All-zero
+    /// at a terminal (no bootstrap).
+    pub next_legal_mask: Vec<f32>,
+}
+
+/// Densify a legal-action id list into a 0/1 mask over the action space.
+fn densify(legal: &[usize], actions: usize) -> Vec<f32> {
+    let mut mask = vec![0.0; actions];
+    for &a in legal {
+        mask[a] = 1.0;
+    }
+    mask
 }
 
 /// Bootstrapped-DQN record production: one per-head-masked transition per step, no episode-end mixing.
@@ -54,13 +69,34 @@ impl Learner<QEvaluation> for Dqn {
     ) -> Vec<DqnRecord> {
         trajectory
             .iter()
-            .map(|s| DqnRecord {
-                obs: s.obs.clone(),
-                action: s.action,
-                reward: s.reward,
-                next_obs: s.next_obs.clone(),
-                terminal: s.terminal,
-                mask: sample_mask(rng, self.n_heads, self.bootstrap_p),
+            .enumerate()
+            .map(|(t, s)| {
+                let a = s.evaluation.values[0].len();
+                // s' = the agent's NEXT DECISION STATE. For interior steps that is the next step
+                // of its own trajectory — on strictly-alternating games the engine's per-tick
+                // next_obs is the OPPONENT-to-move position (the agent has no legal actions
+                // there), so bootstrapping needs the own-turn successor; on simultaneous/
+                // single-agent games the two coincide exactly. The final step keeps the engine's
+                // post-move view: terminal (all-zero mask, no bootstrap) or truncation — where,
+                // on alternating games, the empty next-legal mask again means "do not bootstrap".
+                let (next_obs, next_legal) = match trajectory.get(t + 1) {
+                    Some(succ) => (succ.obs.clone(), succ.evaluation.legal.clone()),
+                    None => (s.next_obs.clone(), s.next_legal.clone()),
+                };
+                DqnRecord {
+                    obs: s.obs.clone(),
+                    action: s.action,
+                    reward: s.reward,
+                    next_obs,
+                    terminal: s.terminal,
+                    mask: sample_mask(rng, self.n_heads, self.bootstrap_p),
+                    legal_mask: densify(&s.evaluation.legal, a),
+                    next_legal_mask: if s.terminal {
+                        vec![0.0; a] // no bootstrap at a terminal
+                    } else {
+                        densify(&next_legal, a)
+                    },
+                }
             })
             .collect()
     }
@@ -85,10 +121,12 @@ mod tests {
             obs,
             evaluation: QEvaluation {
                 values: vec![vec![0.0; 2]],
+                legal: vec![0, 1],
             },
             action,
             reward,
             next_obs,
+            next_legal: Vec::new(),
             terminal,
         }
     }
@@ -119,7 +157,8 @@ mod tests {
         assert!(learner
             .eval_records(
                 &mut QEvaluation {
-                    values: vec![vec![0.0; 2]]
+                    values: vec![vec![0.0; 2]],
+                    legal: vec![0, 1],
                 },
                 &mut SplitMix64::new(0)
             )

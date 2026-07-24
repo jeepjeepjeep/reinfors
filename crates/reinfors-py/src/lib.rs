@@ -657,6 +657,13 @@ struct DqnBatch {
     #[pyo3(get)]
     masks: Py<PyArray2<f32>>, // (M, K)
     #[pyo3(get)]
+    legal_masks: Py<PyArray2<f32>>, // (M, A) 0/1 legality of `obs` (all-ones on all-legal games)
+    // (M, A) legality of `next_obs`; all-zero rows at terminals. The TD target MUST mask with
+    // this: `q_next.masked_fill(next_legal_masks == 0, -inf).max(-1)` — an unmasked max
+    // bootstraps phantom Q values on sparse-action games (chess, backgammon).
+    #[pyo3(get)]
+    next_legal_masks: Py<PyArray2<f32>>,
+    #[pyo3(get)]
     telemetry: Py<PyDict>,
 }
 
@@ -834,20 +841,35 @@ impl RecordBatch for DqnRecord {
         } else {
             n_heads
         };
+        let a = if m > 0 {
+            records[0].legal_mask.len()
+        } else {
+            0
+        };
         let mut obs_flat: Vec<f32> = Vec::with_capacity(m * dim);
         let mut next_flat: Vec<f32> = Vec::with_capacity(m * dim);
         let mut mask_flat: Vec<f32> = Vec::with_capacity(m * k);
         let mut actions: Vec<i64> = Vec::with_capacity(m);
         let mut rewards: Vec<f64> = Vec::with_capacity(m);
         let mut dones: Vec<bool> = Vec::with_capacity(m);
+        let mut legal_flat: Vec<f32> = Vec::with_capacity(m * a);
+        let mut next_legal_flat: Vec<f32> = Vec::with_capacity(m * a);
         for t in records {
             obs_flat.extend(t.obs);
             next_flat.extend(t.next_obs);
             mask_flat.extend(t.mask);
+            legal_flat.extend(t.legal_mask);
+            next_legal_flat.extend(t.next_legal_mask);
             actions.push(t.action as i64);
             rewards.push(t.reward);
             dones.push(t.terminal);
         }
+        let legal_arr = Array2::from_shape_vec((m, a), legal_flat)
+            .expect("legal mask shape")
+            .into_pyarray(py);
+        let next_legal_arr = Array2::from_shape_vec((m, a), next_legal_flat)
+            .expect("next legal mask shape")
+            .into_pyarray(py);
         let obs_arr = Array2::from_shape_vec((m, dim), obs_flat)
             .expect("obs shape")
             .into_pyarray(py);
@@ -866,6 +888,8 @@ impl RecordBatch for DqnRecord {
                 next_obs: next_arr.unbind(),
                 dones: dones.into_pyarray(py).unbind(),
                 masks: mask_arr.unbind(),
+                legal_masks: legal_arr.unbind(),
+                next_legal_masks: next_legal_arr.unbind(),
                 telemetry: telemetry.unbind(),
             },
         )?
@@ -1718,6 +1742,16 @@ impl PyEnv {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "missing action for active agent {agent}; active agents: {active:?}"
             )));
+        }
+        // Validate legality at the boundary: an illegal action id can corrupt game state (e.g.
+        // backgammon decoding moves for checkers that are not there), so it never enters the core.
+        for (&agent, &action) in &actions {
+            let legal = self.inner.legal_actions(agent);
+            if !legal.contains(&action) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "action {action} is illegal for agent {agent} (legal: {legal:?})"
+                )));
+            }
         }
         let mut joint = vec![0usize; self.inner.num_agents()];
         for (agent, action) in actions {
