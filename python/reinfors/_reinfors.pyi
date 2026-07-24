@@ -46,6 +46,10 @@ class GameHandle:
     # shuffles inside the fifty-move window).
     @staticmethod
     def Chess(max_ticks: int | None = ..., encoder: EncoderHandle | None = ...) -> GameHandle: ...
+    # Backgammon: OpenSpiel-compatible 1352-action encoding, declared dice chance (21 rolls,
+    # non-uniform), no doubling cube. Reward keys: win/gammon/backgammon (defaults 1/2/3, zero-sum).
+    @staticmethod
+    def Backgammon(max_ticks: int | None = ...) -> GameHandle: ...
     @staticmethod
     def GridWorld(
         size: int = ...,

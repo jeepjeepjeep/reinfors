@@ -27,10 +27,11 @@ use reinfors_core::{
 };
 use reinfors_games::snake::{Cell, DeathCause};
 use reinfors_games::{
-    snake_length_cell, Action, Chess, ChessEvent, ChessPlanesAz119, ChessPlanesMinimal,
-    ChessReward, ChessState, Connect4, Connect4Event, Connect4Planes, Connect4Reward,
-    Connect4State, EgocentricSnake, GridEvent, GridState, GridWorld, GridWorldPlanes,
-    GridWorldReward, Snake, SnakeReward, SnakeState, StepEvent,
+    snake_length_cell, Action, Backgammon, BackgammonEvent, BackgammonReward, BackgammonState,
+    BackgammonTesauro, Chess, ChessEvent, ChessPlanesAz119, ChessPlanesMinimal, ChessReward,
+    ChessState, Connect4, Connect4Event, Connect4Planes, Connect4Reward, Connect4State,
+    EgocentricSnake, GridEvent, GridState, GridWorld, GridWorldPlanes, GridWorldReward, Snake,
+    SnakeReward, SnakeState, StepEvent,
 };
 
 /// Absolute `Action` -> its `u8` code (Up/Down/Left/Right = 0/1/2/3), for native-state marshalling.
@@ -1056,6 +1057,9 @@ enum GameSpec {
         max_ticks: Option<usize>,
         encoder: ChessEncoderSpec,
     },
+    Backgammon {
+        max_ticks: Option<usize>,
+    },
     GridWorld {
         size: i32,
         goal: (i32, i32),
@@ -1097,6 +1101,7 @@ impl GameSpec {
                 let (game, enc) = chess_parts(max_ticks, encoder);
                 of(game, &*enc)
             }
+            GameSpec::Backgammon { max_ticks } => of(Backgammon { max_ticks }, &BackgammonTesauro),
             GameSpec::GridWorld {
                 size,
                 goal,
@@ -1157,6 +1162,18 @@ fn build_reward(game: &GameSpec, reward: Option<PyReward>) -> PyResult<RewardBox
                 draw: r[2],
             })
         }
+        GameSpec::Backgammon { .. } => {
+            // Margin-aware zero-sum payoffs (the loser scores the negative automatically).
+            let r = resolve_reward(
+                reward,
+                &[("win", 1.0), ("gammon", 2.0), ("backgammon", 3.0)],
+            )?;
+            RewardBox::Backgammon(BackgammonReward {
+                win: r[0],
+                gammon: r[1],
+                backgammon: r[2],
+            })
+        }
         GameSpec::GridWorld { .. } => {
             let r = resolve_reward(reward, &[("step", 0.0), ("goal", 1.0)])?;
             RewardBox::GridWorld(GridWorldReward {
@@ -1173,6 +1190,7 @@ enum RewardBox {
     Snake(SnakeReward),
     Connect4(Connect4Reward),
     Chess(ChessReward),
+    Backgammon(BackgammonReward),
     GridWorld(GridWorldReward),
 }
 
@@ -1573,6 +1591,16 @@ fn build_engine(
                 infer_cache,
             )
         }
+        (GameSpec::Backgammon { max_ticks }, RewardBox::Backgammon(reward)) => build_for_game(
+            Backgammon { max_ticks },
+            Box::new(BackgammonTesauro),
+            Box::new(reward),
+            Box::new(AlwaysInitialState),
+            policy,
+            learner,
+            engine_params,
+            infer_cache,
+        ),
         (
             GameSpec::GridWorld {
                 size,
@@ -1757,6 +1785,19 @@ impl NativeState for ChessState {
     }
 }
 
+impl NativeState for BackgammonState {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("board", [self.board[0].to_vec(), self.board[1].to_vec()])?;
+        d.set_item("bar", self.bar.to_vec())?;
+        d.set_item("scores", self.scores.to_vec())?;
+        d.set_item("to_move", self.to_move)?;
+        d.set_item("dice", self.dice.to_vec())?;
+        d.set_item("double_turn", self.double_turn)?;
+        Ok(d)
+    }
+}
+
 impl NativeState for GridState {
     fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
@@ -1805,6 +1846,20 @@ impl NativeEvent for Connect4Event {
             Connect4Event::Draw => "draw",
         };
         Ok(s.into_pyobject(py)?.into_any())
+    }
+}
+
+impl NativeEvent for BackgammonEvent {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let d = PyDict::new(py);
+        let (result, margin) = match self {
+            BackgammonEvent::Ongoing => ("ongoing", 0u8),
+            BackgammonEvent::Win(m) => ("win", *m),
+            BackgammonEvent::Loss(m) => ("loss", *m),
+        };
+        d.set_item("result", result)?;
+        d.set_item("margin", margin)?; // 1 plain, 2 gammon, 3 backgammon
+        Ok(d.into_any())
     }
 }
 
@@ -1972,6 +2027,21 @@ fn build_env(game: GameSpec, reward: Option<PyReward>, seed: u64) -> PyResult<Bo
                 obs_shape,
                 reward: reward.map(|rb| match rb {
                     RewardBox::Chess(r) => Box::new(r) as Box<dyn Reward<Event = ChessEvent>>,
+                    _ => unreachable!("build_reward returns the reward variant matching the game"),
+                }),
+                last_rewards: None,
+            })
+        }
+        GameSpec::Backgammon { max_ticks } => {
+            let enc = BackgammonTesauro;
+            let obs_shape = enc.obs_shape();
+            Box::new(EnvImpl {
+                inner: Env::new(Backgammon { max_ticks }, Box::new(enc), seed),
+                obs_shape,
+                reward: reward.map(|rb| match rb {
+                    RewardBox::Backgammon(r) => {
+                        Box::new(r) as Box<dyn Reward<Event = BackgammonEvent>>
+                    }
                     _ => unreachable!("build_reward returns the reward variant matching the game"),
                 }),
                 last_rewards: None,
@@ -2171,6 +2241,19 @@ impl GameHandle {
     }
 
     #[staticmethod]
+    // Backgammon with the OpenSpiel-compatible 1352-action encoding and declared dice chance; no
+    // doubling cube. Reward keys: win/gammon/backgammon (defaults 1/2/3, zero-sum). Weak nets can
+    // shuffle checkers for a long time, so `max_ticks` defaults to a finite cap.
+    #[pyo3(signature = (max_ticks=1000))]
+    #[pyo3(name = "Backgammon")]
+    fn backgammon(max_ticks: Option<usize>) -> PyResult<Self> {
+        check_max_ticks(max_ticks)?;
+        Ok(GameHandle {
+            spec: GameSpec::Backgammon { max_ticks },
+        })
+    }
+
+    #[staticmethod]
     // GridWorld can wander forever without reaching the goal, so `max_ticks` defaults to a finite cap
     // (pass `max_ticks=None` to opt into never truncating).
     #[pyo3(signature = (size=5, goal_row=4, goal_col=4, max_ticks=1000))]
@@ -2209,6 +2292,7 @@ impl GameHandle {
         match self.spec {
             GameSpec::Snake { max_ticks, .. }
             | GameSpec::Chess { max_ticks, .. }
+            | GameSpec::Backgammon { max_ticks }
             | GameSpec::GridWorld { max_ticks, .. } => max_ticks,
             GameSpec::Connect4 => None,
         }
