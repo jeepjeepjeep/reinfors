@@ -152,7 +152,7 @@ impl Policy for SelectiveExpectimax {
         if s.leaves > 0 {
             stats.sum_sigma += s.sigma_sum / s.leaves as f64;
         }
-        stats.sum_disagreement += root_disagreement(&eval.values);
+        stats.sum_disagreement += root_disagreement(&eval.values, &eval.legal);
     }
 }
 
@@ -164,21 +164,23 @@ impl SearchPolicy for SelectiveExpectimax {
 
 /// Root head-disagreement: the per-action population std across heads of the root values `[K][A]`,
 /// averaged over actions (`values.std(axis=0).mean()` in snake_RL). 0 with fewer than two heads.
-fn root_disagreement(values: &[Vec<f64>]) -> f64 {
+fn root_disagreement(values: &[Vec<f64>], legal: &[usize]) -> f64 {
+    // Averaged over the LEGAL actions only: the densified rows carry identical zeros on illegal
+    // slots (std 0 across heads), which would dilute the mean — on chess by ~133x (35 of 4672).
     let k = values.len();
-    if k < 2 || values[0].is_empty() {
+    if k < 2 || values[0].is_empty() || legal.is_empty() {
         return 0.0;
     }
-    let a = values[0].len();
     let inv_k = 1.0 / k as f64;
-    let total: f64 = (0..a)
-        .map(|ai| {
+    let total: f64 = legal
+        .iter()
+        .map(|&ai| {
             let mean = values.iter().map(|h| h[ai]).sum::<f64>() * inv_k;
             let var = values.iter().map(|h| (h[ai] - mean).powi(2)).sum::<f64>() * inv_k;
             var.sqrt()
         })
         .sum();
-    total / a as f64
+    total / legal.len() as f64
 }
 
 #[cfg(test)]
@@ -188,10 +190,18 @@ mod tests {
     #[test]
     fn root_disagreement_matches_population_std_definition() {
         // Single action so the per-action std is the whole metric: heads [0, 2] -> mean 1, std 1.
-        assert!((root_disagreement(&[vec![0.0], vec![2.0]]) - 1.0).abs() < 1e-12);
+        assert!((root_disagreement(&[vec![0.0], vec![2.0]], &[0]) - 1.0).abs() < 1e-12);
         // Identical heads disagree by zero; a single head has no spread.
-        assert_eq!(root_disagreement(&[vec![5.0, 5.0], vec![5.0, 5.0]]), 0.0);
-        assert_eq!(root_disagreement(&[vec![1.0, 2.0, 3.0]]), 0.0);
+        assert_eq!(
+            root_disagreement(&[vec![5.0, 5.0], vec![5.0, 5.0]], &[0, 1]),
+            0.0
+        );
+        assert_eq!(root_disagreement(&[vec![1.0, 2.0, 3.0]], &[0, 1, 2]), 0.0);
+        // Legal-only averaging: a densified illegal zero (std 0) must not dilute the mean —
+        // heads disagree by std 1 on the single legal action; the illegal slot is excluded.
+        let heads = [vec![0.0, 0.0], vec![0.0, 2.0]];
+        assert!((root_disagreement(&heads, &[1]) - 1.0).abs() < 1e-12);
+        assert!((root_disagreement(&heads, &[0, 1]) - 0.5).abs() < 1e-12); // the dilution, shown
     }
 }
 
