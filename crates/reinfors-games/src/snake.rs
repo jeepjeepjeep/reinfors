@@ -327,7 +327,63 @@ impl Snake {
 
     /// Initial placement: heads at one-third / two-thirds along the middle row, bodies trailing to the
     /// nearer wall and wrapping (matches snake_RL's `_initial_snakes` / `_trace_body`).
+    /// Config invariants, checked once at the construction boundary so no input reaches a panic
+    /// later. Placement is checked by *constructing* it — the deterministic `initial_snakes`
+    /// layout must fit the grid, stay disjoint (long bodies can wrap the perimeter into each
+    /// other), and leave enough free cells for the food — rather than by re-deriving bounds that
+    /// could drift from the layout code.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.initial_length < 1 {
+            return Err("initial_length must be >= 1".to_string());
+        }
+        if self.win_food_lead == Some(0) {
+            return Err(
+                "win_food_lead must be >= 1 (a lead of 0 ends the game on tick one)".to_string(),
+            );
+        }
+        let g = self.grid_size;
+        let cells = g as i64 * g as i64;
+        // u128: `N_CHANNELS as i64 * cells` overflows i64 for g above ~1.36e9 — a panic in debug
+        // builds and, worse, a wrap in release that bypasses this very ceiling
+        if g >= 1 && N_CHANNELS as u128 * cells as u128 > i32::MAX as u128 {
+            return Err(format!(
+                "grid_size {g} makes the observation tensor exceed 2^31 elements"
+            ));
+        }
+        let snakes = self.initial_snakes_checked()?;
+        let mut seen = HashSet::new();
+        for snake in &snakes {
+            for &(r, c) in &snake.body {
+                if !(0 <= r && r < g && 0 <= c && c < g) {
+                    return Err(format!(
+                        "grid_size {g} is too small: initial snake placement leaves cell ({r}, {c}) outside the grid"
+                    ));
+                }
+                if !seen.insert((r, c)) {
+                    return Err(format!(
+                        "grid_size {g} is too small for initial_length {}: initial snakes overlap at ({r}, {c})",
+                        self.initial_length
+                    ));
+                }
+            }
+        }
+        let free = cells - seen.len() as i64;
+        // u128: `initial_food_count as i64` would wrap negative for huge usize values and slip past
+        if self.initial_food_count as u128 > free as u128 {
+            return Err(format!(
+                "food {} exceeds the {free} free cells left by the initial snakes",
+                self.initial_food_count
+            ));
+        }
+        Ok(())
+    }
+
     fn initial_snakes(&self) -> [SnakeBody; 2] {
+        self.initial_snakes_checked()
+            .expect("snake config validated at construction")
+    }
+
+    fn initial_snakes_checked(&self) -> Result<[SnakeBody; 2], String> {
         let g = self.grid_size;
         let mid = g / 2;
         let a_body = Self::trace_body(
@@ -335,14 +391,14 @@ impl Snake {
             (mid, g / 3),
             &[Action::Left, Action::Down, Action::Right, Action::Up],
             self.initial_length,
-        );
+        )?;
         let b_body = Self::trace_body(
             g,
             (mid, g - g / 3),
             &[Action::Right, Action::Up, Action::Left, Action::Down],
             self.initial_length,
-        );
-        [
+        )?;
+        Ok([
             SnakeBody {
                 body: a_body,
                 direction: Action::Right,
@@ -353,10 +409,15 @@ impl Snake {
                 direction: Action::Left,
                 alive: true,
             },
-        ]
+        ])
     }
 
-    fn trace_body(grid_size: i32, head: Cell, dirs: &[Action], length: usize) -> VecDeque<Cell> {
+    fn trace_body(
+        grid_size: i32,
+        head: Cell,
+        dirs: &[Action],
+        length: usize,
+    ) -> Result<VecDeque<Cell>, String> {
         let g = grid_size;
         let mut cells = VecDeque::from([head]);
         let (mut r, mut c) = head;
@@ -366,17 +427,18 @@ impl Snake {
             let (nr, nc) = (r + dr, c + dc);
             if !(0 <= nr && nr < g && 0 <= nc && nc < g) {
                 d += 1;
-                assert!(
-                    d < dirs.len(),
-                    "initial_length {length} too long for grid_size {g}"
-                );
+                if d >= dirs.len() {
+                    return Err(format!(
+                        "initial_length {length} does not fit grid_size {g}"
+                    ));
+                }
                 continue;
             }
             r = nr;
             c = nc;
             cells.push_back((r, c));
         }
-        cells
+        Ok(cells)
     }
 
     /// Advance one tick over `(snakes, food)` in place. `actions[i]` is an absolute move for snake `i`
@@ -754,6 +816,41 @@ mod game_tests {
             initial_food_count: 1,
             max_ticks: None,
         }
+    }
+
+    #[test]
+    fn validate_screens_placement_food_and_bounds() {
+        let cfg = |grid_size, initial_length, food| Snake {
+            grid_size,
+            initial_length,
+            play_to_last: false,
+            win_food_lead: None,
+            initial_food_count: food,
+            max_ticks: None,
+        };
+        assert!(cfg(8, 3, 3).validate().is_ok());
+        assert!(cfg(3, 3, 3).validate().is_ok()); // smallest grid for the default length
+        assert!(cfg(2, 3, 1).validate().is_err()); // head placed outside the grid
+        assert!(cfg(0, 1, 0).validate().is_err());
+        assert!(cfg(-4, 3, 1).validate().is_err());
+        assert!(cfg(8, 0, 1).validate().is_err()); // empty body
+        assert!(cfg(8, 100, 1).validate().is_err()); // trace runs out of directions
+        assert!(cfg(3, 3, 4).validate().is_err()); // food exceeds the 3 free cells
+        assert!(cfg(8, 3, 1usize << 63).validate().is_err()); // would wrap an i64 food cast
+        assert!(cfg(46_000, 3, 1).validate().is_err()); // obs tensor over 2^31 elements
+        assert!(cfg(1_500_000_000, 3, 1).validate().is_err()); // past the i64 5*g^2 overflow point
+        assert!(cfg(i32::MAX, 3, 1).validate().is_err());
+
+        // Long bodies wrap the perimeter into each other without exhausting the trace — the
+        // disjointness of the *constructed* placement is what catches it.
+        let overlap = cfg(8, 16, 1).validate();
+        assert!(overlap.is_err() && overlap.unwrap_err().contains("overlap"));
+        assert!(Snake {
+            win_food_lead: Some(0),
+            ..cfg(8, 3, 1)
+        }
+        .validate()
+        .is_err());
     }
 
     struct TestRng(u64);

@@ -14,7 +14,8 @@ def core_build_profile() -> str: ...  # "debug" | "release"; perf numbers are on
 
 class Reward:
     # A generic named-weight reward; each game validates the keys it understands (snake: step/food/
-    # loss/draw/kill/win/survival; connect4: win/loss/draw; gridworld: step/goal).
+    # loss/draw/kill/win/survival; connect4: win/loss/draw; gridworld: step/goal). Weights must be
+    # finite (NaN/inf raise ValueError at construction).
     def __init__(self, **weights: float) -> None: ...
 
 # Space descriptors a game advertises (re-exported as rf.spaces.Box / rf.spaces.Discrete).
@@ -50,11 +51,13 @@ class GameHandle:
     # non-uniform), no doubling cube. Reward keys: win/gammon/backgammon (defaults 1/2/3, zero-sum).
     @staticmethod
     def Backgammon(max_ticks: int | None = ...) -> GameHandle: ...
+    # The goal defaults to the far corner (size-1, size-1), derived from `size`; explicit
+    # coordinates must lie inside the grid. Invalid configs raise ValueError at construction.
     @staticmethod
     def GridWorld(
         size: int = ...,
-        goal_row: int = ...,
-        goal_col: int = ...,
+        goal_row: int | None = ...,
+        goal_col: int | None = ...,
         max_ticks: int | None = ...,
     ) -> GameHandle: ...
     def observation_space(self) -> Box: ...

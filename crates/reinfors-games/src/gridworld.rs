@@ -53,6 +53,32 @@ pub struct GridWorld {
 }
 
 impl GridWorld {
+    /// Config invariants, checked once at the construction boundary so no input reaches a panic or
+    /// a hang later: `size >= 2` (a 1x1 grid has no non-goal start cell, so `initial_state` would
+    /// spin forever), the goal inside the grid, and the observation tensor within indexable bounds.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.size < 2 {
+            return Err(format!("size must be >= 2, got {}", self.size));
+        }
+        // u128 like the other ceilings: for 2 channels the i64 product happens to fit for every
+        // valid i32, but only by a factor of 1.00001 — don't leave it load-bearing
+        let cells = self.size as u128 * self.size as u128;
+        if N_CHANNELS as u128 * cells > i32::MAX as u128 {
+            return Err(format!(
+                "size {} makes the observation tensor exceed 2^31 elements",
+                self.size
+            ));
+        }
+        let (r, c) = self.goal;
+        if !(0 <= r && r < self.size && 0 <= c && c < self.size) {
+            return Err(format!(
+                "goal ({r}, {c}) is outside the {size}x{size} grid",
+                size = self.size
+            ));
+        }
+        Ok(())
+    }
+
     fn moved(&self, (r, c): Pos, action: usize) -> Pos {
         let (dr, dc) = DELTAS[action];
         let (nr, nc) = (r + dr, c + dc);
@@ -374,5 +400,30 @@ mod tests {
             !stats.episodes.is_empty(),
             "episodes should finish (truncate at max_ticks)"
         );
+    }
+
+    #[test]
+    fn validate_accepts_in_grid_goals_and_rejects_bad_configs() {
+        let ok = |size, goal| GridWorld {
+            size,
+            goal,
+            max_ticks: None,
+        };
+        assert!(ok(4, (3, 3)).validate().is_ok());
+        assert!(ok(2, (0, 1)).validate().is_ok());
+        for (size, goal) in [
+            (4, (4, 4)),  // out of grid (the old fixed default vs a smaller size)
+            (4, (-1, 0)), // negative coordinate
+            (1, (0, 0)),  // no non-goal start cell: initial_state would spin forever
+            (0, (0, 0)),
+            (-3, (0, 0)),
+            (40_000, (0, 0)),   // obs tensor would exceed 2^31 elements
+            (i32::MAX, (0, 0)), // the 2*size^2 product must not be trusted to fit i64
+        ] {
+            assert!(
+                ok(size, goal).validate().is_err(),
+                "size {size} goal {goal:?}"
+            );
+        }
     }
 }
