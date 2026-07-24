@@ -2225,7 +2225,7 @@ struct PolicyHandle {
 #[pymethods]
 impl PolicyHandle {
     #[staticmethod]
-    #[pyo3(signature = (expansion_budget=64, top_k=8, max_depth=12, beta=1.0, chance_mode="committed", chance_samples=1, n_heads=1, epsilon=0.0, opponent="uniform", opp_temperature=1.0, opp_floor=0.0))]
+    #[pyo3(signature = (expansion_budget=64, top_k=8, max_depth=12, beta=1.0, chance=None, n_heads=1, epsilon=0.0, opponent="uniform", opp_temperature=1.0, opp_floor=0.0))]
     #[pyo3(name = "SelectiveExpectimax")]
     #[allow(clippy::too_many_arguments)]
     fn selective_expectimax(
@@ -2233,19 +2233,19 @@ impl PolicyHandle {
         top_k: usize,
         max_depth: i32,
         beta: f64,
-        chance_mode: &str,
-        chance_samples: usize,
+        chance: Option<ChanceModeHandle>,
         n_heads: usize,
         epsilon: f64,
         opponent: &str,
         opp_temperature: f64,
         opp_floor: f64,
     ) -> PyResult<Self> {
-        let chance = parse_chance_mode(chance_mode, chance_samples)?;
+        // Default: the historical `food_samples = 1` estimator, on the shared vocabulary.
+        let chance = chance.map_or(ChanceMode::Committed { samples: 1 }, |c| c.mode);
         if !SelectiveExpectimax::supports_chance_mode(chance) {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "SelectiveExpectimax expands each node exactly once (best-first) and cannot \
-                 express per-traversal chance modes; use \"committed\" or \"expand_all\"",
+                 express per-traversal chance modes; use Committed or ExpandAll",
             ));
         }
         Ok(PolicyHandle {
@@ -2285,7 +2285,7 @@ impl PolicyHandle {
     /// `food_samples` treatment, for fans wide relative to the sim budget), or `"expand_all"`
     /// (evaluate every outcome at expansion — exact, for narrow fans).
     #[staticmethod]
-    #[pyo3(signature = (num_simulations=64, uct_c=2.0, max_depth=64, act_by="value", temperature=0.0, temperature_drop=None, chance_mode="always_resample", chance_samples=4))]
+    #[pyo3(signature = (num_simulations=64, uct_c=2.0, max_depth=64, act_by="value", temperature=0.0, temperature_drop=None, chance=None))]
     #[pyo3(name = "Mcts")]
     #[allow(clippy::too_many_arguments)]
     fn mcts(
@@ -2295,8 +2295,7 @@ impl PolicyHandle {
         act_by: &str,
         temperature: f64,
         temperature_drop: Option<u32>,
-        chance_mode: &str,
-        chance_samples: usize,
+        chance: Option<ChanceModeHandle>,
     ) -> PyResult<Self> {
         let act_by = match act_by {
             "value" => ActBy::Value,
@@ -2315,7 +2314,7 @@ impl PolicyHandle {
                 act_by,
                 temperature,
                 temperature_drop: temperature_drop.unwrap_or(u32::MAX),
-                chance: parse_chance_mode(chance_mode, chance_samples)?,
+                chance: chance.map_or(ChanceMode::AlwaysResample, |c| c.mode),
             },
         })
     }
@@ -2326,31 +2325,26 @@ impl PolicyHandle {
     /// supplies search-level exploration (drawn from the seeded stream — collects stay reproducible);
     /// the acting temperature (same semantics as `Mcts`) supplies move-level diversity. Acting is by
     /// visit count (classic AlphaZero).
-    /// `chance_mode` / `chance_samples`: as on `Mcts`.
+    /// `chance`: an `rf.chance_modes.*` handle (default `AlwaysResample`). `noise`: an
+    /// `rf.noise.Dirichlet` handle; `None` disables root noise; omitted = the classic self-play
+    /// default `Dirichlet(0.25, 0.3, "requester")`.
     #[staticmethod]
-    #[pyo3(signature = (num_simulations=64, c_puct=1.5, max_depth=64, noise_epsilon=0.25, noise_alpha=0.3, temperature=1.0, temperature_drop=8, chance_mode="always_resample", chance_samples=4, noise_scope="requester"))]
+    #[pyo3(signature = (num_simulations=64, c_puct=1.5, max_depth=64, temperature=1.0, temperature_drop=8, chance=None, noise=Some(NoiseHandle::default_dirichlet())))]
     #[pyo3(name = "AlphaZero")]
-    #[allow(clippy::too_many_arguments)]
     fn alphazero(
         num_simulations: usize,
         c_puct: f64,
         max_depth: i32,
-        noise_epsilon: f64,
-        noise_alpha: f64,
         temperature: f64,
         temperature_drop: Option<u32>,
-        chance_mode: &str,
-        chance_samples: usize,
-        noise_scope: &str,
+        chance: Option<ChanceModeHandle>,
+        noise: Option<NoiseHandle>,
     ) -> PyResult<Self> {
-        let noise_scope = match noise_scope {
-            "requester" => NoiseScope::Requester,
-            "both" => NoiseScope::Both,
-            other => {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "unknown noise_scope {other:?}; expected \"requester\" or \"both\""
-                )))
-            }
+        // `noise=None` = off (epsilon 0 internally — the core's noise-free path); the alpha/scope
+        // placeholders are inert at epsilon 0.
+        let (noise_epsilon, noise_alpha, noise_scope) = match noise {
+            Some(n) => (n.epsilon, n.alpha, n.scope),
+            None => (0.0, 0.3, NoiseScope::Requester),
         };
         Ok(PolicyHandle {
             spec: PolicySpec::AlphaZero {
@@ -2361,29 +2355,10 @@ impl PolicyHandle {
                 noise_alpha,
                 temperature,
                 temperature_drop: temperature_drop.unwrap_or(u32::MAX),
-                chance: parse_chance_mode(chance_mode, chance_samples)?,
+                chance: chance.map_or(ChanceMode::AlwaysResample, |c| c.mode),
                 noise_scope,
             },
         })
-    }
-}
-
-/// Parse the Python-surface chance-mode string (see the `Mcts` handle docs for semantics).
-fn parse_chance_mode(mode: &str, samples: usize) -> PyResult<ChanceMode> {
-    match mode {
-        "always_resample" => Ok(ChanceMode::AlwaysResample),
-        "committed" => {
-            if samples < 1 {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "chance_samples must be >= 1",
-                ));
-            }
-            Ok(ChanceMode::Committed { samples })
-        }
-        "expand_all" => Ok(ChanceMode::ExpandAll),
-        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "unknown chance_mode {other:?}; expected \"always_resample\", \"committed\", or \"expand_all\""
-        ))),
     }
 }
 
@@ -2434,6 +2409,107 @@ impl LearnerHandle {
         LearnerHandle {
             spec: LearnerSpec::AlphaZero { gamma },
         }
+    }
+}
+
+/// Chance-mode handle (`rf.chance_modes.*`): how a search consumes a stochastic transition's
+/// declared distribution, passed to a search policy's `chance=` kwarg. Parameterized variants
+/// carry their parameters here (the `rf.encoders` pattern) — no orphan kwargs on the policy.
+#[pyclass]
+#[derive(Clone)]
+struct ChanceModeHandle {
+    mode: ChanceMode,
+}
+
+#[pymethods]
+impl ChanceModeHandle {
+    /// Fresh draw proportional to probability on every descent — unbiased, the asymptotically
+    /// correct default for sampled-trajectory searches; thin on fans wide relative to the budget.
+    #[staticmethod]
+    #[pyo3(name = "AlwaysResample")]
+    fn always_resample() -> Self {
+        ChanceModeHandle {
+            mode: ChanceMode::AlwaysResample,
+        }
+    }
+
+    /// Freeze `samples` draws per chance edge at expansion and plan deeply inside them (the
+    /// expectimax `food_samples` estimator) — the wide-fan/small-budget trade.
+    #[staticmethod]
+    #[pyo3(signature = (samples=1))]
+    #[pyo3(name = "Committed")]
+    fn committed(samples: usize) -> PyResult<Self> {
+        if samples < 1 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "samples must be >= 1",
+            ));
+        }
+        Ok(ChanceModeHandle {
+            mode: ChanceMode::Committed { samples },
+        })
+    }
+
+    /// Materialize and evaluate every outcome at expansion (exact) — for narrow fans.
+    #[staticmethod]
+    #[pyo3(name = "ExpandAll")]
+    fn expand_all() -> Self {
+        ChanceModeHandle {
+            mode: ChanceMode::ExpandAll,
+        }
+    }
+}
+
+/// Root-exploration-noise handle (`rf.noise.*`), passed to `rf.policies.AlphaZero(noise=...)`.
+/// `noise=None` disables noise honestly (no `epsilon=0` sentinel); omitting the kwarg keeps the
+/// classic self-play default. `scope` ("requester" | "both") only exists inside the config it
+/// modifies: which root prior(s) the noise perturbs in a *simultaneous* search tree.
+#[pyclass]
+#[derive(Clone)]
+struct NoiseHandle {
+    epsilon: f64,
+    alpha: f64,
+    scope: NoiseScope,
+}
+
+impl NoiseHandle {
+    /// The classic AlphaZero self-play default, used when the `noise=` kwarg is omitted.
+    fn default_dirichlet() -> Self {
+        NoiseHandle {
+            epsilon: 0.25,
+            alpha: 0.3,
+            scope: NoiseScope::Requester,
+        }
+    }
+}
+
+#[pymethods]
+impl NoiseHandle {
+    /// Dirichlet root noise: `(1-epsilon)·P + epsilon·Dir(alpha)` at each search root, drawn from
+    /// the seeded stream (collects stay reproducible).
+    #[staticmethod]
+    #[pyo3(signature = (epsilon=0.25, alpha=0.3, scope="requester"))]
+    #[pyo3(name = "Dirichlet")]
+    fn dirichlet(epsilon: f64, alpha: f64, scope: &str) -> PyResult<Self> {
+        check_unit("epsilon", epsilon)?;
+        if !(alpha > 0.0 && alpha.is_finite()) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "alpha must be finite and > 0",
+            ));
+        }
+        let scope = match scope {
+            "requester" => NoiseScope::Requester,
+            "both" => NoiseScope::Both,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown scope {other:?}; expected \"requester\" or \"both\""
+                )))
+            }
+        };
+        Ok(NoiseHandle {
+            epsilon,
+            alpha,
+            scope,
+        })
     }
 }
 
@@ -2507,6 +2583,8 @@ fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AlphaZeroBatch>()?;
     m.add_class::<CollectStream>()?;
     m.add_class::<EncoderHandle>()?;
+    m.add_class::<ChanceModeHandle>()?;
+    m.add_class::<NoiseHandle>()?;
     m.add_class::<DqnBatch>()?;
     m.add_class::<PyBox>()?;
     m.add_class::<PyDiscrete>()?;

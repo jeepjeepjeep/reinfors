@@ -33,8 +33,7 @@ def _engine(
         rf.policies.AlphaZero(
             num_simulations=num_simulations,
             c_puct=1.5,
-            noise_epsilon=noise_epsilon,
-            noise_alpha=0.3,
+            noise=(rf.noise.Dirichlet(epsilon=noise_epsilon, alpha=0.3) if noise_epsilon > 0 else None),
             temperature=temperature,
             temperature_drop=temperature_drop,
         ),
@@ -128,7 +127,7 @@ def test_alphazero_trains_on_simultaneous_stochastic_snake() -> None:
     engine = rf.Engine(
         rf.games.Snake(grid_size=8, max_ticks=40),
         rf.Reward(food=1.0, loss=-1.0),
-        rf.policies.AlphaZero(num_simulations=12, chance_mode="committed", chance_samples=2),
+        rf.policies.AlphaZero(num_simulations=12, chance=rf.chance_modes.Committed(samples=2)),
         rf.learners.AlphaZero(),
         n_games=2,
         seed=0,
@@ -144,10 +143,11 @@ def test_alphazero_trains_on_simultaneous_stochastic_snake() -> None:
 
 
 def test_noise_scope_kwarg() -> None:
-    rf.policies.AlphaZero(noise_scope="requester")
-    rf.policies.AlphaZero(noise_scope="both")
-    with pytest.raises(ValueError, match="noise_scope"):
-        rf.policies.AlphaZero(noise_scope="all")
+    rf.policies.AlphaZero(noise=rf.noise.Dirichlet(scope="requester"))
+    rf.policies.AlphaZero(noise=rf.noise.Dirichlet(scope="both"))
+    rf.policies.AlphaZero(noise=None)  # honestly off — no epsilon sentinel
+    with pytest.raises(ValueError, match="scope"):
+        rf.noise.Dirichlet(scope="all")
 
 
 @pytest.mark.parametrize(
@@ -178,16 +178,16 @@ def test_rejects_degenerate_params(bad: dict[str, Any]) -> None:
 
 
 def test_rejects_bad_noise_alpha_and_c_puct() -> None:
-    bad_cases: tuple[dict[str, Any], ...] = ({"noise_alpha": 0.0}, {"c_puct": -1.0})
-    for kwargs in bad_cases:
-        with pytest.raises(ValueError):
-            rf.Engine(
-                rf.games.Connect4(),
-                None,
-                rf.policies.AlphaZero(**kwargs),
-                rf.learners.AlphaZero(),
-                n_games=1,
-            )
+    with pytest.raises(ValueError):
+        rf.noise.Dirichlet(alpha=0.0)  # validated at the handle now
+    with pytest.raises(ValueError):
+        rf.Engine(
+            rf.games.Connect4(),
+            None,
+            rf.policies.AlphaZero(c_puct=-1.0),
+            rf.learners.AlphaZero(),
+            n_games=1,
+        )
 
 
 @pytest.mark.parametrize(
