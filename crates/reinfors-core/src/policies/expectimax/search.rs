@@ -15,11 +15,12 @@
 //! [`SearchConfig`] are game-agnostic; concrete games (e.g. the snake `selective_search` wrappers in
 //! reinfors-games) build a `SearchConfig` and a `Game` and call [`search_many`].
 //!
-//! A game's `sample_chance` draws one (stochastic) successor of an eating-style transition — the same
-//! sampler the rollout env uses, so search and env never diverge. The search calls it `food_samples`
-//! times to fan the chance node into that many independent Monte-Carlo draws; a deterministic
-//! transition (`sample_chance` returns `None`) keeps a single child. Each search owns a seeded RNG, so
-//! results are reproducible from a seed.
+//! Chance comes from the game's *declared* distribution (`Game::chance_outcomes` +
+//! `apply_chance` — the same seam the tree searches consume, agreeing with the env's
+//! `sample_chance` by contract), fanned per the configured [`ChanceMode`]: `Committed{k}` draws k
+//! equal-weight realizations (the historical `food_samples` estimator), `ExpandAll` fans every
+//! outcome at its true probability (exact). A deterministic transition keeps a single child. Each
+//! search owns a seeded RNG, so results are reproducible from a seed.
 
 use rayon::prelude::*;
 
@@ -95,8 +96,9 @@ pub type SearchResult = (Vec<Vec<f64>>, Vec<InteriorTarget>, SearchStats);
 
 /// A committed agent action's chance branch. `weight` is the resolved chance probability; for a
 /// deferred (distributional) opponent it is filled in during evaluation from `deferred = (opp obs
-/// index this round, opponent action index)`. `scale` (1/food_samples on a fanned-out branch, else 1)
-/// multiplies the deferred weight at resolution; fixed weights are pre-scaled at construction.
+/// index this round, opponent action index)`. `scale` (the branch's chance probability on a
+/// fanned-out edge, else 1) multiplies the deferred weight at resolution; fixed weights are
+/// pre-scaled at construction.
 struct Branch {
     weight: f64,
     deferred: Option<(usize, usize)>,
