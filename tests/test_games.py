@@ -408,17 +408,22 @@ def test_dqn_transitions_drive_a_td_step() -> None:
             return out
 
     dim, n_actions = 2 * 5 * 5, 4
-    obs, actions, rewards, next_obs, dones, masks, _ = _dqn_engine().collect(64, _dummy_infer(n_actions))
+    batch = _dqn_engine().collect(64, _dummy_infer(n_actions))
+    obs, actions, rewards, next_obs, _dones, masks, _ = batch
     net = TinyQ(dim, _K, n_actions)
     opt = torch.optim.Adam(net.parameters(), lr=1e-3)
 
     q = net(torch.from_numpy(obs))  # (M, K, A)
     a = torch.from_numpy(actions).long()
     r = torch.from_numpy(rewards).float()
-    d = torch.from_numpy(dones).float()
     mask = torch.from_numpy(masks).float()
+    # The documented masked target (the reference pattern — NOT (1 - done) * max, which meets the
+    # masked max's -inf as NaN): bootstrap iff the next-legal row is nonzero.
+    next_legal = torch.from_numpy(batch.next_legal_masks)  # type: ignore[union-attr]
     with torch.no_grad():
-        target = r[:, None] + 0.99 * (1.0 - d[:, None]) * net(torch.from_numpy(next_obs)).max(dim=-1).values  # (M, K)
+        q_next = net(torch.from_numpy(next_obs))  # (M, K, A)
+        masked = q_next.masked_fill((next_legal == 0)[:, None, :], float("-inf")).max(dim=-1).values
+        target = r[:, None] + 0.99 * torch.where(torch.isfinite(masked), masked, 0.0)  # (M, K)
     chosen = q.gather(-1, a[:, None, None].expand(-1, _K, 1)).squeeze(-1)  # (M, K)
     loss = (mask * (chosen - target) ** 2).sum() / mask.sum().clamp(min=1.0)
     opt.zero_grad()

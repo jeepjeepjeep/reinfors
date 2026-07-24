@@ -658,9 +658,12 @@ struct DqnBatch {
     masks: Py<PyArray2<f32>>, // (M, K)
     #[pyo3(get)]
     legal_masks: Py<PyArray2<f32>>, // (M, A) 0/1 legality of `obs` (all-ones on all-legal games)
-    // (M, A) legality of `next_obs`; all-zero rows at terminals. The TD target MUST mask with
-    // this: `q_next.masked_fill(next_legal_masks == 0, -inf).max(-1)` — an unmasked max
-    // bootstraps phantom Q values on sparse-action games (chess, backgammon).
+    // (M, A) legality of `next_obs`. THE bootstrap rule: bootstrap iff the row is nonzero — an
+    // all-zero row (terminal, or a truncation tail on an alternating game) means "target = r".
+    // `dones` is an episode-boundary flag, NOT a target-math input: the `(1 - done) * max` pattern
+    // meets -inf as 0 * -inf = NaN. The complete safe target:
+    //   q  = np.where(next_legal_masks > 0, q_next, -np.inf).max(-1)
+    //   td = rewards + gamma * np.where(np.isfinite(q), q, 0.0)
     #[pyo3(get)]
     next_legal_masks: Py<PyArray2<f32>>,
     #[pyo3(get)]

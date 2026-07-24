@@ -190,9 +190,11 @@ class DqnBatch:
     next_obs: NDArray[np.float32]
     dones: NDArray[np.bool_]
     masks: NDArray[np.float32]
-    # (M, A) 0/1 legality of obs / next_obs. TD targets MUST mask the bootstrap max:
-    #   q_next.masked_fill(next_legal_masks == 0, -inf).max(-1)
-    # (all-ones / all-zero-at-terminal on all-legal games; load-bearing on chess/backgammon).
+    # (M, A) 0/1 legality of obs / next_obs. THE bootstrap rule: bootstrap iff the next row is
+    # nonzero (all-zero = terminal OR alternating-game truncation tail -> target = r). `dones` is
+    # an episode flag, not target math — (1 - done) * max meets -inf as NaN. Complete safe target:
+    #   q  = np.where(next_legal_masks > 0, q_next, -np.inf).max(-1)
+    #   td = rewards + gamma * np.where(np.isfinite(q), q, 0.0)
     legal_masks: NDArray[np.float32]
     next_legal_masks: NDArray[np.float32]
     telemetry: dict[str, Any]

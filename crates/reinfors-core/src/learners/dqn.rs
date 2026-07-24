@@ -20,9 +20,11 @@ pub struct DqnRecord {
     pub mask: Vec<f32>,
     /// Dense 0/1 legality over the action space for `obs` — all-ones on all-legal games.
     pub legal_mask: Vec<f32>,
-    /// Legality for `next_obs`: the TD target `max_a Q(s', a)` MUST range over these only —
-    /// illegal actions' phantom Q values inflate the bootstrap on sparse-action games. All-zero
-    /// at a terminal (no bootstrap).
+    /// Legality for `next_obs`, and the AUTHORITATIVE bootstrap signal: bootstrap the TD target
+    /// from `max_a Q(s', a)` over exactly these actions iff the mask is nonzero; an all-zero mask
+    /// (a terminal, or a truncation tail on an alternating game whose post-move view is
+    /// opponent-to-move) means `target = r`, full stop. Consumers must branch on the mask —
+    /// not multiply by `(1 - done)`, which meets the masked max's `-inf` as `0 * -inf = NaN`.
     pub next_legal_mask: Vec<f32>,
 }
 

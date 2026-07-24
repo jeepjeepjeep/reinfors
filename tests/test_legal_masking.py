@@ -65,16 +65,27 @@ def test_dqn_masks_are_dense_on_all_legal_games() -> None:
     assert np.all(nl[batch.dones] == 0.0)
 
 
-def test_masked_td_target_shape() -> None:
-    # The documented incantation composes: masked max ignores illegal phantom values.
-    batch = _chess_dqn(seed=1).collect(30, _zeros_infer)
+def test_documented_td_target_is_finite_for_every_record() -> None:
+    # The COMPLETE documented recipe — not just the masked max — must produce a finite target for
+    # every record class: bootstrappable interior steps, terminals, and truncation tails (done =
+    # False with an all-zero next mask, which chess with a tight max_ticks reliably produces).
+    batch = _chess_dqn(seed=1).collect(60, _zeros_infer)
     assert isinstance(batch, DqnBatch)
+    gamma = 0.99
     q_next = np.random.default_rng(0).normal(size=batch.next_legal_masks.shape)
-    masked = np.where(batch.next_legal_masks > 0, q_next, -np.inf)
-    target_max = masked.max(axis=1)
-    bootstrappable = batch.next_legal_masks.sum(axis=1) > 0  # excludes terminals + truncation tails
-    assert np.all(np.isfinite(target_max[bootstrappable]))
-    assert np.all(~np.isfinite(target_max[~bootstrappable]))  # and nothing else sneaks a value in
+    # the documented incantation, verbatim:
+    q = np.where(batch.next_legal_masks > 0, q_next, -np.inf).max(axis=1)
+    td = batch.rewards + gamma * np.where(np.isfinite(q), q, 0.0)
+    assert np.all(np.isfinite(td)), "the complete target must never be inf/NaN"
+    # no-bootstrap rows (terminals AND truncation tails) collapse to target = r exactly
+    no_bootstrap = batch.next_legal_masks.sum(axis=1) == 0
+    assert np.any(no_bootstrap & ~batch.dones), "a tight max_ticks must produce truncation tails"
+    assert np.allclose(td[no_bootstrap], batch.rewards[no_bootstrap])
+    # and the naive (1 - done) * max pattern really does blow up on these records — the reason
+    # the docs forbid it (regression guard for the documentation itself)
+    with np.errstate(invalid="ignore"):
+        naive = batch.rewards + gamma * (1.0 - batch.dones) * q
+    assert not np.all(np.isfinite(naive))
 
 
 def test_env_rejects_illegal_actions() -> None:
