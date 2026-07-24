@@ -270,3 +270,52 @@ fn infer_cache_is_behavior_identical_and_hits() {
     }
     assert!(cache.hits > 0 || before > 0);
 }
+
+#[test]
+fn searches_backgammon_dice_chance() {
+    // Backgammon composes wide legal masking (1352 ids, ~15-25 legal) with the narrow declared
+    // dice fan (21 outcomes) — the AlwaysResample showcase regime. Pooled seats, per-seed
+    // deterministic, sane per-agent evaluations.
+    use reinfors_games::{Backgammon, BackgammonReward, BackgammonTesauro};
+    let g = Backgammon::default();
+    let state = g.initial_state(&mut NoRng);
+    let reward = BackgammonReward::default();
+    let run = |seed: u64| {
+        let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 1353]; // A logits + value
+        alphazero_many(
+            &g,
+            &BackgammonTesauro,
+            &reward,
+            &AlphaZeroConfig {
+                num_simulations: 24,
+                c_puct: 2.0,
+                gamma: 1.0,
+                max_depth: 12,
+                noise_epsilon: 0.25,
+                noise_alpha: 0.3,
+                temperature: 0.0,
+                temperature_drop: u32::MAX,
+                chance: ChanceMode::AlwaysResample,
+                noise_scope: NoiseScope::Requester,
+            },
+            vec![(state.clone(), 0)],
+            seed,
+            &mut Evaluator::new(&mut infer, None),
+        )
+        .remove(0)
+    };
+    let e = run(13);
+    assert_eq!(e.visits.len(), 1352);
+    assert!(e.visits.iter().sum::<f64>() > 0.0);
+    let legal: Vec<usize> = g.legal_actions(&state, 0);
+    for (a, &v) in e.visits.iter().enumerate() {
+        if v > 0.0 {
+            assert!(legal.contains(&a), "visited illegal action {a}");
+        }
+    }
+    let again = run(13);
+    assert_eq!(
+        e.visits, again.visits,
+        "seeded dice-chance search is deterministic"
+    );
+}
