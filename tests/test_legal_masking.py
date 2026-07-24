@@ -1,5 +1,5 @@
-"""Sparse-legality completion: DQN acting stays inside legal sets, DQN batches carry legality
-masks for masked TD targets, and the Env boundary rejects illegal actions."""
+"""Sparse-legality completion: DQN acting stays inside legal sets, DQN batches carry CSR legality
+(bootstrap iff the next slice is non-empty), and the Env boundary rejects illegal actions."""
 
 import numpy as np
 import pytest
@@ -22,27 +22,39 @@ def _zeros_infer(arr: np.ndarray) -> np.ndarray:
     return np.zeros((arr.shape[0], 1, 4672))
 
 
+def _densify(ids: np.ndarray, offsets: np.ndarray, actions: int) -> np.ndarray:
+    """The documented minibatch densification."""
+    m = offsets.shape[0] - 1
+    counts = np.diff(offsets)
+    rows = np.repeat(np.arange(m), counts)
+    mask = np.zeros((m, actions), dtype=bool)
+    mask[rows, ids] = True
+    return mask
+
+
 def test_dqn_on_chess_acts_and_masks_legally() -> None:
     # Chess: ~35 legal of 4672 ids. Every recorded action must be legal in its own state, and the
-    # batch's masks must be sparse and consistent (previously: dense argmax over phantom Qs).
+    # CSR legality must be sparse and consistent (previously: dense argmax over phantom Qs).
     batch = _chess_dqn().collect(60, _zeros_infer)
     assert isinstance(batch, DqnBatch)
-    m, a = batch.legal_masks.shape
-    assert a == 4672
+    m = batch.obs.shape[0]
     assert m >= 60
+    legal = _densify(batch.legal_ids, batch.legal_offsets, 4672)
+    assert legal.shape == (m, 4672)
     # each action was legal in its state
-    assert np.all(batch.legal_masks[np.arange(m), batch.actions] == 1.0)
-    # sparse boards: far fewer legal actions than the id space
-    assert np.all(batch.legal_masks.sum(axis=1) < 300)
-    assert np.all(batch.legal_masks.sum(axis=1) >= 1)
-    # next-state masks: all-zero at terminals; interior steps bootstrap from the agent's own
-    # NEXT TURN (>= 1 legal). The only permitted non-terminal zeros are truncation-final steps
-    # (alternating game: the post-move view is opponent-to-move -> documented no-bootstrap).
-    next_counts = batch.next_legal_masks.sum(axis=1)
-    assert np.all(next_counts[batch.dones] == 0.0)
+    assert np.all(legal[np.arange(m), batch.actions])
+    # sparse boards: far fewer legal actions than the id space — and the point of CSR: the id
+    # payload is a tiny fraction of a dense f32 mask
+    counts = np.diff(batch.legal_offsets)
+    assert np.all(counts >= 1) and np.all(counts < 300)
+    assert batch.legal_ids.nbytes + batch.legal_offsets.nbytes < batch.obs.nbytes
+    # next-state legality: empty at terminals; interior steps bootstrap from the agent's own
+    # NEXT TURN. Non-terminal empties are truncation tails only (alternating game: the post-move
+    # view is opponent-to-move -> documented no-bootstrap).
+    next_counts = np.diff(batch.next_legal_offsets)
+    assert np.all(next_counts[batch.dones] == 0)
     live = next_counts[~batch.dones]
     assert (live >= 1).mean() > 0.8, "most interior steps must have an own-turn successor"
-    assert np.all(live[live >= 1] < 300)
 
 
 def test_dqn_masks_are_dense_on_all_legal_games() -> None:
@@ -59,26 +71,28 @@ def test_dqn_masks_are_dense_on_all_legal_games() -> None:
     )
     batch = engine.collect(40, infer)
     assert isinstance(batch, DqnBatch)
-    assert np.all(batch.legal_masks == 1.0)
-    nl = batch.next_legal_masks
-    assert np.all(nl[~batch.dones] == 1.0)
-    assert np.all(nl[batch.dones] == 0.0)
+    assert np.all(np.diff(batch.legal_offsets) == 4)  # all four actions legal everywhere
+    next_counts = np.diff(batch.next_legal_offsets)
+    assert np.all(next_counts[~batch.dones] == 4)
+    assert np.all(next_counts[batch.dones] == 0)
 
 
 def test_documented_td_target_is_finite_for_every_record() -> None:
-    # The COMPLETE documented recipe — not just the masked max — must produce a finite target for
-    # every record class: bootstrappable interior steps, terminals, and truncation tails (done =
-    # False with an all-zero next mask, which chess with a tight max_ticks reliably produces).
+    # The COMPLETE documented recipe — CSR densify + masked max + finite-guard — must produce a
+    # finite target for every record class: bootstrappable interior steps, terminals, and
+    # truncation tails (done=False with an empty slice, which tight max_ticks reliably produces).
     batch = _chess_dqn(seed=1).collect(60, _zeros_infer)
     assert isinstance(batch, DqnBatch)
     gamma = 0.99
-    q_next = np.random.default_rng(0).normal(size=batch.next_legal_masks.shape)
+    m = batch.obs.shape[0]
+    mask = _densify(batch.next_legal_ids, batch.next_legal_offsets, 4672)
+    q_next = np.random.default_rng(0).normal(size=(m, 4672))
     # the documented incantation, verbatim:
-    q = np.where(batch.next_legal_masks > 0, q_next, -np.inf).max(axis=1)
+    q = np.where(mask, q_next, -np.inf).max(axis=1)
     td = batch.rewards + gamma * np.where(np.isfinite(q), q, 0.0)
     assert np.all(np.isfinite(td)), "the complete target must never be inf/NaN"
     # no-bootstrap rows (terminals AND truncation tails) collapse to target = r exactly
-    no_bootstrap = batch.next_legal_masks.sum(axis=1) == 0
+    no_bootstrap = np.diff(batch.next_legal_offsets) == 0
     assert np.any(no_bootstrap & ~batch.dones), "a tight max_ticks must produce truncation tails"
     assert np.allclose(td[no_bootstrap], batch.rewards[no_bootstrap])
     # and the naive (1 - done) * max pattern really does blow up on these records — the reason

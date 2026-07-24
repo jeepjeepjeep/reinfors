@@ -18,23 +18,16 @@ pub struct DqnRecord {
     pub next_obs: Vec<f32>,
     pub terminal: bool,
     pub mask: Vec<f32>,
-    /// Dense 0/1 legality over the action space for `obs` — all-ones on all-legal games.
-    pub legal_mask: Vec<f32>,
-    /// Legality for `next_obs`, and the AUTHORITATIVE bootstrap signal: bootstrap the TD target
-    /// from `max_a Q(s', a)` over exactly these actions iff the mask is nonzero; an all-zero mask
-    /// (a terminal, or a truncation tail on an alternating game whose post-move view is
-    /// opponent-to-move) means `target = r`, full stop. Consumers must branch on the mask —
-    /// not multiply by `(1 - done)`, which meets the masked max's `-inf` as `0 * -inf = NaN`.
-    pub next_legal_mask: Vec<f32>,
-}
-
-/// Densify a legal-action id list into a 0/1 mask over the action space.
-fn densify(legal: &[usize], actions: usize) -> Vec<f32> {
-    let mut mask = vec![0.0; actions];
-    for &a in legal {
-        mask[a] = 1.0;
-    }
-    mask
+    /// The legal action ids at `obs` (SPARSE — dense masks over wide action spaces dwarf the
+    /// observations themselves; chess: ~35 ids vs a 4672-wide f32 row). Diagnostics/regularizers;
+    /// the executed `action` is guaranteed legal already.
+    pub legal: Vec<usize>,
+    /// The legal action ids at `next_obs`, and the AUTHORITATIVE bootstrap signal: bootstrap the
+    /// TD target from `max_a Q(s', a)` over exactly these ids iff the list is NON-EMPTY; an empty
+    /// list (a terminal, or a truncation tail on an alternating game whose post-move view is
+    /// opponent-to-move) means `target = r`, full stop. Consumers branch on emptiness — never
+    /// multiply by `(1 - done)`, which meets a masked max's `-inf` as `0 * -inf = NaN`.
+    pub next_legal: Vec<usize>,
 }
 
 /// Bootstrapped-DQN record production: one per-head-masked transition per step, no episode-end mixing.
@@ -73,7 +66,6 @@ impl Learner<QEvaluation> for Dqn {
             .iter()
             .enumerate()
             .map(|(t, s)| {
-                let a = s.evaluation.values[0].len();
                 // s' = the agent's NEXT DECISION STATE. For interior steps that is the next step
                 // of its own trajectory — on strictly-alternating games the engine's per-tick
                 // next_obs is the OPPONENT-to-move position (the agent has no legal actions
@@ -92,11 +84,11 @@ impl Learner<QEvaluation> for Dqn {
                     next_obs,
                     terminal: s.terminal,
                     mask: sample_mask(rng, self.n_heads, self.bootstrap_p),
-                    legal_mask: densify(&s.evaluation.legal, a),
-                    next_legal_mask: if s.terminal {
-                        vec![0.0; a] // no bootstrap at a terminal
+                    legal: s.evaluation.legal.clone(),
+                    next_legal: if s.terminal {
+                        Vec::new() // no bootstrap at a terminal
                     } else {
-                        densify(&next_legal, a)
+                        next_legal
                     },
                 }
             })

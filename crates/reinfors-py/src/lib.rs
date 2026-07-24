@@ -656,16 +656,26 @@ struct DqnBatch {
     dones: Py<PyArray1<bool>>, // (M,)
     #[pyo3(get)]
     masks: Py<PyArray2<f32>>, // (M, K)
+    // Legality in CSR form — record i's legal ids are `ids[offsets[i]..offsets[i+1]]`. Sparse on
+    // purpose: dense (M, A) f32 masks on wide action spaces dwarf the observations (chess: ~7.7x
+    // the obs bytes; ~37 GB per million transitions), while CSR is ~35 ids/row. Densify per
+    // MINIBATCH at train time, never per record at storage time.
     #[pyo3(get)]
-    legal_masks: Py<PyArray2<f32>>, // (M, A) 0/1 legality of `obs` (all-ones on all-legal games)
-    // (M, A) legality of `next_obs`. THE bootstrap rule: bootstrap iff the row is nonzero — an
-    // all-zero row (terminal, or a truncation tail on an alternating game) means "target = r".
-    // `dones` is an episode-boundary flag, NOT a target-math input: the `(1 - done) * max` pattern
-    // meets -inf as 0 * -inf = NaN. The complete safe target:
-    //   q  = np.where(next_legal_masks > 0, q_next, -np.inf).max(-1)
+    legal_ids: Py<PyArray1<i64>>, // legality of `obs` (diagnostics; the action is already legal)
+    #[pyo3(get)]
+    legal_offsets: Py<PyArray1<i64>>, // (M + 1,)
+    // Legality of `next_obs` + THE bootstrap rule: bootstrap iff record i's slice is NON-EMPTY —
+    // an empty slice (terminal, or an alternating-game truncation tail) means "target = r".
+    // `dones` is an episode-boundary flag, NOT a target-math input ((1 - done) * max meets a
+    // masked max's -inf as NaN). The complete safe target, densified per minibatch:
+    //   counts = np.diff(next_legal_offsets); rows = np.repeat(np.arange(M), counts)
+    //   mask = np.zeros((M, A), bool); mask[rows, next_legal_ids] = True
+    //   q  = np.where(mask, q_next, -np.inf).max(-1)
     //   td = rewards + gamma * np.where(np.isfinite(q), q, 0.0)
     #[pyo3(get)]
-    next_legal_masks: Py<PyArray2<f32>>,
+    next_legal_ids: Py<PyArray1<i64>>,
+    #[pyo3(get)]
+    next_legal_offsets: Py<PyArray1<i64>>, // (M + 1,)
     #[pyo3(get)]
     telemetry: Py<PyDict>,
 }
@@ -844,35 +854,30 @@ impl RecordBatch for DqnRecord {
         } else {
             n_heads
         };
-        let a = if m > 0 {
-            records[0].legal_mask.len()
-        } else {
-            0
-        };
         let mut obs_flat: Vec<f32> = Vec::with_capacity(m * dim);
         let mut next_flat: Vec<f32> = Vec::with_capacity(m * dim);
         let mut mask_flat: Vec<f32> = Vec::with_capacity(m * k);
         let mut actions: Vec<i64> = Vec::with_capacity(m);
         let mut rewards: Vec<f64> = Vec::with_capacity(m);
         let mut dones: Vec<bool> = Vec::with_capacity(m);
-        let mut legal_flat: Vec<f32> = Vec::with_capacity(m * a);
-        let mut next_legal_flat: Vec<f32> = Vec::with_capacity(m * a);
+        let mut legal_ids: Vec<i64> = Vec::new();
+        let mut legal_offsets: Vec<i64> = Vec::with_capacity(m + 1);
+        let mut next_legal_ids: Vec<i64> = Vec::new();
+        let mut next_legal_offsets: Vec<i64> = Vec::with_capacity(m + 1);
+        legal_offsets.push(0);
+        next_legal_offsets.push(0);
         for t in records {
             obs_flat.extend(t.obs);
             next_flat.extend(t.next_obs);
             mask_flat.extend(t.mask);
-            legal_flat.extend(t.legal_mask);
-            next_legal_flat.extend(t.next_legal_mask);
+            legal_ids.extend(t.legal.iter().map(|&a| a as i64));
+            legal_offsets.push(legal_ids.len() as i64);
+            next_legal_ids.extend(t.next_legal.iter().map(|&a| a as i64));
+            next_legal_offsets.push(next_legal_ids.len() as i64);
             actions.push(t.action as i64);
             rewards.push(t.reward);
             dones.push(t.terminal);
         }
-        let legal_arr = Array2::from_shape_vec((m, a), legal_flat)
-            .expect("legal mask shape")
-            .into_pyarray(py);
-        let next_legal_arr = Array2::from_shape_vec((m, a), next_legal_flat)
-            .expect("next legal mask shape")
-            .into_pyarray(py);
         let obs_arr = Array2::from_shape_vec((m, dim), obs_flat)
             .expect("obs shape")
             .into_pyarray(py);
@@ -891,8 +896,10 @@ impl RecordBatch for DqnRecord {
                 next_obs: next_arr.unbind(),
                 dones: dones.into_pyarray(py).unbind(),
                 masks: mask_arr.unbind(),
-                legal_masks: legal_arr.unbind(),
-                next_legal_masks: next_legal_arr.unbind(),
+                legal_ids: legal_ids.into_pyarray(py).unbind(),
+                legal_offsets: legal_offsets.into_pyarray(py).unbind(),
+                next_legal_ids: next_legal_ids.into_pyarray(py).unbind(),
+                next_legal_offsets: next_legal_offsets.into_pyarray(py).unbind(),
                 telemetry: telemetry.unbind(),
             },
         )?

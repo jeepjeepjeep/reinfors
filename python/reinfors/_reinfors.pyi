@@ -190,13 +190,19 @@ class DqnBatch:
     next_obs: NDArray[np.float32]
     dones: NDArray[np.bool_]
     masks: NDArray[np.float32]
-    # (M, A) 0/1 legality of obs / next_obs. THE bootstrap rule: bootstrap iff the next row is
-    # nonzero (all-zero = terminal OR alternating-game truncation tail -> target = r). `dones` is
-    # an episode flag, not target math — (1 - done) * max meets -inf as NaN. Complete safe target:
-    #   q  = np.where(next_legal_masks > 0, q_next, -np.inf).max(-1)
+    # Legality in CSR form (record i's ids = ids[offsets[i]:offsets[i+1]]) — sparse because dense
+    # (M, A) masks dwarf the observations on wide action spaces (~37 GB per 1M chess transitions).
+    # THE bootstrap rule: bootstrap iff record i's next slice is NON-EMPTY (empty = terminal OR
+    # alternating-game truncation tail -> target = r). `dones` is an episode flag, not target math
+    # ((1 - done) * max meets -inf as NaN). Complete safe target, densified per minibatch:
+    #   counts = np.diff(next_legal_offsets); rows = np.repeat(np.arange(M), counts)
+    #   mask = np.zeros((M, A), bool); mask[rows, next_legal_ids] = True
+    #   q  = np.where(mask, q_next, -np.inf).max(-1)
     #   td = rewards + gamma * np.where(np.isfinite(q), q, 0.0)
-    legal_masks: NDArray[np.float32]
-    next_legal_masks: NDArray[np.float32]
+    legal_ids: NDArray[np.int64]
+    legal_offsets: NDArray[np.int64]
+    next_legal_ids: NDArray[np.int64]
+    next_legal_offsets: NDArray[np.int64]
     telemetry: dict[str, Any]
     def __len__(self) -> int: ...
     def __getitem__(self, i: int) -> Any: ...

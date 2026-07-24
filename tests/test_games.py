@@ -418,11 +418,16 @@ def test_dqn_transitions_drive_a_td_step() -> None:
     r = torch.from_numpy(rewards).float()
     mask = torch.from_numpy(masks).float()
     # The documented masked target (the reference pattern — NOT (1 - done) * max, which meets the
-    # masked max's -inf as NaN): bootstrap iff the next-legal row is nonzero.
-    next_legal = torch.from_numpy(batch.next_legal_masks)  # type: ignore[union-attr]
+    # masked max's -inf as NaN): densify the CSR legality per minibatch, bootstrap iff non-empty.
+    m = obs.shape[0]
+    counts = np.diff(batch.next_legal_offsets)  # type: ignore[union-attr]
+    rows = np.repeat(np.arange(m), counts)
+    dense = np.zeros((m, n_actions), dtype=bool)
+    dense[rows, batch.next_legal_ids] = True  # type: ignore[union-attr]
+    next_legal = torch.from_numpy(dense)
     with torch.no_grad():
         q_next = net(torch.from_numpy(next_obs))  # (M, K, A)
-        masked = q_next.masked_fill((next_legal == 0)[:, None, :], float("-inf")).max(dim=-1).values
+        masked = q_next.masked_fill(~next_legal[:, None, :], float("-inf")).max(dim=-1).values
         target = r[:, None] + 0.99 * torch.where(torch.isfinite(masked), masked, 0.0)  # (M, K)
     chosen = q.gather(-1, a[:, None, None].expand(-1, _K, 1)).squeeze(-1)  # (M, K)
     loss = (mask * (chosen - target) ** 2).sum() / mask.sum().clamp(min=1.0)
