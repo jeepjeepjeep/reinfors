@@ -85,10 +85,12 @@ mod tests {
     use crate::rng::SplitMix64;
 
     fn eval(visits: Vec<f64>) -> SearchEvaluation {
+        let n = visits.len();
         SearchEvaluation {
-            values: vec![vec![0.0; visits.len()]],
+            values: vec![vec![0.0; n]],
             visits,
             interior: Vec::new(),
+            legal: (0..n).collect(),
             stats: SearchStats::default(),
         }
     }

@@ -2,8 +2,8 @@
 //! validates the search's sequential path: alternating `Actor::Agent(0)` / `Actor::Agent(1)` nodes
 //! (the searching agent's MAX turns vs the opponent's modeled-chance turns), driven through the same
 //! generic search + rollout engine as snake. Deterministic, so declared chance is the default
-//! (`None`). Action legality is fixed — all 7 columns are always selectable; a move into a full column
-//! is an immediate loss for the mover — so the framework needs no action masking here.
+//! (`None`). Standard rules: only non-full columns are legal (the searches mask to the legal set;
+//! the retired "full column = immediate loss" rule predates sparse legality).
 
 use reinfors_core::{Actor, Game, Reward, Rng, Space, StateEncoder, Transition};
 
@@ -152,9 +152,13 @@ impl Game for Connect4 {
     }
 
     fn legal_actions(&self, state: &Connect4State, agent: usize) -> Vec<usize> {
-        // Only the player to move acts, and all columns are always selectable (a full column loses).
+        // Standard rules: only non-full columns are playable (matching every reference
+        // implementation, incl. OpenSpiel). The pre-chess "full column = immediate loss" rule was
+        // scaffolding for the retired all-actions-always-legal contract.
         if agent == state.turn && !state.done {
-            (0..COLS).collect()
+            (0..COLS)
+                .filter(|&c| Self::drop_row(&state.cells, c).is_some())
+                .collect()
         } else {
             Vec::new()
         }
@@ -169,7 +173,10 @@ impl Game for Connect4 {
         let col = actions[mover];
         let mut cells = state.cells;
         let (next_turn, winner, terminal) = match Self::drop_row(&cells, col) {
-            None => (mover, Some(1 - mover), true), // full column: the mover loses
+            // Full column: unreachable via legal play (searches mask to the legal set, the Env
+            // boundary validates) — kept as a losing backstop rather than a panic for direct core
+            // callers.
+            None => (mover, Some(1 - mover), true),
             Some(r) => {
                 cells[r * COLS + col] = (mover + 1) as u8;
                 if Self::wins(&cells, r, col, (mover + 1) as u8) {
@@ -294,11 +301,22 @@ mod tests {
             &[3],
         );
         assert!(t.terminal && t.events == vec![Connect4Event::Win, Connect4Event::Loss]);
-        // A move into a full column loses immediately.
+        // Standard rules: a full column is ILLEGAL — legal_actions excludes it, and stepping it
+        // anyway (unreachable via legal play) hits the losing backstop rather than corrupting.
         let mut full = [0u8; 42];
         for r in 0..ROWS {
             at(&mut full, r, 0, if r % 2 == 0 { 1 } else { 2 });
         }
+        let full_state = Connect4State {
+            cells: full,
+            turn: 0,
+            done: false,
+        };
+        assert_eq!(
+            g.legal_actions(&full_state, 0),
+            (1..COLS).collect::<Vec<_>>(),
+            "the full column must be masked out"
+        );
         let t = g.step(
             &Connect4State {
                 cells: full,

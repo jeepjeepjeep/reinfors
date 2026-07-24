@@ -871,6 +871,7 @@ impl<S: Clone> Tree<S> {
             }
             visits[action] = f64::from(r_visits[slot]);
         }
+        let legal = r_actions.clone();
         let stats = SearchStats {
             max_depth: self.max_depth_seen,
             expansions: self.sims,
@@ -888,6 +889,7 @@ impl<S: Clone> Tree<S> {
             values: vec![values],
             visits,
             interior: Vec::new(),
+            legal,
             stats,
         }
     }
@@ -1340,10 +1342,20 @@ impl Policy for Mcts {
         if self.cfg.temperature > 0.0 && move_idx < self.cfg.temperature_drop {
             return sample_visits(&eval.visits, self.cfg.temperature, rng);
         }
-        match self.act_by {
-            ActBy::Visits if !eval.visits.is_empty() => argmax(&eval.visits),
-            _ => argmax(&eval.values[0]),
+        // Argmax over the LEGAL set: densified rows carry 0 on illegal slots, and a 0 can
+        // out-argmax all-negative legal values in a losing position.
+        let row = match self.act_by {
+            ActBy::Visits if !eval.visits.is_empty() => &eval.visits,
+            _ => &eval.values[0],
+        };
+        debug_assert!(!eval.legal.is_empty());
+        let mut best = eval.legal[0];
+        for &a in &eval.legal {
+            if row[a] > row[best] {
+                best = a;
+            }
         }
+        best
     }
 
     fn fold_telemetry(&self, eval: &SearchEvaluation, stats: &mut CollectStats) {
@@ -1376,6 +1388,8 @@ mod tests {
             values: vec![values],
             visits,
             interior: Vec::new(),
+            legal: (0..2).collect(),
+
             stats: SearchStats {
                 max_depth: 1,
                 expansions: 1,
@@ -1423,6 +1437,28 @@ mod tests {
     #[test]
     fn low_temperature_approaches_greedy() {
         assert_eq!(sample_visits(&[1.0, 3.0], 0.05, &mut FakeRng(vec![0.5])), 1);
+    }
+
+    #[test]
+    fn value_acting_never_picks_an_illegal_densified_zero() {
+        // Losing position: all LEGAL values negative; the densified illegal slot carries 0 and
+        // must not win the argmax (the sparse-game act_by="value" bug class).
+        let p = Mcts::new(
+            MctsConfig {
+                num_simulations: 8,
+                uct_c: 1.4,
+                gamma: 1.0,
+                max_depth: 8,
+                temperature: 0.0,
+                temperature_drop: u32::MAX,
+                chance: ChanceMode::AlwaysResample,
+            },
+            ActBy::Value,
+        );
+        let mut e = eval(vec![0.0, -0.5], vec![0.0, 6.0]);
+        e.legal = vec![1]; // slot 0 is illegal — its 0.0 is a densification artifact
+        let mut moves = 0u32;
+        assert_eq!(p.select(&e, &mut moves, &mut FakeRng(vec![])), 1);
     }
 
     #[test]

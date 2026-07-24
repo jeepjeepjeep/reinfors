@@ -356,7 +356,11 @@ where
         .into_par_iter()
         .map(|mut s| {
             resolve(&mut s.arena, 0, cfg.gamma, s.n_heads);
-            let values = node_action_values(&s.arena, 0, cfg.gamma, s.n_heads, a);
+            // MAX nodes are the searching agent's decisions, so their legal sets come from its
+            // perspective (the closure densifies value rows back to the full action space).
+            let agent = s.agent;
+            let legal_of = |state: &G::State| game.legal_actions(state, agent);
+            let values = node_action_values(&s.arena, 0, cfg.gamma, s.n_heads, a, &legal_of);
             let mut interior: Vec<InteriorTarget> = Vec::new();
             if collect_interior && s.arena[0].edges.is_some() {
                 // Walk the expanded tree below the root (the root itself is the decision recorded as
@@ -370,6 +374,7 @@ where
                             cfg.gamma,
                             s.n_heads,
                             a,
+                            &legal_of,
                             &mut interior,
                         );
                     }
@@ -795,51 +800,66 @@ fn edge_value<S>(
 
 /// A decision node's action values as `[K][A]` (per head, per relative action) — the chance-averaged
 /// value of each agent action. Used for both the root target and interior TreeStrap targets.
-fn node_action_values<S>(
+fn node_action_values<S, L>(
     arena: &[Node<S>],
     idx: usize,
     gamma: f64,
     k: usize,
     a: usize,
-) -> Vec<Vec<f64>> {
+    legal_of: &L,
+) -> Vec<Vec<f64>>
+where
+    L: Fn(&S) -> Vec<usize>,
+{
+    // Densified back to the full action space: a node's edges run over its LEGAL actions (in
+    // `legal_actions` order), so the per-edge values scatter into their action ids — illegal
+    // columns carry 0, mirroring the tree searches' densification, and acting masks to the legal
+    // set so the zeros are never selectable.
     let edges = match &arena[idx].edges {
         None => return vec![vec![0.0; a]; k],
         Some(_) => take_edges(arena, idx),
     };
-    let per_action: Vec<Vec<f64>> = edges
-        .iter()
-        .map(|e| edge_value(arena, e, gamma, k))
-        .collect(); // [A][K]
-    (0..k)
-        .map(|h| per_action.iter().map(|ev| ev[h]).collect())
-        .collect() // -> [K][A]
+    let legal = legal_of(&arena[idx].state);
+    debug_assert_eq!(legal.len(), edges.len(), "edges parallel the legal set");
+    let mut values = vec![vec![0.0; a]; k];
+    for (slot, e) in edges.iter().enumerate() {
+        let ev = edge_value(arena, e, gamma, k); // [K]
+        let action = legal.get(slot).copied().unwrap_or(slot);
+        for (h, row) in values.iter_mut().enumerate() {
+            row[action] = ev[h];
+        }
+    }
+    values
 }
 
 /// DFS-collect every expanded non-terminal **MAX** node at or below `idx` as `(obs, [K][A] values)` —
 /// true TreeStrap data, valid only at the searching agent's decision points. Terminal and
 /// unexpanded-frontier nodes are skipped (no backed-up values); opponent/chance nodes are recursed
 /// through but not emitted (their `[K][A]` would be over the opponent's actions, not a training target).
-fn collect_interior_targets<S>(
+fn collect_interior_targets<S, L>(
     arena: &[Node<S>],
     idx: usize,
     gamma: f64,
     k: usize,
     a: usize,
+    legal_of: &L,
     out: &mut Vec<InteriorTarget>,
-) {
+) where
+    L: Fn(&S) -> Vec<usize>,
+{
     if arena[idx].terminal || arena[idx].edges.is_none() {
         return;
     }
     if arena[idx].max_node {
         out.push((
             arena[idx].obs.clone(),
-            node_action_values(arena, idx, gamma, k, a),
+            node_action_values(arena, idx, gamma, k, a, legal_of),
         ));
     }
     let edges = take_edges(arena, idx);
     for edge in &edges {
         for &(_, _, child) in edge {
-            collect_interior_targets(arena, child, gamma, k, a, out);
+            collect_interior_targets(arena, child, gamma, k, a, legal_of, out);
         }
     }
 }
