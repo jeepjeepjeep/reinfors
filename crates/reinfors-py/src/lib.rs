@@ -656,6 +656,26 @@ struct DqnBatch {
     dones: Py<PyArray1<bool>>, // (M,)
     #[pyo3(get)]
     masks: Py<PyArray2<f32>>, // (M, K)
+    // Legality in CSR form — record i's legal ids are `ids[offsets[i]..offsets[i+1]]`. Sparse on
+    // purpose: dense (M, A) f32 masks on wide action spaces dwarf the observations (chess: ~7.7x
+    // the obs bytes; ~37 GB per million transitions), while CSR is ~35 ids/row. Densify per
+    // MINIBATCH at train time, never per record at storage time.
+    #[pyo3(get)]
+    legal_ids: Py<PyArray1<i64>>, // legality of `obs` (diagnostics; the action is already legal)
+    #[pyo3(get)]
+    legal_offsets: Py<PyArray1<i64>>, // (M + 1,)
+    // Legality of `next_obs` + THE bootstrap rule: bootstrap iff record i's slice is NON-EMPTY —
+    // an empty slice (terminal, or an alternating-game truncation tail) means "target = r".
+    // `dones` is an episode-boundary flag, NOT a target-math input ((1 - done) * max meets a
+    // masked max's -inf as NaN). The complete safe target, densified per minibatch:
+    //   counts = np.diff(next_legal_offsets); rows = np.repeat(np.arange(M), counts)
+    //   mask = np.zeros((M, A), bool); mask[rows, next_legal_ids] = True
+    //   q  = np.where(mask, q_next, -np.inf).max(-1)
+    //   td = rewards + gamma * np.where(np.isfinite(q), q, 0.0)
+    #[pyo3(get)]
+    next_legal_ids: Py<PyArray1<i64>>,
+    #[pyo3(get)]
+    next_legal_offsets: Py<PyArray1<i64>>, // (M + 1,)
     #[pyo3(get)]
     telemetry: Py<PyDict>,
 }
@@ -840,10 +860,20 @@ impl RecordBatch for DqnRecord {
         let mut actions: Vec<i64> = Vec::with_capacity(m);
         let mut rewards: Vec<f64> = Vec::with_capacity(m);
         let mut dones: Vec<bool> = Vec::with_capacity(m);
+        let mut legal_ids: Vec<i64> = Vec::new();
+        let mut legal_offsets: Vec<i64> = Vec::with_capacity(m + 1);
+        let mut next_legal_ids: Vec<i64> = Vec::new();
+        let mut next_legal_offsets: Vec<i64> = Vec::with_capacity(m + 1);
+        legal_offsets.push(0);
+        next_legal_offsets.push(0);
         for t in records {
             obs_flat.extend(t.obs);
             next_flat.extend(t.next_obs);
             mask_flat.extend(t.mask);
+            legal_ids.extend(t.legal.iter().map(|&a| a as i64));
+            legal_offsets.push(legal_ids.len() as i64);
+            next_legal_ids.extend(t.next_legal.iter().map(|&a| a as i64));
+            next_legal_offsets.push(next_legal_ids.len() as i64);
             actions.push(t.action as i64);
             rewards.push(t.reward);
             dones.push(t.terminal);
@@ -866,6 +896,10 @@ impl RecordBatch for DqnRecord {
                 next_obs: next_arr.unbind(),
                 dones: dones.into_pyarray(py).unbind(),
                 masks: mask_arr.unbind(),
+                legal_ids: legal_ids.into_pyarray(py).unbind(),
+                legal_offsets: legal_offsets.into_pyarray(py).unbind(),
+                next_legal_ids: next_legal_ids.into_pyarray(py).unbind(),
+                next_legal_offsets: next_legal_offsets.into_pyarray(py).unbind(),
                 telemetry: telemetry.unbind(),
             },
         )?
@@ -1718,6 +1752,16 @@ impl PyEnv {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "missing action for active agent {agent}; active agents: {active:?}"
             )));
+        }
+        // Validate legality at the boundary: an illegal action id can corrupt game state (e.g.
+        // backgammon decoding moves for checkers that are not there), so it never enters the core.
+        for (&agent, &action) in &actions {
+            let legal = self.inner.legal_actions(agent);
+            if !legal.contains(&action) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "action {action} is illegal for agent {agent} (legal: {legal:?})"
+                )));
+            }
         }
         let mut joint = vec![0usize; self.inner.num_agents()];
         for (agent, action) in actions {

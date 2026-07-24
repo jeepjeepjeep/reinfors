@@ -179,6 +179,7 @@ mod tests {
                 action: t % 3,
                 reward: t as f64,
                 next_obs: Vec::new(),
+                next_legal: Vec::new(),
                 terminal: false,
             })
             .collect();

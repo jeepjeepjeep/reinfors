@@ -11,6 +11,10 @@ pub struct Step<E> {
     pub action: usize,
     pub reward: f64,
     pub next_obs: Vec<f32>,
+    /// The next state's legal actions (filled with `next_obs` when the learner asks for it) — the
+    /// TD `max_a Q(s', a)` must range over these only; illegal actions' phantom Q values would
+    /// inflate the bootstrap on sparse-action games (chess, backgammon).
+    pub next_legal: Vec<usize>,
     pub terminal: bool,
 }
 

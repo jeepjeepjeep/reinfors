@@ -102,6 +102,7 @@ mod tests {
             action,
             reward,
             next_obs: Vec::new(),
+            next_legal: Vec::new(),
             terminal: false,
         }
     }

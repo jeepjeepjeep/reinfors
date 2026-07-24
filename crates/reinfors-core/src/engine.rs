@@ -252,6 +252,7 @@ where
                     action: rel,
                     reward: 0.0, // filled in from this tick's transition after advancing
                     next_obs: Vec::new(), // filled below when the learner needs it
+                    next_legal: Vec::new(),
                     terminal: false,
                 });
             }
@@ -276,14 +277,18 @@ where
                 for (si, action) in agents.iter().enumerate() {
                     let reward = self.reward.step_reward(&events[si], si);
                     if action.is_some() {
-                        let next_obs = if needs_next_obs {
-                            self.episodes[gi].observe(&*self.encoder, si)
+                        let (next_obs, next_legal) = if needs_next_obs {
+                            (
+                                self.episodes[gi].observe(&*self.encoder, si),
+                                self.game.legal_actions(&self.episodes[gi].state, si),
+                            )
                         } else {
-                            Vec::new()
+                            (Vec::new(), Vec::new())
                         };
                         if let Some(step) = self.traj[gi][si].last_mut() {
                             step.reward = reward;
                             step.next_obs = next_obs;
+                            step.next_legal = next_legal;
                             step.terminal = terminal;
                         }
                     } else if let Some(step) = self.traj[gi][si].last_mut() {
