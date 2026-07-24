@@ -1672,6 +1672,21 @@ struct PyEnv {
     inner: Box<dyn ErasedEnv>,
 }
 
+impl PyEnv {
+    /// Boundary check for the agent-indexed methods: out-of-range indices must be a `ValueError`,
+    /// not a panic (snake indexes `snakes[agent]`) or — worse — a silently wrong answer (connect4
+    /// encodes any unknown index from player 0's perspective).
+    fn check_agent(&self, agent: usize) -> PyResult<()> {
+        let n = self.inner.num_agents();
+        if agent >= n {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "agent {agent} out of range for a {n}-agent game"
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[pymethods]
 impl PyEnv {
     #[new]
@@ -1706,13 +1721,15 @@ impl PyEnv {
         self.inner.active_agents()
     }
 
-    fn legal_actions(&self, agent: usize) -> Vec<usize> {
-        self.inner.legal_actions(agent)
+    fn legal_actions(&self, agent: usize) -> PyResult<Vec<usize>> {
+        self.check_agent(agent)?;
+        Ok(self.inner.legal_actions(agent))
     }
 
     /// The encoded observation for `agent` as a `(C, H, W)` float32 array (the value-network view).
-    fn observe<'py>(&self, py: Python<'py>, agent: usize) -> Bound<'py, PyArray3<f32>> {
-        self.inner.observe(py, agent)
+    fn observe<'py>(&self, py: Python<'py>, agent: usize) -> PyResult<Bound<'py, PyArray3<f32>>> {
+        self.check_agent(agent)?;
+        Ok(self.inner.observe(py, agent))
     }
 
     /// The observation `Space` — so a net can be sized/validated from the env alone.
