@@ -46,7 +46,7 @@ impl<G: Game> Episode<G> {
     /// terminal)`. A [`Reward`](crate::Reward) (held by the caller, not the `Episode`) maps the events
     /// to scalar rewards.
     pub(crate) fn advance(&mut self, game: &G, actions: &[usize]) -> (Vec<G::Event>, bool) {
-        let t = game.step_env(&self.state, actions, &mut self.rng);
+        let t = crate::game::step_env(game, &self.state, actions, &mut self.rng);
         self.state = t.next_state;
         (t.events, t.terminal)
     }

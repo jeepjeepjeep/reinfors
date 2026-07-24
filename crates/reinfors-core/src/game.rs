@@ -53,27 +53,12 @@ pub trait Game {
 
     fn step(&self, state: &Self::State, actions: &[usize]) -> Transition<Self::State, Self::Event>;
 
-    /// Draw one realization of the transition's environment chance. `None` means the transition is
-    /// deterministic (no chance node), so callers use `transition.next_state` directly. Determinism is
-    /// a property of the transition, not the draw, so a stochastic transition always returns `Some`.
-    /// Callers wanting several independent realizations (e.g. the search's `food_samples` Monte-Carlo
-    /// fan-out) call this `n` times. The default is deterministic.
-    fn sample_chance(
-        &self,
-        state: &Self::State,
-        transition: &Transition<Self::State, Self::Event>,
-        rng: &mut dyn Rng,
-    ) -> Option<Self::State> {
-        let _ = (state, transition, rng);
-        None
-    }
-
     /// The transition's chance distribution, *declared*: probabilities over the outcome indices
     /// that [`apply_chance`](Self::apply_chance) accepts. `None` means the transition is
-    /// deterministic — the same condition under which `sample_chance` returns `None`, and the two
-    /// must agree (a correct sampler is constructive proof the game knows this distribution; this
-    /// is its declarative form, and tree searches consume it per their configured
-    /// [`ChanceMode`](crate::ChanceMode)). Contract: probabilities are positive and sum to 1;
+    /// deterministic. This is the game's ONLY chance seam — there is no game-side sampler to
+    /// diverge from it. The framework realizes env transitions from it ([`step_env`], one draw),
+    /// and tree searches consume it per their configured [`ChanceMode`](crate::ChanceMode).
+    /// Contract: probabilities are positive and sum to 1;
     /// terminal transitions return `None`; and outcomes only vary the chance element — they share
     /// the transition's `terminal` flag, next actor, **and events: rewards are edge-level and
     /// outcome-invariant**. Searches score the action edge once from the pre-chance transition and
@@ -90,10 +75,9 @@ pub trait Game {
         None
     }
 
-    /// Materialize one outcome of the transition's chance distribution — the state `sample_chance`
-    /// would produce had it drawn `outcome` (an index into the `chance_outcomes` probabilities).
-    /// Only called with indices of a `Some` distribution; games that declare no chance never see
-    /// it.
+    /// Materialize outcome `outcome` (an index into the `chance_outcomes` probabilities) of the
+    /// transition's chance distribution. Only called with indices of a `Some` distribution; games
+    /// that declare no chance never see it.
     fn apply_chance(
         &self,
         state: &Self::State,
@@ -105,21 +89,6 @@ pub trait Game {
     }
 
     fn initial_state(&self, rng: &mut dyn Rng) -> Self::State;
-
-    fn step_env(
-        &self,
-        state: &Self::State,
-        actions: &[usize],
-        rng: &mut dyn Rng,
-    ) -> Transition<Self::State, Self::Event> {
-        let t = self.step(state, actions);
-        let next_state = self.sample_chance(state, &t, rng).unwrap_or(t.next_state);
-        Transition {
-            next_state,
-            events: t.events,
-            terminal: t.terminal,
-        }
-    }
 
     /// The episode-length cap after which the rollout truncates a still-running game, or `None` for a
     /// game that always ends on its own (e.g. Connect-4). This is a property the game *declares* — the
@@ -135,5 +104,128 @@ pub trait Game {
     /// the survival bonus. Default: no truncation-specific outcome.
     fn mark_truncation(&self, state: &Self::State, events: &mut [Self::Event]) {
         let _ = (state, events);
+    }
+}
+
+/// Realize one environment transition: the deterministic [`Game::step`], then — for a transition
+/// with declared chance — ONE draw from `chance_outcomes` materialized via `apply_chance`. The
+/// framework realizes; the game only declares. This is the sole realization path (rollout engine
+/// and `Env` both route through it), so the chance model the searches plan against and the one the
+/// training trajectories are made of are the same object by construction — divergence is not
+/// expressible. (The cost: realization materializes the probs vector; a game with a very large
+/// outcome space pays that per stochastic tick — acceptable today, revisit if measured.)
+pub fn step_env<G: Game>(
+    game: &G,
+    state: &G::State,
+    actions: &[usize],
+    rng: &mut dyn Rng,
+) -> Transition<G::State, G::Event> {
+    let t = game.step(state, actions);
+    match game.chance_outcomes(state, &t) {
+        None => t,
+        Some(probs) => {
+            let outcome = crate::rng::weighted_index(rng, &probs);
+            Transition {
+                next_state: game.apply_chance(state, &t, outcome),
+                events: t.events,
+                terminal: t.terminal,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod step_env_tests {
+    use super::*;
+
+    /// One action; chance outcomes {0: +10, 1: +20} at p = [0.25, 0.75] on every step.
+    struct Chancy;
+    impl Game for Chancy {
+        type State = i32;
+        type Event = ();
+        fn num_agents(&self) -> usize {
+            1
+        }
+        fn action_count(&self) -> usize {
+            1
+        }
+        fn actor(&self, _: &i32) -> Actor {
+            Actor::Agent(0)
+        }
+        fn legal_actions(&self, _: &i32, _: usize) -> Vec<usize> {
+            vec![0]
+        }
+        fn step(&self, s: &i32, _: &[usize]) -> Transition<i32, ()> {
+            Transition {
+                next_state: *s + 1,
+                events: vec![()],
+                terminal: false,
+            }
+        }
+        fn chance_outcomes(&self, _: &i32, _: &Transition<i32, ()>) -> Option<Vec<f64>> {
+            Some(vec![0.25, 0.75])
+        }
+        fn apply_chance(&self, _: &i32, t: &Transition<i32, ()>, outcome: usize) -> i32 {
+            t.next_state + if outcome == 0 { 10 } else { 20 }
+        }
+        fn initial_state(&self, _: &mut dyn Rng) -> i32 {
+            0
+        }
+    }
+
+    struct Unit(f64);
+    impl Rng for Unit {
+        fn below(&mut self, _: usize) -> usize {
+            0
+        }
+        fn unit(&mut self) -> f64 {
+            self.0
+        }
+    }
+
+    #[test]
+    fn realizes_the_declared_distribution() {
+        // The framework's ONE derivation, pinned once here (not per game — games no longer have a
+        // sampler to agree with): a unit draw below 0.25 lands on outcome 0, above on outcome 1,
+        // and the realized state is exactly `apply_chance` of that outcome.
+        let g = Chancy;
+        let low = step_env(&g, &0, &[0], &mut Unit(0.1));
+        assert_eq!(low.next_state, 11); // step +1, outcome 0 (+10)
+        let high = step_env(&g, &0, &[0], &mut Unit(0.9));
+        assert_eq!(high.next_state, 21); // step +1, outcome 1 (+20)
+        assert!(!low.terminal);
+    }
+
+    #[test]
+    fn deterministic_transitions_pass_through() {
+        struct Det;
+        impl Game for Det {
+            type State = i32;
+            type Event = ();
+            fn num_agents(&self) -> usize {
+                1
+            }
+            fn action_count(&self) -> usize {
+                1
+            }
+            fn actor(&self, _: &i32) -> Actor {
+                Actor::Agent(0)
+            }
+            fn legal_actions(&self, _: &i32, _: usize) -> Vec<usize> {
+                vec![0]
+            }
+            fn step(&self, s: &i32, _: &[usize]) -> Transition<i32, ()> {
+                Transition {
+                    next_state: *s + 1,
+                    events: vec![()],
+                    terminal: false,
+                }
+            }
+            fn initial_state(&self, _: &mut dyn Rng) -> i32 {
+                0
+            }
+        }
+        let t = step_env(&Det, &4, &[0], &mut Unit(0.5));
+        assert_eq!(t.next_state, 5);
     }
 }

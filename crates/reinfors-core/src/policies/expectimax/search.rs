@@ -11,13 +11,13 @@
 //! without fighting the borrow checker.
 //!
 //! The engine is generic over the [`Game`] trait: a `Node<S>` carries an opaque game state `S` and
-//! successors come from `Game::step` + `Game::sample_chance`. The public [`search_many`] +
+//! successors come from `Game::step` (+ the declared chance). The public [`search_many`] +
 //! [`SearchConfig`] are game-agnostic; concrete games (e.g. the snake `selective_search` wrappers in
 //! reinfors-games) build a `SearchConfig` and a `Game` and call [`search_many`].
 //!
 //! Chance comes from the game's *declared* distribution (`Game::chance_outcomes` +
-//! `apply_chance` — the same seam the tree searches consume, agreeing with the env's
-//! `sample_chance` by contract), fanned per the configured [`ChanceMode`]: `Committed{k}` draws k
+//! `apply_chance` — the game's only chance seam; the env realizes from the same declaration),
+//! fanned per the configured [`ChanceMode`]: `Committed{k}` draws k
 //! equal-weight realizations (the historical `food_samples` estimator), `ExpandAll` fans every
 //! outcome at its true probability (exact). A deterministic transition keeps a single child. Each
 //! search owns a seeded RNG, so results are reproducible from a seed.
@@ -504,8 +504,8 @@ fn agent_branching<G: Game>(
 /// `bw` is the move's chance weight. `agent_out_terminal` decides whether "the searching agent has no
 /// legal actions in the child" counts as terminal: true for simultaneous play (it means the agent
 /// died), false for a sequential turn (it just means it is not the agent's move next). A stochastic
-/// transition fans into `food_samples` equally-weighted Monte-Carlo draws from `sample_chance` — the
-/// same chance model the env rollout uses, so search and env can never diverge.
+/// transition fans per the configured `ChanceMode` over the game's declared distribution — the
+/// same declaration the env realizes from, so search and env cannot diverge.
 #[allow(clippy::too_many_arguments)]
 fn push_branches<G: Game>(
     arena: &mut Vec<Node<G::State>>,
