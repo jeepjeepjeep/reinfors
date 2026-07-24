@@ -69,13 +69,17 @@ class EncoderHandle:
     def AlphaZeroChess(history_length: int = ...) -> EncoderHandle: ...
 
 class PolicyHandle:
+    # Best-first selective expectimax (expand-once). chance_mode: "committed" (default; the
+    # historical food_samples estimator) | "expand_all" (exact fan). "always_resample" is rejected —
+    # an expand-once search has no traversal event to redraw on.
     @staticmethod
     def SelectiveExpectimax(
         expansion_budget: int = ...,
         top_k: int = ...,
         max_depth: int = ...,
         beta: float = ...,
-        food_samples: int = ...,
+        chance_mode: str = ...,
+        chance_samples: int = ...,
         n_heads: int = ...,
         epsilon: float = ...,
         opponent: str = ...,

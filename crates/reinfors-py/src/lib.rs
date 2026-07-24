@@ -53,7 +53,6 @@ fn validate_search_params(
     top_k: usize,
     max_depth: i32,
     beta: f64,
-    food_samples: usize,
 ) -> PyResult<()> {
     use pyo3::exceptions::PyValueError;
     if expansion_budget < 1 {
@@ -64,9 +63,6 @@ fn validate_search_params(
     }
     if max_depth < 1 {
         return Err(PyValueError::new_err("max_depth must be >= 1"));
-    }
-    if food_samples < 1 {
-        return Err(PyValueError::new_err("food_samples must be >= 1"));
     }
     if !(0.0..=1.0).contains(&beta) {
         return Err(PyValueError::new_err("beta must be in [0, 1]"));
@@ -1189,7 +1185,7 @@ enum PolicySpec {
         expansion_budget: usize,
         top_k: usize,
         max_depth: i32,
-        food_samples: usize,
+        chance: ChanceMode,
         opponent: Opponent,
         n_heads: usize,
         epsilon: f64,
@@ -1286,7 +1282,7 @@ where
                 expansion_budget,
                 top_k,
                 max_depth,
-                food_samples,
+                chance,
                 opponent,
                 n_heads,
                 epsilon,
@@ -1298,7 +1294,7 @@ where
                 interior_targets,
             },
         ) => {
-            validate_search_params(expansion_budget, top_k, max_depth, beta, food_samples)?;
+            validate_search_params(expansion_budget, top_k, max_depth, beta)?;
             if n_heads < 1 {
                 return Err(pyo3::exceptions::PyValueError::new_err("n_heads must be >= 1"));
             }
@@ -1311,7 +1307,7 @@ where
                 expansion_budget,
                 top_k,
                 max_depth,
-                food_samples,
+                chance,
                 opponent,
             };
             let policy = SelectiveExpectimax::new(cfg, n_heads, epsilon);
@@ -2229,7 +2225,7 @@ struct PolicyHandle {
 #[pymethods]
 impl PolicyHandle {
     #[staticmethod]
-    #[pyo3(signature = (expansion_budget=64, top_k=8, max_depth=12, beta=1.0, food_samples=1, n_heads=1, epsilon=0.0, opponent="uniform", opp_temperature=1.0, opp_floor=0.0))]
+    #[pyo3(signature = (expansion_budget=64, top_k=8, max_depth=12, beta=1.0, chance_mode="committed", chance_samples=1, n_heads=1, epsilon=0.0, opponent="uniform", opp_temperature=1.0, opp_floor=0.0))]
     #[pyo3(name = "SelectiveExpectimax")]
     #[allow(clippy::too_many_arguments)]
     fn selective_expectimax(
@@ -2237,20 +2233,28 @@ impl PolicyHandle {
         top_k: usize,
         max_depth: i32,
         beta: f64,
-        food_samples: usize,
+        chance_mode: &str,
+        chance_samples: usize,
         n_heads: usize,
         epsilon: f64,
         opponent: &str,
         opp_temperature: f64,
         opp_floor: f64,
     ) -> PyResult<Self> {
+        let chance = parse_chance_mode(chance_mode, chance_samples)?;
+        if !SelectiveExpectimax::supports_chance_mode(chance) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "SelectiveExpectimax expands each node exactly once (best-first) and cannot \
+                 express per-traversal chance modes; use \"committed\" or \"expand_all\"",
+            ));
+        }
         Ok(PolicyHandle {
             spec: PolicySpec::SelectiveExpectimax {
                 beta,
                 expansion_budget,
                 top_k,
                 max_depth,
-                food_samples,
+                chance,
                 opponent: parse_opponent(opponent, opp_temperature, opp_floor)?,
                 n_heads,
                 epsilon,

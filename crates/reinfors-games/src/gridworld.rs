@@ -150,7 +150,8 @@ impl StateEncoder for GridWorldPlanes {
 mod tests {
     use super::*;
     use reinfors_core::{
-        search_many, Engine, EngineParams, Opponent, SearchConfig, SelectiveExpectimax, TreeStrap,
+        search_many, ChanceMode, Engine, EngineParams, Opponent, SearchConfig, SelectiveExpectimax,
+        TreeStrap,
     };
 
     fn world() -> GridWorld {
@@ -187,7 +188,7 @@ mod tests {
             expansion_budget: 32,
             top_k: 4,
             max_depth: 8,
-            food_samples: 1,
+            chance: ChanceMode::Committed { samples: 1 },
             opponent: Opponent::Uniform, // irrelevant: single-agent, no opponent nodes
         }
     }

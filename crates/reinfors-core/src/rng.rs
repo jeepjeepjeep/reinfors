@@ -23,6 +23,24 @@ impl SplitMix64 {
     }
 }
 
+/// Draw an index proportional to `probs` (one `unit()` draw; numeric fallback lands on the last
+/// positive-mass entry). Shared by every search's chance-outcome sampling.
+pub(crate) fn weighted_index(rng: &mut dyn crate::game::Rng, probs: &[f64]) -> usize {
+    let total: f64 = probs.iter().sum();
+    let mut r = rng.unit() * total;
+    let mut last = 0;
+    for (i, &p) in probs.iter().enumerate() {
+        if p > 0.0 {
+            last = i;
+            r -= p;
+            if r <= 0.0 {
+                return i;
+            }
+        }
+    }
+    last
+}
+
 impl crate::game::Rng for SplitMix64 {
     fn below(&mut self, n: usize) -> usize {
         (self.next_u64() % n as u64) as usize
