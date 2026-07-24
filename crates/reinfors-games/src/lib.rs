@@ -2,11 +2,15 @@
 //! game-free generic framework. Each game is one self-contained module (`snake`, `connect4`,
 //! `gridworld`): its dynamics, observation encoder, reward, actions, and `Game` adapter.
 
+pub mod backgammon;
 pub mod chess;
 pub mod connect4;
 pub mod gridworld;
 pub mod snake;
 
+pub use backgammon::{
+    Backgammon, BackgammonEvent, BackgammonReward, BackgammonState, BackgammonTesauro,
+};
 pub use chess::{
     Chess, ChessEvent, ChessPlanesAz119, ChessPlanesMinimal, ChessReward, ChessState, CHESS_ACTIONS,
 };
