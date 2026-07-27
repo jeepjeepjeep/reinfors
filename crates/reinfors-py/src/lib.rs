@@ -1600,6 +1600,17 @@ enum LearnerSpec {
 }
 
 /// Reject a probability/weight outside `[0, 1]`.
+/// Reject a non-finite or non-positive value — for parameters that DIVIDE (a zero temperature
+/// turns the distributional softmax into NaN, which panics downstream comparisons).
+fn check_positive_finite(name: &str, v: f64) -> PyResult<()> {
+    if !v.is_finite() || v <= 0.0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{name} must be finite and > 0"
+        )));
+    }
+    Ok(())
+}
+
 /// Reject a non-finite or negative value (NaN-proof: `!(v >= 0.0)` is true for NaN).
 fn check_nonneg_finite(name: &str, v: f64) -> PyResult<()> {
     if !v.is_finite() || v < 0.0 {
@@ -2741,7 +2752,7 @@ impl PolicyHandle {
         check_unit("beta", beta)?;
         check_unit("epsilon", epsilon)?;
         check_unit("opp_floor", opp_floor)?;
-        check_nonneg_finite("opp_temperature", opp_temperature)?;
+        check_positive_finite("opp_temperature", opp_temperature)?;
         let chance = chance.map_or(ChanceMode::Committed { samples: 1 }, |c| c.mode);
         if !SelectiveExpectimax::supports_chance_mode(chance) {
             return Err(pyo3::exceptions::PyValueError::new_err(

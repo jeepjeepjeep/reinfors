@@ -200,3 +200,19 @@ def test_noise_block_name_is_validated() -> None:
     del cfg["policy"]["noise"]["name"]
     with pytest.raises(ValueError, match="requires a name"):
         rf.engine_from_config(cfg)
+
+
+def test_zero_opp_temperature_is_rejected_and_positive_collects() -> None:
+    # opp_temperature divides inside the distributional softmax: 0 made NaNs that panicked the
+    # search mid-collect. Rejected at construction now; a small positive value must collect fine.
+    with pytest.raises(ValueError, match="opp_temperature"):
+        rf.policies.SelectiveExpectimax(opponent="distributional", opp_temperature=0.0)
+    engine = rf.Engine(
+        rf.games.Snake(grid_size=6, initial_length=2, food=1, max_ticks=20),
+        None,
+        rf.policies.SelectiveExpectimax(expansion_budget=4, opponent="distributional", opp_temperature=0.05),
+        rf.learners.TreeStrap(),
+        n_games=2,
+    )
+    batch = engine.collect(8, lambda obs: np.full((obs.shape[0], 1, 3), 0.5))
+    assert batch.obs.shape[0] >= 8
