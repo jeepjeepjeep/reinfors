@@ -7,3 +7,5 @@ __pycache__/
 *.so
 /runs
 uv.lock
+runs_*.out
+runs/
