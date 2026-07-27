@@ -75,6 +75,9 @@ class EncoderHandle:
     # under the same symmetry (role equivariance; the AlphaZero paper's convention).
     @staticmethod
     def RelativeChess() -> EncoderHandle: ...
+    # OpenSpiel's chess observation replicated exactly (20, 8, 8) — the interop/benchmark view.
+    @staticmethod
+    def OpenSpielChess() -> EncoderHandle: ...
     # The encoder's action map (identity for absolute encoders) — for driving a net outside the
     # engine: read logits at head_index(a, agent) for each legal game action a.
     def head_index(self, action: int, agent: int) -> int: ...

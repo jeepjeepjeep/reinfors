@@ -15,11 +15,13 @@ from . import _reinfors
 
 MinimalChess = _reinfors.EncoderHandle.MinimalChess
 RelativeChess = _reinfors.EncoderHandle.RelativeChess
+OpenSpielChess = _reinfors.EncoderHandle.OpenSpielChess
 AlphaZeroChess = _reinfors.EncoderHandle.AlphaZeroChess
 
 _REGISTRY: dict[str, Callable[..., Any]] = {
     "minimal_chess": MinimalChess,
     "relative_chess": RelativeChess,
+    "openspiel_chess": OpenSpielChess,
     "alphazero_chess": AlphaZeroChess,
 }
 

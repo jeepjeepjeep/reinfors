@@ -548,6 +548,78 @@ impl StateEncoder for ChessPlanesRelative {
     }
 }
 
+/// OpenSpiel's chess observation, replicated exactly `(20, 8, 8)` — the interop/benchmark view
+/// (see reinfors-benchmarks: both frameworks' nets consume identical inputs, making throughput,
+/// learning curves AND infer-cache hit rates commensurable — including their encoding's
+/// en-passant blindness, which merges positions differing only in ep rights into one cache
+/// entry). Layout from the pinned source (`chess.cc::ObservationTensor`, commit d15d49f8):
+///   0..12  piece occupancy interleaved by TYPE in K Q R B N P order: white then black per type
+///   12     empty-square occupancy
+///   13     repetition count of the current position, (rep - 1) / 2 over [1, 3]
+///   14     side to move as their player id (ColorToPlayer: Black=0, White=1) — all-ONES White
+///   15     halfmove clock / 101
+///   16..20 castling rights: W queenside, W kingside, B queenside, B kingside
+/// Square order matches ours (rank-major, a1 = 0), so planes are straight bitboard writes.
+/// Absolute frame: the action view is the identity (native 8x8x73 ids; action encodings are
+/// deliberately NOT translated between frameworks — see the benchmarks ledger).
+pub struct ChessPlanesOpenSpiel;
+
+impl ActionView for ChessPlanesOpenSpiel {} // absolute: identity action view
+
+impl StateEncoder for ChessPlanesOpenSpiel {
+    type State = ChessState;
+
+    fn encode(&self, state: &ChessState, _agent: usize) -> Vec<f32> {
+        const PLANE: usize = 64;
+        const TYPES: [Piece; 6] = [
+            Piece::King,
+            Piece::Queen,
+            Piece::Rook,
+            Piece::Bishop,
+            Piece::Knight,
+            Piece::Pawn,
+        ];
+        let mut obs = vec![0.0f32; 20 * PLANE];
+        let board = &state.board;
+        for (ti, piece) in TYPES.into_iter().enumerate() {
+            for (ci, color) in [Color::White, Color::Black].into_iter().enumerate() {
+                let bb = board.pieces(piece) & board.colors(color);
+                for sq in bb {
+                    obs[(ti * 2 + ci) * PLANE + sq_index(sq)] = 1.0;
+                }
+            }
+        }
+        let occupied = board.occupied();
+        for i in 0..PLANE {
+            if !occupied.has(Square::index(i)) {
+                obs[12 * PLANE + i] = 1.0;
+            }
+        }
+        let rep = (state.repetition_count() as f32 - 1.0) / 2.0;
+        obs[13 * PLANE..14 * PLANE].fill(rep);
+        // Their player ids are inverted vs intuition: ColorToPlayer maps Black -> 0, White -> 1,
+        // so the side-to-move plane is all-ONES when White is to move.
+        if board.side_to_move() == Color::White {
+            obs[14 * PLANE..15 * PLANE].fill(1.0);
+        }
+        obs[15 * PLANE..16 * PLANE].fill(f32::from(board.halfmove_clock()) / 101.0);
+        for (i, color) in [Color::White, Color::Black].into_iter().enumerate() {
+            let rights = board.castle_rights(color);
+            if rights.long.is_some() {
+                obs[(16 + i * 2) * PLANE..(17 + i * 2) * PLANE].fill(1.0); // queenside first
+            }
+            if rights.short.is_some() {
+                obs[(17 + i * 2) * PLANE..(18 + i * 2) * PLANE].fill(1.0);
+            }
+        }
+        obs
+    }
+
+    fn obs_shape(&self) -> (usize, usize, usize) {
+        (20, 8, 8)
+    }
+}
+
 /// AlphaZero's 119-plane chess observation `(119, 8, 8)`, in this framework's ABSOLUTE orientation
 /// (the paper flips the board to the mover's perspective; a flipped view belongs together with a
 /// flipped action mapping, which is game-level, not encoder-level — so both stay absolute here and
@@ -1087,5 +1159,47 @@ mod relative_frame_tests {
         }
         assert_eq!(w[12 * 64], 1.0, "White to move: agent 0 sees my-turn");
         assert_eq!(b[12 * 64], 0.0, "White to move: agent 1 sees not-my-turn");
+    }
+}
+
+#[cfg(test)]
+mod openspiel_obs_tests {
+    use super::*;
+
+    #[test]
+    fn start_position_matches_the_documented_layout() {
+        let game = Chess {
+            max_ticks: None,
+            history_len: 0,
+        };
+        let s = {
+            struct R;
+            impl reinfors_core::Rng for R {
+                fn below(&mut self, _: usize) -> usize {
+                    0
+                }
+                fn unit(&mut self) -> f64 {
+                    0.0
+                }
+            }
+            game.initial_state(&mut R)
+        };
+        let obs = ChessPlanesOpenSpiel.encode(&s, 0);
+        let plane = |p: usize| obs[p * 64..(p + 1) * 64].iter().sum::<f32>();
+        // K Q R B N P interleaved white/black
+        for (p, n) in [(0, 1.0), (1, 1.0), (2, 1.0), (3, 1.0), (4, 2.0), (5, 2.0)] {
+            assert_eq!(plane(p), n, "kings/queens/rooks plane {p}");
+        }
+        assert_eq!(plane(10), 8.0); // white pawns
+        assert_eq!(plane(11), 8.0); // black pawns
+        assert_eq!(plane(12), 32.0); // empty squares
+        assert_eq!(plane(13), 0.0); // repetition 1 -> (1-1)/2
+        assert_eq!(plane(14), 64.0); // White to move -> all ONES (their Black=0/White=1 ids)
+        assert_eq!(plane(15), 0.0); // clock 0
+        for p in 16..20 {
+            assert_eq!(plane(p), 64.0, "castling plane {p}");
+        }
+        // a1 is index 0: white queenside rook present in the rook plane at slot 0.
+        assert_eq!(obs[4 * 64], 1.0);
     }
 }
