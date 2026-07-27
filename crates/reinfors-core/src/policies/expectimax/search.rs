@@ -1000,7 +1000,7 @@ mod tests {
     }
 
     struct LineEnc;
-    impl crate::encoder::ActionView for LineEnc {}
+    impl ActionView for LineEnc {}
     impl StateEncoder for LineEnc {
         type State = i32;
         fn encode(&self, pos: &i32, _: usize) -> Vec<f32> {
@@ -1197,7 +1197,7 @@ mod chance_mode_tests {
     }
 
     struct Enc;
-    impl crate::encoder::ActionView for Enc {}
+    impl ActionView for Enc {}
     impl StateEncoder for Enc {
         type State = St;
         fn encode(&self, s: &St, _: usize) -> Vec<f32> {

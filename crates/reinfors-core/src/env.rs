@@ -84,7 +84,7 @@ impl<G: Game> Env<G> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoder::StateEncoder;
+    use crate::encoder::{ActionView, StateEncoder};
     use crate::game::{Actor, Game, Rng, Transition};
 
     // A 1-agent walk to `goal`: action 1 steps right, 0 stays; the event is 1.0 at the goal, else 0.0.
@@ -125,7 +125,7 @@ mod tests {
     }
 
     struct PosEncoder;
-    impl crate::encoder::ActionView for PosEncoder {}
+    impl ActionView for PosEncoder {}
     impl StateEncoder for PosEncoder {
         type State = i32;
         fn encode(&self, pos: &i32, _: usize) -> Vec<f32> {

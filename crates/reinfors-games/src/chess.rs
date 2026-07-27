@@ -31,7 +31,7 @@
 //! is an immediate loss for the mover — the same posture as connect4's full-column rule.
 
 use cozy_chess::{Board, Color, File, GameStatus, Move, Piece, Rank, Square};
-use reinfors_core::{Actor, Game, Reward, Rng, StateEncoder, Transition};
+use reinfors_core::{ActionView, Actor, Game, Reward, Rng, StateEncoder, Transition};
 
 pub const CHESS_ACTIONS: usize = 64 * 73; // 4672
 
@@ -391,7 +391,7 @@ impl Game for Chess {
 /// encoder seam is exactly where such views stay configurable.
 pub struct ChessPlanesMinimal;
 
-impl reinfors_core::ActionView for ChessPlanesMinimal {} // absolute: identity action view
+impl ActionView for ChessPlanesMinimal {} // absolute: identity action view
 
 impl StateEncoder for ChessPlanesMinimal {
     type State = ChessState;
@@ -483,7 +483,7 @@ impl ChessPlanesAz119 {
     }
 }
 
-impl reinfors_core::ActionView for ChessPlanesAz119 {} // absolute: identity action view
+impl ActionView for ChessPlanesAz119 {} // absolute: identity action view
 
 impl StateEncoder for ChessPlanesAz119 {
     type State = ChessState;

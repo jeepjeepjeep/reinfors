@@ -3,7 +3,7 @@
 //! lookahead, no opponent) end to end through the generic search and rollout engine. Deterministic, so
 //! chance is the default (none declared).
 
-use reinfors_core::{Actor, Game, Reward, Space, StateEncoder, Transition};
+use reinfors_core::{ActionView, Actor, Game, Reward, Space, StateEncoder, Transition};
 
 type Pos = (i32, i32);
 
@@ -150,7 +150,7 @@ pub struct GridWorldPlanes {
     pub goal: Pos,
 }
 
-impl reinfors_core::ActionView for GridWorldPlanes {} // absolute: identity action view
+impl ActionView for GridWorldPlanes {} // absolute: identity action view
 
 impl StateEncoder for GridWorldPlanes {
     type State = GridState;

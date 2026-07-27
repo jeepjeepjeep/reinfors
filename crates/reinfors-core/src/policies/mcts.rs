@@ -1633,7 +1633,7 @@ mod masking_tests {
     }
 
     struct Enc;
-    impl crate::encoder::ActionView for Enc {}
+    impl ActionView for Enc {}
     impl StateEncoder for Enc {
         type State = St;
         fn encode(&self, s: &St, _agent: usize) -> Vec<f32> {
@@ -1806,7 +1806,7 @@ mod chance_tests {
     }
 
     struct Enc;
-    impl crate::encoder::ActionView for Enc {}
+    impl ActionView for Enc {}
     impl StateEncoder for Enc {
         type State = St;
         fn encode(&self, s: &St, _agent: usize) -> Vec<f32> {
@@ -2032,7 +2032,7 @@ mod duct_tests {
     }
 
     struct Enc;
-    impl crate::encoder::ActionView for Enc {}
+    impl ActionView for Enc {}
     impl StateEncoder for Enc {
         type State = St;
         fn encode(&self, s: &St, agent: usize) -> Vec<f32> {
