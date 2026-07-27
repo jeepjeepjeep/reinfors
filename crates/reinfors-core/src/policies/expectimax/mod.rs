@@ -68,6 +68,22 @@ impl Policy for SelectiveExpectimax {
     type Evaluation = SearchEvaluation;
     type PolicyState = usize; // the Thompson head for the current episode
 
+    fn encode_eval(&self, eval: &SearchEvaluation, out: &mut Vec<u8>) {
+        crate::policies::expectimax::encode_search_eval(eval, out);
+    }
+
+    fn decode_eval(&self, r: &mut crate::codec::bytes::Reader) -> Result<SearchEvaluation, String> {
+        crate::policies::expectimax::decode_search_eval(r)
+    }
+
+    fn policy_state_to_u64(&self, s: &usize) -> u64 {
+        *s as u64
+    }
+
+    fn policy_state_from_u64(&self, v: u64) -> usize {
+        v as usize
+    }
+
     fn begin_episode(&self, rng: &mut dyn Rng) -> usize {
         rng.below(self.n_heads)
     }
@@ -242,4 +258,71 @@ mod select_masking_tests {
             "the best LEGAL action, not the illegal densified zero"
         );
     }
+}
+
+/// Shared `SearchEvaluation` (de)serialization for the search-family policies' snapshot seams.
+/// `interior` is always drained at decision time (`eval_records` moves it out), so buffered
+/// evaluations never carry it — encoding asserts that and decoding restores it empty.
+pub(crate) fn encode_search_eval(e: &SearchEvaluation, out: &mut Vec<u8>) {
+    use crate::codec::bytes::*;
+    debug_assert!(
+        e.interior.is_empty(),
+        "interior is drained before buffering"
+    );
+    put_u32(out, e.values.len() as u32);
+    for row in &e.values {
+        put_f64s(out, row);
+    }
+    put_f64s(out, &e.visits);
+    put_usizes(out, &e.legal);
+    let st = &e.stats;
+    put_i64(out, i64::from(st.max_depth));
+    for v in [st.expansions, st.leaves, st.rounds] {
+        put_u64(out, v as u64);
+    }
+    put_f64(out, st.sigma_sum);
+    for v in [
+        st.terminal_sims,
+        st.depthcap_sims,
+        st.shared_rows,
+        st.fresh_rows,
+        st.hit_rows,
+        st.extra_eval_rows,
+    ] {
+        put_u64(out, v as u64);
+    }
+}
+
+pub(crate) fn decode_search_eval(
+    r: &mut crate::codec::bytes::Reader,
+) -> Result<SearchEvaluation, String> {
+    use crate::codec::bytes::*;
+    let k = r.u32()? as usize;
+    if k > 4096 {
+        return Err(format!("implausible head count {k}"));
+    }
+    let values = (0..k).map(|_| f64s(r)).collect::<Result<Vec<_>, _>>()?;
+    let visits = f64s(r)?;
+    let legal = usizes(r)?;
+    let mut stats = crate::policies::expectimax::search::SearchStats {
+        max_depth: i32::try_from(r.i64()?).map_err(|_| "max_depth out of range".to_string())?,
+        ..Default::default()
+    };
+    stats.expansions = r.u64()? as usize;
+    stats.leaves = r.u64()? as usize;
+    stats.rounds = r.u64()? as usize;
+    stats.sigma_sum = r.f64()?;
+    stats.terminal_sims = r.u64()? as usize;
+    stats.depthcap_sims = r.u64()? as usize;
+    stats.shared_rows = r.u64()? as usize;
+    stats.fresh_rows = r.u64()? as usize;
+    stats.hit_rows = r.u64()? as usize;
+    stats.extra_eval_rows = r.u64()? as usize;
+    Ok(SearchEvaluation {
+        values,
+        visits,
+        interior: Vec::new(),
+        legal,
+        stats,
+    })
 }

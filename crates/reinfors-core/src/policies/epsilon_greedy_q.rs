@@ -42,6 +42,34 @@ impl Policy for EpsilonGreedyQ {
         rng.below(self.n_heads)
     }
 
+    fn encode_eval(&self, eval: &QEvaluation, out: &mut Vec<u8>) {
+        use crate::codec::bytes::*;
+        put_u32(out, eval.values.len() as u32);
+        for row in &eval.values {
+            put_f64s(out, row);
+        }
+        put_usizes(out, &eval.legal);
+    }
+
+    fn decode_eval(&self, r: &mut crate::codec::bytes::Reader) -> Result<QEvaluation, String> {
+        use crate::codec::bytes::*;
+        let k = r.u32()? as usize;
+        if k > 4096 {
+            return Err(format!("implausible head count {k}"));
+        }
+        let values = (0..k).map(|_| f64s(r)).collect::<Result<Vec<_>, _>>()?;
+        let legal = usizes(r)?;
+        Ok(QEvaluation { values, legal })
+    }
+
+    fn policy_state_to_u64(&self, s: &usize) -> u64 {
+        *s as u64
+    }
+
+    fn policy_state_from_u64(&self, v: u64) -> usize {
+        v as usize
+    }
+
     fn evaluate<G, F>(
         &self,
         game: &G,
