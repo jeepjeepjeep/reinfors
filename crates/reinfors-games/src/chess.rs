@@ -151,9 +151,13 @@ pub fn uci_to_action(uci: &str, board: &Board) -> Option<usize> {
 }
 
 /// Decode an action id back into a cozy-chess move for `board`'s position. Returns `None` for
-/// geometrically impossible ids (off-board targets). Queen promotion is inferred when a pawn
+/// out-of-range ids and geometrically impossible ids (off-board targets). NOTE: a decoded move
+/// is not necessarily LEGAL in `board` — callers rendering for users must check `board.is_legal`. Queen promotion is inferred when a pawn
 /// ray-moves onto the last rank.
 pub fn decode_move(action: usize, board: &Board) -> Option<Move> {
+    if action >= CHESS_ACTIONS {
+        return None; // out-of-range ids (e.g. OpenSpiel's castling ids 4672/4673) are not moves
+    }
     let from_idx = action / 73;
     let move_type = action % 73;
     let from = Square::new(File::index(from_idx % 8), Rank::index(from_idx / 8));

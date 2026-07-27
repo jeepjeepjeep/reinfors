@@ -2820,6 +2820,12 @@ fn chess_action_uci(action: usize, fen: &str) -> PyResult<String> {
             "action {action} does not decode in {fen:?}"
         ))
     })?;
+    if !board.is_legal(mv) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "action {action} decodes to {} which is not legal in {fen:?}",
+            reinfors_games::chess_move_to_uci(mv, &board)
+        )));
+    }
     Ok(reinfors_games::chess_move_to_uci(mv, &board))
 }
 
