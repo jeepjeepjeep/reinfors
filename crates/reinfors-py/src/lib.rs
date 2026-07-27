@@ -836,13 +836,19 @@ impl PyEngine {
             .ok_or_else(stream_active_err)?;
 
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pause = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let queued = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (tx, rx) = StreamChannel::new(depth);
         let worker = {
             let (stop, queued) = (stop.clone(), queued.clone());
+            let pause = pause.clone();
             std::thread::spawn(move || {
                 loop {
-                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    // `pause` is honored only at batch boundaries: the in-flight collect finishes
+                    // with real inference, so the engine's state matches the delivered batches.
+                    if stop.load(std::sync::atomic::Ordering::Relaxed)
+                        || pause.load(std::sync::atomic::Ordering::Relaxed)
+                    {
                         break;
                     }
                     let result = engine.collect_thunk(collect_size, &infer, stop.clone());
@@ -861,6 +867,7 @@ impl PyEngine {
         Ok(CollectStream {
             rx: Some(std::sync::Mutex::new(rx)),
             stop,
+            pause,
             queued,
             handle: Some(worker),
             engine: slf.clone().unbind(),
@@ -977,6 +984,7 @@ impl StreamChannel {
 struct CollectStream {
     rx: Option<std::sync::Mutex<std::sync::mpsc::Receiver<PyResult<BatchThunk>>>>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pause: std::sync::Arc<std::sync::atomic::AtomicBool>,
     queued: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     handle: Option<std::thread::JoinHandle<Box<dyn ErasedEngine>>>,
     engine: Py<PyEngine>,
@@ -1011,6 +1019,44 @@ impl CollectStream {
 
     /// Stop the worker and return the engine to its `Engine` (idempotent). Any queued batches are
     /// discarded. The engine is reusable afterwards — `collect` or a fresh `collect_stream`.
+    /// Lossless quiescence, the checkpoint barrier: stop BEGINNING new collects, let the
+    /// in-flight collect finish with real inference, drain and return every completed batch, and
+    /// hand the engine back — its state then corresponds exactly to the returned batches, so
+    /// `engine.snapshot()` right after is record-exact. (`stop()` is the fast lossy abort:
+    /// it short-circuits the in-flight collect and discards the queue.)
+    fn pause<'py>(&mut self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        self.pause.store(true, std::sync::atomic::Ordering::Relaxed);
+        let rx = self
+            .rx
+            .take()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("stream already stopped"))?;
+        // Drain until the worker drops its sender (it breaks at the batch boundary). recv blocks
+        // while the worker finishes the in-flight batch, whose infer callback needs the GIL —
+        // so recv MUST run with the GIL released (the Mutex wrapper keeps the receiver Sync).
+        let mut thunks = Vec::new();
+        loop {
+            let item = py.allow_threads(|| {
+                rx.lock()
+                    .map_err(|_| ())
+                    .and_then(|guard| guard.recv().map_err(|_| ()))
+            });
+            match item {
+                Ok(item) => thunks.push(item),
+                Err(()) => break, // disconnected: worker is at the boundary
+            }
+        }
+        if let Some(handle) = self.handle.take() {
+            let engine = py
+                .allow_threads(|| handle.join())
+                .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("stream worker panicked"))?;
+            self.engine.bind(py).borrow_mut().inner = Some(engine);
+        }
+        thunks
+            .into_iter()
+            .map(|item| item.and_then(|thunk| Ok(thunk(py)?.into_bound(py))))
+            .collect()
+    }
+
     fn stop(&mut self, py: Python<'_>) -> PyResult<()> {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         self.rx.take(); // unblocks a worker waiting on a full bounded queue

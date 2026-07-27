@@ -100,3 +100,86 @@ def test_weights_generation_travels_with_the_snapshot() -> None:
     other, _ = _mk("az")
     other.restore(snap)
     assert other.snapshot().weights_generation == 2
+
+
+def test_restore_clears_a_warm_cache_from_other_weights() -> None:
+    # Two engines restore the SAME snapshot but one has a cache warmed by a DIFFERENT net at an
+    # equal generation number — its stale rows must not serve (the review reproduction).
+    def build() -> rf.Engine:
+        return rf.Engine(
+            rf.games.Connect4(),
+            None,
+            rf.policies.EpsilonGreedyQ(n_heads=1, epsilon=0.0),
+            rf.learners.Dqn(),
+            n_games=1,
+            seed=0,
+            infer_cache=4096,
+        )
+
+    def net(best: int) -> Any:
+        def infer(obs: np.ndarray) -> np.ndarray:
+            q = np.zeros((obs.shape[0], 1, 7))
+            q[:, :, best] = 1.0
+            return q
+
+        return infer
+
+    warm, cold = build(), build()
+    snap = warm.snapshot()
+    warm.collect(4, net(3))  # warms the cache under the action-3 net
+    warm.restore(snap)
+    a = warm.collect(4, net(0))  # after restore, BOTH engines see the action-0 net
+    cold.restore(snap)
+    b = cold.collect(4, net(0))
+    warm_actions = np.asarray(a.actions)
+    cold_actions = np.asarray(b.actions)
+    assert np.array_equal(warm_actions, cold_actions)  # stale rows would diverge these
+    assert warm_actions[0] == 0  # opening move follows the NEW net, not the cached action-3 rows
+    assert np.array_equal(np.asarray(a.obs), np.asarray(b.obs))
+
+
+def test_forged_payload_semantics_are_rejected() -> None:
+    engine, _ = _mk("az")
+    snap = engine.snapshot()
+    blob = bytearray(snap.to_bytes())
+    # Envelope header: magic 4 + schema 1 + fp(4+64) + gen 8 + pv(1+4+0) + payload len 4.
+    payload_off = 4 + 1 + 4 + 64 + 8 + 1 + 4 + 4
+    # Payload: version 1 + n_games 4 + agents 4 + rngs 16 => ticks live inside the per-game
+    # section; forge the FIRST game's tick to u64::MAX (version+counts+rngs, then state blob).
+    state_len_off = payload_off + 1 + 4 + 4 + 16
+    state_len = int.from_bytes(blob[state_len_off : state_len_off + 4], "little")
+    rng_off = state_len_off + 4 + state_len
+    tick_off = rng_off + 8
+    blob[tick_off : tick_off + 8] = (2**64 - 1).to_bytes(8, "little")
+    forged = rf.EngineSnapshot.from_bytes(bytes(blob))
+    with pytest.raises(ValueError, match="tick"):
+        engine.restore(forged)
+    engine.collect(8, _mk("az")[1])  # engine unharmed
+
+
+def test_stream_pause_is_a_lossless_checkpoint_barrier() -> None:
+    # Reference: synchronous engine, one batch, snapshot. Streamed engine: one delivered batch,
+    # pause (drains queue + in-flight), snapshot. Payloads must MATCH — stop() cannot do this.
+    def build() -> tuple[rf.Engine, Any]:
+        return _mk("dqn")
+
+    sync_engine, infer = build()
+    sync_batches = [sync_engine.collect(32, infer)]
+    while True:  # consume as many batches as the stream will deliver, decided below
+        break
+
+    stream_engine, s_infer = build()
+    stream = stream_engine.collect_stream(32, s_infer, depth=1)
+    first = stream.next()
+    drained = stream.pause()
+    # engine returned; total delivered = 1 + len(drained); mirror on the sync side
+    for _ in range(len(drained)):
+        sync_batches.append(sync_engine.collect(32, infer))
+    a = sync_engine.snapshot().to_bytes()
+    b = stream_engine.snapshot().to_bytes()
+    assert bytes(a) == bytes(b)
+    assert np.array_equal(sync_batches[0].obs, first.obs)
+    for got, want in zip(drained, sync_batches[1:], strict=True):
+        assert np.array_equal(got.obs, want.obs)
+    # and the engines stay record-identical afterwards
+    assert np.array_equal(sync_engine.collect(24, infer).obs, stream_engine.collect(24, s_infer).obs)

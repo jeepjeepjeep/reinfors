@@ -510,23 +510,41 @@ where
         }
         let search_rng = r.u64()?;
         let buffer_rng = r.u64()?;
+        let (c, h, w) = self.encoder.obs_shape();
+        let obs_dim = c * h * w;
+        let action_count = self.game.action_count();
+        let horizon = self.game.truncation_horizon();
+        let bool_byte = |b: u8| -> Result<bool, String> {
+            match b {
+                0 => Ok(false),
+                1 => Ok(true),
+                other => Err(format!("byte {other} is not a bool")),
+            }
+        };
         // Decode EVERYTHING before mutating anything: a malformed snapshot must leave the engine
         // untouched.
-        struct GameSlice<S, E> {
+        struct GameSlice<S, E, PS> {
             state: S,
             rng: u64,
             tick: usize,
             seeded: bool,
-            policy_state: u64,
+            policy_state: PS,
             traj: Vec<Vec<Step<E>>>,
         }
-        let mut slices: Vec<GameSlice<G::State, P::Evaluation>> = Vec::with_capacity(n_games);
+        let mut slices: Vec<GameSlice<G::State, P::Evaluation, P::PolicyState>> =
+            Vec::with_capacity(n_games);
         for _ in 0..n_games {
             let state = codec.decode(r.blob()?)?;
             let rng = r.u64()?;
             let tick = r.u64()? as usize;
-            let seeded = r.u8()? != 0;
-            let policy_state = r.u64()?;
+            if horizon.is_some_and(|hz| tick >= hz) {
+                return Err(format!("tick {tick} at or past the truncation horizon"));
+            }
+            if tick > (1 << 48) {
+                return Err(format!("implausible tick count {tick}"));
+            }
+            let seeded = bool_byte(r.u8()?)?;
+            let policy_state = self.policy.policy_state_from_u64(r.u64()?)?;
             let mut traj = Vec::with_capacity(num_agents);
             for _ in 0..num_agents {
                 let n_steps = r.u32()? as usize;
@@ -534,14 +552,40 @@ where
                     return Err(format!("implausible trajectory length {n_steps}"));
                 }
                 let mut steps = Vec::with_capacity(n_steps);
+                if n_steps > tick {
+                    return Err(format!(
+                        "{n_steps} buffered decisions exceed tick count {tick}"
+                    ));
+                }
                 for _ in 0..n_steps {
                     let obs = f32s(&mut r)?;
-                    let evaluation = self.policy.decode_eval(&mut r)?;
+                    if obs.len() != obs_dim {
+                        return Err(format!("obs width {} != {obs_dim}", obs.len()));
+                    }
+                    let evaluation = self.policy.decode_eval(&mut r, action_count)?;
                     let action = r.u64()? as usize;
+                    if action >= action_count {
+                        return Err(format!("action {action} out of range"));
+                    }
                     let reward = r.f64()?;
+                    if !reward.is_finite() {
+                        return Err("non-finite reward in trajectory".into());
+                    }
                     let next_obs = f32s(&mut r)?;
+                    if !(next_obs.is_empty() || next_obs.len() == obs_dim) {
+                        return Err(format!("next_obs width {} != {obs_dim}", next_obs.len()));
+                    }
                     let next_legal = usizes(&mut r)?;
-                    let terminal = r.u8()? != 0;
+                    if next_legal.iter().any(|&a| a >= action_count) {
+                        return Err("next_legal action id out of range".into());
+                    }
+                    let terminal = bool_byte(r.u8()?)?;
+                    if terminal {
+                        return Err(
+                            "buffered trajectories never hold terminal steps (they flush at episode end)"
+                                .into(),
+                        );
+                    }
                     steps.push(Step {
                         obs,
                         evaluation,
@@ -574,8 +618,13 @@ where
             self.episodes[gi].rng = SplitMix64::from_state(slice.rng);
             self.ticks[gi] = slice.tick;
             self.seeded[gi] = slice.seeded;
-            self.policy_states[gi] = self.policy.policy_state_from_u64(slice.policy_state);
+            self.policy_states[gi] = slice.policy_state;
             self.traj[gi] = slice.traj;
+        }
+        // The cache may hold rows from OTHER weights at a numerically equal generation — stale
+        // rows would silently break the record-exact restore contract. Cold cache = same records.
+        if let Some(cache) = self.infer_cache.as_mut() {
+            cache.force_clear();
         }
         Ok(())
     }

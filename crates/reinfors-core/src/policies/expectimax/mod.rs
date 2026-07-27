@@ -72,16 +72,26 @@ impl Policy for SelectiveExpectimax {
         crate::policies::expectimax::encode_search_eval(eval, out);
     }
 
-    fn decode_eval(&self, r: &mut crate::codec::bytes::Reader) -> Result<SearchEvaluation, String> {
-        crate::policies::expectimax::decode_search_eval(r)
+    fn decode_eval(
+        &self,
+        r: &mut crate::codec::bytes::Reader,
+        action_count: usize,
+    ) -> Result<SearchEvaluation, String> {
+        crate::policies::expectimax::decode_search_eval(r, action_count)
     }
 
     fn policy_state_to_u64(&self, s: &usize) -> u64 {
         *s as u64
     }
 
-    fn policy_state_from_u64(&self, v: u64) -> usize {
-        v as usize
+    fn policy_state_from_u64(&self, v: u64) -> Result<usize, String> {
+        if v as usize >= self.n_heads {
+            return Err(format!(
+                "Thompson head {v} out of range for {} heads",
+                self.n_heads
+            ));
+        }
+        Ok(v as usize)
     }
 
     fn begin_episode(&self, rng: &mut dyn Rng) -> usize {
@@ -295,6 +305,7 @@ pub(crate) fn encode_search_eval(e: &SearchEvaluation, out: &mut Vec<u8>) {
 
 pub(crate) fn decode_search_eval(
     r: &mut crate::codec::bytes::Reader,
+    action_count: usize,
 ) -> Result<SearchEvaluation, String> {
     use crate::codec::bytes::*;
     let k = r.u32()? as usize;
@@ -302,8 +313,31 @@ pub(crate) fn decode_search_eval(
         return Err(format!("implausible head count {k}"));
     }
     let values = (0..k).map(|_| f64s(r)).collect::<Result<Vec<_>, _>>()?;
+    for row in &values {
+        if row.len() != action_count {
+            return Err(format!(
+                "value row width {} != action count {action_count}",
+                row.len()
+            ));
+        }
+        if row.iter().any(|v| !v.is_finite()) {
+            return Err("non-finite search value in evaluation".into());
+        }
+    }
     let visits = f64s(r)?;
+    if visits.len() != action_count && !visits.is_empty() {
+        return Err(format!(
+            "visit vector width {} != action count {action_count}",
+            visits.len()
+        ));
+    }
+    if visits.iter().any(|v| !v.is_finite() || *v < 0.0) {
+        return Err("invalid visit count".into());
+    }
     let legal = usizes(r)?;
+    if legal.iter().any(|&a| a >= action_count) {
+        return Err("legal action id out of range".into());
+    }
     let mut stats = crate::policies::expectimax::search::SearchStats {
         max_depth: i32::try_from(r.i64()?).map_err(|_| "max_depth out of range".to_string())?,
         ..Default::default()

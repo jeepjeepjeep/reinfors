@@ -1345,16 +1345,20 @@ impl Policy for Mcts {
         crate::policies::expectimax::encode_search_eval(eval, out);
     }
 
-    fn decode_eval(&self, r: &mut crate::codec::bytes::Reader) -> Result<SearchEvaluation, String> {
-        crate::policies::expectimax::decode_search_eval(r)
+    fn decode_eval(
+        &self,
+        r: &mut crate::codec::bytes::Reader,
+        action_count: usize,
+    ) -> Result<SearchEvaluation, String> {
+        crate::policies::expectimax::decode_search_eval(r, action_count)
     }
 
     fn policy_state_to_u64(&self, s: &u32) -> u64 {
         u64::from(*s)
     }
 
-    fn policy_state_from_u64(&self, v: u64) -> u32 {
-        v as u32
+    fn policy_state_from_u64(&self, v: u64) -> Result<u32, String> {
+        u32::try_from(v).map_err(|_| format!("acting-ply counter {v} out of range"))
     }
 
     fn begin_episode(&self, _rng: &mut dyn Rng) -> u32 {
