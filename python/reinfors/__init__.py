@@ -76,8 +76,38 @@ def engine_from_config(config: dict[str, Any]) -> Engine:
     def _split(block: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         return block["name"], {k: v for k, v in block.items() if k != "name"}
 
+    def _coerce_handles(kw: dict[str, Any]) -> dict[str, Any]:
+        # Nested handle blocks (as `resolved_config` renders them) become typed handles, so the
+        # round-trip `engine_from_config(engine.resolved_config())` holds for every composition.
+        if isinstance(kw.get("encoder"), dict):
+            e = dict(kw["encoder"])
+            kw["encoder"] = encoders.make(e.pop("name"), **e)
+        if isinstance(kw.get("chance"), dict):
+            c = dict(kw["chance"])
+            kw["chance"] = chance_modes.make(c.pop("name"), **c)
+        if isinstance(kw.get("noise"), dict):
+            n = dict(kw["noise"])
+            noise_name = n.pop("name", None)
+            if noise_name is None:
+                raise ValueError("noise block requires a name")
+            kw["noise"] = noise.make(noise_name, **n)
+        return kw
+
+    schema = config.get("schema_version")
+    if schema is not None and schema != 1:
+        msg = f"unsupported config schema_version {schema!r}; this reinfors supports 1"
+        raise ValueError(msg)
     g_name, g_kw = _split(config["game"])
+    g_kw = _coerce_handles(g_kw)
     engine_kw = dict(config.get("engine", {}))
+    # start_buffer renders as null (off) or a {capacity, p_fresh} block (on) — unpack it back
+    # into the flat constructor kwargs (a plain bool is also accepted, for hand-written configs).
+    if "start_buffer" in engine_kw and not isinstance(engine_kw["start_buffer"], bool):
+        sb = engine_kw.pop("start_buffer")
+        engine_kw["start_buffer"] = sb is not None
+        if sb is not None:
+            engine_kw["start_buffer_capacity"] = sb["capacity"]
+            engine_kw["p_fresh"] = sb["p_fresh"]
     # The reward rides with the game block (YAML-friendly) or its own block; it goes to the Engine now.
     reward_cfg = g_kw.pop("reward", None) or config.get("reward")
     reward = Reward(**reward_cfg) if isinstance(reward_cfg, dict) else reward_cfg
@@ -85,6 +115,7 @@ def engine_from_config(config: dict[str, Any]) -> Engine:
     if "max_ticks" in engine_kw:
         g_kw.setdefault("max_ticks", engine_kw.pop("max_ticks"))
     p_name, p_kw = _split(config["policy"])
+    p_kw = _coerce_handles(p_kw)
     l_name, l_kw = _split(config["learner"])
     return Engine(
         make_game(g_name, **g_kw),

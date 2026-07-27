@@ -38,6 +38,11 @@ SWEEP: list[tuple[Any, bool, dict[str, list[Any]]]] = [
     (rf.chance_modes.Committed, False, {"samples": INT_EDGES}),
     (rf.noise.Dirichlet, False, {"epsilon": FLOAT_EDGES, "alpha": FLOAT_EDGES}),
     (rf.encoders.AlphaZeroChess, False, {"history_length": INT_EDGES}),
+    (rf.policies.Mcts, False, {"uct_c": FLOAT_EDGES, "temperature": FLOAT_EDGES}),
+    (rf.policies.AlphaZero, False, {"c_puct": FLOAT_EDGES, "temperature": FLOAT_EDGES}),
+    (rf.policies.SelectiveExpectimax, False, {"beta": FLOAT_EDGES, "opp_temperature": FLOAT_EDGES}),
+    (rf.learners.TreeStrap, False, {"gamma": FLOAT_EDGES, "outcome_weight": FLOAT_EDGES}),
+    (rf.learners.Dqn, False, {"bootstrap_p": FLOAT_EDGES}),
 ]
 
 
