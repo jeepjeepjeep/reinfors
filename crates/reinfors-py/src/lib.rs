@@ -2096,7 +2096,7 @@ struct PyEnv {
     // Retained for `fork` (rebuilds the composition) and `resolved_config`/snapshot fingerprints.
     game_spec: GameSpec,
     reward_weights: Option<HashMap<String, f64>>,
-    config: Cfg,
+    config: Value,
     fingerprint: String,
 }
 
@@ -2123,29 +2123,27 @@ impl PyEnv {
         let game_spec = game.spec.clone();
         let reward_weights = reward.as_ref().map(|r| r.weights.clone());
         let reward_cfg = match &reward_weights {
-            None => Cfg::Null, // reward-free (play/eval): rewards is always None
+            None => Value::Null, // reward-free (play/eval): rewards is always None
             Some(w) => {
                 let vals = resolve_reward(
                     Some(PyReward { weights: w.clone() }),
                     reward_schema(&game_spec),
                 )?;
-                Cfg::Map(
+                Value::Object(
                     reward_schema(&game_spec)
                         .iter()
                         .zip(vals)
-                        .map(|((k, _), v)| (*k, Cfg::Float(v)))
+                        .map(|((k, _), v)| ((*k).to_string(), json!(v)))
                         .collect(),
                 )
             }
         };
-        let config = Cfg::Map(vec![
-            ("schema_version", Cfg::Int(i64::from(ENV_SNAPSHOT_SCHEMA))),
-            ("game", game_cfg(&game_spec)),
-            ("reward", reward_cfg),
-        ]);
-        let mut canon = String::new();
-        config.canonical_json(&mut canon);
-        let fingerprint = fingerprint128(canon.as_bytes());
+        let config = json!({
+            "schema_version": ENV_SNAPSHOT_SCHEMA,
+            "game": game_cfg(&game_spec),
+            "reward": reward_cfg,
+        });
+        let fingerprint = fingerprint_hex(&canonical_config_bytes(&config));
         Ok(PyEnv {
             inner: build_env(game.spec, reward, seed)?,
             game_spec,
@@ -2157,7 +2155,7 @@ impl PyEnv {
 
     /// The env's immutable composition (game incl. encoder + resolved reward), JSON-compatible.
     fn resolved_config<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        self.config.to_py(py)
+        value_to_py(py, &self.config)
     }
 
     /// Fingerprint of `resolved_config` — embedded in snapshots and checked on `restore`.
