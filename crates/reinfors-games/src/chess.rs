@@ -21,12 +21,9 @@
 //!
 //! **Termination**: checkmate (mover wins), stalemate, the fifty-move rule (both via
 //! `Board::status`), threefold repetition (a hash history kept in the state, reset on irreversible
-//! moves), and an insufficient-material draw covering every no-pawn/rook/queen position with at
-//! most one minor piece PER SIDE — bare kings, K+minor vs K, and K+minor vs K+minor. The last is a
-//! deliberate liberty vs strict FIDE (KNvKN / opposite-bishop KBvKB admit helpmates, so FIDE would
-//! play on): checkmate is detected before this branch, so no mate is ever mis-scored — it only
-//! adjudicates practically-dead endgames early, where the value target is ~0 anyway. A common
-//! self-play adjudication.
+//! moves), and FIDE's dead-position insufficient-material draw: bare kings, a lone knight, or
+//! any number of bishops all on same-colored squares. Positions that admit helpmates (KNvKN,
+//! opposite-colored KBvKB) play on, exactly as FIDE — and OpenSpiel — score them.
 //! An illegal action id (impossible through the masked searches; reachable through a raw `Env`)
 //! is an immediate loss for the mover — the same posture as connect4's full-column rule.
 
@@ -229,18 +226,28 @@ fn agent_of(color: Color) -> usize {
     }
 }
 
-/// King + at most one minor piece per side and no other material. Broader than FIDE's dead-position
-/// rule (K+minor vs K+minor can still be helpmated) — see the module doc for why that liberty is
-/// safe and intended.
+/// FIDE's dead-position rule, exactly (and OpenSpiel-aligned): with no pawns/rooks/queens, a
+/// draw iff kings only, one lone knight, or any number of bishops all on same-colored squares.
+/// KNvKN and opposite-colored KBvKB admit helpmates, so they play on.
 fn insufficient_material(board: &Board) -> bool {
     if !(board.pieces(Piece::Pawn) | board.pieces(Piece::Rook) | board.pieces(Piece::Queen))
         .is_empty()
     {
         return false;
     }
-    let minors = board.pieces(Piece::Knight) | board.pieces(Piece::Bishop);
-    (minors & board.colors(Color::White)).len() <= 1
-        && (minors & board.colors(Color::Black)).len() <= 1
+    let knights = board.pieces(Piece::Knight);
+    let bishops = board.pieces(Piece::Bishop);
+    if bishops.is_empty() {
+        return knights.len() <= 1;
+    }
+    if !knights.is_empty() {
+        return false;
+    }
+    let mut square_colors = bishops
+        .into_iter()
+        .map(|sq| (sq.rank() as usize + sq.file() as usize) % 2);
+    let first = square_colors.next().expect("non-empty bishops");
+    square_colors.all(|c| c == first)
 }
 
 impl ChessState {
@@ -1201,5 +1208,28 @@ mod openspiel_obs_tests {
         }
         // a1 is index 0: white queenside rook present in the rook plane at slot 0.
         assert_eq!(obs[4 * 64], 1.0);
+    }
+}
+
+#[cfg(test)]
+mod fide_dead_position_tests {
+    use super::*;
+
+    fn dead(fen: &str) -> bool {
+        insufficient_material(&fen.parse::<Board>().unwrap())
+    }
+
+    #[test]
+    fn material_boundary_matches_fide() {
+        assert!(dead("8/8/4k3/8/8/3K4/8/8 w - - 0 1")); // K vs K
+        assert!(dead("8/8/4k3/8/8/3KB3/8/8 w - - 0 1")); // K+B vs K
+        assert!(dead("8/8/4kn2/8/8/3K4/8/8 w - - 0 1")); // K vs K+N
+        assert!(dead("8/8/3bk3/8/8/3KB3/8/8 w - - 0 1")); // KB vs KB same-colored squares
+        assert!(dead("8/8/4k3/8/8/3KB3/8/2B5 w - - 0 1")); // K+B+B vs K, same-colored squares
+        assert!(!dead("8/8/2bk4/8/8/3KB3/8/8 w - - 0 1")); // KB vs KB opposite colors: helpmate
+        assert!(!dead("8/8/3nk3/8/8/2NK4/8/8 w - - 0 1")); // KN vs KN: helpmate
+        assert!(!dead("8/8/4k3/8/8/2NKN3/8/8 w - - 0 1")); // KNN vs K
+        assert!(!dead("8/8/4k3/8/8/2NKB3/8/8 w - - 0 1")); // knight + bishop
+        assert!(!dead("8/8/4k3/7p/8/3K4/8/8 w - - 0 1")); // a pawn plays on
     }
 }
