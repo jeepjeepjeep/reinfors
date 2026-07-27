@@ -77,17 +77,24 @@ impl Learner<SearchEvaluation> for AlphaZeroLearner {
         // z = discounted realized return-to-go, from each step's own (per-agent) rewards; an empty
         // tail (terminal episode) seeds z at 0 — the final step's reward carries the outcome.
         let mut z = tail.first().copied().unwrap_or(0.0);
+        // π trains against the net's raw logits, so it is written in the HEAD frame: the dense
+        // game-frame visit vector scatters through a permutation table computed once per episode
+        // (no per-scalar dynamic dispatch; identity views skip the scatter entirely).
+        let a = trajectory.first().map_or(0, |s| s.evaluation.visits.len());
+        let (perm, identity) = crate::encoder::head_permutation(view, a, agent);
         let mut out: Vec<AlphaZeroRecord> = Vec::with_capacity(trajectory.len());
         for step in trajectory.iter().rev() {
             z = step.reward + self.gamma * z;
-            // π trains against the net's raw logits, so it is written in the HEAD frame: the
-            // dense game-frame visit vector scatters through the view (identity for absolute
-            // encoders — a plain copy).
             let visits_game = normalized_visits(&step.evaluation.visits);
-            let mut pi = vec![0.0; visits_game.len()];
-            for (a, v) in visits_game.into_iter().enumerate() {
-                pi[view.head_index(a, agent)] = v;
-            }
+            let pi = if identity {
+                visits_game
+            } else {
+                let mut pi = vec![0.0; visits_game.len()];
+                for (a, v) in visits_game.into_iter().enumerate() {
+                    pi[perm[a]] = v;
+                }
+                pi
+            };
             out.push((step.obs.clone(), pi, z));
         }
         out.reverse();
@@ -96,7 +103,7 @@ impl Learner<SearchEvaluation> for AlphaZeroLearner {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::encoder::IdentityView;
     use crate::policies::expectimax::search::SearchStats;
@@ -113,7 +120,7 @@ mod tests {
         }
     }
 
-    fn step(visits: Vec<f64>, action: usize, reward: f64) -> Step<SearchEvaluation> {
+    pub(crate) fn step(visits: Vec<f64>, action: usize, reward: f64) -> Step<SearchEvaluation> {
         Step {
             obs: vec![reward as f32; 2],
             evaluation: eval(visits),
@@ -175,5 +182,31 @@ mod tests {
         assert!(learner
             .eval_records(&mut e, &IdentityView, 0, &mut SplitMix64::new(0))
             .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+    use crate::encoder::ActionView;
+    use crate::rng::SplitMix64;
+
+    struct Rot; // head = (game + 1) % 3
+    impl ActionView for Rot {
+        fn head_index(&self, action: usize, _: usize) -> usize {
+            (action + 1) % 3
+        }
+        fn game_action(&self, head: usize, _: usize) -> usize {
+            (head + 2) % 3
+        }
+    }
+
+    #[test]
+    fn pi_scatters_into_the_head_frame() {
+        let learner = AlphaZeroLearner::new(1.0);
+        let steps = vec![super::tests::step(vec![6.0, 2.0, 0.0], 0, 0.0)];
+        let recs = learner.episode_records(&steps, &[], &Rot, 0, &mut SplitMix64::new(0));
+        // game-frame π [0.75, 0.25, 0.0] lands at heads [1, 2, 0] -> [0.0, 0.75, 0.25]
+        assert_eq!(recs[0].1, vec![0.0, 0.75, 0.25]);
     }
 }

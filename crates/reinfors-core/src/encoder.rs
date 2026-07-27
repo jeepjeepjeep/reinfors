@@ -46,6 +46,22 @@ pub trait ActionView: Send + Sync {
 pub struct IdentityView;
 impl ActionView for IdentityView {}
 
+/// Materialize `agent`'s permutation (`perm[game_id] = head_index`) plus an is-identity flag.
+/// For DENSE per-action loops: one virtual call per action id here, then plain indexing (or a
+/// straight copy on the identity fast path) instead of `K × A` dynamic dispatches in a hot loop.
+/// Sparse legal-set gathers (a handful of ids) call `head_index` directly.
+pub fn head_permutation(
+    view: &dyn ActionView,
+    action_count: usize,
+    agent: usize,
+) -> (Vec<usize>, bool) {
+    let perm: Vec<usize> = (0..action_count)
+        .map(|a| view.head_index(a, agent))
+        .collect();
+    let identity = perm.iter().enumerate().all(|(i, &p)| i == p);
+    (perm, identity)
+}
+
 /// Assert the [`ActionView`] contract: `head_index(·, agent)` is a bijection on
 /// `0..action_count` with `game_action` its inverse, for each agent. Call from an encoder's tests.
 pub fn check_action_view(view: &dyn ActionView, action_count: usize, num_agents: usize) {
