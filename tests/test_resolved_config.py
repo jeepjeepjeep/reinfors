@@ -5,6 +5,7 @@ engine whose collected records are byte-identical, for every composition family.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import numpy as np
 import pytest
@@ -25,7 +26,7 @@ def _az_chess() -> rf.Engine:
 
 def test_defaults_are_resolved_and_json_compatible() -> None:
     cfg = _az_chess().resolved_config()
-    json.dumps(cfg)  # JSON-compatible throughout
+    json.dumps(cfg, allow_nan=False)  # JSON-compatible throughout, no NaN/inf leakage
     assert cfg["schema_version"] == 1 and cfg["reinfors_version"]
     assert cfg["game"] == {
         "name": "chess",
@@ -157,3 +158,45 @@ def test_round_trip_reconstructs_a_record_identical_engine(family: str) -> None:
         return (arrays, telemetry)
 
     assert collect(original) == collect(rebuilt)
+
+
+def test_u64_seed_round_trips_exactly() -> None:
+    e = rf.Engine(
+        rf.games.Connect4(),
+        None,
+        rf.policies.EpsilonGreedyQ(),
+        rf.learners.Dqn(),
+        n_games=1,
+        seed=2**64 - 1,
+    )
+    cfg = e.resolved_config()
+    assert cfg["engine"]["seed"] == 2**64 - 1 and isinstance(cfg["engine"]["seed"], int)
+    rebuilt = rf.engine_from_config(cfg)
+    assert rebuilt.config_fingerprint() == e.config_fingerprint()
+
+
+def test_every_configurable_float_rejects_non_finite() -> None:
+    cases: list[tuple[Any, list[str]]] = [
+        (rf.policies.SelectiveExpectimax, ["beta", "epsilon", "opp_temperature", "opp_floor"]),
+        (rf.policies.EpsilonGreedyQ, ["epsilon"]),
+        (rf.policies.Mcts, ["uct_c", "temperature"]),
+        (rf.policies.AlphaZero, ["c_puct", "temperature"]),
+        (rf.learners.TreeStrap, ["gamma", "outcome_weight", "bootstrap_p"]),
+        (rf.learners.Dqn, ["bootstrap_p"]),
+        (rf.learners.AlphaZero, ["gamma"]),
+    ]
+    for ctor, params in cases:
+        for param in params:
+            for bad in (float("nan"), float("inf"), float("-inf")):
+                with pytest.raises(ValueError):
+                    ctor(**{param: bad})
+
+
+def test_noise_block_name_is_validated() -> None:
+    cfg = _az_chess().resolved_config()
+    cfg["policy"]["noise"]["name"] = "not_dirichlet"
+    with pytest.raises(KeyError, match="unknown noise"):
+        rf.engine_from_config(cfg)
+    del cfg["policy"]["noise"]["name"]
+    with pytest.raises(ValueError, match="requires a name"):
+        rf.engine_from_config(cfg)

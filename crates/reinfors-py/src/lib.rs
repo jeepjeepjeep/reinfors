@@ -277,9 +277,11 @@ fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny>> {
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 i.into_bound_py_any(py)?
+            } else if let Some(u) = n.as_u64() {
+                u.into_bound_py_any(py)? // u64 seeds above i64::MAX stay exact integers
             } else {
                 n.as_f64()
-                    .expect("config numbers are i64 or f64")
+                    .expect("config numbers are i64, u64, or f64")
                     .into_bound_py_any(py)?
             }
         }
@@ -1598,6 +1600,16 @@ enum LearnerSpec {
 }
 
 /// Reject a probability/weight outside `[0, 1]`.
+/// Reject a non-finite or negative value (NaN-proof: `!(v >= 0.0)` is true for NaN).
+fn check_nonneg_finite(name: &str, v: f64) -> PyResult<()> {
+    if !v.is_finite() || v < 0.0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{name} must be finite and >= 0"
+        )));
+    }
+    Ok(())
+}
+
 fn check_unit(name: &str, v: f64) -> PyResult<()> {
     if !(0.0..=1.0).contains(&v) {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -2726,6 +2738,10 @@ impl PolicyHandle {
         opp_floor: f64,
     ) -> PyResult<Self> {
         // Default: the historical `food_samples = 1` estimator, on the shared vocabulary.
+        check_unit("beta", beta)?;
+        check_unit("epsilon", epsilon)?;
+        check_unit("opp_floor", opp_floor)?;
+        check_nonneg_finite("opp_temperature", opp_temperature)?;
         let chance = chance.map_or(ChanceMode::Committed { samples: 1 }, |c| c.mode);
         if !SelectiveExpectimax::supports_chance_mode(chance) {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -2750,10 +2766,11 @@ impl PolicyHandle {
     #[staticmethod]
     #[pyo3(signature = (n_heads=1, epsilon=0.1))]
     #[pyo3(name = "EpsilonGreedyQ")]
-    fn epsilon_greedy_q(n_heads: usize, epsilon: f64) -> Self {
-        PolicyHandle {
+    fn epsilon_greedy_q(n_heads: usize, epsilon: f64) -> PyResult<Self> {
+        check_unit("epsilon", epsilon)?;
+        Ok(PolicyHandle {
             spec: PolicySpec::EpsilonGreedyQ { n_heads, epsilon },
-        }
+        })
     }
 
     /// Monte-Carlo Tree Search (UCT). Pairs with `TreeStrap`. Sequential, single-agent, and
@@ -2782,6 +2799,8 @@ impl PolicyHandle {
         temperature_drop: Option<u32>,
         chance: Option<ChanceModeHandle>,
     ) -> PyResult<Self> {
+        check_nonneg_finite("uct_c", uct_c)?;
+        check_nonneg_finite("temperature", temperature)?;
         let act_by = match act_by {
             "value" => ActBy::Value,
             "visits" => ActBy::Visits,
@@ -2827,6 +2846,8 @@ impl PolicyHandle {
     ) -> PyResult<Self> {
         // `noise=None` = off (epsilon 0 internally — the core's noise-free path); the alpha/scope
         // placeholders are inert at epsilon 0.
+        check_nonneg_finite("c_puct", c_puct)?;
+        check_nonneg_finite("temperature", temperature)?;
         let (noise_epsilon, noise_alpha, noise_scope) = match noise {
             Some(n) => (n.epsilon, n.alpha, n.scope),
             None => (0.0, 0.3, NoiseScope::Requester),
@@ -2864,24 +2885,28 @@ impl LearnerHandle {
         outcome_weight: f64,
         bootstrap_p: f64,
         interior_targets: bool,
-    ) -> Self {
-        LearnerHandle {
+    ) -> PyResult<Self> {
+        check_unit("gamma", gamma)?;
+        check_unit("outcome_weight", outcome_weight)?;
+        check_unit("bootstrap_p", bootstrap_p)?;
+        Ok(LearnerHandle {
             spec: LearnerSpec::TreeStrap {
                 gamma,
                 outcome_weight,
                 bootstrap_p,
                 interior_targets,
             },
-        }
+        })
     }
 
     #[staticmethod]
     #[pyo3(signature = (bootstrap_p=1.0))]
     #[pyo3(name = "Dqn")]
-    fn dqn(bootstrap_p: f64) -> Self {
-        LearnerHandle {
+    fn dqn(bootstrap_p: f64) -> PyResult<Self> {
+        check_unit("bootstrap_p", bootstrap_p)?;
+        Ok(LearnerHandle {
             spec: LearnerSpec::Dqn { bootstrap_p },
-        }
+        })
     }
 
     /// AlphaZero record production: each decision -> `(obs, π, z)` — π the root visit distribution
@@ -2890,10 +2915,11 @@ impl LearnerHandle {
     #[staticmethod]
     #[pyo3(signature = (gamma=1.0))]
     #[pyo3(name = "AlphaZero")]
-    fn alphazero(gamma: f64) -> Self {
-        LearnerHandle {
+    fn alphazero(gamma: f64) -> PyResult<Self> {
+        check_unit("gamma", gamma)?;
+        Ok(LearnerHandle {
             spec: LearnerSpec::AlphaZero { gamma },
-        }
+        })
     }
 }
 

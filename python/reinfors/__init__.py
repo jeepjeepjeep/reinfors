@@ -87,8 +87,10 @@ def engine_from_config(config: dict[str, Any]) -> Engine:
             kw["chance"] = chance_modes.make(c.pop("name"), **c)
         if isinstance(kw.get("noise"), dict):
             n = dict(kw["noise"])
-            n.pop("name", None)
-            kw["noise"] = noise.Dirichlet(**n)
+            noise_name = n.pop("name", None)
+            if noise_name is None:
+                raise ValueError("noise block requires a name")
+            kw["noise"] = noise.make(noise_name, **n)
         return kw
 
     schema = config.get("schema_version")

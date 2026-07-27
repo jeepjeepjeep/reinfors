@@ -9,6 +9,26 @@ for the self-play default ``Dirichlet(0.25, 0.3, "requester")``.
 
 from __future__ import annotations
 
+from typing import Any
+
 from . import _reinfors
 
 Dirichlet = _reinfors.NoiseHandle.Dirichlet
+
+_REGISTRY = {
+    "dirichlet": Dirichlet,
+}
+
+
+def registered() -> list[str]:
+    """The registered noise names, for `make`."""
+    return sorted(_REGISTRY)
+
+
+def make(name: str, **kwargs: Any) -> Any:
+    """Construct a noise handle by name (the config-driven path)."""
+    try:
+        ctor = _REGISTRY[name]
+    except KeyError:
+        raise KeyError(f"unknown noise {name!r}; registered: {registered()}") from None
+    return ctor(**kwargs)
