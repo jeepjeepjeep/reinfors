@@ -31,7 +31,7 @@ use reinfors_games::{
     BackgammonTesauro, Chess, ChessEvent, ChessPlanesAz119, ChessPlanesMinimal,
     ChessPlanesRelative, ChessReward, ChessState, Connect4, Connect4Event, Connect4Planes,
     Connect4Reward, Connect4State, EgocentricSnake, GridEvent, GridState, GridWorld,
-    GridWorldPlanes, GridWorldReward, Snake, SnakeReward, SnakeState, StepEvent,
+    GridWorldPlanes, GridWorldReward, Snake, SnakeReward, SnakeState, StepEvent, CHESS_ACTIONS,
 };
 
 /// Absolute `Action` -> its `u8` code (Up/Down/Left/Right = 0/1/2/3), for native-state marshalling.
@@ -2725,6 +2725,31 @@ impl EncoderHandle {
         EncoderHandle {
             chess: ChessEncoderSpec::Relative,
         }
+    }
+
+    /// The encoder's action map: the net-head index of game action `action` from `agent`'s
+    /// perspective (identity for absolute encoders). For driving a trained net OUTSIDE the
+    /// engine (play/eval scripts): read logits at `head_index(a, agent)` for each legal game
+    /// action `a` from `env.legal_actions`.
+    fn head_index(&self, action: usize, agent: usize) -> PyResult<usize> {
+        if action >= CHESS_ACTIONS {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "action {action} out of range for the {CHESS_ACTIONS}-action chess encoding"
+            )));
+        }
+        let (_, enc) = chess_parts(None, self.chess);
+        Ok(enc.head_index(action, agent))
+    }
+
+    /// Inverse of `head_index`.
+    fn game_action(&self, head: usize, agent: usize) -> PyResult<usize> {
+        if head >= CHESS_ACTIONS {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "head {head} out of range for the {CHESS_ACTIONS}-action chess encoding"
+            )));
+        }
+        let (_, enc) = chess_parts(None, self.chess);
+        Ok(enc.game_action(head, agent))
     }
 
     /// AlphaZero's chess view: `14·history_length + 7` planes (12 piece + 2 repetition planes per
