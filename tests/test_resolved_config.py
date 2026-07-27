@@ -41,6 +41,31 @@ def test_defaults_are_resolved_and_json_compatible() -> None:
     assert cfg["engine"]["n_games"] == 2 and cfg["engine"]["infer_cache"] == 1024
 
 
+def test_schema_version_is_checked() -> None:
+    cfg = _az_chess().resolved_config()
+    cfg["schema_version"] = 2
+    with pytest.raises(ValueError, match="schema_version"):
+        rf.engine_from_config(cfg)
+
+
+def test_disabled_start_buffer_renders_null_and_cannot_split_fingerprints() -> None:
+    def build(cap: int, p: float) -> rf.Engine:
+        return rf.Engine(
+            rf.games.Connect4(),
+            None,
+            rf.policies.EpsilonGreedyQ(),
+            rf.learners.Dqn(),
+            n_games=1,
+            start_buffer=False,
+            start_buffer_capacity=cap,
+            p_fresh=p,
+        )
+
+    a, b = build(1, 0.0), build(999, 0.9)  # ignored args must not reach the fingerprint
+    assert a.resolved_config()["engine"]["start_buffer"] is None
+    assert a.config_fingerprint() == b.config_fingerprint()
+
+
 def test_noise_off_renders_null() -> None:
     e = rf.Engine(
         rf.games.Connect4(),
@@ -99,7 +124,14 @@ def test_round_trip_reconstructs_a_record_identical_engine(family: str) -> None:
     assert rebuilt.resolved_config() == original.resolved_config()
     assert rebuilt.config_fingerprint() == original.config_fingerprint()
 
-    def collect(e: rf.Engine) -> bytes:
+    def _norm(v: object) -> object:
+        if isinstance(v, np.ndarray):
+            return v.tolist()
+        if isinstance(v, (list, tuple)):
+            return [_norm(x) for x in v]
+        return v
+
+    def collect(e: rf.Engine) -> object:
         a = e.resolved_config()["game"]["name"]
         ka = {"backgammon": (2, 1352), "snake": (2, 3)}.get(a)
 
@@ -111,6 +143,17 @@ def test_round_trip_reconstructs_a_record_identical_engine(family: str) -> None:
             return np.full((rows, *ka), 0.25)
 
         b = e.collect(40, infer)
-        return np.ascontiguousarray(b.obs).tobytes()
+        # EVERY learner-specific array plus deterministic telemetry — not just obs. Timing
+        # fields (seconds/rates) are the only exclusion.
+        arrays = {
+            k: np.ascontiguousarray(getattr(b, k)).tobytes()
+            for k in dir(b)
+            if isinstance(getattr(b, k, None), np.ndarray)
+        }
+        assert len(arrays) >= 3, sorted(arrays)  # the batch really exposes its arrays
+        telemetry = {
+            k: _norm(v) for k, v in b.telemetry.items() if "seconds" not in k and "time" not in k and "per_s" not in k
+        }
+        return (arrays, telemetry)
 
     assert collect(original) == collect(rebuilt)

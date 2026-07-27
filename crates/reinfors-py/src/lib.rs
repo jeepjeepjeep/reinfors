@@ -569,9 +569,13 @@ impl PyEngine {
             "engine": {
                 "n_games": n_games,
                 "seed": seed,
-                "start_buffer": start_buffer.is_some(),
-                "start_buffer_capacity": start_buffer_capacity,
-                "p_fresh": p_fresh,
+                // Effective composition only: a disabled start buffer renders null, so ignored
+                // capacity/p_fresh arguments cannot split fingerprints of identical engines
+                // (the AlphaZero-noise convention).
+                "start_buffer": start_buffer.as_ref().map_or(Value::Null, |sb| json!({
+                    "capacity": sb.capacity,
+                    "p_fresh": sb.p_fresh,
+                })),
                 "infer_cache": infer_cache,
             },
         });

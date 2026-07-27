@@ -91,9 +91,21 @@ def engine_from_config(config: dict[str, Any]) -> Engine:
             kw["noise"] = noise.Dirichlet(**n)
         return kw
 
+    schema = config.get("schema_version")
+    if schema is not None and schema != 1:
+        msg = f"unsupported config schema_version {schema!r}; this reinfors supports 1"
+        raise ValueError(msg)
     g_name, g_kw = _split(config["game"])
     g_kw = _coerce_handles(g_kw)
     engine_kw = dict(config.get("engine", {}))
+    # start_buffer renders as null (off) or a {capacity, p_fresh} block (on) — unpack it back
+    # into the flat constructor kwargs (a plain bool is also accepted, for hand-written configs).
+    if "start_buffer" in engine_kw and not isinstance(engine_kw["start_buffer"], bool):
+        sb = engine_kw.pop("start_buffer")
+        engine_kw["start_buffer"] = sb is not None
+        if sb is not None:
+            engine_kw["start_buffer_capacity"] = sb["capacity"]
+            engine_kw["p_fresh"] = sb["p_fresh"]
     # The reward rides with the game block (YAML-friendly) or its own block; it goes to the Engine now.
     reward_cfg = g_kw.pop("reward", None) or config.get("reward")
     reward = Reward(**reward_cfg) if isinstance(reward_cfg, dict) else reward_cfg
