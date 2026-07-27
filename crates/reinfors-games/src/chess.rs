@@ -21,9 +21,14 @@
 //!
 //! **Termination**: checkmate (mover wins), stalemate, the fifty-move rule (both via
 //! `Board::status`), threefold repetition (a hash history kept in the state, reset on irreversible
-//! moves), and FIDE's dead-position insufficient-material draw: bare kings, a lone knight, or
-//! any number of bishops all on same-colored squares. Positions that admit helpmates (KNvKN,
-//! opposite-colored KBvKB) play on, exactly as FIDE — and OpenSpiel — score them.
+//! moves), and an insufficient-material draw: bare kings, a lone knight, or any number of
+//! bishops all on same-colored squares. This is the MATERIAL-ONLY sufficient condition of FIDE's
+//! dead-position rule (§5.2.2) — the standard practical subset (OpenSpiel and python-chess score
+//! identically). Full dead-position detection is semantic ("no series of legal moves can ever
+//! mate", including locked pawn fortresses) and is a proof-search problem no engine-adjacent
+//! implementation attempts; such positions cannot be won and fall through to the fifty-move or
+//! repetition draw — the same result FIDE reaches, later. Helpmate-admitting material (KNvKN,
+//! opposite-colored KBvKB) plays on.
 //! An illegal action id (impossible through the masked searches; reachable through a raw `Env`)
 //! is an immediate loss for the mover — the same posture as connect4's full-column rule.
 
@@ -226,9 +231,10 @@ fn agent_of(color: Color) -> usize {
     }
 }
 
-/// FIDE's dead-position rule, exactly (and OpenSpiel-aligned): with no pawns/rooks/queens, a
-/// draw iff kings only, one lone knight, or any number of bishops all on same-colored squares.
-/// KNvKN and opposite-colored KBvKB admit helpmates, so they play on.
+/// The material-only sufficient condition of FIDE's dead-position rule (OpenSpiel-aligned; see
+/// the module doc for the semantic cases this deliberately does not attempt): with no
+/// pawns/rooks/queens, a draw iff kings only, one lone knight, or any number of bishops all on
+/// same-colored squares. KNvKN and opposite-colored KBvKB admit helpmates, so they play on.
 fn insufficient_material(board: &Board) -> bool {
     if !(board.pieces(Piece::Pawn) | board.pieces(Piece::Rook) | board.pieces(Piece::Queen))
         .is_empty()
