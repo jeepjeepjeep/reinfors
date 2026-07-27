@@ -14,6 +14,16 @@ impl SplitMix64 {
         SplitMix64 { state: seed }
     }
 
+    /// The raw generator state — with `from_state`, the snapshot/restore seam (an exact resume
+    /// point, unlike `new`, whose argument is a seed about to be advanced).
+    pub(crate) fn state(&self) -> u64 {
+        self.state
+    }
+
+    pub(crate) fn from_state(state: u64) -> Self {
+        SplitMix64 { state }
+    }
+
     pub(crate) fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.state;

@@ -174,6 +174,35 @@ impl StateEncoder for GridWorldPlanes {
     }
 }
 
+impl reinfors_core::StateCodec for GridWorld {
+    type State = GridState;
+
+    fn encode(&self, s: &GridState) -> Vec<u8> {
+        let mut out = vec![1u8]; // layout version
+        crate::codec_util::put_i32(&mut out, s.pos.0);
+        crate::codec_util::put_i32(&mut out, s.pos.1);
+        out.push(u8::from(s.done));
+        out
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Result<GridState, String> {
+        let mut r = crate::codec_util::Reader::new(bytes);
+        if r.u8()? != 1 {
+            return Err("unsupported gridworld state layout version".into());
+        }
+        let pos = (r.i32()?, r.i32()?);
+        let done = r.u8()? != 0;
+        r.finish()?;
+        if !(0 <= pos.0 && pos.0 < self.size && 0 <= pos.1 && pos.1 < self.size) {
+            return Err(format!(
+                "position {pos:?} outside the {0}x{0} grid",
+                self.size
+            ));
+        }
+        Ok(GridState { pos, done })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

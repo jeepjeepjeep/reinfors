@@ -3,6 +3,7 @@
 //! It defines the `Game` trait, the `Policy` (acting) + `Learner` (records) seams the rollout `Engine`
 //! drives, and concrete algorithm impls under `policies`/`learners`.
 
+pub mod codec;
 pub mod encoder;
 pub mod engine;
 pub mod env;
@@ -19,6 +20,7 @@ pub(crate) mod rng;
 pub mod space;
 pub mod start;
 
+pub use codec::StateCodec;
 pub use encoder::{check_action_view, ActionView, IdentityView, StateEncoder};
 pub use engine::{CollectStats, Engine, EngineParams, EpisodeSummary};
 pub use env::Env;

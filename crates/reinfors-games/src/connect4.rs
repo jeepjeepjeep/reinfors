@@ -247,6 +247,47 @@ impl StateEncoder for Connect4Planes {
     }
 }
 
+impl reinfors_core::StateCodec for Connect4 {
+    type State = Connect4State;
+
+    fn encode(&self, s: &Connect4State) -> Vec<u8> {
+        let mut out = vec![1u8];
+        out.extend_from_slice(&s.cells);
+        out.push(s.turn as u8);
+        out.push(u8::from(s.done));
+        out
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Result<Connect4State, String> {
+        let mut r = crate::codec_util::Reader::new(bytes);
+        if r.u8()? != 1 {
+            return Err("unsupported connect4 state layout version".into());
+        }
+        let mut cells = [0u8; COLS * ROWS];
+        for c in cells.iter_mut() {
+            *c = r.u8()?;
+            if *c > 2 {
+                return Err(format!("cell value {c} out of range"));
+            }
+        }
+        let turn = r.u8()? as usize;
+        if turn > 1 {
+            return Err(format!("turn {turn} out of range"));
+        }
+        let done = r.u8()? != 0;
+        r.finish()?;
+        // Gravity invariant: a filled cell cannot float above an empty one.
+        for col in 0..COLS {
+            for row in 1..ROWS {
+                if cells[row * COLS + col] != 0 && cells[(row - 1) * COLS + col] == 0 {
+                    return Err(format!("floating piece at row {row} col {col}"));
+                }
+            }
+        }
+        Ok(Connect4State { cells, turn, done })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

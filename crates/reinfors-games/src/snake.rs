@@ -1389,3 +1389,84 @@ mod reward_tests {
         assert!((r.step_reward(&dead, 0) - (-0.5)).abs() < 1e-12); // loss only
     }
 }
+
+impl reinfors_core::StateCodec for Snake {
+    type State = SnakeState;
+
+    fn encode(&self, s: &SnakeState) -> Vec<u8> {
+        use crate::codec_util::{put_i32, put_u32};
+        let mut out = vec![1u8];
+        for snake in &s.snakes {
+            put_u32(&mut out, snake.body.len() as u32);
+            for &(r, c) in &snake.body {
+                put_i32(&mut out, r);
+                put_i32(&mut out, c);
+            }
+            out.push(snake.direction.ego_rot_k()); // Up=0 Right=1 Down=2 Left=3: a stable id
+            out.push(u8::from(snake.alive));
+        }
+        let mut food: Vec<Cell> = s.food.iter().copied().collect();
+        food.sort_unstable(); // canonical order: equal states encode to equal bytes
+        put_u32(&mut out, food.len() as u32);
+        for (r, c) in food {
+            put_i32(&mut out, r);
+            put_i32(&mut out, c);
+        }
+        out
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Result<SnakeState, String> {
+        let mut r = crate::codec_util::Reader::new(bytes);
+        if r.u8()? != 1 {
+            return Err("unsupported snake state layout version".into());
+        }
+        let g = self.grid_size;
+        let in_grid = |cell: Cell| 0 <= cell.0 && cell.0 < g && 0 <= cell.1 && cell.1 < g;
+        let mut snakes: Vec<SnakeBody> = Vec::with_capacity(2);
+        for i in 0..2 {
+            let n = r.u32()? as usize;
+            if n > (g as usize).pow(2) {
+                return Err(format!("snake {i} body length {n} exceeds the grid"));
+            }
+            let mut body = VecDeque::with_capacity(n);
+            for _ in 0..n {
+                let cell = (r.i32()?, r.i32()?);
+                if !in_grid(cell) {
+                    return Err(format!("snake {i} cell {cell:?} outside the grid"));
+                }
+                body.push_back(cell);
+            }
+            let direction = match r.u8()? {
+                0 => Action::Up,
+                1 => Action::Right,
+                2 => Action::Down,
+                3 => Action::Left,
+                d => return Err(format!("direction id {d} out of range")),
+            };
+            let alive = r.u8()? != 0;
+            if alive && body.is_empty() {
+                return Err(format!("snake {i} is alive with an empty body"));
+            }
+            snakes.push(SnakeBody {
+                body,
+                direction,
+                alive,
+            });
+        }
+        let n_food = r.u32()? as usize;
+        if n_food > (g as usize).pow(2) {
+            return Err(format!("food count {n_food} exceeds the grid"));
+        }
+        let mut food = HashSet::with_capacity(n_food);
+        for _ in 0..n_food {
+            let cell = (r.i32()?, r.i32()?);
+            if !in_grid(cell) {
+                return Err(format!("food cell {cell:?} outside the grid"));
+            }
+            food.insert(cell);
+        }
+        r.finish()?;
+        let snakes: [SnakeBody; 2] = snakes.try_into().expect("exactly two snakes decoded");
+        Ok(SnakeState { snakes, food })
+    }
+}

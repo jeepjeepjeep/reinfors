@@ -933,3 +933,100 @@ mod tests {
         probs.len() - 1
     }
 }
+
+impl reinfors_core::StateCodec for Backgammon {
+    type State = BackgammonState;
+
+    fn encode(&self, s: &BackgammonState) -> Vec<u8> {
+        let mut out = vec![1u8];
+        for p in 0..2 {
+            out.extend_from_slice(&s.board[p]);
+            out.push(s.bar[p]);
+            out.push(s.scores[p]);
+        }
+        out.push(s.to_move);
+        out.extend_from_slice(&s.dice);
+        out.push(u8::from(s.double_turn));
+        out
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Result<BackgammonState, String> {
+        let mut r = crate::codec_util::Reader::new(bytes);
+        if r.u8()? != 1 {
+            return Err("unsupported backgammon state layout version".into());
+        }
+        let mut board = [[0u8; NUM_POINTS]; 2];
+        let mut bar = [0u8; 2];
+        let mut scores = [0u8; 2];
+        for p in 0..2 {
+            for pt in board[p].iter_mut() {
+                *pt = r.u8()?;
+            }
+            bar[p] = r.u8()?;
+            scores[p] = r.u8()?;
+        }
+        let to_move = r.u8()?;
+        let dice = [r.u8()?, r.u8()?];
+        let double_turn = r.u8()? != 0;
+        r.finish()?;
+        if to_move > 1 {
+            return Err(format!("to_move {to_move} out of range"));
+        }
+        for (p, (b, (bar_p, score_p))) in
+            board.iter().zip(bar.iter().zip(scores.iter())).enumerate()
+        {
+            let total = b.iter().map(|&c| u32::from(c)).sum::<u32>()
+                + u32::from(*bar_p)
+                + u32::from(*score_p);
+            if total != 15 {
+                return Err(format!("player {p} has {total} checkers, expected 15"));
+            }
+        }
+        for d in dice {
+            if d > 12 {
+                return Err(format!(
+                    "die value {d} out of range (0 unrolled, 1-6 fresh, 7-12 used)"
+                ));
+            }
+        }
+        Ok(BackgammonState {
+            board,
+            bar,
+            scores,
+            to_move,
+            dice,
+            double_turn,
+        })
+    }
+}
+
+#[cfg(test)]
+mod codec_tests {
+    use super::*;
+    use reinfors_core::StateCodec;
+
+    #[test]
+    fn backgammon_state_round_trips_and_rejects_checker_imbalance() {
+        struct R(u64);
+        impl reinfors_core::Rng for R {
+            fn below(&mut self, n: usize) -> usize {
+                self.0 = self
+                    .0
+                    .wrapping_mul(2862933555777941757)
+                    .wrapping_add(3037000493);
+                (self.0 >> 33) as usize % n.max(1)
+            }
+            fn unit(&mut self) -> f64 {
+                0.5
+            }
+        }
+        let game = Backgammon { max_ticks: None };
+        let s = game.initial_state(&mut R(9));
+        let bytes = game.encode(&s);
+        let back = game.decode(&bytes).unwrap();
+        assert_eq!(game.encode(&back), bytes);
+        let mut evil = bytes.clone();
+        evil[1] = evil[1].wrapping_add(1); // one extra checker on point 0
+        assert!(game.decode(&evil).unwrap_err().contains("checkers"));
+    }
+}

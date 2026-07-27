@@ -17,6 +17,8 @@ pub use chess::{
     ChessPlanesOpenSpiel, ChessPlanesRelative, ChessReward, ChessState, CHESS_ACTIONS,
 };
 pub use connect4::{Connect4, Connect4Event, Connect4Planes, Connect4Reward, Connect4State};
+pub(crate) mod codec_util;
+
 pub use cozy_chess::Board as ChessBoard;
 pub use gridworld::{GridEvent, GridState, GridWorld, GridWorldPlanes, GridWorldReward};
 pub use snake::{
