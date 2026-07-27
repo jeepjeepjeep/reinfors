@@ -18,6 +18,8 @@ use numpy::{IntoPyArray, PyArray1, PyArray2, PyArray3, PyArrayDyn, PyReadonlyArr
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
+use serde_json::{json, Value};
+
 use reinfors_core::{
     ActBy, AlphaZero, AlphaZeroConfig, AlphaZeroLearner, AlphaZeroRecord, AlwaysInitialState,
     ChanceMode, Dqn, DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game, InferCache,
@@ -260,98 +262,54 @@ fn parse_opponent(opponent: &str, opp_temperature: f64, opp_floor: f64) -> PyRes
 // RESOLVED CONFIG — a fully resolved, JSON-compatible view of an engine's immutable composition
 // (defaults included), rendered from the same specs the factory consumes and the same reward
 // schema `build_reward` resolves against. `engine_from_config(engine.resolved_config())`
-// round-trips (the property test pins it). The fingerprint hashes reinfors-produced canonical
-// bytes — sorted keys, Rust f64 Display — and may change algorithm with `schema_version`.
+// round-trips (the property test pins it). Canonical bytes = `serde_json` serialization (keys
+// sorted by its BTreeMap-backed Map, floats via ryu shortest round-trip); the fingerprint is
+// SHA-256 over those bytes — standard and permanent.
 // ===========================================================================
 
 const CONFIG_SCHEMA_VERSION: i64 = 1;
 
-#[derive(Clone)]
-enum Cfg {
-    Null,
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    Str(String),
-    Map(Vec<(&'static str, Cfg)>),
-}
-
-impl Cfg {
-    fn canonical_json(&self, out: &mut String) {
-        match self {
-            Cfg::Null => out.push_str("null"),
-            Cfg::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-            Cfg::Int(i) => out.push_str(&i.to_string()),
-            Cfg::Float(f) => out.push_str(&format!("{f}")),
-            Cfg::Str(v) => {
-                out.push('"');
-                for c in v.chars() {
-                    match c {
-                        '"' => out.push_str("\\\""),
-                        '\\' => out.push_str("\\\\"),
-                        c => out.push(c),
-                    }
-                }
-                out.push('"');
-            }
-            Cfg::Map(entries) => {
-                let mut sorted: Vec<&(&str, Cfg)> = entries.iter().collect();
-                sorted.sort_by_key(|(k, _)| *k);
-                out.push('{');
-                for (i, (k, v)) in sorted.into_iter().enumerate() {
-                    if i > 0 {
-                        out.push(',');
-                    }
-                    out.push('"');
-                    out.push_str(k);
-                    out.push_str("\":");
-                    v.canonical_json(out);
-                }
-                out.push('}');
+fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny>> {
+    use pyo3::IntoPyObjectExt;
+    Ok(match v {
+        Value::Null => py.None().into_bound(py),
+        Value::Bool(b) => b.into_bound_py_any(py)?,
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                i.into_bound_py_any(py)?
+            } else {
+                n.as_f64()
+                    .expect("config numbers are i64 or f64")
+                    .into_bound_py_any(py)?
             }
         }
-    }
-
-    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        use pyo3::IntoPyObjectExt;
-        Ok(match self {
-            Cfg::Null => py.None().into_bound(py),
-            Cfg::Bool(b) => b.into_bound_py_any(py)?,
-            Cfg::Int(i) => i.into_bound_py_any(py)?,
-            Cfg::Float(f) => f.into_bound_py_any(py)?,
-            Cfg::Str(v) => v.into_bound_py_any(py)?,
-            Cfg::Map(entries) => {
-                let d = PyDict::new(py);
-                for (k, v) in entries {
-                    d.set_item(k, v.to_py(py)?)?;
-                }
-                d.into_bound_py_any(py)?
+        Value::String(x) => x.into_bound_py_any(py)?,
+        Value::Array(items) => {
+            let list = pyo3::types::PyList::empty(py);
+            for item in items {
+                list.append(value_to_py(py, item)?)?;
             }
-        })
-    }
+            list.into_bound_py_any(py)?
+        }
+        Value::Object(map) => {
+            let d = PyDict::new(py);
+            for (k, val) in map {
+                d.set_item(k, value_to_py(py, val)?)?;
+            }
+            d.into_bound_py_any(py)?
+        }
+    })
 }
 
-fn cfg_named(name: &str, rest: Vec<(&'static str, Cfg)>) -> Cfg {
-    let mut entries = vec![("name", Cfg::Str(name.to_string()))];
-    entries.extend(rest);
-    Cfg::Map(entries)
-}
-
-fn cfg_opt_usize(v: Option<usize>) -> Cfg {
-    v.map_or(Cfg::Null, |x| Cfg::Int(x as i64))
-}
-
-fn chance_cfg(mode: &ChanceMode) -> Cfg {
+fn chance_cfg(mode: &ChanceMode) -> Value {
     match mode {
-        ChanceMode::AlwaysResample => cfg_named("always_resample", vec![]),
-        ChanceMode::Committed { samples } => {
-            cfg_named("committed", vec![("samples", Cfg::Int(*samples as i64))])
-        }
-        ChanceMode::ExpandAll => cfg_named("expand_all", vec![]),
+        ChanceMode::AlwaysResample => json!({"name": "always_resample"}),
+        ChanceMode::Committed { samples } => json!({"name": "committed", "samples": samples}),
+        ChanceMode::ExpandAll => json!({"name": "expand_all"}),
     }
 }
 
-fn game_cfg(spec: &GameSpec) -> Cfg {
+fn game_cfg(spec: &GameSpec) -> Value {
     match spec {
         GameSpec::Snake {
             grid_size,
@@ -360,58 +318,50 @@ fn game_cfg(spec: &GameSpec) -> Cfg {
             play_to_last,
             win_food_lead,
             max_ticks,
-        } => cfg_named(
-            "snake",
-            vec![
-                ("grid_size", Cfg::Int(i64::from(*grid_size))),
-                ("initial_length", Cfg::Int(*initial_length as i64)),
-                ("food", Cfg::Int(*initial_food_count as i64)),
-                ("play_to_last", Cfg::Bool(*play_to_last)),
-                ("win_food_lead", cfg_opt_usize(*win_food_lead)),
-                ("max_ticks", cfg_opt_usize(*max_ticks)),
-            ],
-        ),
-        GameSpec::Connect4 => cfg_named("connect4", vec![]),
+        } => json!({
+            "name": "snake",
+            "grid_size": grid_size,
+            "initial_length": initial_length,
+            "food": initial_food_count,
+            "play_to_last": play_to_last,
+            "win_food_lead": win_food_lead,
+            "max_ticks": max_ticks,
+        }),
+        GameSpec::Connect4 => json!({"name": "connect4"}),
         GameSpec::Chess { max_ticks, encoder } => {
             let enc = match encoder {
-                ChessEncoderSpec::Minimal => cfg_named("minimal_chess", vec![]),
-                ChessEncoderSpec::Relative => cfg_named("relative_chess", vec![]),
-                ChessEncoderSpec::OpenSpiel => cfg_named("openspiel_chess", vec![]),
-                ChessEncoderSpec::AlphaZero { history } => cfg_named(
-                    "alphazero_chess",
-                    vec![("history_length", Cfg::Int(*history as i64))],
-                ),
+                ChessEncoderSpec::Minimal => json!({"name": "minimal_chess"}),
+                ChessEncoderSpec::Relative => json!({"name": "relative_chess"}),
+                ChessEncoderSpec::OpenSpiel => json!({"name": "openspiel_chess"}),
+                ChessEncoderSpec::AlphaZero { history } => {
+                    json!({"name": "alphazero_chess", "history_length": history})
+                }
             };
-            cfg_named(
-                "chess",
-                vec![("max_ticks", cfg_opt_usize(*max_ticks)), ("encoder", enc)],
-            )
+            json!({"name": "chess", "max_ticks": max_ticks, "encoder": enc})
         }
         GameSpec::Backgammon { max_ticks } => {
-            cfg_named("backgammon", vec![("max_ticks", cfg_opt_usize(*max_ticks))])
+            json!({"name": "backgammon", "max_ticks": max_ticks})
         }
         GameSpec::GridWorld {
             size,
             goal,
             max_ticks,
-        } => cfg_named(
-            "gridworld",
-            vec![
-                ("size", Cfg::Int(i64::from(*size))),
-                ("goal_row", Cfg::Int(i64::from(goal.0))),
-                ("goal_col", Cfg::Int(i64::from(goal.1))),
-                ("max_ticks", cfg_opt_usize(*max_ticks)),
-            ],
-        ),
+        } => json!({
+            "name": "gridworld",
+            "size": size,
+            "goal_row": goal.0,
+            "goal_col": goal.1,
+            "max_ticks": max_ticks,
+        }),
     }
 }
 
-fn policy_cfg(spec: &PolicySpec) -> Cfg {
+fn policy_cfg(spec: &PolicySpec) -> Value {
     let drop_cfg = |d: u32| {
         if d == u32::MAX {
-            Cfg::Null
+            Value::Null
         } else {
-            Cfg::Int(i64::from(d))
+            json!(d)
         }
     };
     match spec {
@@ -425,32 +375,32 @@ fn policy_cfg(spec: &PolicySpec) -> Cfg {
             n_heads,
             epsilon,
         } => {
-            let mut rest = vec![
-                ("beta", Cfg::Float(*beta)),
-                ("expansion_budget", Cfg::Int(*expansion_budget as i64)),
-                ("top_k", Cfg::Int(*top_k as i64)),
-                ("max_depth", Cfg::Int(i64::from(*max_depth))),
-                ("chance", chance_cfg(chance)),
-                ("n_heads", Cfg::Int(*n_heads as i64)),
-                ("epsilon", Cfg::Float(*epsilon)),
-            ];
+            let mut v = json!({
+                "name": "selective_expectimax",
+                "beta": beta,
+                "expansion_budget": expansion_budget,
+                "top_k": top_k,
+                "max_depth": max_depth,
+                "chance": chance_cfg(chance),
+                "n_heads": n_heads,
+                "epsilon": epsilon,
+            });
+            let m = v.as_object_mut().expect("built as an object");
             match opponent {
-                Opponent::Uniform => rest.push(("opponent", Cfg::Str("uniform".into()))),
+                Opponent::Uniform => {
+                    m.insert("opponent".into(), json!("uniform"));
+                }
                 Opponent::Distributional { temperature, floor } => {
-                    rest.push(("opponent", Cfg::Str("distributional".into())));
-                    rest.push(("opp_temperature", Cfg::Float(*temperature)));
-                    rest.push(("opp_floor", Cfg::Float(*floor)));
+                    m.insert("opponent".into(), json!("distributional"));
+                    m.insert("opp_temperature".into(), json!(temperature));
+                    m.insert("opp_floor".into(), json!(floor));
                 }
             }
-            cfg_named("selective_expectimax", rest)
+            v
         }
-        PolicySpec::EpsilonGreedyQ { n_heads, epsilon } => cfg_named(
-            "epsilon_greedy_q",
-            vec![
-                ("n_heads", Cfg::Int(*n_heads as i64)),
-                ("epsilon", Cfg::Float(*epsilon)),
-            ],
-        ),
+        PolicySpec::EpsilonGreedyQ { n_heads, epsilon } => {
+            json!({"name": "epsilon_greedy_q", "n_heads": n_heads, "epsilon": epsilon})
+        }
         PolicySpec::Mcts {
             num_simulations,
             uct_c,
@@ -459,24 +409,16 @@ fn policy_cfg(spec: &PolicySpec) -> Cfg {
             temperature,
             temperature_drop,
             chance,
-        } => cfg_named(
-            "mcts",
-            vec![
-                ("num_simulations", Cfg::Int(*num_simulations as i64)),
-                ("uct_c", Cfg::Float(*uct_c)),
-                ("max_depth", Cfg::Int(i64::from(*max_depth))),
-                (
-                    "act_by",
-                    Cfg::Str(match act_by {
-                        ActBy::Value => "value".into(),
-                        ActBy::Visits => "visits".into(),
-                    }),
-                ),
-                ("temperature", Cfg::Float(*temperature)),
-                ("temperature_drop", drop_cfg(*temperature_drop)),
-                ("chance", chance_cfg(chance)),
-            ],
-        ),
+        } => json!({
+            "name": "mcts",
+            "num_simulations": num_simulations,
+            "uct_c": uct_c,
+            "max_depth": max_depth,
+            "act_by": match act_by { ActBy::Value => "value", ActBy::Visits => "visits" },
+            "temperature": temperature,
+            "temperature_drop": drop_cfg(*temperature_drop),
+            "chance": chance_cfg(chance),
+        }),
         PolicySpec::AlphaZero {
             num_simulations,
             c_puct,
@@ -490,73 +432,64 @@ fn policy_cfg(spec: &PolicySpec) -> Cfg {
         } => {
             // `noise=None` is stored as epsilon 0 (the noise-free path) — rendered back as null.
             let noise = if *noise_epsilon == 0.0 {
-                Cfg::Null
+                Value::Null
             } else {
-                cfg_named(
-                    "dirichlet",
-                    vec![
-                        ("epsilon", Cfg::Float(*noise_epsilon)),
-                        ("alpha", Cfg::Float(*noise_alpha)),
-                        (
-                            "scope",
-                            Cfg::Str(match noise_scope {
-                                NoiseScope::Requester => "requester".into(),
-                                NoiseScope::Both => "both".into(),
-                            }),
-                        ),
-                    ],
-                )
+                json!({
+                    "name": "dirichlet",
+                    "epsilon": noise_epsilon,
+                    "alpha": noise_alpha,
+                    "scope": match noise_scope {
+                        NoiseScope::Requester => "requester",
+                        NoiseScope::Both => "both",
+                    },
+                })
             };
-            cfg_named(
-                "alphazero",
-                vec![
-                    ("num_simulations", Cfg::Int(*num_simulations as i64)),
-                    ("c_puct", Cfg::Float(*c_puct)),
-                    ("max_depth", Cfg::Int(i64::from(*max_depth))),
-                    ("temperature", Cfg::Float(*temperature)),
-                    ("temperature_drop", drop_cfg(*temperature_drop)),
-                    ("chance", chance_cfg(chance)),
-                    ("noise", noise),
-                ],
-            )
+            json!({
+                "name": "alphazero",
+                "num_simulations": num_simulations,
+                "c_puct": c_puct,
+                "max_depth": max_depth,
+                "temperature": temperature,
+                "temperature_drop": drop_cfg(*temperature_drop),
+                "chance": chance_cfg(chance),
+                "noise": noise,
+            })
         }
     }
 }
 
-fn learner_cfg(spec: &LearnerSpec) -> Cfg {
+fn learner_cfg(spec: &LearnerSpec) -> Value {
     match spec {
         LearnerSpec::TreeStrap {
             gamma,
             outcome_weight,
             bootstrap_p,
             interior_targets,
-        } => cfg_named(
-            "treestrap",
-            vec![
-                ("gamma", Cfg::Float(*gamma)),
-                ("outcome_weight", Cfg::Float(*outcome_weight)),
-                ("bootstrap_p", Cfg::Float(*bootstrap_p)),
-                ("interior_targets", Cfg::Bool(*interior_targets)),
-            ],
-        ),
-        LearnerSpec::Dqn { bootstrap_p } => {
-            cfg_named("dqn", vec![("bootstrap_p", Cfg::Float(*bootstrap_p))])
-        }
-        LearnerSpec::AlphaZero { gamma } => {
-            cfg_named("alphazero", vec![("gamma", Cfg::Float(*gamma))])
-        }
+        } => json!({
+            "name": "treestrap",
+            "gamma": gamma,
+            "outcome_weight": outcome_weight,
+            "bootstrap_p": bootstrap_p,
+            "interior_targets": interior_targets,
+        }),
+        LearnerSpec::Dqn { bootstrap_p } => json!({"name": "dqn", "bootstrap_p": bootstrap_p}),
+        LearnerSpec::AlphaZero { gamma } => json!({"name": "alphazero", "gamma": gamma}),
     }
 }
 
-fn fingerprint128(bytes: &[u8]) -> String {
-    let (mut h1, mut h2): (u64, u64) = (0xcbf2_9ce4_8422_2325, 0x9e37_79b9_7f4a_7c15);
-    for &b in bytes {
-        h1 = (h1 ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
-        h2 = (h2 ^ u64::from(b))
-            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-            .rotate_left(31);
-    }
-    format!("{h1:016x}{h2:016x}")
+/// Canonical bytes of a config value: `serde_json` with its BTreeMap-backed object ordering
+/// (sorted keys) and ryu float formatting — deterministic by construction.
+fn canonical_config_bytes(v: &Value) -> Vec<u8> {
+    serde_json::to_vec(v).expect("config values contain no non-serializable data")
+}
+
+/// SHA-256 hex over the canonical bytes.
+fn fingerprint_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// The unified parallel rollout engine: composes a game + policy + learner handle and drives N games,
@@ -567,7 +500,7 @@ struct PyEngine {
     // `None` while a `CollectStream` holds the engine on its worker thread; `stop()` returns it.
     inner: Option<Box<dyn ErasedEngine>>,
     // The immutable composition, resolved (defaults included) at construction — see `resolved_config`.
-    config: Cfg,
+    config: Value,
     // Weights-version counter shared with the infer cache (if enabled). Held here — OUTSIDE the
     // movable engine — so `weights_updated()` works from the consumer thread while a stream's
     // worker owns the engine.
@@ -618,39 +551,30 @@ impl PyEngine {
                 weights: r.weights.clone(),
             });
             let vals = resolve_reward(weights, reward_schema(&game.spec))?;
-            Cfg::Map(
+            Value::Object(
                 reward_schema(&game.spec)
                     .iter()
                     .zip(vals)
-                    .map(|((k, _), v)| (*k, Cfg::Float(v)))
+                    .map(|((k, _), v)| ((*k).to_string(), json!(v)))
                     .collect(),
             )
         };
-        let config = Cfg::Map(vec![
-            ("schema_version", Cfg::Int(CONFIG_SCHEMA_VERSION)),
-            (
-                "reinfors_version",
-                Cfg::Str(reinfors_core::version().to_string()),
-            ),
-            ("game", game_cfg(&game.spec)),
-            ("reward", resolved_reward),
-            ("policy", policy_cfg(&policy.spec)),
-            ("learner", learner_cfg(&learner.spec)),
-            (
-                "engine",
-                Cfg::Map(vec![
-                    ("n_games", Cfg::Int(n_games as i64)),
-                    ("seed", Cfg::Int(seed as i64)),
-                    ("start_buffer", Cfg::Bool(start_buffer.is_some())),
-                    (
-                        "start_buffer_capacity",
-                        Cfg::Int(start_buffer_capacity as i64),
-                    ),
-                    ("p_fresh", Cfg::Float(p_fresh)),
-                    ("infer_cache", Cfg::Int(infer_cache as i64)),
-                ]),
-            ),
-        ]);
+        let config = json!({
+            "schema_version": CONFIG_SCHEMA_VERSION,
+            "reinfors_version": reinfors_core::version(),
+            "game": game_cfg(&game.spec),
+            "reward": resolved_reward,
+            "policy": policy_cfg(&policy.spec),
+            "learner": learner_cfg(&learner.spec),
+            "engine": {
+                "n_games": n_games,
+                "seed": seed,
+                "start_buffer": start_buffer.is_some(),
+                "start_buffer_capacity": start_buffer_capacity,
+                "p_fresh": p_fresh,
+                "infer_cache": infer_cache,
+            },
+        });
         let engine_params = EngineParams { n_games, seed };
         let weights_generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let cache =
@@ -686,16 +610,14 @@ impl PyEngine {
     /// equivalent engine. Excludes what reinfors does not own: network, optimizer, replay buffer,
     /// inference callback.
     fn resolved_config<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        self.config.to_py(py)
+        value_to_py(py, &self.config)
     }
 
     /// A 128-bit hex fingerprint of `resolved_config`, hashed over reinfors-produced canonical
     /// bytes (sorted keys, Rust float formatting). Compare fingerprints; never recompute from
     /// re-serialized JSON. The algorithm may change with the config `schema_version`.
     fn config_fingerprint(&self) -> String {
-        let mut out = String::new();
-        self.config.canonical_json(&mut out);
-        fingerprint128(out.as_bytes())
+        fingerprint_hex(&canonical_config_bytes(&self.config))
     }
 
     /// Roll forward until at least `n_records` records are gathered. `infer` maps an (N, C*H*W) float32

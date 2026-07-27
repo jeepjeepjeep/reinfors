@@ -55,7 +55,7 @@ def test_noise_off_renders_null() -> None:
 def test_fingerprint_separates_configs_and_is_stable() -> None:
     a, b = _az_chess(), _az_chess()
     assert a.config_fingerprint() == b.config_fingerprint()
-    assert len(a.config_fingerprint()) == 32
+    assert len(a.config_fingerprint()) == 64  # SHA-256 hex
     c = rf.Engine(
         rf.games.Chess(max_ticks=60, encoder=rf.encoders.MinimalChess()),  # encoder differs
         None,
