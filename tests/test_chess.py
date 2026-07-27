@@ -161,3 +161,15 @@ def test_relative_encoder_shape_and_symmetric_start() -> None:
     mask = np.ones((19, 8, 8), dtype=bool)
     mask[12] = False
     assert (w[mask] == b[mask]).all()
+
+
+def test_uci_interop_validates_before_rendering() -> None:
+    start = rf.Env(rf.games.Chess(), seed=0).state()["fen"]
+    assert rf.chess_action_uci(rf.chess_uci_action("e2e4", start), start) == "e2e4"
+    with pytest.raises(ValueError, match="not legal"):
+        rf.chess_action_uci(0, start)  # decodes to a1a2: geometrically fine, illegal here
+    for bad in (4672, 4673, 10**6):  # OpenSpiel's castling ids and beyond: never a panic
+        with pytest.raises(ValueError):
+            rf.chess_action_uci(bad, start)
+        with pytest.raises(ValueError):
+            rf._reinfors.chess_action_uci(bad, start)

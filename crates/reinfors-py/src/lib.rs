@@ -2796,6 +2796,39 @@ impl EncoderHandle {
     }
 }
 
+/// Chess interop: the action id of the legal move whose STANDARD-UCI string is `uci` in the
+/// position `fen` (castling as "e1g1"/"e1c1"). ValueError on a bad FEN or a string matching no
+/// legal move. Pure — for referees/tools translating between engines' move languages.
+#[pyfunction]
+fn chess_uci_action(uci: &str, fen: &str) -> PyResult<usize> {
+    let board: reinfors_games::ChessBoard = fen
+        .parse()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err(format!("invalid FEN: {fen:?}")))?;
+    reinfors_games::chess_uci_to_action(uci, &board).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("{uci:?} is not a legal move in {fen:?}"))
+    })
+}
+
+/// Inverse of `chess_uci_action`: the standard-UCI string of `action` in `fen`'s position.
+#[pyfunction]
+fn chess_action_uci(action: usize, fen: &str) -> PyResult<String> {
+    let board: reinfors_games::ChessBoard = fen
+        .parse()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err(format!("invalid FEN: {fen:?}")))?;
+    let mv = reinfors_games::chess_decode_move(action, &board).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "action {action} does not decode in {fen:?}"
+        ))
+    })?;
+    if !board.is_legal(mv) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "action {action} decodes to {} which is not legal in {fen:?}",
+            reinfors_games::chess_move_to_uci(mv, &board)
+        )));
+    }
+    Ok(reinfors_games::chess_move_to_uci(mv, &board))
+}
+
 #[pyfunction]
 fn core_version() -> &'static str {
     reinfors_core::version()
@@ -2816,6 +2849,8 @@ fn core_build_profile() -> &'static str {
 #[pymodule]
 fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
+    m.add_function(wrap_pyfunction!(chess_uci_action, m)?)?;
+    m.add_function(wrap_pyfunction!(chess_action_uci, m)?)?;
     m.add_function(wrap_pyfunction!(core_build_profile, m)?)?;
     m.add_class::<PyEngine>()?;
     m.add_class::<PyEnv>()?;

@@ -115,10 +115,49 @@ pub fn encode_move(mv: Move, side: Color) -> usize {
     from * 73 + move_type
 }
 
+/// Standard-UCI rendering of a cozy move ("e2e4", "e7e8q"). Cozy represents castling as
+/// king-takes-own-rook ("e1h1"); standard UCI wants the king's two-square destination ("e1g1"),
+/// so castling is detected against `board` and re-rendered.
+pub fn move_to_uci(mv: Move, board: &Board) -> String {
+    let stm = board.side_to_move();
+    let is_castle = (board.pieces(Piece::King) & board.colors(stm)).has(mv.from)
+        && (board.pieces(Piece::Rook) & board.colors(stm)).has(mv.to);
+    if is_castle {
+        let to_file = if (mv.to.file() as i8) > (mv.from.file() as i8) {
+            File::G
+        } else {
+            File::C
+        };
+        format!("{}{}", mv.from, Square::new(to_file, mv.from.rank()))
+    } else {
+        format!("{mv}")
+    }
+}
+
+/// The action id of the legal move whose standard-UCI rendering is `uci`, in `board`'s position.
+/// Matching against the LEGAL move list (rather than parsing) disambiguates castling from plain
+/// king moves and pins promotions exactly. `None` if no legal move renders as `uci`.
+pub fn uci_to_action(uci: &str, board: &Board) -> Option<usize> {
+    let mut found: Option<Move> = None;
+    board.generate_moves(|ms| {
+        for mv in ms {
+            if move_to_uci(mv, board) == uci {
+                found = Some(mv);
+            }
+        }
+        false
+    });
+    found.map(|mv| encode_move(mv, board.side_to_move()))
+}
+
 /// Decode an action id back into a cozy-chess move for `board`'s position. Returns `None` for
-/// geometrically impossible ids (off-board targets). Queen promotion is inferred when a pawn
+/// out-of-range ids and geometrically impossible ids (off-board targets). NOTE: a decoded move
+/// is not necessarily LEGAL in `board` — callers rendering for users must check `board.is_legal`. Queen promotion is inferred when a pawn
 /// ray-moves onto the last rank.
 pub fn decode_move(action: usize, board: &Board) -> Option<Move> {
+    if action >= CHESS_ACTIONS {
+        return None; // out-of-range ids (e.g. OpenSpiel's castling ids 4672/4673) are not moves
+    }
     let from_idx = action / 73;
     let move_type = action % 73;
     let from = Square::new(File::index(from_idx % 8), Rank::index(from_idx / 8));
@@ -1237,5 +1276,49 @@ mod fide_dead_position_tests {
         assert!(!dead("8/8/4k3/8/8/2NKN3/8/8 w - - 0 1")); // KNN vs K
         assert!(!dead("8/8/4k3/8/8/2NKB3/8/8 w - - 0 1")); // knight + bishop
         assert!(!dead("8/8/4k3/7p/8/3K4/8/8 w - - 0 1")); // a pawn plays on
+    }
+}
+
+#[cfg(test)]
+mod uci_tests {
+    use super::*;
+
+    #[test]
+    fn castling_renders_standard_and_round_trips() {
+        let board: Board = "r3k2r/pppqpppp/8/8/8/8/PPPQPPPP/R3K2R w KQkq - 0 1"
+            .parse()
+            .unwrap();
+        // Standard-UCI castling strings resolve to legal ids; cozy-form strings do NOT exist
+        // in the standard rendering.
+        for uci in ["e1g1", "e1c1"] {
+            let id = uci_to_action(uci, &board).expect(uci);
+            let mv = decode_move(id, &board).unwrap();
+            assert_eq!(move_to_uci(mv, &board), uci);
+        }
+        assert!(uci_to_action("e1h1", &board).is_none());
+    }
+
+    #[test]
+    fn every_legal_move_round_trips_via_uci() {
+        let mut board = Board::default();
+        for ply in 0..40 {
+            let mut moves = Vec::new();
+            board.generate_moves(|ms| {
+                moves.extend(ms);
+                false
+            });
+            if moves.is_empty() {
+                break;
+            }
+            for &mv in &moves {
+                let uci = move_to_uci(mv, &board);
+                assert_eq!(
+                    uci_to_action(&uci, &board),
+                    Some(encode_move(mv, board.side_to_move())),
+                    "ply {ply} move {uci}"
+                );
+            }
+            board.play(moves[(ply * 5) % moves.len()]);
+        }
     }
 }
