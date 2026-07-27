@@ -2181,4 +2181,267 @@ mod duct_tests {
                 - s.extra_eval_rows
         );
     }
+
+    /// Each simultaneous table's row must cross via ITS OWN agent's view: agent 1's logits arrive
+    /// swapped into its head frame while agent 0 keeps the identity — the search must reproduce
+    /// the all-identity run exactly (a slot-for-slot read of either table would break it).
+    struct SwapFor1;
+    impl ActionView for SwapFor1 {
+        fn head_index(&self, action: usize, agent: usize) -> usize {
+            if agent == 1 {
+                1 - action
+            } else {
+                action
+            }
+        }
+        fn game_action(&self, head: usize, agent: usize) -> usize {
+            if agent == 1 {
+                1 - head
+            } else {
+                head
+            }
+        }
+    }
+    impl StateEncoder for SwapFor1 {
+        type State = St;
+        fn encode(&self, s: &St, agent: usize) -> Vec<f32> {
+            vec![f32::from(u8::from(s.done)), agent as f32]
+        }
+        fn obs_shape(&self) -> (usize, usize, usize) {
+            (1, 1, 2)
+        }
+    }
+
+    #[test]
+    fn duct_tables_gather_through_each_agents_own_view() {
+        let game_logits = |seat: usize| {
+            if seat == 0 {
+                [1.2, -0.4]
+            } else {
+                [-0.8, 0.9]
+            }
+        };
+        let states = || vec![(St { done: false }, 0), (St { done: false }, 1)];
+        let run = |swapped: bool| {
+            let mut infer = move |obs: Vec<f32>, n: usize| -> Vec<f64> {
+                (0..n)
+                    .flat_map(|i| {
+                        let seat = obs[i * 2 + 1] as usize;
+                        let l = game_logits(seat);
+                        let (l0, l1) = if swapped && seat == 1 {
+                            (l[1], l[0]) // head frame for agent 1: swapped
+                        } else {
+                            (l[0], l[1])
+                        };
+                        [l0, l1, 0.1]
+                    })
+                    .collect()
+            };
+            let mut eval = Evaluator::new(&mut infer, None);
+            let cfg = az_cfg(40, 0.0, NoiseScope::Requester);
+            if swapped {
+                alphazero_many(
+                    &MatrixGame,
+                    &SwapFor1,
+                    &Passthrough,
+                    &cfg,
+                    states(),
+                    9,
+                    &mut eval,
+                )
+            } else {
+                alphazero_many(
+                    &MatrixGame,
+                    &Enc,
+                    &Passthrough,
+                    &cfg,
+                    states(),
+                    9,
+                    &mut eval,
+                )
+            }
+        };
+        let id = run(false);
+        let sw = run(true);
+        for (seat, (a, b)) in id.iter().zip(&sw).enumerate() {
+            assert_eq!(a.visits, b.visits, "seat {seat}: per-table view broken");
+            assert_eq!(a.values, b.values, "seat {seat}: per-table view broken");
+        }
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    //! Search gathers must cross raw net rows through the encoder's `ActionView`. Each test runs
+    //! the SAME search twice — an identity encoder against game-frame infer rows, and a rotated
+    //! view against rows permuted into its head frame — and asserts identical search results:
+    //! any gather that skipped (or double-applied) the view would break the equality.
+    use super::*;
+    use crate::encoder::StateEncoder;
+    use crate::game::{Actor, Game, Rng, Transition};
+    use crate::policies::alphazero::{alphazero_many, AlphaZeroConfig};
+    use crate::reward::Reward as RewardTrait;
+
+    /// A=4 but only {0, 2} legal (sparse) — the gathers iterate the legal set, so a wrong frame
+    /// reads a slot the net never associated with that move.
+    struct Sparse;
+    #[derive(Clone)]
+    struct St(i32);
+    impl Game for Sparse {
+        type State = St;
+        type Event = f64;
+        fn num_agents(&self) -> usize {
+            1
+        }
+        fn action_count(&self) -> usize {
+            4
+        }
+        fn actor(&self, _: &St) -> Actor {
+            Actor::Agent(0)
+        }
+        fn legal_actions(&self, _: &St, _: usize) -> Vec<usize> {
+            vec![0, 2]
+        }
+        fn step(&self, s: &St, actions: &[usize]) -> Transition<St, f64> {
+            let next = s.0 * 3 + actions[0] as i32 + 1;
+            Transition {
+                next_state: St(next),
+                events: vec![0.0],
+                terminal: next > 40,
+            }
+        }
+        fn initial_state(&self, _: &mut dyn Rng) -> St {
+            St(0)
+        }
+    }
+    struct Zero;
+    impl RewardTrait for Zero {
+        type Event = f64;
+        fn step_reward(&self, _: &f64, _: usize) -> f64 {
+            0.0
+        }
+    }
+
+    const A: usize = 4;
+    fn rot(a: usize) -> usize {
+        (a + 1) % A
+    }
+
+    struct IdEnc;
+    impl ActionView for IdEnc {}
+    struct RotEnc;
+    impl ActionView for RotEnc {
+        fn head_index(&self, action: usize, _: usize) -> usize {
+            rot(action)
+        }
+        fn game_action(&self, head: usize, _: usize) -> usize {
+            (head + A - 1) % A
+        }
+    }
+    macro_rules! enc_obs {
+        ($t:ty) => {
+            impl StateEncoder for $t {
+                type State = St;
+                fn encode(&self, s: &St, _: usize) -> Vec<f32> {
+                    vec![s.0 as f32]
+                }
+                fn obs_shape(&self) -> (usize, usize, usize) {
+                    (1, 1, 1)
+                }
+            }
+        };
+    }
+    enc_obs!(IdEnc);
+    enc_obs!(RotEnc);
+
+    /// Deterministic game-frame value for (state, action).
+    fn v(s: f64, a: usize) -> f64 {
+        ((s as i64 * 3 + a as i64 * 7) % 11) as f64 * 0.1
+    }
+
+    #[test]
+    fn uct_leaf_values_gather_through_the_view() {
+        let cfg = MctsConfig {
+            num_simulations: 30,
+            uct_c: 1.4,
+            gamma: 0.95,
+            max_depth: 6,
+            temperature: 0.0,
+            temperature_drop: u32::MAX,
+            chance: ChanceMode::AlwaysResample,
+        };
+        let run = |use_rot: bool| {
+            let mut infer = move |obs: Vec<f32>, n: usize| -> Vec<f64> {
+                (0..n)
+                    .flat_map(|i| {
+                        let s = f64::from(obs[i]);
+                        (0..A).map(move |slot| {
+                            // identity: slot IS the game action; rot: slot holds the game
+                            // action whose head index it is.
+                            let game_a = if use_rot { (slot + A - 1) % A } else { slot };
+                            v(s, game_a)
+                        })
+                    })
+                    .collect() // K=1 Q rows
+            };
+            let mut eval = Evaluator::new(&mut infer, None);
+            let requests = vec![(St(0), 0)];
+            if use_rot {
+                mcts_many(&Sparse, &RotEnc, &Zero, &cfg, requests, 3, &mut eval).remove(0)
+            } else {
+                mcts_many(&Sparse, &IdEnc, &Zero, &cfg, requests, 3, &mut eval).remove(0)
+            }
+        };
+        let id = run(false);
+        let rot = run(true);
+        assert_eq!(id.visits, rot.visits, "UCT leaf gathers must be frame-true");
+        assert_eq!(id.values, rot.values);
+    }
+
+    #[test]
+    fn puct_priors_gather_through_the_view() {
+        let cfg = AlphaZeroConfig {
+            num_simulations: 30,
+            c_puct: 1.5,
+            gamma: 1.0,
+            max_depth: 6,
+            noise_epsilon: 0.0, // noise off: priors are the only stochastic-free signal
+            noise_alpha: 0.3,
+            temperature: 0.0,
+            temperature_drop: u32::MAX,
+            chance: ChanceMode::AlwaysResample,
+            noise_scope: NoiseScope::Requester,
+        };
+        let run = |use_rot: bool| {
+            let mut infer = move |obs: Vec<f32>, n: usize| -> Vec<f64> {
+                (0..n)
+                    .flat_map(|i| {
+                        let s = f64::from(obs[i]);
+                        let mut row: Vec<f64> = (0..A)
+                            .map(|slot| {
+                                let game_a = if use_rot { (slot + A - 1) % A } else { slot };
+                                v(s, game_a) * 4.0 // logits
+                            })
+                            .collect();
+                        row.push(0.2); // value slot: layout, not an action — never permuted
+                        row
+                    })
+                    .collect()
+            };
+            let mut eval = Evaluator::new(&mut infer, None);
+            let requests = vec![(St(0), 0)];
+            if use_rot {
+                alphazero_many(&Sparse, &RotEnc, &Zero, &cfg, requests, 3, &mut eval).remove(0)
+            } else {
+                alphazero_many(&Sparse, &IdEnc, &Zero, &cfg, requests, 3, &mut eval).remove(0)
+            }
+        };
+        let id = run(false);
+        let rot = run(true);
+        assert_eq!(
+            id.visits, rot.visits,
+            "PUCT prior gathers must be frame-true"
+        );
+        assert_eq!(id.values, rot.values);
+    }
 }

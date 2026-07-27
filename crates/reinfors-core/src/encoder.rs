@@ -245,3 +245,129 @@ mod tests {
         assert!(rot[0].next_legal.is_empty()); // terminal: unchanged by the view
     }
 }
+
+#[cfg(test)]
+mod dispatch_tests {
+    //! Frame coverage the engine-level test above cannot see: sparse legal sets under a
+    //! permutation, and the identity fast path's dispatch count (the latency-regression guard —
+    //! wall-clock is flaky in unit tests, so we count the mechanism instead: virtual
+    //! `head_index` calls must be O(A) table builds, never O(K x A x n) per-scalar gathers).
+    use super::*;
+    use crate::evaluator::Evaluator;
+    use crate::game::{Actor, Game, Rng, Transition};
+    use crate::policies::epsilon_greedy_q::EpsilonGreedyQ;
+    use crate::policy::Policy;
+    use crate::reward::Reward;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A=3 with only {0, 2} legal.
+    struct SparseShot;
+    #[derive(Clone)]
+    struct St;
+    impl Game for SparseShot {
+        type State = St;
+        type Event = ();
+        fn num_agents(&self) -> usize {
+            1
+        }
+        fn action_count(&self) -> usize {
+            3
+        }
+        fn actor(&self, _: &St) -> Actor {
+            Actor::Agent(0)
+        }
+        fn legal_actions(&self, _: &St, _: usize) -> Vec<usize> {
+            vec![0, 2]
+        }
+        fn step(&self, _: &St, _: &[usize]) -> Transition<St, ()> {
+            Transition {
+                next_state: St,
+                events: vec![()],
+                terminal: true,
+            }
+        }
+        fn initial_state(&self, _: &mut dyn Rng) -> St {
+            St
+        }
+    }
+    struct NoReward;
+    impl Reward for NoReward {
+        type Event = ();
+        fn step_reward(&self, _: &(), _: usize) -> f64 {
+            0.0
+        }
+    }
+
+    /// Identity-valued view that counts its virtual `head_index` calls.
+    struct CountingEnc(AtomicUsize);
+    impl ActionView for CountingEnc {
+        fn head_index(&self, action: usize, _: usize) -> usize {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            action
+        }
+    }
+    impl StateEncoder for CountingEnc {
+        type State = St;
+        fn encode(&self, _: &St, _: usize) -> Vec<f32> {
+            vec![0.0]
+        }
+        fn obs_shape(&self) -> (usize, usize, usize) {
+            (1, 1, 1)
+        }
+    }
+
+    struct RotEnc; // head = (game + 1) % 3
+    impl ActionView for RotEnc {
+        fn head_index(&self, action: usize, _: usize) -> usize {
+            (action + 1) % 3
+        }
+        fn game_action(&self, head: usize, _: usize) -> usize {
+            (head + 2) % 3
+        }
+    }
+    impl StateEncoder for RotEnc {
+        type State = St;
+        fn encode(&self, _: &St, _: usize) -> Vec<f32> {
+            vec![0.0]
+        }
+        fn obs_shape(&self) -> (usize, usize, usize) {
+            (1, 1, 1)
+        }
+    }
+
+    #[test]
+    fn sparse_legal_sets_map_and_select_under_a_permutation() {
+        use crate::engine::{Engine, EngineParams};
+        use crate::learners::dqn::Dqn;
+        let mut engine = Engine::new(
+            SparseShot,
+            Box::new(RotEnc),
+            Box::new(NoReward),
+            EpsilonGreedyQ::new(1, 0.0),
+            Dqn::new(1, 1.0),
+            EngineParams {
+                n_games: 1,
+                seed: 0,
+            },
+        );
+        // Head-frame row [10, 0, 5] -> game frame [0, 5, 10]; legal = {0, 2}: argmax is game 2.
+        let (records, _) =
+            engine.collect(1, |_obs, n| (0..n).flat_map(|_| [10.0, 0.0, 5.0]).collect());
+        assert_eq!(records[0].action, 0); // head_index(2) = 0 — the slot whose 10.0 won
+        assert_eq!(records[0].legal, vec![1, 0]); // game {0, 2} through the view
+    }
+
+    #[test]
+    fn identity_path_pays_one_table_build_not_per_scalar_dispatch() {
+        let enc = CountingEnc(AtomicUsize::new(0));
+        let policy = EpsilonGreedyQ::new(2, 0.0); // K = 2
+        let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2 * 3];
+        let mut eval = Evaluator::new(&mut infer, None);
+        let requests = vec![(St, 0), (St, 0), (St, 0), (St, 0)]; // n = 4
+        let evals = policy.evaluate(&SparseShot, &enc, &NoReward, requests, 0, false, &mut eval);
+        assert_eq!(evals.len(), 4);
+        // One permutation build (A = 3 probes), memoized across all requests and heads — a
+        // regression to per-scalar gathers would read K x A x n = 24.
+        assert_eq!(enc.0.load(Ordering::Relaxed), 3);
+    }
+}
