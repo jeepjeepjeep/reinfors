@@ -29,9 +29,10 @@ use reinfors_games::snake::{Cell, DeathCause};
 use reinfors_games::{
     snake_length_cell, Action, Backgammon, BackgammonEvent, BackgammonReward, BackgammonState,
     BackgammonTesauro, Chess, ChessEvent, ChessPlanesAz119, ChessPlanesMinimal,
-    ChessPlanesRelative, ChessReward, ChessState, Connect4, Connect4Event, Connect4Planes,
-    Connect4Reward, Connect4State, EgocentricSnake, GridEvent, GridState, GridWorld,
-    GridWorldPlanes, GridWorldReward, Snake, SnakeReward, SnakeState, StepEvent, CHESS_ACTIONS,
+    ChessPlanesOpenSpiel, ChessPlanesRelative, ChessReward, ChessState, Connect4, Connect4Event,
+    Connect4Planes, Connect4Reward, Connect4State, EgocentricSnake, GridEvent, GridState,
+    GridWorld, GridWorldPlanes, GridWorldReward, Snake, SnakeReward, SnakeState, StepEvent,
+    CHESS_ACTIONS,
 };
 
 /// Absolute `Action` -> its `u8` code (Up/Down/Left/Right = 0/1/2/3), for native-state marshalling.
@@ -418,6 +419,7 @@ impl PyEngine {
 enum ChessEncoderSpec {
     Minimal,
     Relative,
+    OpenSpiel,
     AlphaZero { history: usize },
 }
 
@@ -441,6 +443,13 @@ fn chess_parts(
                 history_len: 0,
             },
             Box::new(ChessPlanesRelative),
+        ),
+        ChessEncoderSpec::OpenSpiel => (
+            Chess {
+                max_ticks,
+                history_len: 0,
+            },
+            Box::new(ChessPlanesOpenSpiel),
         ),
         ChessEncoderSpec::AlphaZero { history } => (
             Chess {
@@ -2724,6 +2733,17 @@ impl EncoderHandle {
     fn relative_chess() -> Self {
         EncoderHandle {
             chess: ChessEncoderSpec::Relative,
+        }
+    }
+
+    /// OpenSpiel's chess observation replicated exactly, (20, 8, 8) — the interop/benchmark view
+    /// (identical net inputs on both sides of a comparison, including their encoding's
+    /// en-passant blindness). Absolute frame; parity-gated against pyspiel in reinfors-benchmarks.
+    #[staticmethod]
+    #[pyo3(name = "OpenSpielChess")]
+    fn openspiel_chess() -> Self {
+        EncoderHandle {
+            chess: ChessEncoderSpec::OpenSpiel,
         }
     }
 

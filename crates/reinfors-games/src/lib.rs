@@ -12,8 +12,8 @@ pub use backgammon::{
     Backgammon, BackgammonEvent, BackgammonReward, BackgammonState, BackgammonTesauro,
 };
 pub use chess::{
-    Chess, ChessEvent, ChessPlanesAz119, ChessPlanesMinimal, ChessPlanesRelative, ChessReward,
-    ChessState, CHESS_ACTIONS,
+    Chess, ChessEvent, ChessPlanesAz119, ChessPlanesMinimal, ChessPlanesOpenSpiel,
+    ChessPlanesRelative, ChessReward, ChessState, CHESS_ACTIONS,
 };
 pub use connect4::{Connect4, Connect4Event, Connect4Planes, Connect4Reward, Connect4State};
 pub use gridworld::{GridEvent, GridState, GridWorld, GridWorldPlanes, GridWorldReward};
