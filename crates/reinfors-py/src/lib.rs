@@ -250,19 +250,324 @@ fn parse_opponent(opponent: &str, opp_temperature: f64, opp_floor: f64) -> PyRes
     }
 }
 
-/// The unified parallel rollout engine: composes a game + policy + learner handle and drives N games,
-/// yielding the learner's records. Holds the composition type-erased, so one class serves every
-/// `(game, policy, learner)`. Construct the handles via `rf.games.*` / `rf.policies.*` / `rf.learners.*`.
 // ===========================================================================
 // UNIFIED ENGINE (permanent) — the `Engine` pyclass + its type-erased dispatch and two-axis factory.
 // One class composes any game/policy/learner; only a factory arm (+ a `RecordBatch` impl for a new
 // record shape) is needed to extend it — never a per-game/per-family engine type.
 // ===========================================================================
 
+// ===========================================================================
+// RESOLVED CONFIG — a fully resolved, JSON-compatible view of an engine's immutable composition
+// (defaults included), rendered from the same specs the factory consumes and the same reward
+// schema `build_reward` resolves against. `engine_from_config(engine.resolved_config())`
+// round-trips (the property test pins it). The fingerprint hashes reinfors-produced canonical
+// bytes — sorted keys, Rust f64 Display — and may change algorithm with `schema_version`.
+// ===========================================================================
+
+const CONFIG_SCHEMA_VERSION: i64 = 1;
+
+#[derive(Clone)]
+enum Cfg {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Map(Vec<(&'static str, Cfg)>),
+}
+
+impl Cfg {
+    fn canonical_json(&self, out: &mut String) {
+        match self {
+            Cfg::Null => out.push_str("null"),
+            Cfg::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            Cfg::Int(i) => out.push_str(&i.to_string()),
+            Cfg::Float(f) => out.push_str(&format!("{f}")),
+            Cfg::Str(v) => {
+                out.push('"');
+                for c in v.chars() {
+                    match c {
+                        '"' => out.push_str("\\\""),
+                        '\\' => out.push_str("\\\\"),
+                        c => out.push(c),
+                    }
+                }
+                out.push('"');
+            }
+            Cfg::Map(entries) => {
+                let mut sorted: Vec<&(&str, Cfg)> = entries.iter().collect();
+                sorted.sort_by_key(|(k, _)| *k);
+                out.push('{');
+                for (i, (k, v)) in sorted.into_iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push('"');
+                    out.push_str(k);
+                    out.push_str("\":");
+                    v.canonical_json(out);
+                }
+                out.push('}');
+            }
+        }
+    }
+
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        use pyo3::IntoPyObjectExt;
+        Ok(match self {
+            Cfg::Null => py.None().into_bound(py),
+            Cfg::Bool(b) => b.into_bound_py_any(py)?,
+            Cfg::Int(i) => i.into_bound_py_any(py)?,
+            Cfg::Float(f) => f.into_bound_py_any(py)?,
+            Cfg::Str(v) => v.into_bound_py_any(py)?,
+            Cfg::Map(entries) => {
+                let d = PyDict::new(py);
+                for (k, v) in entries {
+                    d.set_item(k, v.to_py(py)?)?;
+                }
+                d.into_bound_py_any(py)?
+            }
+        })
+    }
+}
+
+fn cfg_named(name: &str, rest: Vec<(&'static str, Cfg)>) -> Cfg {
+    let mut entries = vec![("name", Cfg::Str(name.to_string()))];
+    entries.extend(rest);
+    Cfg::Map(entries)
+}
+
+fn cfg_opt_usize(v: Option<usize>) -> Cfg {
+    v.map_or(Cfg::Null, |x| Cfg::Int(x as i64))
+}
+
+fn chance_cfg(mode: &ChanceMode) -> Cfg {
+    match mode {
+        ChanceMode::AlwaysResample => cfg_named("always_resample", vec![]),
+        ChanceMode::Committed { samples } => {
+            cfg_named("committed", vec![("samples", Cfg::Int(*samples as i64))])
+        }
+        ChanceMode::ExpandAll => cfg_named("expand_all", vec![]),
+    }
+}
+
+fn game_cfg(spec: &GameSpec) -> Cfg {
+    match spec {
+        GameSpec::Snake {
+            grid_size,
+            initial_length,
+            initial_food_count,
+            play_to_last,
+            win_food_lead,
+            max_ticks,
+        } => cfg_named(
+            "snake",
+            vec![
+                ("grid_size", Cfg::Int(i64::from(*grid_size))),
+                ("initial_length", Cfg::Int(*initial_length as i64)),
+                ("food", Cfg::Int(*initial_food_count as i64)),
+                ("play_to_last", Cfg::Bool(*play_to_last)),
+                ("win_food_lead", cfg_opt_usize(*win_food_lead)),
+                ("max_ticks", cfg_opt_usize(*max_ticks)),
+            ],
+        ),
+        GameSpec::Connect4 => cfg_named("connect4", vec![]),
+        GameSpec::Chess { max_ticks, encoder } => {
+            let enc = match encoder {
+                ChessEncoderSpec::Minimal => cfg_named("minimal_chess", vec![]),
+                ChessEncoderSpec::Relative => cfg_named("relative_chess", vec![]),
+                ChessEncoderSpec::OpenSpiel => cfg_named("openspiel_chess", vec![]),
+                ChessEncoderSpec::AlphaZero { history } => cfg_named(
+                    "alphazero_chess",
+                    vec![("history_length", Cfg::Int(*history as i64))],
+                ),
+            };
+            cfg_named(
+                "chess",
+                vec![("max_ticks", cfg_opt_usize(*max_ticks)), ("encoder", enc)],
+            )
+        }
+        GameSpec::Backgammon { max_ticks } => {
+            cfg_named("backgammon", vec![("max_ticks", cfg_opt_usize(*max_ticks))])
+        }
+        GameSpec::GridWorld {
+            size,
+            goal,
+            max_ticks,
+        } => cfg_named(
+            "gridworld",
+            vec![
+                ("size", Cfg::Int(i64::from(*size))),
+                ("goal_row", Cfg::Int(i64::from(goal.0))),
+                ("goal_col", Cfg::Int(i64::from(goal.1))),
+                ("max_ticks", cfg_opt_usize(*max_ticks)),
+            ],
+        ),
+    }
+}
+
+fn policy_cfg(spec: &PolicySpec) -> Cfg {
+    let drop_cfg = |d: u32| {
+        if d == u32::MAX {
+            Cfg::Null
+        } else {
+            Cfg::Int(i64::from(d))
+        }
+    };
+    match spec {
+        PolicySpec::SelectiveExpectimax {
+            beta,
+            expansion_budget,
+            top_k,
+            max_depth,
+            chance,
+            opponent,
+            n_heads,
+            epsilon,
+        } => {
+            let mut rest = vec![
+                ("beta", Cfg::Float(*beta)),
+                ("expansion_budget", Cfg::Int(*expansion_budget as i64)),
+                ("top_k", Cfg::Int(*top_k as i64)),
+                ("max_depth", Cfg::Int(i64::from(*max_depth))),
+                ("chance", chance_cfg(chance)),
+                ("n_heads", Cfg::Int(*n_heads as i64)),
+                ("epsilon", Cfg::Float(*epsilon)),
+            ];
+            match opponent {
+                Opponent::Uniform => rest.push(("opponent", Cfg::Str("uniform".into()))),
+                Opponent::Distributional { temperature, floor } => {
+                    rest.push(("opponent", Cfg::Str("distributional".into())));
+                    rest.push(("opp_temperature", Cfg::Float(*temperature)));
+                    rest.push(("opp_floor", Cfg::Float(*floor)));
+                }
+            }
+            cfg_named("selective_expectimax", rest)
+        }
+        PolicySpec::EpsilonGreedyQ { n_heads, epsilon } => cfg_named(
+            "epsilon_greedy_q",
+            vec![
+                ("n_heads", Cfg::Int(*n_heads as i64)),
+                ("epsilon", Cfg::Float(*epsilon)),
+            ],
+        ),
+        PolicySpec::Mcts {
+            num_simulations,
+            uct_c,
+            max_depth,
+            act_by,
+            temperature,
+            temperature_drop,
+            chance,
+        } => cfg_named(
+            "mcts",
+            vec![
+                ("num_simulations", Cfg::Int(*num_simulations as i64)),
+                ("uct_c", Cfg::Float(*uct_c)),
+                ("max_depth", Cfg::Int(i64::from(*max_depth))),
+                (
+                    "act_by",
+                    Cfg::Str(match act_by {
+                        ActBy::Value => "value".into(),
+                        ActBy::Visits => "visits".into(),
+                    }),
+                ),
+                ("temperature", Cfg::Float(*temperature)),
+                ("temperature_drop", drop_cfg(*temperature_drop)),
+                ("chance", chance_cfg(chance)),
+            ],
+        ),
+        PolicySpec::AlphaZero {
+            num_simulations,
+            c_puct,
+            max_depth,
+            noise_epsilon,
+            noise_alpha,
+            temperature,
+            temperature_drop,
+            chance,
+            noise_scope,
+        } => {
+            // `noise=None` is stored as epsilon 0 (the noise-free path) — rendered back as null.
+            let noise = if *noise_epsilon == 0.0 {
+                Cfg::Null
+            } else {
+                cfg_named(
+                    "dirichlet",
+                    vec![
+                        ("epsilon", Cfg::Float(*noise_epsilon)),
+                        ("alpha", Cfg::Float(*noise_alpha)),
+                        (
+                            "scope",
+                            Cfg::Str(match noise_scope {
+                                NoiseScope::Requester => "requester".into(),
+                                NoiseScope::Both => "both".into(),
+                            }),
+                        ),
+                    ],
+                )
+            };
+            cfg_named(
+                "alphazero",
+                vec![
+                    ("num_simulations", Cfg::Int(*num_simulations as i64)),
+                    ("c_puct", Cfg::Float(*c_puct)),
+                    ("max_depth", Cfg::Int(i64::from(*max_depth))),
+                    ("temperature", Cfg::Float(*temperature)),
+                    ("temperature_drop", drop_cfg(*temperature_drop)),
+                    ("chance", chance_cfg(chance)),
+                    ("noise", noise),
+                ],
+            )
+        }
+    }
+}
+
+fn learner_cfg(spec: &LearnerSpec) -> Cfg {
+    match spec {
+        LearnerSpec::TreeStrap {
+            gamma,
+            outcome_weight,
+            bootstrap_p,
+            interior_targets,
+        } => cfg_named(
+            "treestrap",
+            vec![
+                ("gamma", Cfg::Float(*gamma)),
+                ("outcome_weight", Cfg::Float(*outcome_weight)),
+                ("bootstrap_p", Cfg::Float(*bootstrap_p)),
+                ("interior_targets", Cfg::Bool(*interior_targets)),
+            ],
+        ),
+        LearnerSpec::Dqn { bootstrap_p } => {
+            cfg_named("dqn", vec![("bootstrap_p", Cfg::Float(*bootstrap_p))])
+        }
+        LearnerSpec::AlphaZero { gamma } => {
+            cfg_named("alphazero", vec![("gamma", Cfg::Float(*gamma))])
+        }
+    }
+}
+
+fn fingerprint128(bytes: &[u8]) -> String {
+    let (mut h1, mut h2): (u64, u64) = (0xcbf2_9ce4_8422_2325, 0x9e37_79b9_7f4a_7c15);
+    for &b in bytes {
+        h1 = (h1 ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
+        h2 = (h2 ^ u64::from(b))
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            .rotate_left(31);
+    }
+    format!("{h1:016x}{h2:016x}")
+}
+
+/// The unified parallel rollout engine: composes a game + policy + learner handle and drives N games,
+/// yielding the learner's records. Holds the composition type-erased, so one class serves every
+/// `(game, policy, learner)`. Construct the handles via `rf.games.*` / `rf.policies.*` / `rf.learners.*`.
 #[pyclass(name = "Engine")]
 struct PyEngine {
     // `None` while a `CollectStream` holds the engine on its worker thread; `stop()` returns it.
     inner: Option<Box<dyn ErasedEngine>>,
+    // The immutable composition, resolved (defaults included) at construction — see `resolved_config`.
+    config: Cfg,
     // Weights-version counter shared with the infer cache (if enabled). Held here — OUTSIDE the
     // movable engine — so `weights_updated()` works from the consumer thread while a stream's
     // worker owns the engine.
@@ -307,6 +612,45 @@ impl PyEngine {
         } else {
             None
         };
+        // Capture the resolved composition before the specs are consumed by the factory.
+        let resolved_reward = {
+            let weights = reward.as_ref().map(|r| PyReward {
+                weights: r.weights.clone(),
+            });
+            let vals = resolve_reward(weights, reward_schema(&game.spec))?;
+            Cfg::Map(
+                reward_schema(&game.spec)
+                    .iter()
+                    .zip(vals)
+                    .map(|((k, _), v)| (*k, Cfg::Float(v)))
+                    .collect(),
+            )
+        };
+        let config = Cfg::Map(vec![
+            ("schema_version", Cfg::Int(CONFIG_SCHEMA_VERSION)),
+            (
+                "reinfors_version",
+                Cfg::Str(reinfors_core::version().to_string()),
+            ),
+            ("game", game_cfg(&game.spec)),
+            ("reward", resolved_reward),
+            ("policy", policy_cfg(&policy.spec)),
+            ("learner", learner_cfg(&learner.spec)),
+            (
+                "engine",
+                Cfg::Map(vec![
+                    ("n_games", Cfg::Int(n_games as i64)),
+                    ("seed", Cfg::Int(seed as i64)),
+                    ("start_buffer", Cfg::Bool(start_buffer.is_some())),
+                    (
+                        "start_buffer_capacity",
+                        Cfg::Int(start_buffer_capacity as i64),
+                    ),
+                    ("p_fresh", Cfg::Float(p_fresh)),
+                    ("infer_cache", Cfg::Int(infer_cache as i64)),
+                ]),
+            ),
+        ]);
         let engine_params = EngineParams { n_games, seed };
         let weights_generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let cache =
@@ -321,6 +665,7 @@ impl PyEngine {
                 start_buffer,
                 cache,
             )?),
+            config,
             weights_generation,
         })
     }
@@ -334,6 +679,23 @@ impl PyEngine {
     fn weights_updated(&self) {
         self.weights_generation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The engine's immutable composition, fully resolved (defaults included) as a
+    /// JSON-compatible dict — `rf.engine_from_config(engine.resolved_config())` reconstructs an
+    /// equivalent engine. Excludes what reinfors does not own: network, optimizer, replay buffer,
+    /// inference callback.
+    fn resolved_config<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.config.to_py(py)
+    }
+
+    /// A 128-bit hex fingerprint of `resolved_config`, hashed over reinfors-produced canonical
+    /// bytes (sorted keys, Rust float formatting). Compare fingerprints; never recompute from
+    /// re-serialized JSON. The algorithm may change with the config `schema_version`.
+    fn config_fingerprint(&self) -> String {
+        let mut out = String::new();
+        self.config.canonical_json(&mut out);
+        fingerprint128(out.as_bytes())
     }
 
     /// Roll forward until at least `n_records` records are gathered. `infer` maps an (N, C*H*W) float32
@@ -1172,21 +1534,30 @@ impl GameSpec {
 /// Resolve the generic `rf.Reward` weights against the game's schema into the concrete reward struct,
 /// boxed as the `dyn Reward` handle the engine threads. One arm per game (the reward keys + defaults
 /// are the game's). Used at `Engine` construction, where both game and reward are known.
+/// The per-game reward schema (component names + defaults) — the single table `build_reward`
+/// resolves against and `resolved_config` renders from, so the two cannot drift.
+fn reward_schema(game: &GameSpec) -> &'static [(&'static str, f64)] {
+    match game {
+        GameSpec::Snake { .. } => &[
+            ("step", 0.0),
+            ("food", 0.0),
+            ("loss", 0.0),
+            ("draw", 0.0),
+            ("kill", 0.0),
+            ("win", 0.0),
+            ("survival", 0.0),
+        ],
+        GameSpec::Connect4 => &[("win", 1.0), ("loss", -1.0), ("draw", 0.0)],
+        GameSpec::Chess { .. } => &[("win", 1.0), ("loss", -1.0), ("draw", 0.0)],
+        GameSpec::Backgammon { .. } => &[("win", 1.0), ("gammon", 2.0), ("backgammon", 3.0)],
+        GameSpec::GridWorld { .. } => &[("step", 0.0), ("goal", 1.0)],
+    }
+}
+
 fn build_reward(game: &GameSpec, reward: Option<PyReward>) -> PyResult<RewardBox> {
     Ok(match game {
         GameSpec::Snake { .. } => {
-            let r = resolve_reward(
-                reward,
-                &[
-                    ("step", 0.0),
-                    ("food", 0.0),
-                    ("loss", 0.0),
-                    ("draw", 0.0),
-                    ("kill", 0.0),
-                    ("win", 0.0),
-                    ("survival", 0.0),
-                ],
-            )?;
+            let r = resolve_reward(reward, reward_schema(game))?;
             RewardBox::Snake(SnakeReward {
                 step: r[0],
                 food: r[1],
@@ -1198,7 +1569,7 @@ fn build_reward(game: &GameSpec, reward: Option<PyReward>) -> PyResult<RewardBox
             })
         }
         GameSpec::Connect4 => {
-            let r = resolve_reward(reward, &[("win", 1.0), ("loss", -1.0), ("draw", 0.0)])?;
+            let r = resolve_reward(reward, reward_schema(game))?;
             RewardBox::Connect4(Connect4Reward {
                 win: r[0],
                 loss: r[1],
@@ -1206,7 +1577,7 @@ fn build_reward(game: &GameSpec, reward: Option<PyReward>) -> PyResult<RewardBox
             })
         }
         GameSpec::Chess { .. } => {
-            let r = resolve_reward(reward, &[("win", 1.0), ("loss", -1.0), ("draw", 0.0)])?;
+            let r = resolve_reward(reward, reward_schema(game))?;
             RewardBox::Chess(ChessReward {
                 win: r[0],
                 loss: r[1],
@@ -1215,10 +1586,7 @@ fn build_reward(game: &GameSpec, reward: Option<PyReward>) -> PyResult<RewardBox
         }
         GameSpec::Backgammon { .. } => {
             // Margin-aware zero-sum payoffs (the loser scores the negative automatically).
-            let r = resolve_reward(
-                reward,
-                &[("win", 1.0), ("gammon", 2.0), ("backgammon", 3.0)],
-            )?;
+            let r = resolve_reward(reward, reward_schema(game))?;
             RewardBox::Backgammon(BackgammonReward {
                 win: r[0],
                 gammon: r[1],
@@ -1226,7 +1594,7 @@ fn build_reward(game: &GameSpec, reward: Option<PyReward>) -> PyResult<RewardBox
             })
         }
         GameSpec::GridWorld { .. } => {
-            let r = resolve_reward(reward, &[("step", 0.0), ("goal", 1.0)])?;
+            let r = resolve_reward(reward, reward_schema(game))?;
             RewardBox::GridWorld(GridWorldReward {
                 step: r[0],
                 goal: r[1],

@@ -76,7 +76,23 @@ def engine_from_config(config: dict[str, Any]) -> Engine:
     def _split(block: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         return block["name"], {k: v for k, v in block.items() if k != "name"}
 
+    def _coerce_handles(kw: dict[str, Any]) -> dict[str, Any]:
+        # Nested handle blocks (as `resolved_config` renders them) become typed handles, so the
+        # round-trip `engine_from_config(engine.resolved_config())` holds for every composition.
+        if isinstance(kw.get("encoder"), dict):
+            e = dict(kw["encoder"])
+            kw["encoder"] = encoders.make(e.pop("name"), **e)
+        if isinstance(kw.get("chance"), dict):
+            c = dict(kw["chance"])
+            kw["chance"] = chance_modes.make(c.pop("name"), **c)
+        if isinstance(kw.get("noise"), dict):
+            n = dict(kw["noise"])
+            n.pop("name", None)
+            kw["noise"] = noise.Dirichlet(**n)
+        return kw
+
     g_name, g_kw = _split(config["game"])
+    g_kw = _coerce_handles(g_kw)
     engine_kw = dict(config.get("engine", {}))
     # The reward rides with the game block (YAML-friendly) or its own block; it goes to the Engine now.
     reward_cfg = g_kw.pop("reward", None) or config.get("reward")
@@ -85,6 +101,7 @@ def engine_from_config(config: dict[str, Any]) -> Engine:
     if "max_ticks" in engine_kw:
         g_kw.setdefault("max_ticks", engine_kw.pop("max_ticks"))
     p_name, p_kw = _split(config["policy"])
+    p_kw = _coerce_handles(p_kw)
     l_name, l_kw = _split(config["learner"])
     return Engine(
         make_game(g_name, **g_kw),
