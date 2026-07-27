@@ -2,9 +2,13 @@
 //! into training records. Parameterized by the evaluation type it consumes (`Learner<E>`), so any
 //! policy producing a compatible `E` can pair with it. Concrete learners live in `crate::learners`.
 
+use crate::encoder::ActionView;
 use crate::game::Rng;
 
 /// One buffered decision in a trajectory, held until its episode ends so the realized return is known.
+/// Frame note: `action` and `next_legal` are GAME-frame ids (they come from `select` and
+/// `Game::legal_actions`); a learner whose records index net output maps them through the
+/// `ActionView` it is handed at record-construction time.
 pub struct Step<E> {
     pub obs: Vec<f32>,
     pub evaluation: E, // the policy's per-decision evaluation
@@ -30,17 +34,25 @@ pub trait Learner<E> {
     /// Extract the z-tail values from one net-output row for the final state. The row layout is the
     /// policy family's infer contract, which the paired learner knows: the default reads `[K][A]`
     /// Q-rows — per-head `max_a` over the state's LEGAL actions (`legal`, the mover-convention set
-    /// the engine supplies; a dense max would bootstrap a phantom illegal Q on sparse-action
+    /// the engine supplies in GAME-frame ids; the row is net output, so each read crosses into the
+    /// head frame via `view`; a dense max would bootstrap a phantom illegal Q on sparse-action
     /// games). The AlphaZero learner overrides to read the value slot of its `[A]-logits + value`
     /// row, ignoring `legal`.
-    fn tail_from_row(&self, row: &[f64], action_count: usize, legal: &[usize]) -> Vec<f64> {
+    fn tail_from_row(
+        &self,
+        row: &[f64],
+        action_count: usize,
+        legal: &[usize],
+        view: &dyn ActionView,
+        agent: usize,
+    ) -> Vec<f64> {
         let k = row.len() / action_count;
         (0..k)
             .map(|h| {
                 let head = &row[h * action_count..(h + 1) * action_count];
                 legal
                     .iter()
-                    .map(|&aid| head[aid])
+                    .map(|&aid| head[view.head_index(aid, agent)])
                     .fold(f64::NEG_INFINITY, f64::max)
             })
             .collect()
@@ -62,14 +74,26 @@ pub trait Learner<E> {
     /// Records emitted immediately for one decision (TreeStrap interior MAX nodes). Takes `&mut E` so it
     /// can move out the immediate-only payload (interior nodes), leaving `E` lean enough to buffer for
     /// the whole episode — interior is never retained past the decision that produced it.
-    fn eval_records(&self, evaluation: &mut E, rng: &mut dyn Rng) -> Vec<Self::Record>;
+    /// `view`/`agent`: the encoder's action view and the trajectory's agent — anything the record
+    /// carries that indexes NET output (π targets, Q masks, action indices) must be written in the
+    /// head frame via `view`; everything else stays in game-frame ids.
+    fn eval_records(
+        &self,
+        evaluation: &mut E,
+        view: &dyn ActionView,
+        agent: usize,
+        rng: &mut dyn Rng,
+    ) -> Vec<Self::Record>;
 
     /// Records from a finished episode's buffered trajectory (TreeStrap z-mixing). `tail` is the final
-    /// state's per-head bootstrap on a truncation, or **empty** for a terminal episode.
+    /// state's per-head bootstrap on a truncation, or **empty** for a terminal episode. `view`/`agent`
+    /// as in [`eval_records`](Self::eval_records).
     fn episode_records(
         &self,
         trajectory: &[Step<E>],
         tail: &[f64],
+        view: &dyn ActionView,
+        agent: usize,
         rng: &mut dyn Rng,
     ) -> Vec<Self::Record>;
 }

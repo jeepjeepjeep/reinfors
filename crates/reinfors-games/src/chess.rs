@@ -391,6 +391,8 @@ impl Game for Chess {
 /// encoder seam is exactly where such views stay configurable.
 pub struct ChessPlanesMinimal;
 
+impl reinfors_core::ActionView for ChessPlanesMinimal {} // absolute: identity action view
+
 impl StateEncoder for ChessPlanesMinimal {
     type State = ChessState;
 
@@ -480,6 +482,8 @@ impl ChessPlanesAz119 {
         }
     }
 }
+
+impl reinfors_core::ActionView for ChessPlanesAz119 {} // absolute: identity action view
 
 impl StateEncoder for ChessPlanesAz119 {
     type State = ChessState;

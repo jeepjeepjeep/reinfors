@@ -29,7 +29,7 @@
 //! prior-guided, noise-capable search use the `AlphaZero` policy. The reached-state start buffer
 //! remains the complementary coverage source.
 
-use crate::encoder::StateEncoder;
+use crate::encoder::{ActionView, StateEncoder};
 use crate::engine::CollectStats;
 use crate::evaluator::{Evaluator, Resolve};
 use crate::game::{Actor, Game, Rng};
@@ -951,10 +951,20 @@ fn select_scored(
 
 /// A leaf state's value = greedy max over the LEGAL actions of the head-mean net Q (matches the
 /// expectimax bootstrap; restricting to legal keeps an illegal move's phantom Q out of the bootstrap).
-fn leaf_value(q: &[f64], k: usize, a: usize, legal: &[usize]) -> f64 {
+fn leaf_value(
+    q: &[f64],
+    k: usize,
+    a: usize,
+    legal: &[usize],
+    view: &dyn ActionView,
+    agent: usize,
+) -> f64 {
     legal
         .iter()
-        .map(|&ai| (0..k).map(|h| q[h * a + ai]).sum::<f64>() / k as f64)
+        .map(|&ai| {
+            let hi = view.head_index(ai, agent); // q is net output: game id -> head slot
+            (0..k).map(|h| q[h * a + hi]).sum::<f64>() / k as f64
+        })
         .fold(f64::NEG_INFINITY, f64::max)
 }
 
@@ -1070,7 +1080,9 @@ where
                                 match batch.resolve_or_stage(&obs) {
                                     Resolve::Resolved(row) => {
                                         tree.hit_rows += 1;
-                                        consume_row(tree, leaf, ag, &row, guidance, gamma, a, ti);
+                                        consume_row(
+                                            tree, leaf, ag, &row, guidance, gamma, a, ti, enc,
+                                        );
                                     }
                                     Resolve::Staged(ticket) => {
                                         stage(tree, ti, leaf, ag, ticket, &mut consumers);
@@ -1084,7 +1096,7 @@ where
                             match batch.resolve_or_stage(&tree.arena[leaf].obs) {
                                 Resolve::Resolved(row) => {
                                     tree.hit_rows += 1;
-                                    consume_row(tree, leaf, 0, &row, guidance, gamma, a, ti);
+                                    consume_row(tree, leaf, 0, &row, guidance, gamma, a, ti, enc);
                                     // resolved from cache — keep advancing this tree
                                 }
                                 Resolve::Staged(ticket) => {
@@ -1120,7 +1132,9 @@ where
                                 match batch.resolve_or_stage(&obs) {
                                     Resolve::Resolved(row) => {
                                         tree.hit_rows += 1;
-                                        consume_row(tree, child, ag, &row, guidance, gamma, a, ti);
+                                        consume_row(
+                                            tree, child, ag, &row, guidance, gamma, a, ti, enc,
+                                        );
                                     }
                                     Resolve::Staged(ticket) => {
                                         stage(tree, ti, child, ag, ticket, &mut consumers);
@@ -1148,6 +1162,7 @@ where
                     gamma,
                     a,
                     ti,
+                    enc,
                 );
             }
         }
@@ -1190,8 +1205,17 @@ fn consume_row<S: Clone>(
     gamma: f64,
     a: usize,
     ti: usize,
+    view: &dyn ActionView,
 ) {
     let is_sim_node = matches!(tree.arena[ni].kind, NodeKind::Simultaneous(_));
+    // The perspective this row was encoded for — a decision node's obs is the mover's, a
+    // simultaneous node's per-table obs is that table's agent. All gathers from the raw row cross
+    // into the head frame through this agent's view.
+    let row_agent = if is_sim_node {
+        slot
+    } else {
+        tree.arena[ni].actor
+    };
     let value = match guidance {
         Guidance::Uct { .. } => {
             let k = row_data.len() / a;
@@ -1199,7 +1223,7 @@ fn consume_row<S: Clone>(
                 NodeKind::Simultaneous(sim) => &sim.tables[slot].actions,
                 _ => &tree.arena[ni].actions,
             };
-            leaf_value(row_data, k, a, actions)
+            leaf_value(row_data, k, a, actions, view, row_agent)
         }
         Guidance::Puct {
             noise, noise_both, ..
@@ -1213,7 +1237,10 @@ fn consume_row<S: Clone>(
                 NodeKind::Simultaneous(sim) => &sim.tables[slot].actions,
                 _ => &tree.arena[ni].actions,
             };
-            let legal_logits: Vec<f64> = node_actions.iter().map(|&act| logits[act]).collect();
+            let legal_logits: Vec<f64> = node_actions
+                .iter()
+                .map(|&act| logits[view.head_index(act, row_agent)])
+                .collect();
             let mut prior = softmax(&legal_logits);
             // Root noise scope: a decision root's one table always gets it; a simultaneous root's
             // tables get it per `noise_scope` — the requester's always, the opponent's only under
@@ -1606,6 +1633,7 @@ mod masking_tests {
     }
 
     struct Enc;
+    impl crate::encoder::ActionView for Enc {}
     impl StateEncoder for Enc {
         type State = St;
         fn encode(&self, s: &St, _agent: usize) -> Vec<f32> {
@@ -1778,6 +1806,7 @@ mod chance_tests {
     }
 
     struct Enc;
+    impl crate::encoder::ActionView for Enc {}
     impl StateEncoder for Enc {
         type State = St;
         fn encode(&self, s: &St, _agent: usize) -> Vec<f32> {
@@ -2003,6 +2032,7 @@ mod duct_tests {
     }
 
     struct Enc;
+    impl crate::encoder::ActionView for Enc {}
     impl StateEncoder for Enc {
         type State = St;
         fn encode(&self, s: &St, agent: usize) -> Vec<f32> {

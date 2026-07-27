@@ -218,6 +218,8 @@ impl Game for Connect4 {
 /// The default Connect-4 observation: two own/opponent piece planes from the mover's perspective.
 pub struct Connect4Planes;
 
+impl reinfors_core::ActionView for Connect4Planes {} // absolute: identity action view
+
 impl StateEncoder for Connect4Planes {
     type State = Connect4State;
 

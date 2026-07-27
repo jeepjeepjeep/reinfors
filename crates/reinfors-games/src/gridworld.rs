@@ -150,6 +150,8 @@ pub struct GridWorldPlanes {
     pub goal: Pos,
 }
 
+impl reinfors_core::ActionView for GridWorldPlanes {} // absolute: identity action view
+
 impl StateEncoder for GridWorldPlanes {
     type State = GridState;
 

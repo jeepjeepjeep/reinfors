@@ -2,6 +2,7 @@
 //! action, interior MAX-node targets, and a per-head bootstrap mask on every record. Consumes the
 //! expectimax family's `SearchEvaluation`, so it pairs with any expectimax policy (selective today).
 
+use crate::encoder::ActionView;
 use crate::game::Rng;
 use crate::learner::{sample_mask, Learner, Step};
 use crate::policies::expectimax::SearchEvaluation;
@@ -77,6 +78,8 @@ impl Learner<SearchEvaluation> for TreeStrap {
     fn eval_records(
         &self,
         evaluation: &mut SearchEvaluation,
+        _view: &dyn ActionView, // records carry per-head scalars only — nothing indexes net actions
+        _agent: usize,
         rng: &mut dyn Rng,
     ) -> Vec<Self::Record> {
         let k = evaluation.values.len();
@@ -94,6 +97,8 @@ impl Learner<SearchEvaluation> for TreeStrap {
         &self,
         trajectory: &[Step<SearchEvaluation>],
         tail: &[f64],
+        _view: &dyn ActionView, // `step.action` reads the SEARCH's game-frame values, not net rows
+        _agent: usize,
         rng: &mut dyn Rng,
     ) -> Vec<Self::Record> {
         if trajectory.is_empty() {
@@ -125,6 +130,7 @@ impl Learner<SearchEvaluation> for TreeStrap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoder::IdentityView;
     use crate::policies::expectimax::search::{InteriorTarget, SearchStats};
     use crate::rng::SplitMix64;
 
@@ -152,7 +158,7 @@ mod tests {
             ),
         ];
         let mut e = eval(vec![vec![0.0; 3], vec![0.0; 3]], interior.clone());
-        let recs = learner.eval_records(&mut e, &mut SplitMix64::new(5));
+        let recs = learner.eval_records(&mut e, &IdentityView, 0, &mut SplitMix64::new(5));
         assert!(
             e.interior.is_empty(),
             "interior is moved out, never buffered"
@@ -184,7 +190,8 @@ mod tests {
             })
             .collect();
         let tail = [0.5, -0.5];
-        let recs = learner.episode_records(&steps, &tail, &mut SplitMix64::new(9));
+        let recs =
+            learner.episode_records(&steps, &tail, &IdentityView, 0, &mut SplitMix64::new(9));
 
         let traj: Vec<(Vec<Vec<f64>>, usize, f64)> = steps
             .iter()

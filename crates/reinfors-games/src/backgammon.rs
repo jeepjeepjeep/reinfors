@@ -552,6 +552,8 @@ impl Reward for BackgammonReward {
 /// the checker count), then bar/score/is-my-turn for each side, then the two dice values.
 pub struct BackgammonTesauro;
 
+impl reinfors_core::ActionView for BackgammonTesauro {} // absolute: identity action view
+
 impl StateEncoder for BackgammonTesauro {
     type State = BackgammonState;
 

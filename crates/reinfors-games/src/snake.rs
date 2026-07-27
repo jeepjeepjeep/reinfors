@@ -290,6 +290,8 @@ pub struct EgocentricSnake {
     pub grid_size: i32,
 }
 
+impl reinfors_core::ActionView for EgocentricSnake {} // absolute: identity action view
+
 impl StateEncoder for EgocentricSnake {
     type State = SnakeState;
 

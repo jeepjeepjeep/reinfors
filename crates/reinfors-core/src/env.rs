@@ -125,6 +125,7 @@ mod tests {
     }
 
     struct PosEncoder;
+    impl crate::encoder::ActionView for PosEncoder {}
     impl StateEncoder for PosEncoder {
         type State = i32;
         fn encode(&self, pos: &i32, _: usize) -> Vec<f32> {

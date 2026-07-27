@@ -70,10 +70,15 @@ impl Policy for EpsilonGreedyQ {
             .iter()
             .enumerate()
             .map(|(i, (state, agent))| {
+                // Materialize the net's head-frame row into GAME-frame per-action values (the
+                // internal currency of select and the search seam). Identity views make this the
+                // plain copy it always was.
                 let values = (0..k)
                     .map(|h| {
                         let start = (i * k + h) * a;
-                        q[start..start + a].to_vec()
+                        (0..a)
+                            .map(|act| q[start + enc.head_index(act, *agent)])
+                            .collect()
                     })
                     .collect();
                 QEvaluation {

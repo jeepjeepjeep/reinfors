@@ -4,6 +4,7 @@
 //! Classic AlphaZero: no interior targets, no bootstrap masks (single head), pure-outcome values —
 //! γ=1 with win/loss rewards reproduces the paper's z ∈ {−1, 0, 1}.
 
+use crate::encoder::ActionView;
 use crate::game::Rng;
 use crate::learner::{Learner, Step};
 use crate::policies::expectimax::SearchEvaluation;
@@ -42,14 +43,24 @@ impl Learner<SearchEvaluation> for AlphaZeroLearner {
         true
     }
 
-    /// The net row is `[A]` policy logits + the state value — the tail is that single value.
-    fn tail_from_row(&self, row: &[f64], action_count: usize, _legal: &[usize]) -> Vec<f64> {
+    /// The net row is `[A]` policy logits + the state value — the tail is that single value (a
+    /// layout slot, not an action: no frame crossing).
+    fn tail_from_row(
+        &self,
+        row: &[f64],
+        action_count: usize,
+        _legal: &[usize],
+        _view: &dyn ActionView,
+        _agent: usize,
+    ) -> Vec<f64> {
         vec![row[action_count]]
     }
 
     fn eval_records(
         &self,
         _evaluation: &mut SearchEvaluation,
+        _view: &dyn ActionView,
+        _agent: usize,
         _rng: &mut dyn Rng,
     ) -> Vec<Self::Record> {
         Vec::new() // all records are episode-end (z needs the realized outcome)
@@ -59,6 +70,8 @@ impl Learner<SearchEvaluation> for AlphaZeroLearner {
         &self,
         trajectory: &[Step<SearchEvaluation>],
         tail: &[f64],
+        view: &dyn ActionView,
+        agent: usize,
         _rng: &mut dyn Rng,
     ) -> Vec<Self::Record> {
         // z = discounted realized return-to-go, from each step's own (per-agent) rewards; an empty
@@ -67,11 +80,15 @@ impl Learner<SearchEvaluation> for AlphaZeroLearner {
         let mut out: Vec<AlphaZeroRecord> = Vec::with_capacity(trajectory.len());
         for step in trajectory.iter().rev() {
             z = step.reward + self.gamma * z;
-            out.push((
-                step.obs.clone(),
-                normalized_visits(&step.evaluation.visits),
-                z,
-            ));
+            // π trains against the net's raw logits, so it is written in the HEAD frame: the
+            // dense game-frame visit vector scatters through the view (identity for absolute
+            // encoders — a plain copy).
+            let visits_game = normalized_visits(&step.evaluation.visits);
+            let mut pi = vec![0.0; visits_game.len()];
+            for (a, v) in visits_game.into_iter().enumerate() {
+                pi[view.head_index(a, agent)] = v;
+            }
+            out.push((step.obs.clone(), pi, z));
         }
         out.reverse();
         out
@@ -81,6 +98,7 @@ impl Learner<SearchEvaluation> for AlphaZeroLearner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoder::IdentityView;
     use crate::policies::expectimax::search::SearchStats;
     use crate::rng::SplitMix64;
 
@@ -111,7 +129,7 @@ mod tests {
     fn pi_is_the_normalized_visit_distribution() {
         let learner = AlphaZeroLearner::new(1.0);
         let steps = vec![step(vec![6.0, 2.0, 0.0], 0, 0.0)];
-        let recs = learner.episode_records(&steps, &[], &mut SplitMix64::new(0));
+        let recs = learner.episode_records(&steps, &[], &IdentityView, 0, &mut SplitMix64::new(0));
         assert_eq!(recs[0].1, vec![0.75, 0.25, 0.0]);
         assert!((recs[0].1.iter().sum::<f64>() - 1.0).abs() < 1e-12);
     }
@@ -125,7 +143,7 @@ mod tests {
             step(vec![1.0, 1.0], 1, 0.0),
             step(vec![1.0, 1.0], 0, 1.0),
         ];
-        let recs = learner.episode_records(&steps, &[], &mut SplitMix64::new(0));
+        let recs = learner.episode_records(&steps, &[], &IdentityView, 0, &mut SplitMix64::new(0));
         let zs: Vec<f64> = recs.iter().map(|r| r.2).collect();
         assert_eq!(zs, vec![0.25, 0.5, 1.0]);
     }
@@ -135,7 +153,8 @@ mod tests {
         // gamma 1, rewards [0, 0], tail value 0.8: z = [0.8, 0.8].
         let learner = AlphaZeroLearner::new(1.0);
         let steps = vec![step(vec![1.0], 0, 0.0), step(vec![1.0], 0, 0.0)];
-        let recs = learner.episode_records(&steps, &[0.8], &mut SplitMix64::new(0));
+        let recs =
+            learner.episode_records(&steps, &[0.8], &IdentityView, 0, &mut SplitMix64::new(0));
         assert_eq!(recs.iter().map(|r| r.2).collect::<Vec<_>>(), vec![0.8, 0.8]);
     }
 
@@ -144,7 +163,7 @@ mod tests {
         let learner = AlphaZeroLearner::new(1.0);
         // row = [logit, logit, logit, value]
         assert_eq!(
-            learner.tail_from_row(&[9.0, 9.0, 9.0, 0.4], 3, &[0, 1, 2]),
+            learner.tail_from_row(&[9.0, 9.0, 9.0, 0.4], 3, &[0, 1, 2], &IdentityView, 0),
             vec![0.4]
         );
     }
@@ -154,7 +173,7 @@ mod tests {
         let learner = AlphaZeroLearner::new(1.0);
         let mut e = eval(vec![1.0, 2.0]);
         assert!(learner
-            .eval_records(&mut e, &mut SplitMix64::new(0))
+            .eval_records(&mut e, &IdentityView, 0, &mut SplitMix64::new(0))
             .is_empty());
     }
 }

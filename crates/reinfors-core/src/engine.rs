@@ -236,10 +236,12 @@ where
             for (mut eval, &(gi, si)) in evals.into_iter().zip(meta.iter()) {
                 stats.decisions += 1;
                 self.policy.fold_telemetry(&eval, &mut stats);
-                out.extend(
-                    self.learner
-                        .eval_records(&mut eval, &mut self.episodes[gi].rng),
-                );
+                out.extend(self.learner.eval_records(
+                    &mut eval,
+                    &*self.encoder,
+                    si,
+                    &mut self.episodes[gi].rng,
+                ));
                 let rel = self.policy.select(
                     &eval,
                     &mut self.policy_states[gi],
@@ -346,10 +348,13 @@ where
                 }
                 *ep_slot = steps.iter().map(|s| s.reward).sum();
                 let tail = tails.get(&(gi, si)).cloned().unwrap_or_default();
-                out.extend(
-                    self.learner
-                        .episode_records(&steps, &tail, &mut self.episodes[gi].rng),
-                );
+                out.extend(self.learner.episode_records(
+                    &steps,
+                    &tail,
+                    &*self.encoder,
+                    si,
+                    &mut self.episodes[gi].rng,
+                ));
             }
             // Tag the summary with the finishing episode's seeded flag (set at its start) BEFORE the
             // reset below overwrites it for the next episode.
@@ -422,7 +427,12 @@ where
                     crate::game::Actor::Simultaneous => self.game.legal_actions(state, si),
                     crate::game::Actor::Chance => unreachable!("chance actors are not searched"),
                 };
-                tails.insert((gi, si), self.learner.tail_from_row(row, a, &legal));
+                // The row was encoded for `si`, so the gather maps game ids through si's frame.
+                tails.insert(
+                    (gi, si),
+                    self.learner
+                        .tail_from_row(row, a, &legal, &*self.encoder, si),
+                );
             }
         }
         tails

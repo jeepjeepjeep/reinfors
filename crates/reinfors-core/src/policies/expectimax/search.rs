@@ -24,7 +24,7 @@
 
 use rayon::prelude::*;
 
-use crate::encoder::StateEncoder;
+use crate::encoder::{ActionView, StateEncoder};
 use crate::game::{Actor, Game, Rng};
 use crate::policy::ChanceMode;
 use crate::reward::Reward;
@@ -356,6 +356,9 @@ where
                         &s.batch,
                         &s.new_leaves,
                         &s.opp_legal,
+                        enc,
+                        s.agent,
+                        s.opp,
                         &legal_of,
                         slice,
                         n_opp,
@@ -411,6 +414,12 @@ fn evaluate<S, L>(
     batch: &[usize],
     new_leaves: &[usize],
     opp_legal: &[Vec<usize>],
+    // The encoder's action view + the perspectives the rows were encoded for: every leaf row is
+    // the SEARCHER's observation, every opponent row the opponent's. Gathers from raw net rows
+    // cross into the head frame through the matching perspective.
+    view: &dyn ActionView,
+    searcher: usize,
+    opp_agent: usize,
     legal_of: &L,
     q: &[f64],
     n_opp: usize,
@@ -431,7 +440,10 @@ fn evaluate<S, L>(
             Opponent::Distributional { temperature, floor } => {
                 let mean = head_mean(row(i), k, a);
                 let legal = &opp_legal[i];
-                let gathered: Vec<f64> = legal.iter().map(|&aid| mean[aid]).collect();
+                let gathered: Vec<f64> = legal
+                    .iter()
+                    .map(|&aid| mean[view.head_index(aid, opp_agent)])
+                    .collect();
                 let probs = softmax_floor(&gathered, temperature, floor);
                 let mut full = vec![0.0; a];
                 for (&aid, p) in legal.iter().zip(probs) {
@@ -456,7 +468,7 @@ fn evaluate<S, L>(
                 let head = &leaf_q[h * a..(h + 1) * a];
                 legal
                     .iter()
-                    .map(|&aid| head[aid])
+                    .map(|&aid| head[view.head_index(aid, searcher)])
                     .fold(f64::NEG_INFINITY, f64::max)
             })
             .collect();
@@ -988,6 +1000,7 @@ mod tests {
     }
 
     struct LineEnc;
+    impl crate::encoder::ActionView for LineEnc {}
     impl StateEncoder for LineEnc {
         type State = i32;
         fn encode(&self, pos: &i32, _: usize) -> Vec<f32> {
@@ -1184,6 +1197,7 @@ mod chance_mode_tests {
     }
 
     struct Enc;
+    impl crate::encoder::ActionView for Enc {}
     impl StateEncoder for Enc {
         type State = St;
         fn encode(&self, s: &St, _: usize) -> Vec<f32> {
