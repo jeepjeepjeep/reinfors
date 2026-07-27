@@ -10,6 +10,11 @@ import numpy as np
 from numpy.typing import NDArray
 
 def core_version() -> str: ...
+
+# Chess interop (pure; for referees/tools): standard-UCI <-> 8x8x73 action ids, grounded in a
+# FEN so castling/promotions disambiguate exactly. ValueError on bad FEN / illegal move.
+def chess_uci_action(uci: str, fen: str) -> int: ...
+def chess_action_uci(action: int, fen: str) -> str: ...
 def core_build_profile() -> str: ...  # "debug" | "release"; perf numbers are only valid on "release"
 
 class Reward:
