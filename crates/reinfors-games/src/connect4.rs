@@ -274,7 +274,11 @@ impl reinfors_core::StateCodec for Connect4 {
         if turn > 1 {
             return Err(format!("turn {turn} out of range"));
         }
-        let done = r.u8()? != 0;
+        let done = match r.u8()? {
+            0 => false,
+            1 => true,
+            b => return Err(format!("done byte {b} is not a bool")),
+        };
         r.finish()?;
         // Gravity invariant: a filled cell cannot float above an empty one.
         for col in 0..COLS {
@@ -284,7 +288,40 @@ impl reinfors_core::StateCodec for Connect4 {
                 }
             }
         }
+        // Alternation: P0 opens, so P0 has either equal pieces (P0 to move) or exactly one more
+        // (P1 to move).
+        let c1 = cells.iter().filter(|&&c| c == 1).count();
+        let c2 = cells.iter().filter(|&&c| c == 2).count();
+        if !(c1 == c2 && turn == 0 || c1 == c2 + 1 && turn == 1) {
+            return Err(format!(
+                "piece counts ({c1}, {c2}) inconsistent with turn {turn}"
+            ));
+        }
+        if !done {
+            // A live game cannot already contain a connect-four (or a full board).
+            for r_ in 0..ROWS {
+                for c_ in 0..COLS {
+                    let v = cells[r_ * COLS + c_];
+                    if v != 0 && Self::wins(&cells, r_, c_, v) {
+                        return Err("board contains a win but done is false".into());
+                    }
+                }
+            }
+            if cells.iter().all(|&c| c != 0) {
+                return Err("board is full but done is false".into());
+            }
+        }
         Ok(Connect4State { cells, turn, done })
+    }
+
+    fn check_done(&self, state: &Connect4State, done: bool) -> Result<(), String> {
+        if state.done != done {
+            return Err(format!(
+                "state done flag {} disagrees with envelope done {done}",
+                state.done
+            ));
+        }
+        Ok(())
     }
 }
 

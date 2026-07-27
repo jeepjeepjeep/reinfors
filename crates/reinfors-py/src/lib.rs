@@ -2523,6 +2523,9 @@ where
         let decoded = codec.decode(state).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("invalid snapshot state: {e}"))
         })?;
+        codec.check_done(&decoded, done).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("invalid snapshot state: {e}"))
+        })?;
         self.inner.set_parts(decoded, rng_state, done);
         self.last_rewards = None; // transient last-step output belongs to the step that produced it
         Ok(())

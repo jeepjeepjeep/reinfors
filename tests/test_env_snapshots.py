@@ -105,3 +105,87 @@ def test_restore_lands_at_a_step_boundary() -> None:
     snap = env.snapshot()
     env.restore(snap)
     assert env.rewards is None  # transient last-step output is not state
+
+
+def test_done_gates_active_agents_and_stepping() -> None:
+    # snake, play_to_last=False: one survivor ends the game with no internal state flag — done
+    # must gate active_agents so the step guard holds (incl. for restored terminal snapshots).
+    env = rf.Env(rf.games.Snake(grid_size=6, initial_length=2, food=1, play_to_last=False), seed=3)
+    env.reset()
+    for _ in range(40):
+        if env.done():
+            break
+        env.step(dict.fromkeys(env.active_agents(), 0))  # everyone forward: someone hits a wall
+    assert env.done()
+    assert env.active_agents() == [] and env.legal_actions(0) == []
+    with pytest.raises(ValueError, match="episode is over"):
+        env.step({0: 0})
+    clone = env.fork()
+    assert clone.done() and clone.active_agents() == []
+    with pytest.raises(ValueError, match="episode is over"):
+        clone.step({0: 0})
+
+
+def test_done_mismatch_between_envelope_and_state_is_rejected() -> None:
+    env = rf.Env(rf.games.GridWorld(size=5), seed=0)
+    env.reset()
+    blob = bytearray(env.snapshot().to_bytes())
+    assert blob[-1] == 0  # gridworld state layout ends with its done byte
+    blob[-1] = 1  # state says done, envelope still says live
+    snap = rf.EnvSnapshot.from_bytes(bytes(blob))
+    with pytest.raises(ValueError, match="disagrees"):
+        env.restore(snap)
+
+
+def _snap_with_state(env: rf.Env, state: bytes) -> rf.EnvSnapshot:
+    """Rebuild a snapshot envelope around a forged state payload (fixed-width header: magic 4 +
+    schema 1 + fp-len 4 + fp 64 + rng 8 + done 1)."""
+    head = bytes(env.snapshot().to_bytes()[: 4 + 1 + 4 + 64 + 8 + 1])
+    return rf.EnvSnapshot.from_bytes(head + len(state).to_bytes(4, "little") + state)
+
+
+def test_deep_codec_invariants_reject_forged_states() -> None:
+    import struct
+
+    env = rf.Env(rf.games.Snake(grid_size=6, initial_length=2, food=1), seed=0)
+    env.reset()
+
+    def snake_state(bodies: list[list[tuple[int, int]]], food: list[tuple[int, int]]) -> bytes:
+        out = bytearray([1])
+        for body in bodies:
+            out += struct.pack("<I", len(body))
+            for r, c in body:
+                out += struct.pack("<ii", r, c)
+            out += bytes([0, 1])  # direction Up, alive
+        out += struct.pack("<I", len(food))
+        for r, c in food:
+            out += struct.pack("<ii", r, c)
+        return bytes(out)
+
+    cases = {
+        "revisits": snake_state([[(1, 1), (1, 2), (1, 1)], [(3, 3)]], []),
+        "overlap": snake_state([[(1, 1)], [(1, 1)]], []),
+        "duplicate food": snake_state([[(1, 1)], [(3, 3)]], [(2, 2), (2, 2)]),
+        "overlaps a snake": snake_state([[(1, 1)], [(3, 3)]], [(1, 1)]),
+    }
+    for msg, forged in cases.items():
+        with pytest.raises(ValueError, match=msg.split()[0]):
+            env.restore(_snap_with_state(env, forged))
+
+    c4 = rf.Env(rf.games.Connect4(), seed=0)
+    c4.reset()
+    board = bytearray([1] + [0] * 42 + [0, 0])
+    board[1] = 1
+    board[2] = 1  # two P0 pieces, none for P1, turn 0: alternation violated
+    with pytest.raises(ValueError, match="inconsistent with turn"):
+        c4.restore(_snap_with_state(c4, bytes(board)))
+    bool_bad = bytearray([1] + [0] * 42 + [0, 2])  # done byte = 2
+    with pytest.raises(ValueError, match="not a bool"):
+        c4.restore(_snap_with_state(c4, bytes(bool_bad)))
+
+
+def test_env_snapshot_is_public_api() -> None:
+    assert rf.EnvSnapshot is rf._reinfors.EnvSnapshot
+    env = rf.Env(rf.games.Connect4(), seed=1)
+    env.reset()
+    assert isinstance(rf.EnvSnapshot.from_bytes(env.snapshot().to_bytes()), rf.EnvSnapshot)

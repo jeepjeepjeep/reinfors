@@ -16,4 +16,13 @@ pub trait StateCodec: Send + Sync {
     fn encode(&self, state: &Self::State) -> Vec<u8>;
 
     fn decode(&self, bytes: &[u8]) -> Result<Self::State, String>;
+
+    /// Consistency of a decoded state with an independently transported `done` flag (snapshot
+    /// envelopes carry both). Games with a state-level flag require equality; games whose
+    /// terminality is derivable require "definitely-terminal state implies done". Default: no
+    /// check (a game with neither).
+    fn check_done(&self, state: &Self::State, done: bool) -> Result<(), String> {
+        let _ = (state, done);
+        Ok(())
+    }
 }

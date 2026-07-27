@@ -68,11 +68,20 @@ impl<G: Game> Env<G> {
         self.done = done;
     }
 
+    /// Empty once the episode is over — games without an internal terminal flag (snake with
+    /// `play_to_last=false`, backgammon) would otherwise still report movers after `done`,
+    /// letting a finished env (or a restored terminal snapshot) be stepped.
     pub fn active_agents(&self) -> Vec<usize> {
+        if self.done {
+            return Vec::new();
+        }
         self.episode.active_agents(&self.game)
     }
 
     pub fn legal_actions(&self, agent: usize) -> Vec<usize> {
+        if self.done {
+            return Vec::new();
+        }
         self.game.legal_actions(&self.episode.state, agent)
     }
 

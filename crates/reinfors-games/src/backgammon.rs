@@ -967,7 +967,11 @@ impl reinfors_core::StateCodec for Backgammon {
         }
         let to_move = r.u8()?;
         let dice = [r.u8()?, r.u8()?];
-        let double_turn = r.u8()? != 0;
+        let double_turn = match r.u8()? {
+            0 => false,
+            1 => true,
+            b => return Err(format!("double_turn byte {b} is not a bool")),
+        };
         r.finish()?;
         if to_move > 1 {
             return Err(format!("to_move {to_move} out of range"));
@@ -997,6 +1001,17 @@ impl reinfors_core::StateCodec for Backgammon {
             dice,
             double_turn,
         })
+    }
+
+    fn check_done(&self, state: &BackgammonState, done: bool) -> Result<(), String> {
+        let finished = state.scores.iter().any(|&s| s >= 15);
+        if finished != done {
+            return Err(format!(
+                "borne-off counts {:?} disagree with done {done}",
+                state.scores
+            ));
+        }
+        Ok(())
     }
 }
 

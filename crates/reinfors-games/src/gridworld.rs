@@ -191,7 +191,11 @@ impl reinfors_core::StateCodec for GridWorld {
             return Err("unsupported gridworld state layout version".into());
         }
         let pos = (r.i32()?, r.i32()?);
-        let done = r.u8()? != 0;
+        let done = match r.u8()? {
+            0 => false,
+            1 => true,
+            b => return Err(format!("done byte {b} is not a bool")),
+        };
         r.finish()?;
         if !(0 <= pos.0 && pos.0 < self.size && 0 <= pos.1 && pos.1 < self.size) {
             return Err(format!(
@@ -200,6 +204,16 @@ impl reinfors_core::StateCodec for GridWorld {
             ));
         }
         Ok(GridState { pos, done })
+    }
+
+    fn check_done(&self, state: &GridState, done: bool) -> Result<(), String> {
+        if state.done != done {
+            return Err(format!(
+                "state done flag {} disagrees with envelope done {done}",
+                state.done
+            ));
+        }
+        Ok(())
     }
 }
 

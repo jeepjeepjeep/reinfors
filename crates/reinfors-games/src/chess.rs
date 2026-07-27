@@ -1401,6 +1401,16 @@ impl reinfors_core::StateCodec for Chess {
             finished,
         })
     }
+
+    fn check_done(&self, state: &ChessState, done: bool) -> Result<(), String> {
+        if state.finished.is_some() != done {
+            return Err(format!(
+                "state finished flag {} disagrees with envelope done {done}",
+                state.finished.is_some()
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

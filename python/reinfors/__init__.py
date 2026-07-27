@@ -24,6 +24,7 @@ from . import _reinfors, chance_modes, encoders, games, gym, learners, noise, po
 from ._reinfors import (
     Engine,
     Env,
+    EnvSnapshot,
     Reward,
     chess_action_uci,
     chess_uci_action,
@@ -129,6 +130,7 @@ def engine_from_config(config: dict[str, Any]) -> Engine:
 __all__ = [
     "Engine",
     "Env",
+    "EnvSnapshot",
     "Reward",
     "_reinfors",
     "chance_modes",

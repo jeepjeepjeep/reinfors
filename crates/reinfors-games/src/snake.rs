@@ -1436,6 +1436,10 @@ impl reinfors_core::StateCodec for Snake {
                 }
                 body.push_back(cell);
             }
+            let mut seen = HashSet::with_capacity(body.len());
+            if !body.iter().all(|&c| seen.insert(c)) {
+                return Err(format!("snake {i} body revisits a cell"));
+            }
             let direction = match r.u8()? {
                 0 => Action::Up,
                 1 => Action::Right,
@@ -1443,7 +1447,11 @@ impl reinfors_core::StateCodec for Snake {
                 3 => Action::Left,
                 d => return Err(format!("direction id {d} out of range")),
             };
-            let alive = r.u8()? != 0;
+            let alive = match r.u8()? {
+                0 => false,
+                1 => true,
+                b => return Err(format!("alive byte {b} is not a bool")),
+            };
             if alive && body.is_empty() {
                 return Err(format!("snake {i} is alive with an empty body"));
             }
@@ -1457,16 +1465,39 @@ impl reinfors_core::StateCodec for Snake {
         if n_food > (g as usize).pow(2) {
             return Err(format!("food count {n_food} exceeds the grid"));
         }
+        let occupied: HashSet<Cell> = snakes.iter().flat_map(|s| s.body.iter().copied()).collect();
+        if occupied.len() != snakes.iter().map(|s| s.body.len()).sum::<usize>() {
+            return Err("snakes overlap".into());
+        }
         let mut food = HashSet::with_capacity(n_food);
         for _ in 0..n_food {
             let cell = (r.i32()?, r.i32()?);
             if !in_grid(cell) {
                 return Err(format!("food cell {cell:?} outside the grid"));
             }
-            food.insert(cell);
+            if occupied.contains(&cell) {
+                return Err(format!("food cell {cell:?} overlaps a snake body"));
+            }
+            if !food.insert(cell) {
+                return Err(format!("duplicate food cell {cell:?}"));
+            }
         }
         r.finish()?;
         let snakes: [SnakeBody; 2] = snakes.try_into().expect("exactly two snakes decoded");
         Ok(SnakeState { snakes, food })
+    }
+
+    fn check_done(&self, state: &SnakeState, done: bool) -> Result<(), String> {
+        // Definitely-terminal states must carry done: all snakes dead, or (without play_to_last)
+        // a lone survivor. The win_food_lead terminal is not statically derivable — done=true is
+        // accepted for it; done=false with a derivably-terminal state is not.
+        let alive = state.snakes.iter().filter(|s| s.alive).count();
+        let terminal = alive == 0 || (!self.play_to_last && alive <= 1);
+        if terminal && !done {
+            return Err(format!(
+                "{alive} snakes alive is terminal but done is false"
+            ));
+        }
+        Ok(())
     }
 }
