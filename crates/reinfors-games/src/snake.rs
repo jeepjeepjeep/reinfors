@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use reinfors_core::game::{Actor, Game, Rng, Transition};
-use reinfors_core::{Reward, Space, StateEncoder};
+use reinfors_core::{ActionView, Reward, Space, StateEncoder};
 
 pub type Cell = (i32, i32);
 
@@ -289,6 +289,8 @@ pub fn snake_length_cell(state: &SnakeState) -> Option<u64> {
 pub struct EgocentricSnake {
     pub grid_size: i32,
 }
+
+impl ActionView for EgocentricSnake {} // absolute: identity action view
 
 impl StateEncoder for EgocentricSnake {
     type State = SnakeState;

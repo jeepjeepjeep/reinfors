@@ -22,7 +22,7 @@
 
 use std::collections::BTreeSet;
 
-use reinfors_core::{Actor, Game, Reward, Rng, StateEncoder, Transition};
+use reinfors_core::{ActionView, Actor, Game, Reward, Rng, StateEncoder, Transition};
 
 pub const NUM_POINTS: usize = 24;
 pub const NUM_CHECKERS: u8 = 15;
@@ -551,6 +551,8 @@ impl Reward for BackgammonReward {
 /// point 4 features for the requesting agent then 4 for the opponent (1/2/3/overflow encodings of
 /// the checker count), then bar/score/is-my-turn for each side, then the two dice values.
 pub struct BackgammonTesauro;
+
+impl ActionView for BackgammonTesauro {} // absolute: identity action view
 
 impl StateEncoder for BackgammonTesauro {
     type State = BackgammonState;

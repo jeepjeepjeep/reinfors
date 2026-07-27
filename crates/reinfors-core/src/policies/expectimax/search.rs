@@ -24,7 +24,7 @@
 
 use rayon::prelude::*;
 
-use crate::encoder::StateEncoder;
+use crate::encoder::{ActionView, StateEncoder};
 use crate::game::{Actor, Game, Rng};
 use crate::policy::ChanceMode;
 use crate::reward::Reward;
@@ -356,6 +356,9 @@ where
                         &s.batch,
                         &s.new_leaves,
                         &s.opp_legal,
+                        enc,
+                        s.agent,
+                        s.opp,
                         &legal_of,
                         slice,
                         n_opp,
@@ -411,6 +414,12 @@ fn evaluate<S, L>(
     batch: &[usize],
     new_leaves: &[usize],
     opp_legal: &[Vec<usize>],
+    // The encoder's action view + the perspectives the rows were encoded for: every leaf row is
+    // the SEARCHER's observation, every opponent row the opponent's. Gathers from raw net rows
+    // cross into the head frame through the matching perspective.
+    view: &dyn ActionView,
+    searcher: usize,
+    opp_agent: usize,
     legal_of: &L,
     q: &[f64],
     n_opp: usize,
@@ -431,7 +440,10 @@ fn evaluate<S, L>(
             Opponent::Distributional { temperature, floor } => {
                 let mean = head_mean(row(i), k, a);
                 let legal = &opp_legal[i];
-                let gathered: Vec<f64> = legal.iter().map(|&aid| mean[aid]).collect();
+                let gathered: Vec<f64> = legal
+                    .iter()
+                    .map(|&aid| mean[view.head_index(aid, opp_agent)])
+                    .collect();
                 let probs = softmax_floor(&gathered, temperature, floor);
                 let mut full = vec![0.0; a];
                 for (&aid, p) in legal.iter().zip(probs) {
@@ -456,7 +468,7 @@ fn evaluate<S, L>(
                 let head = &leaf_q[h * a..(h + 1) * a];
                 legal
                     .iter()
-                    .map(|&aid| head[aid])
+                    .map(|&aid| head[view.head_index(aid, searcher)])
                     .fold(f64::NEG_INFINITY, f64::max)
             })
             .collect();
@@ -988,6 +1000,7 @@ mod tests {
     }
 
     struct LineEnc;
+    impl ActionView for LineEnc {}
     impl StateEncoder for LineEnc {
         type State = i32;
         fn encode(&self, pos: &i32, _: usize) -> Vec<f32> {
@@ -1184,6 +1197,7 @@ mod chance_mode_tests {
     }
 
     struct Enc;
+    impl ActionView for Enc {}
     impl StateEncoder for Enc {
         type State = St;
         fn encode(&self, s: &St, _: usize) -> Vec<f32> {
@@ -1264,5 +1278,154 @@ mod chance_mode_tests {
             opponent: Opponent::Uniform,
         };
         let _ = crate::policies::expectimax::SelectiveExpectimax::new(cfg, 1, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    //! The two expectimax gathers — leaf bootstraps (searcher's frame) and distributional-opponent
+    //! rows (opponent's frame) — must cross via each row's own encoding perspective. Same
+    //! equivalence scheme as the mcts frame tests: identity encoder + game-frame rows vs an
+    //! agent-dependent view + rows permuted into each agent's head frame; results must be equal.
+    use super::*;
+    use crate::encoder::{ActionView, StateEncoder};
+    use crate::game::{Actor, Game, Rng, Transition};
+    use crate::reward::Reward as RewardTrait;
+
+    /// Two agents alternating by an explicit turn flag; searcher = agent 0, so leaf rows are
+    /// encoded for agent 0 and (distributional) opponent rows for agent 1.
+    #[derive(Clone)]
+    struct St {
+        id: i32,
+        turn: usize,
+    }
+    struct Duel;
+    impl Game for Duel {
+        type State = St;
+        type Event = f64;
+        fn num_agents(&self) -> usize {
+            2
+        }
+        fn action_count(&self) -> usize {
+            2
+        }
+        fn actor(&self, s: &St) -> Actor {
+            Actor::Agent(s.turn)
+        }
+        fn legal_actions(&self, s: &St, agent: usize) -> Vec<usize> {
+            if agent == s.turn {
+                vec![0, 1]
+            } else {
+                Vec::new()
+            }
+        }
+        fn step(&self, s: &St, actions: &[usize]) -> Transition<St, f64> {
+            Transition {
+                next_state: St {
+                    id: s.id * 2 + actions[s.turn] as i32 + 1,
+                    turn: 1 - s.turn,
+                },
+                events: vec![0.0, 0.0],
+                terminal: false,
+            }
+        }
+        fn initial_state(&self, _: &mut dyn Rng) -> St {
+            St { id: 0, turn: 0 }
+        }
+    }
+    struct Zero;
+    impl RewardTrait for Zero {
+        type Event = f64;
+        fn step_reward(&self, _: &f64, _: usize) -> f64 {
+            0.0
+        }
+    }
+
+    /// Agent 0 keeps the identity; agent 1's head frame swaps the two actions.
+    struct SwapFor1;
+    impl ActionView for SwapFor1 {
+        fn head_index(&self, action: usize, agent: usize) -> usize {
+            if agent == 1 {
+                1 - action
+            } else {
+                action
+            }
+        }
+        fn game_action(&self, head: usize, agent: usize) -> usize {
+            if agent == 1 {
+                1 - head
+            } else {
+                head
+            }
+        }
+    }
+    struct IdEnc;
+    impl ActionView for IdEnc {}
+    macro_rules! enc_obs {
+        ($t:ty) => {
+            impl StateEncoder for $t {
+                type State = St;
+                fn encode(&self, s: &St, agent: usize) -> Vec<f32> {
+                    vec![s.id as f32, agent as f32] // the encoding perspective rides the obs
+                }
+                fn obs_shape(&self) -> (usize, usize, usize) {
+                    (1, 1, 2)
+                }
+            }
+        };
+    }
+    enc_obs!(IdEnc);
+    enc_obs!(SwapFor1);
+
+    /// Deterministic game-frame value for (state id, game action, head, encode agent).
+    fn v(id: f64, a: usize, h: usize, g: usize) -> f64 {
+        ((id as i64 * 3 + a as i64 * 7 + h as i64 * 5 + g as i64 * 2) % 11) as f64 * 0.1
+    }
+
+    #[test]
+    fn leaf_and_opponent_gathers_cross_via_each_rows_view() {
+        let cfg = SearchConfig {
+            gamma: 0.9,
+            beta: 1.0,
+            expansion_budget: 5,
+            top_k: 2,
+            max_depth: 3,
+            chance: ChanceMode::Committed { samples: 1 },
+            opponent: Opponent::Distributional {
+                temperature: 1.0,
+                floor: 0.1,
+            },
+        };
+        let run = |swapped: bool| {
+            let infer = move |obs: Vec<f32>, n: usize| -> Vec<f64> {
+                (0..n)
+                    .flat_map(|i| {
+                        let id = f64::from(obs[i * 2]);
+                        let g = obs[i * 2 + 1] as usize;
+                        (0..2).flat_map(move |h| {
+                            (0..2).map(move |slot| {
+                                // identity: slot is the game action; swapped view: agent 1's
+                                // slots are exchanged (agent 0 unchanged).
+                                let game_a = if swapped && g == 1 { 1 - slot } else { slot };
+                                v(id, game_a, h, g)
+                            })
+                        })
+                    })
+                    .collect() // K=2, A=2 rows
+            };
+            let requests = vec![(St { id: 0, turn: 0 }, 0)];
+            if swapped {
+                search_many(&Duel, &SwapFor1, &Zero, &cfg, requests, true, 0, infer).remove(0)
+            } else {
+                search_many(&Duel, &IdEnc, &Zero, &cfg, requests, true, 0, infer).remove(0)
+            }
+        };
+        let id = run(false);
+        let sw = run(true);
+        assert_eq!(id.0, sw.0, "root values: a gather skipped its row's view");
+        assert_eq!(
+            id.1, sw.1,
+            "interior targets are game-frame search products: must be frame-invariant"
+        );
     }
 }

@@ -19,7 +19,7 @@ pub(crate) mod rng;
 pub mod space;
 pub mod start;
 
-pub use encoder::StateEncoder;
+pub use encoder::{check_action_view, ActionView, IdentityView, StateEncoder};
 pub use engine::{CollectStats, Engine, EngineParams, EpisodeSummary};
 pub use env::Env;
 pub use evaluator::{CommittedRows, EvalBatch, Evaluator, Resolve};

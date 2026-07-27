@@ -2,6 +2,8 @@
 //! search), and `select` is a Thompson-head epsilon-greedy choice. Its `QEvaluation` is the seam's
 //! non-search case; the matching `Dqn` (in `crate::learners::dqn`) consumes it into transitions.
 
+use std::collections::HashMap;
+
 use crate::encoder::StateEncoder;
 use crate::evaluator::Evaluator;
 use crate::game::{Game, Rng};
@@ -66,14 +68,27 @@ impl Policy for EpsilonGreedyQ {
         }
         let q = eval.forward(obs_flat, n); // flat [n, K, A]
         let k = q.len() / (n * a);
+        // Per-agent permutation tables, computed once: this dense materialization is the reactive
+        // path's throughput ceiling, so it must not pay a virtual `head_index` call per scalar.
+        // Identity views (every absolute encoder) keep the contiguous-copy fast path.
+        let mut perms: HashMap<usize, (Vec<usize>, bool)> = HashMap::new();
         requests
             .iter()
             .enumerate()
             .map(|(i, (state, agent))| {
+                let (perm, identity) = perms
+                    .entry(*agent)
+                    .or_insert_with(|| crate::encoder::head_permutation(enc, a, *agent));
+                // Materialize the net's head-frame row into GAME-frame per-action values (the
+                // internal currency of select and the search seam).
                 let values = (0..k)
                     .map(|h| {
                         let start = (i * k + h) * a;
-                        q[start..start + a].to_vec()
+                        if *identity {
+                            q[start..start + a].to_vec()
+                        } else {
+                            perm.iter().map(|&p| q[start + p]).collect()
+                        }
                     })
                     .collect();
                 QEvaluation {

@@ -3,6 +3,7 @@
 //! `QEvaluation` from `crate::policies::epsilon_greedy_q`. Together these exercise the seam's two hardest cases: a
 //! non-search evaluation and a transition record (a different shape from TreeStrap's targets).
 
+use crate::encoder::ActionView;
 use crate::game::Rng;
 use crate::learner::{sample_mask, Learner, Step};
 use crate::policies::epsilon_greedy_q::QEvaluation;
@@ -52,7 +53,13 @@ impl Learner<QEvaluation> for Dqn {
         true
     }
 
-    fn eval_records(&self, _eval: &mut QEvaluation, _rng: &mut dyn Rng) -> Vec<DqnRecord> {
+    fn eval_records(
+        &self,
+        _eval: &mut QEvaluation,
+        _view: &dyn ActionView,
+        _agent: usize,
+        _rng: &mut dyn Rng,
+    ) -> Vec<DqnRecord> {
         Vec::new() // nothing at decision time; transitions need the post-step s', formed at episode end
     }
 
@@ -60,8 +67,13 @@ impl Learner<QEvaluation> for Dqn {
         &self,
         trajectory: &[Step<QEvaluation>],
         _tail: &[f64],
+        view: &dyn ActionView,
+        agent: usize,
         rng: &mut dyn Rng,
     ) -> Vec<DqnRecord> {
+        // The record's action/legal/next_legal index the net's Q output in training, so they cross
+        // into the head frame here (trajectory `Step`s hold game-frame ids).
+        let to_head = |ids: &[usize]| ids.iter().map(|&x| view.head_index(x, agent)).collect();
         trajectory
             .iter()
             .enumerate()
@@ -74,17 +86,17 @@ impl Learner<QEvaluation> for Dqn {
                 // post-move view: terminal (all-zero mask, no bootstrap) or truncation — where,
                 // on alternating games, the empty next-legal mask again means "do not bootstrap".
                 let (next_obs, next_legal) = match trajectory.get(t + 1) {
-                    Some(succ) => (succ.obs.clone(), succ.evaluation.legal.clone()),
-                    None => (s.next_obs.clone(), s.next_legal.clone()),
+                    Some(succ) => (succ.obs.clone(), to_head(&succ.evaluation.legal)),
+                    None => (s.next_obs.clone(), to_head(&s.next_legal)),
                 };
                 DqnRecord {
                     obs: s.obs.clone(),
-                    action: s.action,
+                    action: view.head_index(s.action, agent),
                     reward: s.reward,
                     next_obs,
                     terminal: s.terminal,
                     mask: sample_mask(rng, self.n_heads, self.bootstrap_p),
-                    legal: s.evaluation.legal.clone(),
+                    legal: to_head(&s.evaluation.legal),
                     next_legal: if s.terminal {
                         Vec::new() // no bootstrap at a terminal
                     } else {
@@ -99,6 +111,7 @@ impl Learner<QEvaluation> for Dqn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoder::IdentityView;
     use crate::engine::Engine;
     use crate::game::{Actor, Game, Transition};
     use crate::policies::epsilon_greedy_q::EpsilonGreedyQ;
@@ -132,7 +145,7 @@ mod tests {
             step(vec![1.0], 0, 0.5, vec![2.0], false),
             step(vec![2.0], 1, -1.0, vec![], true), // terminal: next_obs unused
         ];
-        let recs = learner.episode_records(&traj, &[], &mut SplitMix64::new(1));
+        let recs = learner.episode_records(&traj, &[], &IdentityView, 0, &mut SplitMix64::new(1));
         assert_eq!(recs.len(), 2);
         assert_eq!(recs[0].obs, vec![1.0]);
         assert_eq!(recs[0].action, 0);
@@ -154,6 +167,8 @@ mod tests {
                     values: vec![vec![0.0; 2]],
                     legal: vec![0, 1],
                 },
+                &IdentityView,
+                0,
                 &mut SplitMix64::new(0)
             )
             .is_empty());

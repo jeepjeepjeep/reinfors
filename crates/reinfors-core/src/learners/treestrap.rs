@@ -2,6 +2,7 @@
 //! action, interior MAX-node targets, and a per-head bootstrap mask on every record. Consumes the
 //! expectimax family's `SearchEvaluation`, so it pairs with any expectimax policy (selective today).
 
+use crate::encoder::ActionView;
 use crate::game::Rng;
 use crate::learner::{sample_mask, Learner, Step};
 use crate::policies::expectimax::SearchEvaluation;
@@ -77,15 +78,23 @@ impl Learner<SearchEvaluation> for TreeStrap {
     fn eval_records(
         &self,
         evaluation: &mut SearchEvaluation,
+        view: &dyn ActionView,
+        agent: usize,
         rng: &mut dyn Rng,
     ) -> Vec<Self::Record> {
         let k = evaluation.values.len();
+        // Interior `[K][A]` targets are materialized by the search in GAME-action order; the
+        // record trains the net's raw `[K][A]` output, so each completed row scatters into the
+        // head frame here — otherwise training would supervise a different slot than the one
+        // whose value drove acting.
+        let a = evaluation.interior.first().map_or(0, |(_, v)| v[0].len());
+        let (perm, identity) = crate::encoder::head_permutation(view, a, agent);
         // Move the interior nodes out so they are emitted now and never buffered with the step.
         std::mem::take(&mut evaluation.interior)
             .into_iter()
             .map(|(obs, values)| {
                 let mask = sample_mask(rng, k, self.bootstrap_p);
-                (obs, values, mask)
+                (obs, to_head_frame(values, &perm, identity), mask)
             })
             .collect()
     }
@@ -94,6 +103,8 @@ impl Learner<SearchEvaluation> for TreeStrap {
         &self,
         trajectory: &[Step<SearchEvaluation>],
         tail: &[f64],
+        view: &dyn ActionView,
+        agent: usize,
         rng: &mut dyn Rng,
     ) -> Vec<Self::Record> {
         if trajectory.is_empty() {
@@ -110,21 +121,50 @@ impl Learner<SearchEvaluation> for TreeStrap {
             .iter()
             .map(|s| (s.evaluation.values.clone(), s.action, s.reward))
             .collect();
+        // Blending stays in the GAME frame (`step.action` indexes the search's game-frame values);
+        // each FINISHED `[K][A]` target then scatters into the head frame at emission, since the
+        // record supervises the net's raw output.
+        let a = trajectory[0].evaluation.values[0].len();
+        let (perm, identity) = crate::encoder::head_permutation(view, a, agent);
         let blended = Self::blend_outcome_targets(&traj, self.gamma, self.outcome_weight, &tail);
         trajectory
             .iter()
             .zip(blended)
             .map(|(step, target)| {
                 let mask = sample_mask(rng, k, self.bootstrap_p);
-                (step.obs.clone(), target, mask)
+                (
+                    step.obs.clone(),
+                    to_head_frame(target, &perm, identity),
+                    mask,
+                )
             })
             .collect()
     }
 }
 
+/// Scatter a completed game-frame `[K][A]` target into the net's head frame via a precomputed
+/// permutation (`perm[game_id] = head_index`). The identity (every absolute encoder) returns the
+/// array untouched.
+fn to_head_frame(values: Vec<Vec<f64>>, perm: &[usize], identity: bool) -> Vec<Vec<f64>> {
+    if identity {
+        return values;
+    }
+    values
+        .into_iter()
+        .map(|row| {
+            let mut out = vec![0.0; row.len()];
+            for (a, v) in row.into_iter().enumerate() {
+                out[perm[a]] = v;
+            }
+            out
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoder::IdentityView;
     use crate::policies::expectimax::search::{InteriorTarget, SearchStats};
     use crate::rng::SplitMix64;
 
@@ -152,7 +192,7 @@ mod tests {
             ),
         ];
         let mut e = eval(vec![vec![0.0; 3], vec![0.0; 3]], interior.clone());
-        let recs = learner.eval_records(&mut e, &mut SplitMix64::new(5));
+        let recs = learner.eval_records(&mut e, &IdentityView, 0, &mut SplitMix64::new(5));
         assert!(
             e.interior.is_empty(),
             "interior is moved out, never buffered"
@@ -184,7 +224,8 @@ mod tests {
             })
             .collect();
         let tail = [0.5, -0.5];
-        let recs = learner.episode_records(&steps, &tail, &mut SplitMix64::new(9));
+        let recs =
+            learner.episode_records(&steps, &tail, &IdentityView, 0, &mut SplitMix64::new(9));
 
         let traj: Vec<(Vec<Vec<f64>>, usize, f64)> = steps
             .iter()
@@ -226,5 +267,65 @@ mod tests {
         // The learner is authoritative over interior collection; the engine threads this to the policy.
         assert!(TreeStrap::new(0.99, 0.3, 1.0, true).needs_interior());
         assert!(!TreeStrap::new(0.99, 0.3, 1.0, false).needs_interior());
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+    use crate::learner::Step;
+    use crate::rng::SplitMix64;
+
+    /// head = (game + 1) % 3 — targets must land in the slot acting read, not the game id.
+    struct Rot;
+    impl ActionView for Rot {
+        fn head_index(&self, action: usize, _: usize) -> usize {
+            (action + 1) % 3
+        }
+        fn game_action(&self, head: usize, _: usize) -> usize {
+            (head + 2) % 3
+        }
+    }
+
+    fn eval(
+        values: Vec<Vec<f64>>,
+        interior: Vec<crate::policies::expectimax::search::InteriorTarget>,
+    ) -> SearchEvaluation {
+        SearchEvaluation {
+            values,
+            visits: Vec::new(),
+            interior,
+            legal: (0..3).collect(),
+            stats: Default::default(),
+        }
+    }
+
+    #[test]
+    fn interior_targets_scatter_into_the_head_frame() {
+        let learner = TreeStrap::new(0.99, 0.0, 1.0, true);
+        let interior = vec![(vec![1.0f32], vec![vec![0.1, 0.2, 0.3], vec![0.4, 0.5, 0.6]])];
+        let mut e = eval(vec![vec![0.0; 3]; 2], interior);
+        let recs = learner.eval_records(&mut e, &Rot, 0, &mut SplitMix64::new(0));
+        // game [g0, g1, g2] scatters to heads [1, 2, 0]: head row = [g2, g0, g1]
+        assert_eq!(recs[0].1, vec![vec![0.3, 0.1, 0.2], vec![0.6, 0.4, 0.5]]);
+    }
+
+    #[test]
+    fn episode_targets_blend_in_game_frame_then_scatter() {
+        // outcome_weight 1, gamma 1, reward 2, terminal (empty tail -> z seeds 0): z = 2, blended
+        // into GAME action 1's slot of every head — which must surface at HEAD index (1+1)%3 = 2.
+        let learner = TreeStrap::new(1.0, 1.0, 1.0, false);
+        let steps = vec![Step {
+            obs: vec![0.0f32],
+            evaluation: eval(vec![vec![0.1, 0.2, 0.3]], Vec::new()),
+            action: 1,
+            reward: 2.0,
+            next_obs: Vec::new(),
+            next_legal: Vec::new(),
+            terminal: true,
+        }];
+        let recs = learner.episode_records(&steps, &[], &Rot, 0, &mut SplitMix64::new(0));
+        // game frame after blend: [0.1, 2.0, 0.3] -> head frame: [0.3, 0.1, 2.0]
+        assert_eq!(recs[0].1, vec![vec![0.3, 0.1, 2.0]]);
     }
 }

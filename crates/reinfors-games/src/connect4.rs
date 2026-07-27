@@ -5,7 +5,7 @@
 //! (`None`). Standard rules: only non-full columns are legal (the searches mask to the legal set;
 //! the retired "full column = immediate loss" rule predates sparse legality).
 
-use reinfors_core::{Actor, Game, Reward, Rng, Space, StateEncoder, Transition};
+use reinfors_core::{ActionView, Actor, Game, Reward, Rng, Space, StateEncoder, Transition};
 
 const COLS: usize = 7;
 const ROWS: usize = 6;
@@ -217,6 +217,8 @@ impl Game for Connect4 {
 
 /// The default Connect-4 observation: two own/opponent piece planes from the mover's perspective.
 pub struct Connect4Planes;
+
+impl ActionView for Connect4Planes {} // absolute: identity action view
 
 impl StateEncoder for Connect4Planes {
     type State = Connect4State;
