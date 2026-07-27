@@ -71,6 +71,10 @@ class EncoderHandle:
     # state bookkeeping a view needs is enabled in the game automatically when selected.
     @staticmethod
     def MinimalChess() -> EncoderHandle: ...
+    # Mover-relative chess view (19, 8, 8): board seen from the mover's side, action head indexed
+    # under the same symmetry (role equivariance; the AlphaZero paper's convention).
+    @staticmethod
+    def RelativeChess() -> EncoderHandle: ...
     # AlphaZero's chess view: 14*history_length + 7 planes; history_length=8 = the paper's 119.
     @staticmethod
     def AlphaZeroChess(history_length: int = ...) -> EncoderHandle: ...

@@ -436,6 +436,118 @@ impl StateEncoder for ChessPlanesMinimal {
     }
 }
 
+/// Ray-direction index after rank reflection (`dr -> -dr`): N<->S, NE<->SE, NW<->SW, E/W fixed.
+const RAY_REFLECT: [usize; 8] = [4, 3, 2, 1, 0, 7, 6, 5];
+/// Knight-direction index after rank reflection.
+const KNIGHT_REFLECT: [usize; 8] = [3, 2, 1, 0, 7, 6, 5, 4];
+
+/// The role symmetry sigma on an 8x8x73 action id: reflect the from-square's rank and negate every
+/// rank delta. Underpromotion slots encode file direction + piece only ("forward" is
+/// side-implicit), so they are fixed points. An involution: applying it twice is the identity.
+pub(crate) fn reflect_action(action: usize) -> usize {
+    let from = action / 73;
+    let mt = action % 73;
+    let from_r = (7 - from / 8) * 8 + from % 8;
+    let mt_r = if mt < 56 {
+        RAY_REFLECT[mt / 7] * 7 + mt % 7
+    } else if mt < 64 {
+        56 + KNIGHT_REFLECT[mt - 56]
+    } else {
+        mt
+    };
+    from_r * 73 + mt_r
+}
+
+/// Mover-relative observation planes `(19, 8, 8)`: the position seen from `agent`'s side — for
+/// agent 1 (Black) the board is rank-reflected and colors swap roles, so both colors present the
+/// net the same "my pieces advance up the board" geometry (role equivariance as an inductive
+/// bias — the AlphaZero paper's convention, vs [`ChessPlanesMinimal`]'s absolute frame). Layout
+/// mirrors the minimal encoder with my/opp planes in place of White/Black:
+///   0..6   my P N B R Q K   6..12  opponent P N B R Q K   (ranks reflected for agent 1)
+///   12     my-turn plane (all-ones when `agent` is to move)
+///   13..17 castling rights: my short, my long, opp short, opp long
+///   17     en-passant file (one-hot column; files are fixed under rank reflection)
+///   18     halfmove clock / 100
+/// The paired `ActionView` applies the SAME sigma to action indexing (`reflect_action` for
+/// agent 1), so observations and the policy/Q head transform together — the seam's coherence
+/// contract, pinned by the equivariance tests below.
+pub struct ChessPlanesRelative;
+
+impl ActionView for ChessPlanesRelative {
+    fn head_index(&self, action: usize, agent: usize) -> usize {
+        if agent == 1 {
+            reflect_action(action)
+        } else {
+            action
+        }
+    }
+
+    fn game_action(&self, head: usize, agent: usize) -> usize {
+        // sigma is an involution: the map is its own inverse.
+        if agent == 1 {
+            reflect_action(head)
+        } else {
+            head
+        }
+    }
+}
+
+impl StateEncoder for ChessPlanesRelative {
+    type State = ChessState;
+
+    fn encode(&self, state: &ChessState, agent: usize) -> Vec<f32> {
+        const PLANE: usize = 64;
+        let mut obs = vec![0.0f32; 19 * PLANE];
+        let board = &state.board;
+        let persp = if agent == 0 {
+            Color::White
+        } else {
+            Color::Black
+        };
+        let at = |sq: Square| -> usize {
+            let i = sq_index(sq);
+            if persp == Color::Black {
+                (7 - i / 8) * 8 + i % 8
+            } else {
+                i
+            }
+        };
+        for (ci, color) in [persp, !persp].into_iter().enumerate() {
+            for (pi, piece) in Piece::ALL.into_iter().enumerate() {
+                let bb = board.pieces(piece) & board.colors(color);
+                for sq in bb {
+                    obs[(ci * 6 + pi) * PLANE + at(sq)] = 1.0;
+                }
+            }
+        }
+        if board.side_to_move() == persp {
+            obs[12 * PLANE..13 * PLANE].fill(1.0);
+        }
+        for (i, color) in [persp, !persp].into_iter().enumerate() {
+            let rights = board.castle_rights(color);
+            if rights.short.is_some() {
+                obs[(13 + i * 2) * PLANE..(14 + i * 2) * PLANE].fill(1.0);
+            }
+            if rights.long.is_some() {
+                obs[(14 + i * 2) * PLANE..(15 + i * 2) * PLANE].fill(1.0);
+            }
+        }
+        if let Some(file) = board.en_passant() {
+            let f = file as usize;
+            for rank in 0..8 {
+                obs[17 * PLANE + rank * 8 + f] = 1.0;
+            }
+        }
+        let hm = f32::from(board.halfmove_clock()) / 100.0;
+        obs[18 * PLANE..19 * PLANE].fill(hm);
+        obs
+    }
+
+    fn obs_shape(&self) -> (usize, usize, usize) {
+        (19, 8, 8)
+    }
+}
+
 /// AlphaZero's 119-plane chess observation `(119, 8, 8)`, in this framework's ABSOLUTE orientation
 /// (the paper flips the board to the mover's perspective; a flipped view belongs together with a
 /// flipped action mapping, which is game-level, not encoder-level — so both stay absolute here and
@@ -824,5 +936,156 @@ mod az119_tests {
         let obs = ChessPlanesAz119::default().encode(&s, 0);
         assert!(obs[..12 * PLANE].contains(&1.0)); // t=0 present
         assert!(obs[14 * PLANE..112 * PLANE].iter().all(|&v| v == 0.0)); // no history steps
+    }
+}
+
+#[cfg(test)]
+mod relative_frame_tests {
+    //! The sigma-coherence suite for the mover-relative encoder: `encode` and the `ActionView`
+    //! must apply the SAME role symmetry. Any drift — reflecting the board but not en passant,
+    //! reflecting observations but not actions, a wrong ray/knight table — fails these.
+    use super::*;
+    use reinfors_core::check_action_view;
+
+    /// sigma on a FEN: reverse rank rows + swap piece case, flip side to move, swap castling
+    /// case, reflect the en-passant rank (3 <-> 6). Clocks unchanged.
+    fn sigma_fen(fen: &str) -> String {
+        let parts: Vec<&str> = fen.split(' ').collect();
+        let placement: Vec<String> = parts[0]
+            .split('/')
+            .rev()
+            .map(|row| {
+                row.chars()
+                    .map(|c| {
+                        if c.is_ascii_uppercase() {
+                            c.to_ascii_lowercase()
+                        } else if c.is_ascii_lowercase() {
+                            c.to_ascii_uppercase()
+                        } else {
+                            c
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let side = if parts[1] == "w" { "b" } else { "w" };
+        let castling = if parts[2] == "-" {
+            "-".to_string()
+        } else {
+            let mut cs: Vec<char> = parts[2]
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_uppercase() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        c.to_ascii_uppercase()
+                    }
+                })
+                .collect();
+            cs.sort_by_key(|c| "KQkq".find(*c).unwrap());
+            cs.into_iter().collect()
+        };
+        let ep = if parts[3] == "-" {
+            "-".to_string()
+        } else {
+            parts[3]
+                .chars()
+                .map(|c| match c {
+                    '3' => '6',
+                    '6' => '3',
+                    r => r,
+                })
+                .collect()
+        };
+        format!(
+            "{} {} {} {} {} {}",
+            placement.join("/"),
+            side,
+            castling,
+            ep,
+            parts[4],
+            parts[5]
+        )
+    }
+
+    fn state_of(board: Board) -> ChessState {
+        ChessState {
+            board,
+            hashes: Vec::new(),
+            recent: Vec::new(),
+            finished: None,
+        }
+    }
+
+    fn reflect_sq(sq: Square) -> Square {
+        Square::new(sq.file(), Rank::index(7 - sq.rank() as usize))
+    }
+
+    #[test]
+    fn action_view_contract_holds_over_the_full_space() {
+        check_action_view(&ChessPlanesRelative, CHESS_ACTIONS, 2);
+    }
+
+    #[test]
+    fn obs_and_actions_transform_together_under_sigma() {
+        // Deterministic pseudo-random walk; at EVERY position s with mover m, against t = sigma(s):
+        //   encode(s, m) == encode(t, 1 - m)                                  (obs equivariance)
+        //   head_index(id(mv in s), m) == head_index(id(sigma(mv) in t), 1-m) (action coherence)
+        let enc = ChessPlanesRelative;
+        let mut board = Board::default();
+        for ply in 0..60 {
+            let s = state_of(board.clone());
+            let mover = usize::from(s.board.side_to_move() == Color::Black);
+            let t = state_of(
+                Board::from_fen(&sigma_fen(&format!("{}", s.board)), false)
+                    .expect("sigma of a legal position is legal"),
+            );
+            assert_eq!(
+                enc.encode(&s, mover),
+                enc.encode(&t, 1 - mover),
+                "obs equivariance broke at ply {ply}"
+            );
+            let mut moves = Vec::new();
+            board.generate_moves(|ms| {
+                moves.extend(ms);
+                false
+            });
+            if moves.is_empty() {
+                break;
+            }
+            for &mv in &moves {
+                let id = encode_move(mv, s.board.side_to_move());
+                let smv = Move {
+                    from: reflect_sq(mv.from),
+                    to: reflect_sq(mv.to),
+                    promotion: mv.promotion,
+                };
+                let sid = encode_move(smv, t.board.side_to_move());
+                assert_eq!(
+                    enc.head_index(id, mover),
+                    enc.head_index(sid, 1 - mover),
+                    "action coherence broke at ply {ply} for {mv}"
+                );
+            }
+            let mv = moves[(ply * 7) % moves.len()];
+            board.play(mv);
+        }
+    }
+
+    #[test]
+    fn start_position_is_sigma_symmetric_except_the_turn_plane() {
+        // The initial position equals its own sigma image, so the two perspectives may differ
+        // ONLY in plane 12 (whose turn it is) — a direct, scaffold-free equivariance check.
+        let enc = ChessPlanesRelative;
+        let s = state_of(Board::default());
+        let (w, b) = (enc.encode(&s, 0), enc.encode(&s, 1));
+        for (i, (x, y)) in w.iter().zip(&b).enumerate() {
+            if (12 * 64..13 * 64).contains(&i) {
+                continue;
+            }
+            assert_eq!(x, y, "plane mismatch at flat index {i}");
+        }
+        assert_eq!(w[12 * 64], 1.0, "White to move: agent 0 sees my-turn");
+        assert_eq!(b[12 * 64], 0.0, "White to move: agent 1 sees not-my-turn");
     }
 }

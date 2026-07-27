@@ -28,10 +28,10 @@ use reinfors_core::{
 use reinfors_games::snake::{Cell, DeathCause};
 use reinfors_games::{
     snake_length_cell, Action, Backgammon, BackgammonEvent, BackgammonReward, BackgammonState,
-    BackgammonTesauro, Chess, ChessEvent, ChessPlanesAz119, ChessPlanesMinimal, ChessReward,
-    ChessState, Connect4, Connect4Event, Connect4Planes, Connect4Reward, Connect4State,
-    EgocentricSnake, GridEvent, GridState, GridWorld, GridWorldPlanes, GridWorldReward, Snake,
-    SnakeReward, SnakeState, StepEvent,
+    BackgammonTesauro, Chess, ChessEvent, ChessPlanesAz119, ChessPlanesMinimal,
+    ChessPlanesRelative, ChessReward, ChessState, Connect4, Connect4Event, Connect4Planes,
+    Connect4Reward, Connect4State, EgocentricSnake, GridEvent, GridState, GridWorld,
+    GridWorldPlanes, GridWorldReward, Snake, SnakeReward, SnakeState, StepEvent,
 };
 
 /// Absolute `Action` -> its `u8` code (Up/Down/Left/Right = 0/1/2/3), for native-state marshalling.
@@ -417,6 +417,7 @@ impl PyEngine {
 #[derive(Clone, Copy)]
 enum ChessEncoderSpec {
     Minimal,
+    Relative,
     AlphaZero { history: usize },
 }
 
@@ -433,6 +434,13 @@ fn chess_parts(
                 history_len: 0,
             },
             Box::new(ChessPlanesMinimal),
+        ),
+        ChessEncoderSpec::Relative => (
+            Chess {
+                max_ticks,
+                history_len: 0,
+            },
+            Box::new(ChessPlanesRelative),
         ),
         ChessEncoderSpec::AlphaZero { history } => (
             Chess {
@@ -2704,6 +2712,18 @@ impl EncoderHandle {
     fn minimal_chess() -> Self {
         EncoderHandle {
             chess: ChessEncoderSpec::Minimal,
+        }
+    }
+
+    /// Mover-relative chess view, (19, 8, 8): the position seen from the mover's side (board
+    /// rank-reflected and colors role-swapped for Black), with the action head indexed under the
+    /// SAME symmetry — role equivariance as an inductive bias (the AlphaZero paper's convention).
+    /// Layout mirrors MinimalChess with my/opponent planes in place of White/Black.
+    #[staticmethod]
+    #[pyo3(name = "RelativeChess")]
+    fn relative_chess() -> Self {
+        EncoderHandle {
+            chess: ChessEncoderSpec::Relative,
         }
     }
 

@@ -108,7 +108,7 @@ def test_collect_is_deterministic_per_seed() -> None:
 
 
 def test_make_encoder_by_name() -> None:
-    assert rf.encoders.registered() == ["alphazero_chess", "minimal_chess"]
+    assert rf.encoders.registered() == ["alphazero_chess", "minimal_chess", "relative_chess"]
     enc = rf.encoders.make("alphazero_chess", history_length=4)
     assert tuple(rf.games.Chess(encoder=enc).observation_space().shape) == (63, 8, 8)  # 14*4+7
 
@@ -147,3 +147,17 @@ def test_start_buffer_rejected() -> None:
             n_games=1,
             start_buffer=True,
         )
+
+
+def test_relative_encoder_shape_and_symmetric_start() -> None:
+    game = rf.games.Chess(encoder=rf.encoders.RelativeChess())
+    assert tuple(game.observation_space().shape) == (19, 8, 8)
+    env = rf.Env(game, seed=0)
+    env.reset()
+    w, b = env.observe(0), env.observe(1)
+    # The start position is its own sigma image, so the two perspectives differ only in the
+    # my-turn plane (12): all-ones for White (to move), all-zeros for Black.
+    assert (w[12] == 1.0).all() and (b[12] == 0.0).all()
+    mask = np.ones((19, 8, 8), dtype=bool)
+    mask[12] = False
+    assert (w[mask] == b[mask]).all()
