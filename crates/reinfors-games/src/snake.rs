@@ -25,7 +25,7 @@ pub enum DeathCause {
     HeadOn,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SnakeBody {
     pub body: VecDeque<Cell>, // body[0] is the head, body[len-1] the tail
     pub direction: Action,
@@ -67,7 +67,7 @@ pub struct StepEvent {
 
 // ============================ Grid actions ============================
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Action {
     Up,
     Down,
@@ -256,9 +256,38 @@ impl Reward for SnakeReward {
 
 /// Snake's dynamic state: the two snakes and the food. Static config (grid size, rules) lives on
 /// `Snake` and the reward on the decoupled `SnakeReward`, so the search/engine carry just this per node.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Canonical food serialization: a HashSet iterates nondeterministically, which would make
+/// equal states encode to different bytes (breaking snapshot byte-identity) — so food
+/// serializes as a SORTED list, and deserialization rejects duplicates rather than silently
+/// deduplicating them.
+mod food_serde {
+    use super::Cell;
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashSet;
+
+    pub fn serialize<S: Serializer>(food: &HashSet<Cell>, ser: S) -> Result<S::Ok, S::Error> {
+        let mut cells: Vec<Cell> = food.iter().copied().collect();
+        cells.sort_unstable();
+        cells.serialize(ser)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<HashSet<Cell>, D::Error> {
+        let cells = Vec::<Cell>::deserialize(de)?;
+        let mut food = HashSet::with_capacity(cells.len());
+        for cell in cells {
+            if !food.insert(cell) {
+                return Err(D::Error::custom(format!("duplicate food cell {cell:?}")));
+            }
+        }
+        Ok(food)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SnakeState {
     pub snakes: [SnakeBody; 2],
+    #[serde(with = "food_serde")]
     pub food: HashSet<Cell>,
 }
 
@@ -1394,100 +1423,41 @@ impl reinfors_core::StateCodec for Snake {
     type State = SnakeState;
 
     fn encode(&self, s: &SnakeState) -> Vec<u8> {
-        use crate::codec_util::{put_i32, put_u32};
-        let mut out = vec![1u8];
-        for snake in &s.snakes {
-            put_u32(&mut out, snake.body.len() as u32);
-            for &(r, c) in &snake.body {
-                put_i32(&mut out, r);
-                put_i32(&mut out, c);
-            }
-            out.push(snake.direction.ego_rot_k()); // Up=0 Right=1 Down=2 Left=3: a stable id
-            out.push(u8::from(snake.alive));
-        }
-        let mut food: Vec<Cell> = s.food.iter().copied().collect();
-        food.sort_unstable(); // canonical order: equal states encode to equal bytes
-        put_u32(&mut out, food.len() as u32);
-        for (r, c) in food {
-            put_i32(&mut out, r);
-            put_i32(&mut out, c);
-        }
-        out
+        crate::codec_util::serde_encode(2, s)
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<SnakeState, String> {
-        let mut r = crate::codec_util::Reader::new(bytes);
-        if r.u8()? != 1 {
-            return Err("unsupported snake state layout version".into());
-        }
+        crate::codec_util::serde_decode(2, bytes)
+    }
+
+    fn validate_state(&self, state: &SnakeState, done: bool) -> Result<(), String> {
         let g = self.grid_size;
         let in_grid = |cell: Cell| 0 <= cell.0 && cell.0 < g && 0 <= cell.1 && cell.1 < g;
-        let mut snakes: Vec<SnakeBody> = Vec::with_capacity(2);
-        for i in 0..2 {
-            let n = r.u32()? as usize;
-            if n > (g as usize).pow(2) {
-                return Err(format!("snake {i} body length {n} exceeds the grid"));
+        // Occupancy invariants hold among the LIVING only: dead snakes' bodies remain in the
+        // state as corpses that living snakes (and other corpses — head-on deaths share a cell)
+        // may overlap. The reachability property test is what pinned this boundary.
+        let mut occupied: HashSet<Cell> = HashSet::new();
+        for (i, snake) in state.snakes.iter().enumerate() {
+            if snake.alive && snake.body.is_empty() {
+                return Err(format!("snake {i} is alive with an empty body"));
             }
-            let mut body = VecDeque::with_capacity(n);
-            for _ in 0..n {
-                let cell = (r.i32()?, r.i32()?);
+            for &cell in &snake.body {
                 if !in_grid(cell) {
                     return Err(format!("snake {i} cell {cell:?} outside the grid"));
                 }
-                body.push_back(cell);
+                if snake.alive && !occupied.insert(cell) {
+                    return Err(format!("living snakes overlap or revisit at {cell:?}"));
+                }
             }
-            let mut seen = HashSet::with_capacity(body.len());
-            if !body.iter().all(|&c| seen.insert(c)) {
-                return Err(format!("snake {i} body revisits a cell"));
-            }
-            let direction = match r.u8()? {
-                0 => Action::Up,
-                1 => Action::Right,
-                2 => Action::Down,
-                3 => Action::Left,
-                d => return Err(format!("direction id {d} out of range")),
-            };
-            let alive = match r.u8()? {
-                0 => false,
-                1 => true,
-                b => return Err(format!("alive byte {b} is not a bool")),
-            };
-            if alive && body.is_empty() {
-                return Err(format!("snake {i} is alive with an empty body"));
-            }
-            snakes.push(SnakeBody {
-                body,
-                direction,
-                alive,
-            });
         }
-        let n_food = r.u32()? as usize;
-        if n_food > (g as usize).pow(2) {
-            return Err(format!("food count {n_food} exceeds the grid"));
-        }
-        let occupied: HashSet<Cell> = snakes.iter().flat_map(|s| s.body.iter().copied()).collect();
-        if occupied.len() != snakes.iter().map(|s| s.body.len()).sum::<usize>() {
-            return Err("snakes overlap".into());
-        }
-        let mut food = HashSet::with_capacity(n_food);
-        for _ in 0..n_food {
-            let cell = (r.i32()?, r.i32()?);
+        for &cell in &state.food {
             if !in_grid(cell) {
                 return Err(format!("food cell {cell:?} outside the grid"));
             }
             if occupied.contains(&cell) {
-                return Err(format!("food cell {cell:?} overlaps a snake body"));
-            }
-            if !food.insert(cell) {
-                return Err(format!("duplicate food cell {cell:?}"));
+                return Err(format!("food cell {cell:?} overlaps a living snake"));
             }
         }
-        r.finish()?;
-        let snakes: [SnakeBody; 2] = snakes.try_into().expect("exactly two snakes decoded");
-        Ok(SnakeState { snakes, food })
-    }
-
-    fn check_done(&self, state: &SnakeState, done: bool) -> Result<(), String> {
         // Definitely-terminal states must carry done: all snakes dead, or (without play_to_last)
         // a lone survivor. The win_food_lead terminal is not statically derivable — done=true is
         // accepted for it; done=false with a derivably-terminal state is not.

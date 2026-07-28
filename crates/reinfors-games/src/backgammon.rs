@@ -75,7 +75,7 @@ pub enum BackgammonEvent {
     Loss(u8),
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BackgammonState {
     /// Checker counts per player per point; X (agent 0) travels 0→23, O (agent 1) 23→0.
     pub board: [[u8; NUM_POINTS]; 2],
@@ -938,72 +938,37 @@ impl reinfors_core::StateCodec for Backgammon {
     type State = BackgammonState;
 
     fn encode(&self, s: &BackgammonState) -> Vec<u8> {
-        let mut out = vec![1u8];
-        for p in 0..2 {
-            out.extend_from_slice(&s.board[p]);
-            out.push(s.bar[p]);
-            out.push(s.scores[p]);
-        }
-        out.push(s.to_move);
-        out.extend_from_slice(&s.dice);
-        out.push(u8::from(s.double_turn));
-        out
+        crate::codec_util::serde_encode(2, s)
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<BackgammonState, String> {
-        let mut r = crate::codec_util::Reader::new(bytes);
-        if r.u8()? != 1 {
-            return Err("unsupported backgammon state layout version".into());
+        crate::codec_util::serde_decode(2, bytes)
+    }
+
+    fn validate_state(&self, state: &BackgammonState, done: bool) -> Result<(), String> {
+        if state.to_move > 1 {
+            return Err(format!("to_move {} out of range", state.to_move));
         }
-        let mut board = [[0u8; NUM_POINTS]; 2];
-        let mut bar = [0u8; 2];
-        let mut scores = [0u8; 2];
-        for p in 0..2 {
-            for pt in board[p].iter_mut() {
-                *pt = r.u8()?;
-            }
-            bar[p] = r.u8()?;
-            scores[p] = r.u8()?;
-        }
-        let to_move = r.u8()?;
-        let dice = [r.u8()?, r.u8()?];
-        let double_turn = match r.u8()? {
-            0 => false,
-            1 => true,
-            b => return Err(format!("double_turn byte {b} is not a bool")),
-        };
-        r.finish()?;
-        if to_move > 1 {
-            return Err(format!("to_move {to_move} out of range"));
-        }
-        for (p, (b, (bar_p, score_p))) in
-            board.iter().zip(bar.iter().zip(scores.iter())).enumerate()
+        for (p, (board, (bar, score))) in state
+            .board
+            .iter()
+            .zip(state.bar.iter().zip(state.scores.iter()))
+            .enumerate()
         {
-            let total = b.iter().map(|&c| u32::from(c)).sum::<u32>()
-                + u32::from(*bar_p)
-                + u32::from(*score_p);
+            let total = board.iter().map(|&c| u32::from(c)).sum::<u32>()
+                + u32::from(*bar)
+                + u32::from(*score);
             if total != 15 {
                 return Err(format!("player {p} has {total} checkers, expected 15"));
             }
         }
-        for d in dice {
+        for d in state.dice {
             if d > 12 {
                 return Err(format!(
                     "die value {d} out of range (0 unrolled, 1-6 fresh, 7-12 used)"
                 ));
             }
         }
-        Ok(BackgammonState {
-            board,
-            bar,
-            scores,
-            to_move,
-            dice,
-            double_turn,
-        })
-    }
-
-    fn check_done(&self, state: &BackgammonState, done: bool) -> Result<(), String> {
         let finished = state.scores.iter().any(|&s| s >= 15);
         if finished != done {
             return Err(format!(
@@ -1020,8 +985,7 @@ mod codec_tests {
     use super::*;
     use reinfors_core::StateCodec;
 
-    #[test]
-    fn backgammon_state_round_trips_and_rejects_checker_imbalance() {
+    fn initial() -> (Backgammon, BackgammonState) {
         struct R(u64);
         impl reinfors_core::Rng for R {
             fn below(&mut self, n: usize) -> usize {
@@ -1037,11 +1001,41 @@ mod codec_tests {
         }
         let game = Backgammon { max_ticks: None };
         let s = game.initial_state(&mut R(9));
+        (game, s)
+    }
+
+    #[test]
+    fn round_trips_canonically_and_validates() {
+        let (game, s) = initial();
         let bytes = game.encode(&s);
         let back = game.decode(&bytes).unwrap();
         assert_eq!(game.encode(&back), bytes);
-        let mut evil = bytes.clone();
-        evil[1] = evil[1].wrapping_add(1); // one extra checker on point 0
-        assert!(game.decode(&evil).unwrap_err().contains("checkers"));
+        game.validate_state(&back, false).unwrap();
+    }
+
+    #[test]
+    fn semantic_invariants_reject_tampered_structs() {
+        let (game, s) = initial();
+        let mut extra = s.clone();
+        extra.board[0][0] += 1;
+        assert!(game
+            .validate_state(&extra, false)
+            .unwrap_err()
+            .contains("checkers"));
+        let mut bad_die = s.clone();
+        bad_die.dice[0] = 13;
+        assert!(game
+            .validate_state(&bad_die, false)
+            .unwrap_err()
+            .contains("die"));
+        let mut won = s.clone();
+        won.board[0] = [0; NUM_POINTS];
+        won.bar[0] = 0;
+        won.scores[0] = 15;
+        assert!(game
+            .validate_state(&won, false)
+            .unwrap_err()
+            .contains("borne-off"));
+        game.validate_state(&won, true).unwrap();
     }
 }

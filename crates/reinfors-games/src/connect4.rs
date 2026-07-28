@@ -11,10 +11,33 @@ const COLS: usize = 7;
 const ROWS: usize = 6;
 const CONNECT: usize = 4;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// serde stops at 32-element arrays; the 42-cell board round-trips through a length-checked Vec.
+mod cells_serde {
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        cells: &[u8; super::COLS * super::ROWS],
+        ser: S,
+    ) -> Result<S::Ok, S::Error> {
+        cells.as_slice().serialize(ser)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        de: D,
+    ) -> Result<[u8; super::COLS * super::ROWS], D::Error> {
+        let v = Vec::<u8>::deserialize(de)?;
+        v.try_into().map_err(|v: Vec<u8>| {
+            D::Error::custom(format!("board has {} cells, expected 42", v.len()))
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Connect4State {
+    #[serde(with = "cells_serde")]
     cells: [u8; COLS * ROWS], // 0 empty, 1 player-0, 2 player-1; index = row*COLS + col, row 0 = bottom
-    turn: usize,              // whose move it is (0 or 1)
+    turn: usize, // whose move it is (0 or 1)
     done: bool,
 }
 
@@ -251,36 +274,21 @@ impl reinfors_core::StateCodec for Connect4 {
     type State = Connect4State;
 
     fn encode(&self, s: &Connect4State) -> Vec<u8> {
-        let mut out = vec![1u8];
-        out.extend_from_slice(&s.cells);
-        out.push(s.turn as u8);
-        out.push(u8::from(s.done));
-        out
+        crate::codec_util::serde_encode(2, s)
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<Connect4State, String> {
-        let mut r = crate::codec_util::Reader::new(bytes);
-        if r.u8()? != 1 {
-            return Err("unsupported connect4 state layout version".into());
+        crate::codec_util::serde_decode(2, bytes)
+    }
+
+    fn validate_state(&self, state: &Connect4State, done: bool) -> Result<(), String> {
+        let cells = &state.cells;
+        if cells.iter().any(|&c| c > 2) {
+            return Err("cell value out of range".into());
         }
-        let mut cells = [0u8; COLS * ROWS];
-        for c in cells.iter_mut() {
-            *c = r.u8()?;
-            if *c > 2 {
-                return Err(format!("cell value {c} out of range"));
-            }
+        if state.turn > 1 {
+            return Err(format!("turn {} out of range", state.turn));
         }
-        let turn = r.u8()? as usize;
-        if turn > 1 {
-            return Err(format!("turn {turn} out of range"));
-        }
-        let done = match r.u8()? {
-            0 => false,
-            1 => true,
-            b => return Err(format!("done byte {b} is not a bool")),
-        };
-        r.finish()?;
-        // Gravity invariant: a filled cell cannot float above an empty one.
         for col in 0..COLS {
             for row in 1..ROWS {
                 if cells[row * COLS + col] != 0 && cells[(row - 1) * COLS + col] == 0 {
@@ -288,33 +296,29 @@ impl reinfors_core::StateCodec for Connect4 {
                 }
             }
         }
-        // Alternation: P0 opens, so P0 has either equal pieces (P0 to move) or exactly one more
-        // (P1 to move).
         let c1 = cells.iter().filter(|&&c| c == 1).count();
         let c2 = cells.iter().filter(|&&c| c == 2).count();
-        if !(c1 == c2 && turn == 0 || c1 == c2 + 1 && turn == 1) {
+        if !(c1 == c2 && state.turn == 0 || c1 == c2 + 1 && state.turn == 1) {
             return Err(format!(
-                "piece counts ({c1}, {c2}) inconsistent with turn {turn}"
+                "piece counts ({c1}, {c2}) inconsistent with turn {}",
+                state.turn
             ));
         }
-        if !done {
-            // A live game cannot already contain a connect-four (or a full board).
-            for r_ in 0..ROWS {
-                for c_ in 0..COLS {
-                    let v = cells[r_ * COLS + c_];
-                    if v != 0 && Self::wins(&cells, r_, c_, v) {
-                        return Err("board contains a win but done is false".into());
-                    }
-                }
-            }
-            if cells.iter().all(|&c| c != 0) {
-                return Err("board is full but done is false".into());
-            }
+        let has_win = (0..ROWS).any(|r| {
+            (0..COLS).any(|c| {
+                let v = cells[r * COLS + c];
+                v != 0 && Self::wins(cells, r, c, v)
+            })
+        });
+        let full = cells.iter().all(|&c| c != 0);
+        // Terminal consistency BOTH ways: a live board holds neither a win nor a full grid, and
+        // a finished one holds at least one of them (the gap the byte-era codec left open).
+        if !state.done && (has_win || full) {
+            return Err("board is decided but done is false".into());
         }
-        Ok(Connect4State { cells, turn, done })
-    }
-
-    fn check_done(&self, state: &Connect4State, done: bool) -> Result<(), String> {
+        if state.done && !(has_win || full) {
+            return Err("done is true but the board is neither won nor full".into());
+        }
         if state.done != done {
             return Err(format!(
                 "state done flag {} disagrees with envelope done {done}",

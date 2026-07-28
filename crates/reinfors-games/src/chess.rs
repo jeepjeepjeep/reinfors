@@ -194,8 +194,47 @@ pub fn decode_move(action: usize, board: &Board) -> Option<Move> {
     })
 }
 
-#[derive(Clone)]
+/// Board fields serialize as FEN strings (cozy's `Board` is a foreign type; FEN is its
+/// canonical, parse-validated text form).
+mod board_serde {
+    use cozy_chess::Board;
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(board: &Board, ser: S) -> Result<S::Ok, S::Error> {
+        format!("{board}").serialize(ser)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Board, D::Error> {
+        String::deserialize(de)?
+            .parse()
+            .map_err(|_| D::Error::custom("invalid FEN"))
+    }
+
+    pub mod pairs {
+        use super::*;
+
+        pub fn serialize<S: Serializer>(v: &[(Board, u8)], ser: S) -> Result<S::Ok, S::Error> {
+            let strs: Vec<(String, u8)> = v.iter().map(|(b, c)| (format!("{b}"), *c)).collect();
+            strs.serialize(ser)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Vec<(Board, u8)>, D::Error> {
+            Vec::<(String, u8)>::deserialize(de)?
+                .into_iter()
+                .map(|(s, c)| {
+                    s.parse()
+                        .map(|b| (b, c))
+                        .map_err(|_| D::Error::custom("invalid FEN in history"))
+                })
+                .collect()
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ChessState {
+    #[serde(with = "board_serde")]
     pub(crate) board: Board,
     /// Position hashes since the last irreversible move (pawn move / capture / castling-rights
     /// change resets the halfmove clock, which we mirror) — the threefold-repetition window.
@@ -205,11 +244,12 @@ pub struct ChessState {
     /// across irreversible-move resets). Maintained only when the game was built with
     /// a nonzero `history_len` (the AZ-119 encoder's input); empty otherwise, so the minimal-encoder path
     /// pays nothing for it in tree-node clones.
+    #[serde(with = "board_serde::pairs")]
     recent: Vec<(Board, u8)>,
     finished: Option<ChessOutcome>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 enum ChessOutcome {
     /// The stored agent index won (its opponent is mated or played an illegal action).
     WonBy(usize),
@@ -1327,82 +1367,32 @@ impl reinfors_core::StateCodec for Chess {
     type State = ChessState;
 
     fn encode(&self, s: &ChessState) -> Vec<u8> {
-        use crate::codec_util::{put_str, put_u32, put_u64};
-        let mut out = vec![1u8];
-        put_str(&mut out, &format!("{}", s.board));
-        put_u32(&mut out, s.hashes.len() as u32);
-        for &h in &s.hashes {
-            put_u64(&mut out, h);
-        }
-        put_u32(&mut out, s.recent.len() as u32);
-        for (board, count) in &s.recent {
-            put_str(&mut out, &format!("{board}"));
-            out.push(*count);
-        }
-        out.push(match s.finished {
-            None => 0,
-            Some(ChessOutcome::WonBy(0)) => 1,
-            Some(ChessOutcome::WonBy(_)) => 2,
-            Some(ChessOutcome::Draw) => 3,
-        });
-        out
+        crate::codec_util::serde_encode(2, s)
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<ChessState, String> {
-        let mut r = crate::codec_util::Reader::new(bytes);
-        if r.u8()? != 1 {
-            return Err("unsupported chess state layout version".into());
-        }
-        let board: Board = r
-            .str()?
-            .parse()
-            .map_err(|_| "invalid FEN in chess snapshot".to_string())?;
-        let n_hashes = r.u32()? as usize;
-        if n_hashes == 0 {
-            return Err("empty hash history (must contain at least the current position)".into());
-        }
-        if n_hashes > 100_000 {
-            return Err(format!("implausible hash history length {n_hashes}"));
-        }
-        let mut hashes = Vec::with_capacity(n_hashes);
-        for _ in 0..n_hashes {
-            hashes.push(r.u64()?);
-        }
-        if *hashes.last().expect("non-empty") != board.hash() {
-            return Err("hash history does not end at the current position".into());
-        }
-        let n_recent = r.u32()? as usize;
-        if n_recent > 8 {
-            return Err(format!(
-                "recent-history length {n_recent} exceeds the 8-slot ring"
-            ));
-        }
-        let mut recent = Vec::with_capacity(n_recent);
-        for _ in 0..n_recent {
-            let b: Board = r
-                .str()?
-                .parse()
-                .map_err(|_| "invalid FEN in chess history".to_string())?;
-            let count = r.u8()?;
-            recent.push((b, count));
-        }
-        let finished = match r.u8()? {
-            0 => None,
-            1 => Some(ChessOutcome::WonBy(0)),
-            2 => Some(ChessOutcome::WonBy(1)),
-            3 => Some(ChessOutcome::Draw),
-            v => return Err(format!("finished tag {v} out of range")),
-        };
-        r.finish()?;
-        Ok(ChessState {
-            board,
-            hashes,
-            recent,
-            finished,
-        })
+        crate::codec_util::serde_decode(2, bytes)
     }
 
-    fn check_done(&self, state: &ChessState, done: bool) -> Result<(), String> {
+    fn validate_state(&self, state: &ChessState, done: bool) -> Result<(), String> {
+        if state.hashes.is_empty() {
+            return Err("empty hash history (must contain at least the current position)".into());
+        }
+        if state.hashes.len() > 100_000 {
+            return Err(format!(
+                "implausible hash history length {}",
+                state.hashes.len()
+            ));
+        }
+        if *state.hashes.last().expect("non-empty") != state.board.hash() {
+            return Err("hash history does not end at the current position".into());
+        }
+        if state.recent.len() > 8 {
+            return Err(format!(
+                "recent-history length {} exceeds the 8-slot ring",
+                state.recent.len()
+            ));
+        }
         if state.finished.is_some() != done {
             return Err(format!(
                 "state finished flag {} disagrees with envelope done {done}",
@@ -1418,24 +1408,21 @@ mod codec_tests {
     use super::*;
     use reinfors_core::StateCodec;
 
-    #[test]
-    fn chess_state_round_trips_and_rejects_malformed() {
+    fn played() -> (Chess, ChessState) {
         let game = Chess {
             max_ticks: None,
             history_len: 8,
         };
-        let mut s = {
-            struct R;
-            impl reinfors_core::Rng for R {
-                fn below(&mut self, _: usize) -> usize {
-                    0
-                }
-                fn unit(&mut self) -> f64 {
-                    0.0
-                }
+        struct R;
+        impl reinfors_core::Rng for R {
+            fn below(&mut self, _: usize) -> usize {
+                0
             }
-            game.initial_state(&mut R)
-        };
+            fn unit(&mut self) -> f64 {
+                0.0
+            }
+        }
+        let mut s = game.initial_state(&mut R);
         for uci in ["e2e4", "e7e5", "g1f3", "b8c6"] {
             let mv: Move = uci.parse().unwrap();
             let a = encode_move(mv, s.board.side_to_move());
@@ -1444,25 +1431,40 @@ mod codec_tests {
             joint[mover] = a;
             s = game.step(&s, &joint).next_state;
         }
-        let bytes = game.encode(&s);
-        let back = game.decode(&bytes).unwrap();
-        assert_eq!(format!("{}", back.board), format!("{}", s.board));
-        assert_eq!(back.hashes, s.hashes);
-        assert_eq!(back.recent.len(), s.recent.len());
-        assert_eq!(game.encode(&back), bytes); // canonical: re-encode is byte-identical
+        (game, s)
+    }
 
-        assert!(game.decode(&bytes[..bytes.len() - 1]).is_err()); // truncated
-        let mut evil = bytes.clone();
-        let h = s.hashes.len();
-        let hash_start = evil.len()
-            - 1
-            - s.recent
-                .iter()
-                .map(|(b, _)| 4 + format!("{b}").len() + 1)
-                .sum::<usize>()
-            - 4
-            - h * 8;
-        evil[hash_start + (h - 1) * 8] ^= 0xFF; // corrupt the last hash: no longer the current position
-        assert!(game.decode(&evil).is_err());
+    #[test]
+    fn round_trips_canonically_and_validates() {
+        let (game, s) = played();
+        let bytes = game.encode(&s);
+        let back = game
+            .decode(&bytes)
+            .unwrap_or_else(|e| panic!("decode failed: {e}"));
+        assert_eq!(game.encode(&back), bytes); // canonical: re-encode is byte-identical
+        game.validate_state(&back, false).unwrap();
+        assert!(game.decode(&bytes[..bytes.len() - 1]).is_err()); // structural: truncated
+        assert!(game.decode(&[1, 0, 0]).unwrap_err().contains("version")); // old layout rejected
+    }
+
+    #[test]
+    fn semantic_invariants_reject_tampered_structs() {
+        let (game, s) = played();
+        let mut no_tail = s.clone();
+        no_tail.hashes.pop(); // history no longer ends at the current position
+        assert!(game
+            .validate_state(&no_tail, false)
+            .unwrap_err()
+            .contains("hash history"));
+        let mut fat_ring = s.clone();
+        fat_ring.recent = vec![(s.board.clone(), 1); 9];
+        assert!(game
+            .validate_state(&fat_ring, false)
+            .unwrap_err()
+            .contains("8-slot"));
+        assert!(game
+            .validate_state(&s, true)
+            .unwrap_err()
+            .contains("finished"));
     }
 }

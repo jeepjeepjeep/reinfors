@@ -10,7 +10,7 @@ type Pos = (i32, i32);
 const N_CHANNELS: usize = 2; // 0 = agent, 1 = goal
 const DELTAS: [Pos; 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)]; // up, down, left, right
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GridState {
     pub pos: Pos,
     pub done: bool, // reached the goal
@@ -178,35 +178,27 @@ impl reinfors_core::StateCodec for GridWorld {
     type State = GridState;
 
     fn encode(&self, s: &GridState) -> Vec<u8> {
-        let mut out = vec![1u8]; // layout version
-        crate::codec_util::put_i32(&mut out, s.pos.0);
-        crate::codec_util::put_i32(&mut out, s.pos.1);
-        out.push(u8::from(s.done));
-        out
+        crate::codec_util::serde_encode(2, s)
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<GridState, String> {
-        let mut r = crate::codec_util::Reader::new(bytes);
-        if r.u8()? != 1 {
-            return Err("unsupported gridworld state layout version".into());
-        }
-        let pos = (r.i32()?, r.i32()?);
-        let done = match r.u8()? {
-            0 => false,
-            1 => true,
-            b => return Err(format!("done byte {b} is not a bool")),
-        };
-        r.finish()?;
+        crate::codec_util::serde_decode(2, bytes)
+    }
+
+    fn validate_state(&self, state: &GridState, done: bool) -> Result<(), String> {
+        let pos = state.pos;
         if !(0 <= pos.0 && pos.0 < self.size && 0 <= pos.1 && pos.1 < self.size) {
             return Err(format!(
                 "position {pos:?} outside the {0}x{0} grid",
                 self.size
             ));
         }
-        Ok(GridState { pos, done })
-    }
-
-    fn check_done(&self, state: &GridState, done: bool) -> Result<(), String> {
+        if state.done != (state.pos == self.goal) {
+            return Err(format!(
+                "done flag {} inconsistent with position vs goal {:?}",
+                state.done, self.goal
+            ));
+        }
         if state.done != done {
             return Err(format!(
                 "state done flag {} disagrees with envelope done {done}",

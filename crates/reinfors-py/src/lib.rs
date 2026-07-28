@@ -2523,7 +2523,7 @@ where
         let decoded = codec.decode(state).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("invalid snapshot state: {e}"))
         })?;
-        codec.check_done(&decoded, done).map_err(|e| {
+        codec.validate_state(&decoded, done).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("invalid snapshot state: {e}"))
         })?;
         self.inner.set_parts(decoded, rng_state, done);
