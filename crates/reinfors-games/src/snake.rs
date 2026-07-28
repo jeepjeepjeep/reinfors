@@ -1,4 +1,5 @@
-//! The two-player snake game, in one self-contained module (mirroring `connect4.rs`): grid actions,
+//! The N-player snake game (2-8 snakes, default 2), in one self-contained module (mirroring
+//! `connect4.rs`): grid actions,
 //! the egocentric observation encoder, reward shaping, and the `Snake` adapter implementing
 //! `reinfors_core::Game` (its deterministic dynamics live in private methods, alongside the
 //! `EgocentricSnake` state encoder).
@@ -159,10 +160,13 @@ const CH_OPP_HEAD: usize = 2;
 const CH_OPP_BODY: usize = 3;
 const CH_FOOD: usize = 4;
 
-/// Build the egocentric observation for `agent` (0 = A, 1 = B) as a flat `[5 * g * g]` f32 buffer,
-/// from a `(snakes, food)` state. Coordinates are pre-rotated so the queried snake faces "up".
+/// Build the egocentric observation for `agent` as a flat `[5 * g * g]` f32 buffer, from a
+/// `(snakes, food)` state. Coordinates are pre-rotated so the queried snake faces "up". EVERY
+/// other snake lands in the shared opponent head/body channels, so the observation shape is
+/// independent of the snake count (a per-opponent-channel encoder is a possible future variant
+/// behind the encoder seam).
 pub fn egocentric_parts(
-    snakes: &[SnakeBody; 2],
+    snakes: &[SnakeBody],
     food: &HashSet<Cell>,
     grid_size: i32,
     agent: usize,
@@ -286,7 +290,7 @@ mod food_serde {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SnakeState {
-    pub snakes: [SnakeBody; 2],
+    pub snakes: Vec<SnakeBody>, // [num_snakes]
     #[serde(with = "food_serde")]
     pub food: HashSet<Cell>,
 }
@@ -297,20 +301,23 @@ pub struct SnakeState {
 const CELL_BUCKET_SIZE: usize = 3;
 const CELL_N_BUCKETS: u64 = 10;
 
-/// A start-state-buffer coverage cell for a snake state: the **unordered** pair of the two snakes'
-/// length buckets, packed into a `u64`. The pair is unordered because self-play is symmetric — one
-/// lopsided rollout already yields both perspectives, so `(20, 4)` and `(4, 20)` are the same cell
-/// (an off-diagonal one). Returns `None` for a state with a dead snake (the episode is effectively
-/// over, so it is not a valid restart point). This is snake's `cell_key` for
-/// [`ReachedStateBuffer`](reinfors_core::ReachedStateBuffer); another game supplies its own.
+/// A start-state-buffer coverage cell for a snake state: the **sorted multiset** of the snakes'
+/// length buckets, packed into a `u64`. Unordered because self-play is symmetric — one lopsided
+/// rollout already yields every perspective, so `(20, 4)` and `(4, 20)` are the same cell.
+/// Returns `None` for a state with any dead snake (v1 keeps coverage on full games; a
+/// mid-elimination restart seam is a future refinement). Packing: 16-bit fields up to 4 snakes
+/// (2 snakes reproduce the legacy `(lo << 16) | hi` keys exactly, so existing buffers bucket
+/// identically), 8-bit fields for 5-8 (buckets < 10 fit either way).
+/// This is snake's `cell_key` for [`ReachedStateBuffer`](reinfors_core::ReachedStateBuffer).
 pub fn snake_length_cell(state: &SnakeState) -> Option<u64> {
-    if !state.snakes[0].alive || !state.snakes[1].alive {
+    if state.snakes.iter().any(|s| !s.alive) {
         return None;
     }
     let bucket = |len: usize| ((len / CELL_BUCKET_SIZE) as u64).min(CELL_N_BUCKETS - 1);
-    let (a, b) = (bucket(state.snakes[0].len()), bucket(state.snakes[1].len()));
-    let (lo, hi) = (a.min(b), a.max(b));
-    Some((lo << 16) | hi)
+    let mut buckets: Vec<u64> = state.snakes.iter().map(|s| bucket(s.len())).collect();
+    buckets.sort_unstable();
+    let shift = if buckets.len() <= 4 { 16 } else { 8 };
+    Some(buckets.into_iter().fold(0u64, |acc, b| (acc << shift) | b))
 }
 
 /// The default snake observation: an egocentric 5-channel grid, the searching snake always facing up
@@ -338,9 +345,13 @@ impl StateEncoder for EgocentricSnake {
     }
 }
 
-/// Two-player simultaneous-move snake with environment chance (apple respawn). Its deterministic
+/// N-player simultaneous-move snake with environment chance (apple respawn). Its deterministic
 /// dynamics live in the private `impl Snake` methods below, behind the `Game` trait.
 pub struct Snake {
+    /// Number of snakes (2-8; validated). 2 keeps the legacy placement and rules exactly; more
+    /// snakes spread across the grid, with every rule generalizing per-agent (the lone survivor
+    /// wins, deaths with survivors lose, simultaneous last deaths draw).
+    pub num_snakes: usize,
     pub grid_size: i32,
     pub initial_length: usize,
     pub play_to_last: bool,
@@ -364,12 +375,22 @@ impl Snake {
     /// other), and leave enough free cells for the food — rather than by re-deriving bounds that
     /// could drift from the layout code.
     pub fn validate(&self) -> Result<(), String> {
+        if !(2..=8).contains(&self.num_snakes) {
+            return Err("num_snakes must be in 2..=8".to_string());
+        }
         if self.initial_length < 1 {
             return Err("initial_length must be >= 1".to_string());
         }
         if self.win_food_lead == Some(0) {
             return Err(
                 "win_food_lead must be >= 1 (a lead of 0 ends the game on tick one)".to_string(),
+            );
+        }
+        if self.win_food_lead.is_some() && self.num_snakes != 2 {
+            return Err(
+                "win_food_lead is a two-snake rule (a lead over WHOM is undefined past two); \
+                 unset it for more snakes"
+                    .to_string(),
             );
         }
         let g = self.grid_size;
@@ -379,6 +400,22 @@ impl Snake {
         if g >= 1 && N_CHANNELS as u128 * cells as u128 > i32::MAX as u128 {
             return Err(format!(
                 "grid_size {g} makes the observation tensor exceed 2^31 elements"
+            ));
+        }
+        // The declared respawn chance enumerates ordered k-tuples of free cells for k apples
+        // eaten on one tick (k <= min(snakes, food)); bound its worst case so a rare multi-eat
+        // cannot allocate an absurd probability vector (negative grids clamp to zero cells here; the
+        // placement construction below rejects them properly).
+        let k_max = self.num_snakes.min(self.initial_food_count) as u128;
+        let cell_count = self.grid_size.max(0) as u128 * self.grid_size.max(0) as u128;
+        let worst: u128 = (0..k_max)
+            .map(|i| cell_count.saturating_sub(i))
+            .try_fold(1u128, |acc, f| acc.checked_mul(f))
+            .unwrap_or(u128::MAX);
+        if worst > 1 << 22 {
+            return Err(format!(
+                "worst-case respawn enumeration ({k_max} apples eatable at once on a \
+                 {cell_count} - cell grid) exceeds 2^22 outcomes; reduce food or grid size"
             ));
         }
         let snakes = self.initial_snakes_checked()?;
@@ -409,38 +446,51 @@ impl Snake {
         Ok(())
     }
 
-    fn initial_snakes(&self) -> [SnakeBody; 2] {
+    fn initial_snakes(&self) -> Vec<SnakeBody> {
         self.initial_snakes_checked()
             .expect("snake config validated at construction")
     }
 
-    fn initial_snakes_checked(&self) -> Result<[SnakeBody; 2], String> {
+    fn initial_snakes_checked(&self) -> Result<Vec<SnakeBody>, String> {
         let g = self.grid_size;
         let mid = g / 2;
-        let a_body = Self::trace_body(
-            g,
-            (mid, g / 3),
-            &[Action::Left, Action::Down, Action::Right, Action::Up],
-            self.initial_length,
-        )?;
-        let b_body = Self::trace_body(
-            g,
-            (mid, g - g / 3),
-            &[Action::Right, Action::Up, Action::Left, Action::Down],
-            self.initial_length,
-        )?;
-        Ok([
-            SnakeBody {
-                body: a_body,
-                direction: Action::Right,
-                alive: true,
-            },
-            SnakeBody {
-                body: b_body,
-                direction: Action::Left,
-                alive: true,
-            },
-        ])
+        // Two snakes keep the legacy placement byte-for-byte (heads at thirds of the middle row);
+        // more spread across evenly-spaced rows, alternating the left/right pattern.
+        let rows: Vec<i32> = if self.num_snakes == 2 {
+            vec![mid, mid]
+        } else {
+            (0..self.num_snakes)
+                .map(|i| (i as i32 + 1) * g / (self.num_snakes as i32 + 1))
+                .collect()
+        };
+        let mut snakes = Vec::with_capacity(self.num_snakes);
+        for (i, &row) in rows.iter().enumerate() {
+            let snake = if i % 2 == 0 {
+                SnakeBody {
+                    body: Self::trace_body(
+                        g,
+                        (row, g / 3),
+                        &[Action::Left, Action::Down, Action::Right, Action::Up],
+                        self.initial_length,
+                    )?,
+                    direction: Action::Right,
+                    alive: true,
+                }
+            } else {
+                SnakeBody {
+                    body: Self::trace_body(
+                        g,
+                        (row, g - g / 3),
+                        &[Action::Right, Action::Up, Action::Left, Action::Down],
+                        self.initial_length,
+                    )?,
+                    direction: Action::Left,
+                    alive: true,
+                }
+            };
+            snakes.push(snake);
+        }
+        Ok(snakes)
     }
 
     fn trace_body(
@@ -478,17 +528,18 @@ impl Snake {
     /// whether the episode is now over.
     fn advance(
         &self,
-        snakes: &mut [SnakeBody; 2],
+        snakes: &mut [SnakeBody],
         food: &mut HashSet<Cell>,
-        actions: [Option<Action>; 2],
+        actions: &[Option<Action>],
         mut next_food: impl FnMut() -> Option<Cell>,
-    ) -> ([StepEvent; 2], bool) {
-        let mut events = [StepEvent::default(), StepEvent::default()];
+    ) -> (Vec<StepEvent>, bool) {
+        let n = snakes.len();
+        let mut events = vec![StepEvent::default(); n];
 
         // Stage 1: move every living snake. Eating intent keeps the tail; survival is settled below.
-        let mut ate_intent = [false, false];
-        let mut moved = [false, false];
-        for i in 0..2 {
+        let mut ate_intent = vec![false; n];
+        let mut moved = vec![false; n];
+        for i in 0..n {
             if !snakes[i].alive {
                 continue;
             }
@@ -510,13 +561,13 @@ impl Snake {
 
         // Stage 2: resolve collisions against the post-move world.
         let causes = self.resolve_collisions(snakes, &moved);
-        let mut fatal_heads = [None, None];
-        for i in 0..2 {
+        let mut fatal_heads = vec![None; n];
+        for i in 0..n {
             if causes[i].is_some() {
                 fatal_heads[i] = Some(snakes[i].head());
             }
         }
-        for i in 0..2 {
+        for i in 0..n {
             if let Some(cause) = causes[i] {
                 snakes[i].alive = false;
                 snakes[i].body.pop_front(); // corpse vacates the collision cell
@@ -526,7 +577,7 @@ impl Snake {
         }
 
         // Eating: survivors whose new head landed on food eat it and trigger a replacement spawn.
-        for i in 0..2 {
+        for i in 0..n {
             if ate_intent[i] && causes[i].is_none() {
                 let head = snakes[i].head();
                 food.remove(&head);
@@ -538,7 +589,7 @@ impl Snake {
         }
 
         // Kill credit: a snake whose body occupies the cell an opponent fatally moved into.
-        for i in 0..2 {
+        for i in 0..n {
             if causes[i] == Some(DeathCause::OppBody) {
                 if let Some(killer) = self.find_killer(snakes, fatal_heads[i].unwrap(), i) {
                     events[killer].killed_opponent = true;
@@ -546,13 +597,14 @@ impl Snake {
             }
         }
 
-        // Outcomes.
-        let alive_ids: Vec<usize> = (0..2).filter(|&i| snakes[i].alive).collect();
+        // Outcomes (per-agent, any N): the lone survivor of a deadly tick wins outright; a death
+        // with survivors remaining loses; simultaneous deaths that leave nobody draw.
+        let alive_ids: Vec<usize> = (0..n).filter(|&i| snakes[i].alive).collect();
         let n_causes = causes.iter().filter(|c| c.is_some()).count();
         if alive_ids.len() == 1 && n_causes > 0 {
             events[alive_ids[0]].won = true;
         }
-        for i in 0..2 {
+        for i in 0..n {
             if causes[i].is_some() {
                 if !alive_ids.is_empty() {
                     events[i].lost = true;
@@ -583,8 +635,8 @@ impl Snake {
     /// difference at or past the configured lead). The single source of terminality — `advance`
     /// ends the tick on it, and the codec's lifecycle check compares the envelope's `done`
     /// against it rather than re-implementing the rules.
-    fn is_terminal(&self, snakes: &[SnakeBody; 2]) -> bool {
-        let alive: Vec<usize> = (0..2).filter(|&i| snakes[i].alive).collect();
+    fn is_terminal(&self, snakes: &[SnakeBody]) -> bool {
+        let alive: Vec<usize> = (0..snakes.len()).filter(|&i| snakes[i].alive).collect();
         if alive.len() <= if self.play_to_last { 0 } else { 1 } {
             return true;
         }
@@ -594,14 +646,11 @@ impl Snake {
         false
     }
 
-    fn resolve_collisions(
-        &self,
-        snakes: &[SnakeBody; 2],
-        moved: &[bool; 2],
-    ) -> [Option<DeathCause>; 2] {
-        let mut causes = [None, None];
+    fn resolve_collisions(&self, snakes: &[SnakeBody], moved: &[bool]) -> Vec<Option<DeathCause>> {
+        let n = snakes.len();
+        let mut causes = vec![None; n];
 
-        // Two heads on one cell die together, whatever else is on it.
+        // Heads sharing one cell die together, whatever else is on it.
         let mut by_head: HashMap<Cell, Vec<usize>> = HashMap::new();
         for (i, &m) in moved.iter().enumerate() {
             if m {
@@ -616,7 +665,7 @@ impl Snake {
             }
         }
 
-        for i in 0..2 {
+        for i in 0..n {
             if !moved[i] || causes[i].is_some() {
                 continue;
             }
@@ -632,13 +681,11 @@ impl Snake {
         causes
     }
 
-    fn find_killer(
-        &self,
-        snakes: &[SnakeBody; 2],
-        fatal_head: Cell,
-        victim: usize,
-    ) -> Option<usize> {
-        (0..2).find(|&j| j != victim && snakes[j].alive && snakes[j].body.contains(&fatal_head))
+    /// The lowest-indexed living snake whose body holds the fatal cell (deterministic when
+    /// several bodies share it).
+    fn find_killer(&self, snakes: &[SnakeBody], fatal_head: Cell, victim: usize) -> Option<usize> {
+        (0..snakes.len())
+            .find(|&j| j != victim && snakes[j].alive && snakes[j].body.contains(&fatal_head))
     }
 
     /// Spawn one apple at a uniform-random empty cell (the env's true spawn), or nothing if the grid is
@@ -649,7 +696,7 @@ impl Snake {
     /// Place one apple on the `i`-th free cell drawn by `rng` — initial-state placement, routed
     /// through the SAME free-cell indexing (`occupied_of` + `nth_free_of`) as `apply_chance`, so
     /// exactly one implementation of "the i-th free cell" exists.
-    fn spawn_one(&self, snakes: &[SnakeBody; 2], food: &mut HashSet<Cell>, rng: &mut dyn Rng) {
+    fn spawn_one(&self, snakes: &[SnakeBody], food: &mut HashSet<Cell>, rng: &mut dyn Rng) {
         let occupied = self.occupied_of(snakes, food);
         let n = (self.grid_size * self.grid_size) as usize - occupied.len();
         if n == 0 {
@@ -661,7 +708,7 @@ impl Snake {
 
     /// Occupied cell ids (food + both bodies), sorted + deduped — the complement enumerates the
     /// free cells in row-major order.
-    fn occupied_of(&self, snakes: &[SnakeBody; 2], food: &HashSet<Cell>) -> Vec<usize> {
+    fn occupied_of(&self, snakes: &[SnakeBody], food: &HashSet<Cell>) -> Vec<usize> {
         let g = self.grid_size;
         let mut occupied: Vec<usize> = food.iter().map(|&(r, c)| (r * g + c) as usize).collect();
         for s in snakes {
@@ -705,7 +752,7 @@ impl Game for Snake {
     type Event = StepEvent;
 
     fn num_agents(&self) -> usize {
-        2
+        self.num_snakes
     }
 
     fn action_count(&self) -> usize {
@@ -726,7 +773,7 @@ impl Game for Snake {
 
     fn step(&self, state: &SnakeState, actions: &[usize]) -> Transition<SnakeState, StepEvent> {
         // Relative action index -> absolute heading per (living) snake; `advance` coasts dead ones.
-        let mut moves: [Option<Action>; 2] = [None, None];
+        let mut moves: Vec<Option<Action>> = vec![None; state.snakes.len()];
         for (i, (slot, snake)) in moves.iter_mut().zip(state.snakes.iter()).enumerate() {
             if snake.alive {
                 *slot = Some(relative_to_absolute(
@@ -740,21 +787,21 @@ impl Game for Snake {
         // and the chance element stay separable and are shared by the rollout and search.
         let mut snakes = state.snakes.clone();
         let mut food = state.food.clone();
-        let (events, done) = self.advance(&mut snakes, &mut food, moves, || None);
+        let (events, done) = self.advance(&mut snakes, &mut food, &moves, || None);
         Transition {
             next_state: SnakeState { snakes, food },
-            events: events.into(),
+            events,
             terminal: done,
         }
     }
 
-    /// The respawn chance, declared (the game's only chance seam). One respawn: uniform over the
-    /// free cells of the post-step state, in row-major order. Two respawns (both agents eat
-    /// on one tick — the maximum, each head eats at most one apple): uniform over ORDERED pairs
-    /// (first placement from the n free cells, second from the remaining n−1), matching the two
-    /// sequential draws bijectively — n·(n−1) outcomes, so wide boards pay a transiently large
-    /// probs vector on the rare double-eat edges. A full board degenerates to one no-op outcome
-    /// (`spawn_one` can't place), keeping the sampler/declaration agreement exact.
+    /// The respawn chance, declared (the game's only chance seam). `k` apples eaten on one tick
+    /// (each living head eats at most one, so `k <= min(snakes, food)`) respawn as `k` sequential
+    /// uniform draws over the shrinking free set — enumerated as ordered tuples, mixed-radix with
+    /// bases `n, n-1, …, n-k+1` over the free-cell count `n` (the k = 2 case is exactly the old
+    /// `n·(n-1)` ordered-pair layout). Placements cap at the free cells available; a full board
+    /// degenerates to one no-op outcome, keeping the sampler/declaration agreement exact. The
+    /// worst-case enumeration size is bounded at construction (`validate`).
     fn chance_outcomes(
         &self,
         state: &SnakeState,
@@ -765,17 +812,9 @@ impl Game for Snake {
         if eaten == 0 || transition.terminal {
             return None;
         }
-        assert!(
-            eaten <= 2,
-            "at most two apples (one per head) can be eaten per tick"
-        );
         let n = self.free_cell_count(next);
-        let outcomes = match (eaten, n) {
-            (_, 0) | (2, 1) => 1, // no (or only one) placeable cell: the tail draws no-op
-            (1, _) => n,
-            (2, _) => n * (n - 1),
-            _ => unreachable!(),
-        };
+        let placeable = eaten.min(n);
+        let outcomes: usize = (0..placeable).map(|i| n - i).product::<usize>().max(1);
         Some(vec![1.0 / outcomes as f64; outcomes])
     }
 
@@ -788,24 +827,24 @@ impl Game for Snake {
         let next = &transition.next_state;
         let eaten = state.food.len().saturating_sub(next.food.len());
         let n = self.free_cell_count(next);
+        let placeable = eaten.min(n);
         let mut out = SnakeState {
             snakes: next.snakes.clone(),
             food: next.food.clone(),
         };
-        match (eaten, n) {
-            (_, 0) => {}
-            (1, _) | (2, 1) => {
-                let cell = self.nth_free_cell(&out, outcome % n.max(1));
-                out.food.insert(cell);
-            }
-            (2, _) => {
-                let (i, j) = (outcome / (n - 1), outcome % (n - 1));
-                let first = self.nth_free_cell(&out, i);
-                out.food.insert(first);
-                let second = self.nth_free_cell(&out, j);
-                out.food.insert(second);
-            }
-            _ => unreachable!(),
+        // Mixed-radix digits, least-significant (base n-k+1, the LAST draw) first; each placement
+        // indexes the free cells REMAINING after the ones before it, matching the sequential
+        // draws bijectively.
+        let mut digits = vec![0usize; placeable];
+        let mut rem = outcome;
+        for i in (0..placeable).rev() {
+            let base = n - i;
+            digits[i] = rem % base;
+            rem /= base;
+        }
+        for &d in &digits {
+            let cell = self.nth_free_cell(&out, d);
+            out.food.insert(cell);
         }
         out
     }
@@ -851,6 +890,7 @@ mod game_tests {
 
     fn game() -> Snake {
         Snake {
+            num_snakes: 2,
             grid_size: G,
             initial_length: 3,
             play_to_last: false,
@@ -863,6 +903,7 @@ mod game_tests {
     #[test]
     fn validate_screens_placement_food_and_bounds() {
         let cfg = |grid_size, initial_length, food| Snake {
+            num_snakes: 2,
             grid_size,
             initial_length,
             play_to_last: false,
@@ -921,7 +962,7 @@ mod game_tests {
     }
 
     /// The unoccupied cells in row-major order — the oracle for what `spawn_one` may pick.
-    fn empty_cells(snakes: &[SnakeBody; 2], food: &HashSet<Cell>, grid_size: i32) -> Vec<Cell> {
+    fn empty_cells(snakes: &[SnakeBody], food: &HashSet<Cell>, grid_size: i32) -> Vec<Cell> {
         let mut occupied: HashSet<Cell> = food.clone();
         for s in snakes {
             occupied.extend(s.body.iter().copied());
@@ -1143,7 +1184,7 @@ mod game_tests {
         let mk = |la: usize, lb: usize, b_alive: bool| {
             let body = |len: usize| (0..len as i32).map(|c| (0, c)).collect::<VecDeque<Cell>>();
             SnakeState {
-                snakes: [
+                snakes: vec![
                     SnakeBody {
                         body: body(la),
                         direction: Action::Right,
@@ -1182,6 +1223,7 @@ mod env_tests {
     // `advance` takes a working `(snakes, food)` and mutates it.
     fn game(grid_size: i32, win_food_lead: Option<usize>) -> Snake {
         Snake {
+            num_snakes: 2,
             grid_size,
             initial_length: 3,
             play_to_last: false,
@@ -1214,7 +1256,7 @@ mod env_tests {
         let (events, done) = g.advance(
             &mut snakes,
             &mut food,
-            [Some(Action::Right), Some(Action::Left)],
+            &[Some(Action::Right), Some(Action::Left)],
             || None,
         );
         assert_eq!(
@@ -1234,7 +1276,7 @@ mod env_tests {
         let mut snakes = g.initial_snakes();
         let mut food = HashSet::new();
         // A heads Right; commanding Left (reverse) must coast Right, not reverse into itself.
-        g.advance(&mut snakes, &mut food, [Some(Action::Left), None], || None);
+        g.advance(&mut snakes, &mut food, &[Some(Action::Left), None], || None);
         assert_eq!(snakes[A].head(), (10, 7));
         assert_eq!(snakes[A].direction, Action::Right);
     }
@@ -1249,7 +1291,7 @@ mod env_tests {
             (events, done) = g.advance(
                 &mut snakes,
                 &mut food,
-                [Some(Action::Right), Some(Action::Left)],
+                &[Some(Action::Right), Some(Action::Left)],
                 || None,
             );
         }
@@ -1268,7 +1310,7 @@ mod env_tests {
         let (events, _) = g.advance(
             &mut snakes,
             &mut food,
-            [Some(Action::Right), Some(Action::Left)],
+            &[Some(Action::Right), Some(Action::Left)],
             || replacement.pop(),
         );
         assert!(events[A].ate_food);
@@ -1284,7 +1326,9 @@ mod env_tests {
         // Place A against the right wall (row 0, clear of B at row 10) so one Right step runs off-grid.
         snakes[A].body = VecDeque::from([(0, 19), (0, 18), (0, 17)]);
         snakes[A].direction = Action::Right;
-        let (events, _) = g.advance(&mut snakes, &mut food, [Some(Action::Right), None], || None);
+        let (events, _) = g.advance(&mut snakes, &mut food, &[Some(Action::Right), None], || {
+            None
+        });
         assert_eq!(events[A].death_cause, Some(DeathCause::Wall));
         assert!(!snakes[A].alive);
     }
@@ -1297,7 +1341,7 @@ mod env_tests {
         // A folds back on itself: head (5,5) facing Right; turning Up steps onto its own body at (4,5).
         snakes[A].body = VecDeque::from([(5, 5), (5, 4), (4, 4), (4, 5), (4, 6)]);
         snakes[A].direction = Action::Right;
-        let (events, _) = g.advance(&mut snakes, &mut food, [Some(Action::Up), None], || None);
+        let (events, _) = g.advance(&mut snakes, &mut food, &[Some(Action::Up), None], || None);
         assert_eq!(events[A].death_cause, Some(DeathCause::SelfBody));
         assert!(!snakes[A].alive);
     }
@@ -1316,7 +1360,7 @@ mod env_tests {
         let (events, done) = g.advance(
             &mut snakes,
             &mut food,
-            [Some(Action::Right), Some(Action::Down)],
+            &[Some(Action::Right), Some(Action::Down)],
             || None,
         );
         assert_eq!(events[B].death_cause, Some(DeathCause::OppBody));
@@ -1332,7 +1376,9 @@ mod env_tests {
         snakes[A].body = VecDeque::from([(2, 5), (2, 4), (2, 3), (2, 2), (2, 1)]); // length 5 vs B's 3
         snakes[A].direction = Action::Right;
         let (events, done) =
-            g.advance(&mut snakes, &mut food, [Some(Action::Right), None], || None);
+            g.advance(&mut snakes, &mut food, &[Some(Action::Right), None], || {
+                None
+            });
         assert!(events[A].won && events[B].lost && done);
     }
 }
@@ -1346,8 +1392,9 @@ mod obs_tests {
     }
 
     // The default initial placement on a 20-grid (heads at (10,6) / (10,14)).
-    fn snakes() -> [SnakeBody; 2] {
+    fn snakes() -> Vec<SnakeBody> {
         Snake {
+            num_snakes: 2,
             grid_size: 20,
             initial_length: 3,
             play_to_last: false,
@@ -1434,11 +1481,12 @@ impl reinfors_core::StateCodec for Snake {
     type State = SnakeState;
 
     fn encode(&self, s: &SnakeState) -> Vec<u8> {
-        crate::codec_util::serde_encode(2, s)
+        // Layout 3: `snakes` became a length-prefixed Vec (the fixed two-element array era was 2).
+        crate::codec_util::serde_encode(3, s)
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<SnakeState, String> {
-        crate::codec_util::serde_decode(2, bytes)
+        crate::codec_util::serde_decode(3, bytes)
     }
 
     // Safety per the narrowed codec contract: bounds that game methods index by, plus lifecycle
@@ -1447,6 +1495,13 @@ impl reinfors_core::StateCodec for Snake {
     // source, not a re-implementation). Occupancy rules are NOT re-proved here; unreachable-but-
     // safe states are accepted.
     fn validate_decoded_state(&self, state: &SnakeState, done: bool) -> Result<(), String> {
+        if state.snakes.len() != self.num_snakes {
+            return Err(format!(
+                "state has {} snakes; this game has {}",
+                state.snakes.len(),
+                self.num_snakes
+            ));
+        }
         let g = self.grid_size;
         let in_grid = |cell: Cell| 0 <= cell.0 && cell.0 < g && 0 <= cell.1 && cell.1 < g;
         for (i, snake) in state.snakes.iter().enumerate() {
@@ -1471,5 +1526,223 @@ impl reinfors_core::StateCodec for Snake {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod n_player_tests {
+    use super::*;
+
+    fn game(num_snakes: usize, grid: i32, food: usize) -> Snake {
+        Snake {
+            num_snakes,
+            grid_size: grid,
+            initial_length: 2,
+            play_to_last: false,
+            win_food_lead: None,
+            initial_food_count: food,
+            max_ticks: None,
+        }
+    }
+
+    #[test]
+    fn validation_bounds_the_config() {
+        assert!(game(3, 8, 2).validate().is_ok());
+        assert!(game(8, 12, 2).validate().is_ok());
+        assert!(game(1, 8, 2).validate().is_err()); // solo snake is a different mode
+        assert!(game(9, 20, 2).validate().is_err());
+        let mut lead = game(3, 8, 2);
+        lead.win_food_lead = Some(2);
+        assert!(lead.validate().is_err(), "the lead rule is two-snake only");
+        // The respawn enumeration bound: multi-eat ordered-tuple fans past 2^22 reject at
+        // construction (40000-cell grid: even a double-eat enumerates ~1.6e9 outcomes).
+        assert!(game(3, 200, 3).validate().is_err());
+        assert!(game(3, 200, 2).validate().is_err());
+        assert!(game(3, 200, 1).validate().is_ok()); // one apple: one eat per tick, linear fan
+        assert!(game(3, 20, 2).validate().is_ok()); // double-eat fan on a 20-grid: ~160k, fine
+        assert!(game(3, 12, 3).validate().is_ok()); // triple-eat needs a small grid (~2.9M)
+        assert!(game(3, 20, 3).validate().is_err()); // ~63M outcomes: over the bound
+    }
+
+    #[test]
+    fn three_snakes_place_disjoint_and_in_grid() {
+        for g in [6, 8, 12] {
+            for n in [3, 4, 5] {
+                let snakes = game(n, g, 1).initial_snakes();
+                assert_eq!(snakes.len(), n);
+                let mut seen = HashSet::new();
+                for s in &snakes {
+                    assert_eq!(s.len(), 2);
+                    for &(r, c) in &s.body {
+                        assert!(0 <= r && r < g && 0 <= c && c < g);
+                        assert!(seen.insert((r, c)), "snakes overlap at ({r}, {c})");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn two_snake_placement_is_the_legacy_layout() {
+        // N=2 must stay byte-identical: heads at thirds of the middle row, facing inward.
+        let snakes = game(2, 8, 1).initial_snakes();
+        assert_eq!(snakes[0].head(), (4, 2));
+        assert_eq!(snakes[0].direction, Action::Right);
+        assert_eq!(snakes[1].head(), (4, 6));
+        assert_eq!(snakes[1].direction, Action::Left);
+    }
+
+    fn body_at(cells: &[Cell], dir: Action) -> SnakeBody {
+        SnakeBody {
+            body: VecDeque::from(cells.to_vec()),
+            direction: dir,
+            alive: true,
+        }
+    }
+
+    #[test]
+    fn three_way_head_on_draws_everyone() {
+        let g = game(3, 8, 0);
+        // Three heads converge on (4, 4).
+        let mut snakes = vec![
+            body_at(&[(4, 3)], Action::Right),
+            body_at(&[(4, 5)], Action::Left),
+            body_at(&[(3, 4)], Action::Down),
+        ];
+        let mut food = HashSet::new();
+        let (events, done) = g.advance(
+            &mut snakes,
+            &mut food,
+            &[Some(Action::Right), Some(Action::Left), Some(Action::Down)],
+            || None,
+        );
+        assert!(done);
+        for e in &events {
+            assert!(e.died && e.drew && !e.lost && !e.won);
+            assert_eq!(e.death_cause, Some(DeathCause::HeadOn));
+        }
+    }
+
+    #[test]
+    fn deaths_with_survivors_lose_and_the_last_one_standing_wins() {
+        let g = game(3, 8, 0);
+        // Snake 0 runs into the wall; 1 and 2 survive -> 0 lost, nobody won, game continues.
+        let mut snakes = vec![
+            body_at(&[(0, 0)], Action::Up),
+            body_at(&[(4, 4)], Action::Right),
+            body_at(&[(6, 6)], Action::Right),
+        ];
+        let mut food = HashSet::new();
+        let (events, done) = g.advance(
+            &mut snakes,
+            &mut food,
+            &[Some(Action::Up), Some(Action::Right), Some(Action::Right)],
+            || None,
+        );
+        assert!(!done, "two snakes still alive");
+        assert!(events[0].died && events[0].lost);
+        assert!(!events[1].won && !events[2].won);
+        // Drive snake 1 up and out of bounds while snake 2 orbits a safe 2x2 box (it already
+        // moved Right to (6,7) in the tick above, so the orbit starts at Down); when snake 1
+        // hits the wall, snake 2 is the lone survivor of a deadly tick -> won, terminal.
+        let orbit = [Action::Down, Action::Left, Action::Up, Action::Right];
+        let mut events;
+        let mut done;
+        let mut step = 0;
+        loop {
+            let out = g.advance(
+                &mut snakes,
+                &mut food,
+                &[None, Some(Action::Up), Some(orbit[step % 4])],
+                || None,
+            );
+            events = out.0;
+            done = out.1;
+            step += 1;
+            if done || step > 10 {
+                break;
+            }
+        }
+        assert!(done);
+        assert!(events[2].won, "lone survivor of the deadly tick wins");
+        assert!(events[1].died && events[1].lost);
+    }
+
+    #[test]
+    fn k_eater_respawn_matches_the_ordered_tuple_layout() {
+        // 3 snakes all eating on one tick: outcomes = n·(n-1)·(n-2) ordered triples of free
+        // cells, each applying as three sequential placements over the shrinking free set.
+        let g = game(3, 6, 3);
+        let mut rng = TestRng(3);
+        let mut state = g.initial_state(&mut rng);
+        // Put an apple directly ahead of each head so every snake eats simultaneously.
+        state.food.clear();
+        let mut expected_heads = Vec::new();
+        for s in &state.snakes {
+            let (dr, dc) = s.direction.delta();
+            let (hr, hc) = s.head();
+            state.food.insert((hr + dr, hc + dc));
+            expected_heads.push((hr + dr, hc + dc));
+        }
+        let t = g.step(&state, &[0, 0, 0]); // Forward for everyone
+        assert!(state.food.len() == 3 && t.next_state.food.is_empty());
+        let probs = g
+            .chance_outcomes(&state, &t)
+            .expect("3 eats declare chance");
+        let n = (6 * 6)
+            - t.next_state
+                .snakes
+                .iter()
+                .map(|s| s.body.len())
+                .sum::<usize>() as i32;
+        let n = n as usize;
+        assert_eq!(probs.len(), n * (n - 1) * (n - 2));
+        // Every outcome yields exactly 3 fresh apples on free cells; outcome 0 places the three
+        // lowest free cells in row-major order (sequential draws at index 0 each time).
+        let s0 = g.apply_chance(&state, &t, 0);
+        assert_eq!(s0.food.len(), 3);
+        let last = g.apply_chance(&state, &t, probs.len() - 1);
+        assert_eq!(last.food.len(), 3);
+        assert_ne!(s0.food, last.food);
+    }
+
+    #[test]
+    fn length_cell_keys_are_legacy_at_two_and_sorted_multisets_past() {
+        let two = SnakeState {
+            snakes: vec![
+                body_at(&[(1, 1)], Action::Up),
+                body_at(&[(2, 2), (2, 3), (2, 4)], Action::Up),
+            ],
+            food: HashSet::new(),
+        };
+        // buckets: len 1 -> 0, len 3 -> 1; legacy packing (lo << 16) | hi.
+        assert_eq!(snake_length_cell(&two), Some(1));
+        let three = SnakeState {
+            snakes: vec![
+                body_at(&[(1, 1), (1, 2), (1, 3)], Action::Up),
+                body_at(&[(3, 3)], Action::Up),
+                body_at(&[(5, 5)], Action::Up),
+            ],
+            food: HashSet::new(),
+        };
+        // sorted buckets [0, 0, 1] -> (((0)<<16 | 0) << 16) | 1
+        assert_eq!(snake_length_cell(&three), Some(1));
+        let mut dead = three.clone();
+        dead.snakes[1].alive = false;
+        assert_eq!(snake_length_cell(&dead), None);
+    }
+
+    struct TestRng(u64);
+    impl Rng for TestRng {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(2862933555777941757)
+                .wrapping_add(3037000493);
+            (self.0 >> 33) as usize % n.max(1)
+        }
+        fn unit(&mut self) -> f64 {
+            self.below(1 << 20) as f64 / (1 << 20) as f64
+        }
     }
 }

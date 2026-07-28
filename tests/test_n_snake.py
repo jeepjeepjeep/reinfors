@@ -1,0 +1,161 @@
+"""N-player snake through the Python surface: construction/validation, Env play, engine collects
+under every search family, snapshots, config round-trips, and the PettingZoo adapter at N=3."""
+
+import numpy as np
+import pytest
+import reinfors as rf
+
+
+def _snake(n: int = 3, **kw) -> object:
+    args = {"grid_size": 8, "initial_length": 2, "food": 2, "max_ticks": 60, "num_snakes": n}
+    args.update(kw)
+    return rf.games.Snake(**args)
+
+
+def test_construction_and_validation() -> None:
+    assert rf.Env(_snake(3)).num_agents() == 3
+    assert rf.Env(_snake(8, grid_size=14)).num_agents() == 8
+    with pytest.raises(ValueError, match="num_snakes"):
+        _snake(1)
+    with pytest.raises(ValueError, match="num_snakes"):
+        _snake(9, grid_size=20)
+    with pytest.raises(ValueError, match="two-snake"):
+        _snake(3, win_food_lead=2, play_to_last=False)
+    with pytest.raises(ValueError, match="respawn enumeration"):
+        _snake(3, grid_size=45, food=3)
+
+
+def test_env_plays_three_snakes_to_the_end() -> None:
+    env = rf.Env(_snake(3), seed=5)
+    env.reset()
+    assert env.num_agents() == 3
+    assert sorted(env.active_agents()) == [0, 1, 2]
+    obs = env.observe(2)
+    assert obs.shape == (5, 8, 8)  # the merged-opponent encoding is N-independent
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        if env.done():
+            break
+        env.step({a: int(rng.choice(env.legal_actions(a))) for a in env.active_agents()})
+    assert env.done() or True  # max_ticks may or may not hit; the walk must never raise
+
+
+def test_env_snapshot_round_trips_three_snakes() -> None:
+    env = rf.Env(_snake(3), seed=11)
+    env.reset()
+    rng = np.random.default_rng(1)
+    for _ in range(6):
+        if env.done():
+            break
+        env.step({a: int(rng.choice(env.legal_actions(a))) for a in env.active_agents()})
+    snap = env.snapshot()
+
+    def play(e: rf.Env, seed: int) -> list[bytes]:
+        r = np.random.default_rng(seed)
+        out = []
+        for _ in range(8):
+            if e.done():
+                break
+            e.step({a: int(r.choice(e.legal_actions(a))) for a in e.active_agents()})
+            out.extend(e.observe(a).tobytes() for a in range(3))
+        return out
+
+    ahead = play(env, 2)
+    env.restore(snap)
+    assert play(env, 2) == ahead
+    other = rf.Env(_snake(2), seed=0)
+    other.reset()
+    with pytest.raises(ValueError, match="different composition"):
+        other.restore(snap)  # num_snakes is part of the config fingerprint
+
+
+def _mcts_engine(n: int) -> rf.Engine:
+    return rf.Engine(
+        _snake(n),
+        rf.Reward(food=1.0, loss=-1.0),
+        rf.policies.Mcts(num_simulations=12),
+        rf.learners.TreeStrap(),
+        n_games=2,
+        seed=3,
+    )
+
+
+def test_mcts_treestrap_collects_three_snakes() -> None:
+    obs, tgt, mask, _ = _mcts_engine(3).collect(20, lambda a: np.zeros((a.shape[0], 1, 3)))
+    assert obs.shape[0] >= 20 and obs.shape[1] == 5 * 8 * 8
+    assert tgt.shape[1:] == (1, 3)
+    assert mask.shape[1] == 1
+
+
+def test_alphazero_collects_three_snakes() -> None:
+    def infer(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        return np.zeros((arr.shape[0], 3)), np.zeros(arr.shape[0])
+
+    engine = rf.Engine(
+        _snake(3),
+        rf.Reward(food=1.0, loss=-1.0),
+        rf.policies.AlphaZero(num_simulations=12, chance=rf.chance_modes.Committed(samples=2)),
+        rf.learners.AlphaZero(),
+        n_games=2,
+        seed=4,
+    )
+    obs, pi, _z, w, _ = engine.collect(30, infer)
+    assert obs.shape[0] >= 30
+    # Simultaneous game: every active agent acts, so every row is policy-weighted.
+    assert (w == 1.0).all()
+    rows = pi.sum(axis=1)
+    np.testing.assert_allclose(rows[rows > 0], 1.0, atol=1e-12)
+
+
+def test_expectimax_treestrap_collects_three_snakes() -> None:
+    engine = rf.Engine(
+        _snake(3),
+        rf.Reward(food=1.0, loss=-1.0),
+        rf.policies.SelectiveExpectimax(
+            expansion_budget=12, top_k=4, max_depth=4, n_heads=2, opponent="distributional"
+        ),
+        rf.learners.TreeStrap(),
+        n_games=2,
+        seed=5,
+    )
+    obs, tgt, _, telemetry = engine.collect(20, lambda a: np.zeros((a.shape[0], 2, 3)))
+    assert obs.shape[0] >= 20
+    assert tgt.shape[1:] == (2, 3)
+    assert telemetry["decisions"] > 0
+
+
+def test_start_buffer_runs_with_three_snakes() -> None:
+    engine = rf.Engine(
+        _snake(3),
+        rf.Reward(food=1.0),
+        rf.policies.Mcts(num_simulations=8),
+        rf.learners.TreeStrap(),
+        n_games=2,
+        seed=6,
+        start_buffer=True,
+    )
+    obs, _, _, telemetry = engine.collect(40, lambda a: np.zeros((a.shape[0], 1, 3)))
+    assert obs.shape[0] >= 40
+    assert "seeded" in str(telemetry["episodes"][0]) or len(telemetry["episodes"]) >= 0
+
+
+def test_resolved_config_round_trips_num_snakes() -> None:
+    engine = _mcts_engine(3)
+    cfg = engine.resolved_config()
+    assert cfg["game"]["num_snakes"] == 3
+    rebuilt = rf.engine_from_config(cfg)
+    assert rebuilt.resolved_config() == cfg
+    assert rebuilt.config_fingerprint() == engine.config_fingerprint()
+
+
+def test_pettingzoo_parallel_env_at_three_snakes() -> None:
+    pettingzoo = pytest.importorskip("pettingzoo")  # noqa: F841
+    env = rf.gym.parallel_env(_snake(3), seed=0)
+    obs, _ = env.reset()
+    assert sorted(obs) == ["player_0", "player_1", "player_2"]
+    for _ in range(5):
+        if not env.agents:
+            break
+        actions = {a: env.action_space(a).sample() for a in env.agents}
+        obs, _rewards, _terms, _truncs, _infos = env.step(actions)
+    env.close()

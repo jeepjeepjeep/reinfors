@@ -163,6 +163,7 @@ fn mcts_pools_multiple_requests() {
 #[test]
 fn mcts_searches_simultaneous_snake() {
     let snake = Snake {
+        num_snakes: 2,
         grid_size: 8,
         initial_length: 3,
         play_to_last: false,

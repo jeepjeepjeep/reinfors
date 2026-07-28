@@ -87,6 +87,7 @@ fn search() -> SearchParams {
 
 fn game(search: &SearchParams, initial_food_count: usize) -> Snake {
     Snake {
+        num_snakes: 2,
         grid_size: search.grid_size,
         initial_length: search.initial_length,
         play_to_last: search.play_to_last,
