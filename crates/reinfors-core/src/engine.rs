@@ -118,7 +118,17 @@ where
         learner: L,
         params: EngineParams,
     ) -> Self {
-        debug_assert!((1..=2).contains(&game.num_agents()));
+        // A real assert, not a debug one: an unsupported agent count doesn't fail loudly later,
+        // it silently computes wrong values. The binding pre-checks and errors; this is the
+        // backstop for direct core callers.
+        let n = game.num_agents();
+        assert!(n >= 1, "a game must have at least one agent");
+        if let Some(cap) = policy.max_agents() {
+            assert!(
+                n <= cap,
+                "this policy supports at most {cap} agents; the game has {n}"
+            );
+        }
         let mut episodes: Vec<Episode<G>> = (0..params.n_games)
             .map(|i| {
                 Episode::new(

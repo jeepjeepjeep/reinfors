@@ -68,6 +68,10 @@ impl Policy for SelectiveExpectimax {
     type Evaluation = SearchEvaluation;
     type PolicyState = usize; // the Thompson head for the current episode
 
+    fn max_agents(&self) -> Option<usize> {
+        Some(2) // the search models a single opponent (`opp = 1 - agent`, one belief stream)
+    }
+
     fn encode_eval(&self, eval: &SearchEvaluation, out: &mut Vec<u8>) {
         crate::policies::expectimax::encode_search_eval(eval, out);
     }
