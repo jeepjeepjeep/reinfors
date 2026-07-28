@@ -463,7 +463,7 @@ impl Game for Backgammon {
         &self,
         _state: &BackgammonState,
         t: &Transition<BackgammonState, BackgammonEvent>,
-    ) -> Option<Vec<f64>> {
+    ) -> Option<reinfors_core::ChanceDist> {
         // The next roll is the transition's chance — except on a doubles extra turn (dice
         // re-armed, deterministic) and at game end.
         if t.terminal || t.next_state.dice != [0, 0] {
@@ -473,7 +473,7 @@ impl Game for Backgammon {
         for p in probs.iter_mut().skip(15) {
             *p = 1.0 / 36.0;
         }
-        Some(probs)
+        Some(reinfors_core::ChanceDist::Weighted(probs))
     }
 
     fn apply_chance(
@@ -687,7 +687,10 @@ mod tests {
                 s = g.initial_state(&mut rng);
             } else {
                 s = match g.chance_outcomes(&s, &t) {
-                    Some(probs) => g.apply_chance(&s, &t, tests_weighted(&mut rng, &probs)),
+                    Some(reinfors_core::ChanceDist::Weighted(probs)) => {
+                        g.apply_chance(&s, &t, tests_weighted(&mut rng, &probs))
+                    }
+                    Some(_) => unreachable!("backgammon declares weighted rolls"),
                     None => t.next_state,
                 };
             }
@@ -734,7 +737,10 @@ mod tests {
                     break;
                 }
                 s = match g.chance_outcomes(&s, &t) {
-                    Some(probs) => g.apply_chance(&s, &t, tests_weighted(&mut rng, &probs)),
+                    Some(reinfors_core::ChanceDist::Weighted(probs)) => {
+                        g.apply_chance(&s, &t, tests_weighted(&mut rng, &probs))
+                    }
+                    Some(_) => unreachable!("backgammon declares weighted rolls"),
                     None => t.next_state,
                 };
             }
@@ -873,9 +879,12 @@ mod tests {
         let s = state(&[(0, 2), (11, 13)], &[(23, 2), (12, 13)], [0, 0], [2, 5], 0);
         let legal = s.legal_action_ids(0);
         let t = g.step(&s, &[legal[0], 0]);
-        let probs = g
+        let reinfors_core::ChanceDist::Weighted(probs) = g
             .chance_outcomes(&s, &t)
-            .expect("a completed turn declares the next roll");
+            .expect("a completed turn declares the next roll")
+        else {
+            panic!("backgammon declares weighted rolls");
+        };
         assert_eq!(probs.len(), 21);
         assert!((probs.iter().sum::<f64>() - 1.0).abs() < 1e-12);
         assert!(probs[..15].iter().all(|&p| (p - 1.0 / 18.0).abs() < 1e-15));

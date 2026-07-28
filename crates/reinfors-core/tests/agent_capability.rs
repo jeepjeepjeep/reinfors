@@ -598,3 +598,156 @@ fn truncation_bootstraps_every_perspectives_own_tail() {
         );
     }
 }
+
+/// A simultaneous 2-agent game whose every transition declares a combinatorial Uniform chance —
+/// the shape the compact declaration exists for.
+struct WideChance;
+#[derive(Clone)]
+struct WSt(usize);
+impl Game for WideChance {
+    type State = WSt;
+    type Event = ();
+    fn num_agents(&self) -> usize {
+        2
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn actor(&self, _s: &WSt) -> Actor {
+        Actor::Simultaneous
+    }
+    fn legal_actions(&self, s: &WSt, _agent: usize) -> Vec<usize> {
+        if s.0 >= 3 {
+            Vec::new()
+        } else {
+            vec![0, 1]
+        }
+    }
+    fn step(&self, s: &WSt, _actions: &[usize]) -> Transition<WSt, ()> {
+        Transition {
+            next_state: WSt(s.0 + 1),
+            events: vec![(); 2],
+            terminal: s.0 + 1 >= 3,
+        }
+    }
+    fn chance_outcomes(
+        &self,
+        _s: &WSt,
+        t: &Transition<WSt, ()>,
+    ) -> Option<reinfors_core::ChanceDist> {
+        (!t.terminal).then_some(reinfors_core::ChanceDist::Uniform(50_000_000))
+    }
+    fn apply_chance(&self, _s: &WSt, t: &Transition<WSt, ()>, _outcome: usize) -> WSt {
+        t.next_state.clone()
+    }
+    fn initial_state(&self, _rng: &mut dyn Rng) -> WSt {
+        WSt(0)
+    }
+}
+
+struct WEnc;
+impl reinfors_core::ActionView for WEnc {}
+impl StateEncoder for WEnc {
+    type State = WSt;
+    fn encode(&self, s: &WSt, agent: usize) -> Vec<f32> {
+        vec![s.0 as f32, agent as f32]
+    }
+    fn obs_shape(&self) -> (usize, usize, usize) {
+        (1, 1, 2)
+    }
+}
+
+#[test]
+fn sampling_modes_traverse_combinatorial_uniform_chance() {
+    // Committed and AlwaysResample draw single indices from a 5e7-outcome space — no vector, no
+    // dense child array (AlwaysResample materializes children sparsely per distinct outcome).
+    for chance in [
+        ChanceMode::Committed { samples: 2 },
+        ChanceMode::AlwaysResample,
+    ] {
+        let cfg = MctsConfig {
+            num_simulations: 32,
+            uct_c: 1.0,
+            gamma: 0.99,
+            max_depth: 6,
+            temperature: 0.0,
+            temperature_drop: 0,
+            chance,
+        };
+        let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+        let mut eval = Evaluator::new(&mut infer, None);
+        let evals = mcts_many(
+            &WideChance,
+            &WEnc,
+            &Zero2,
+            &cfg,
+            vec![(WSt(0), 0)],
+            0,
+            &mut eval,
+        );
+        assert_eq!(evals[0].visits.iter().sum::<f64>() as usize, 32);
+    }
+}
+
+struct Zero2;
+impl Reward for Zero2 {
+    type Event = ();
+    fn step_reward(&self, _e: &(), _agent: usize) -> f64 {
+        0.0
+    }
+}
+
+#[test]
+#[should_panic(expected = "ExpandAll cannot enumerate")]
+fn expand_all_rejects_combinatorial_outcome_spaces() {
+    let cfg = MctsConfig {
+        num_simulations: 8,
+        uct_c: 1.0,
+        gamma: 0.99,
+        max_depth: 6,
+        temperature: 0.0,
+        temperature_drop: 0,
+        chance: ChanceMode::ExpandAll,
+    };
+    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+    let mut eval = Evaluator::new(&mut infer, None);
+    let _ = mcts_many(
+        &WideChance,
+        &WEnc,
+        &Zero2,
+        &cfg,
+        vec![(WSt(0), 0)],
+        0,
+        &mut eval,
+    );
+}
+
+#[test]
+fn uniform_draws_cover_the_index_space() {
+    use reinfors_core::ChanceDist;
+    struct R(u64);
+    impl Rng for R {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (self.0 >> 33) as usize % n.max(1)
+        }
+        fn unit(&mut self) -> f64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (self.0 >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+    let dist = ChanceDist::Uniform(37);
+    let mut rng = R(9);
+    let mut hits = [0usize; 37];
+    for _ in 0..37_00 {
+        let i = dist.draw(&mut rng);
+        assert!(i < 37);
+        hits[i] += 1;
+    }
+    assert!(
+        hits.iter().all(|&h| h > 0),
+        "every index reachable: {hits:?}"
+    );
+    // Loose uniformity: no bucket more than 3x the mean.
+    assert!(hits.iter().all(|&h| h < 300), "roughly uniform: {hits:?}");
+}

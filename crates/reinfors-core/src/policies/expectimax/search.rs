@@ -622,22 +622,29 @@ fn push_branches<G: Game>(
     // every outcome at its true probability (exact). `None` = deterministic: one child.
     let children: Vec<(G::State, f64)> = match game.chance_outcomes(state, &t) {
         None => vec![(t.next_state, 1.0)],
-        Some(probs) => match cfg.chance {
+        Some(dist) => match cfg.chance {
             ChanceMode::Committed { samples } => {
                 let k = samples.max(1);
                 (0..k)
                     .map(|_| {
-                        let idx = crate::rng::weighted_index(rng, &probs);
+                        let idx = dist.draw(rng);
                         (game.apply_chance(state, &t, idx), 1.0 / k as f64)
                     })
                     .collect()
             }
             ChanceMode::ExpandAll => {
-                let total: f64 = probs.iter().sum();
-                probs
-                    .iter()
+                // Exhaustive fan: exact, so an outcome space past the enumeration bound is an
+                // error rather than an approximation — sample (Committed) instead.
+                let count = dist.count();
+                assert!(
+                    count <= crate::policy::MAX_ENUMERATED_OUTCOMES,
+                    "ExpandAll cannot enumerate {count} chance outcomes (bound {}); use a \
+                     sampling chance mode for combinatorial outcome spaces",
+                    crate::policy::MAX_ENUMERATED_OUTCOMES
+                );
+                dist.iter_probs()
                     .enumerate()
-                    .map(|(idx, &pr)| (game.apply_chance(state, &t, idx), pr / total))
+                    .map(|(idx, pr)| (game.apply_chance(state, &t, idx), pr))
                     .collect()
             }
             ChanceMode::AlwaysResample => unreachable!(
@@ -1254,8 +1261,13 @@ mod chance_mode_tests {
                 }
             }
         }
-        fn chance_outcomes(&self, s: &St, t: &Transition<St, f64>) -> Option<Vec<f64>> {
-            (s.ply == 0 && t.next_state.total == s.total).then(|| vec![0.5, 0.5])
+        fn chance_outcomes(
+            &self,
+            s: &St,
+            t: &Transition<St, f64>,
+        ) -> Option<crate::game::ChanceDist> {
+            (s.ply == 0 && t.next_state.total == s.total)
+                .then(|| crate::game::ChanceDist::Weighted(vec![0.5, 0.5]))
         }
         fn apply_chance(&self, _s: &St, t: &Transition<St, f64>, outcome: usize) -> St {
             St {

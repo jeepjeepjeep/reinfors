@@ -27,6 +27,58 @@ pub struct Transition<S, E> {
     pub terminal: bool,
 }
 
+/// A transition's declared chance distribution over its outcome indices. `Weighted` is the
+/// general form (backgammon's 21 rolls). `Uniform(count)` declares a uniform distribution over
+/// `count` outcomes in O(1) at ANY size — the outcome space can be combinatorial (snake's
+/// k-apple respawn enumerates `P(free, k)` ordered placements) because sampling consumers draw
+/// one index and decode it procedurally through `apply_chance`; only enumeration (`ExpandAll`)
+/// ever pays per-outcome cost, and it bounds itself. `count` is the outcome-INDEX type
+/// (`usize`, matching `apply_chance`) and must fit `min(2^53, usize::MAX)` — indices must
+/// survive both an f64 mantissa (the uniform draw) and the platform word (validated by the
+/// declaring game at construction AND against decoded state).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ChanceDist {
+    Weighted(Vec<f64>),
+    Uniform(usize),
+}
+
+impl ChanceDist {
+    pub fn count(&self) -> usize {
+        match self {
+            ChanceDist::Weighted(p) => p.len(),
+            ChanceDist::Uniform(n) => *n,
+        }
+    }
+
+    /// The normalized probabilities in outcome order, for exact enumeration. The weight total is
+    /// computed ONCE up front — a per-outcome normalization would make an N-outcome fan
+    /// quadratic in N (there is deliberately no `prob(i)` accessor for that reason).
+    pub fn iter_probs(&self) -> impl Iterator<Item = f64> + '_ {
+        let (total, uniform) = match self {
+            ChanceDist::Weighted(p) => (p.iter().sum::<f64>(), 0.0),
+            ChanceDist::Uniform(n) => (1.0, 1.0 / *n as f64),
+        };
+        (0..self.count()).map(move |i| match self {
+            ChanceDist::Weighted(p) => p[i] / total,
+            ChanceDist::Uniform(_) => uniform,
+        })
+    }
+
+    /// Draw one outcome index. Both arms consume exactly one `rng.unit()` — the uniform arm is
+    /// the closed form of the weighted scan on an equal-weight vector, so seeded streams stay
+    /// aligned with the vector-era realization (indices can differ only at float-tie
+    /// boundaries, ~1e-13 per draw).
+    pub fn draw(&self, rng: &mut dyn Rng) -> usize {
+        match self {
+            ChanceDist::Weighted(p) => crate::rng::weighted_index(rng, p),
+            ChanceDist::Uniform(n) => {
+                let u = rng.unit();
+                (((*n as f64) * u) as usize).min(n.saturating_sub(1))
+            }
+        }
+    }
+}
+
 /// A finite-action, perfect-information game. Single-agent, sequential or simultaneous multi-agent,
 /// and N-player general-sum are all expressible via `actor` + the per-agent `Event`. The game owns
 /// only dynamics + outcomes; turning an `Event` into a scalar reward is the [`Reward`](crate::Reward)'s
@@ -53,12 +105,12 @@ pub trait Game {
 
     fn step(&self, state: &Self::State, actions: &[usize]) -> Transition<Self::State, Self::Event>;
 
-    /// The transition's chance distribution, *declared*: probabilities over the outcome indices
-    /// that [`apply_chance`](Self::apply_chance) accepts. `None` means the transition is
+    /// The transition's chance distribution, *declared* (see [`ChanceDist`]): over the outcome
+    /// indices that [`apply_chance`](Self::apply_chance) accepts. `None` means the transition is
     /// deterministic. This is the game's ONLY chance seam — there is no game-side sampler to
     /// diverge from it. The framework realizes env transitions from it ([`step_env`], one draw),
     /// and tree searches consume it per their configured [`ChanceMode`](crate::ChanceMode).
-    /// Contract: probabilities are positive and sum to 1;
+    /// Contract: `Weighted` probabilities are positive; `Uniform` counts are in `1..=2^53`;
     /// terminal transitions return `None`; and outcomes only vary the chance element — they share
     /// the transition's `terminal` flag, next actor, **and events: rewards are edge-level and
     /// outcome-invariant**. Searches score the action edge once from the pre-chance transition and
@@ -70,7 +122,7 @@ pub trait Game {
         &self,
         state: &Self::State,
         transition: &Transition<Self::State, Self::Event>,
-    ) -> Option<Vec<f64>> {
+    ) -> Option<ChanceDist> {
         let _ = (state, transition);
         None
     }
@@ -123,8 +175,8 @@ pub fn step_env<G: Game>(
     let t = game.step(state, actions);
     match game.chance_outcomes(state, &t) {
         None => t,
-        Some(probs) => {
-            let outcome = crate::rng::weighted_index(rng, &probs);
+        Some(dist) => {
+            let outcome = dist.draw(rng);
             Transition {
                 next_state: game.apply_chance(state, &t, outcome),
                 events: t.events,
@@ -162,8 +214,8 @@ mod step_env_tests {
                 terminal: false,
             }
         }
-        fn chance_outcomes(&self, _: &i32, _: &Transition<i32, ()>) -> Option<Vec<f64>> {
-            Some(vec![0.25, 0.75])
+        fn chance_outcomes(&self, _: &i32, _: &Transition<i32, ()>) -> Option<ChanceDist> {
+            Some(ChanceDist::Weighted(vec![0.25, 0.75]))
         }
         fn apply_chance(&self, _: &i32, t: &Transition<i32, ()>, outcome: usize) -> i32 {
             t.next_state + if outcome == 0 { 10 } else { 20 }
@@ -227,5 +279,22 @@ mod step_env_tests {
         }
         let t = step_env(&Det, &4, &[0], &mut Unit(0.5));
         assert_eq!(t.next_state, 5);
+    }
+}
+
+#[cfg(test)]
+mod chance_dist_tests {
+    use super::*;
+
+    #[test]
+    fn iter_probs_normalizes_once_and_matches_both_arms() {
+        // Weighted: normalized by the (single) total; Uniform: 1/count per outcome.
+        let w = ChanceDist::Weighted(vec![1.0, 3.0]);
+        let probs: Vec<f64> = w.iter_probs().collect();
+        assert_eq!(probs, vec![0.25, 0.75]);
+        let u = ChanceDist::Uniform(4);
+        let probs: Vec<f64> = u.iter_probs().collect();
+        assert_eq!(probs, vec![0.25; 4]);
+        assert_eq!(u.count(), 4);
     }
 }
