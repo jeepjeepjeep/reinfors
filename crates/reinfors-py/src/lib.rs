@@ -24,8 +24,8 @@ use reinfors_core::{
     ActBy, AlphaZero, AlphaZeroConfig, AlphaZeroLearner, AlphaZeroRecord, AlwaysInitialState,
     ChanceMode, Dqn, DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game, InferCache,
     Learner, Mcts, MctsConfig, NoiseScope, Opponent, Policy, ReachedStateBuffer, Reward,
-    SearchConfig, SelectiveExpectimax, Space, StartDistribution, StateEncoder, TreeStrap,
-    TreeStrapRecord,
+    SearchConfig, SelectiveExpectimax, Space, StartDistribution, StateCodec, StateEncoder,
+    TreeStrap, TreeStrapRecord,
 };
 use reinfors_games::snake::{Cell, DeathCause};
 use reinfors_games::{
@@ -2001,9 +2001,107 @@ fn build_engine(
 // arm that pairs the game with its default encoder. Drives one game move-by-move (play / eval).
 // ===========================================================================
 
+const ENV_SNAPSHOT_SCHEMA: u8 = 1;
+const ENV_SNAPSHOT_MAGIC: &[u8; 4] = b"RFES";
+
+/// An opaque, restorable point-in-time capture of an `Env`: native game state (via the game's
+/// `StateCodec`), env RNG state, terminal status, plus the env's config fingerprint and a schema
+/// version. NOT the inspection format — `env.state()` stays the human-readable view; this one is
+/// produced by reinfors and validated while decoding, so a malformed blob is a `ValueError`,
+/// never a corrupted env.
+#[pyclass(name = "EnvSnapshot")]
+#[derive(Clone)]
+struct PyEnvSnapshot {
+    schema: u8,
+    fingerprint: String,
+    state: Vec<u8>,
+    rng_state: u64,
+    done: bool,
+}
+
+#[pymethods]
+impl PyEnvSnapshot {
+    /// The captured env's config fingerprint (game + reward; excludes the reinfors version, so a
+    /// snapshot survives a library upgrade with an unchanged schema).
+    #[getter]
+    fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    #[getter]
+    fn schema_version(&self) -> u8 {
+        self.schema
+    }
+
+    /// Serialize to a self-describing byte blob (magic + schema + fingerprint + payload).
+    fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
+        let mut out = Vec::with_capacity(self.state.len() + self.fingerprint.len() + 32);
+        out.extend_from_slice(ENV_SNAPSHOT_MAGIC);
+        out.push(self.schema);
+        out.extend_from_slice(&(self.fingerprint.len() as u32).to_le_bytes());
+        out.extend_from_slice(self.fingerprint.as_bytes());
+        out.extend_from_slice(&self.rng_state.to_le_bytes());
+        out.push(u8::from(self.done));
+        out.extend_from_slice(&(self.state.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.state);
+        pyo3::types::PyBytes::new(py, &out)
+    }
+
+    /// Parse a blob produced by `to_bytes`. Structure is validated here; the game state inside is
+    /// validated by the game's codec at `restore` time.
+    #[staticmethod]
+    fn from_bytes(data: &[u8]) -> PyResult<Self> {
+        let err =
+            |m: &str| pyo3::exceptions::PyValueError::new_err(format!("invalid EnvSnapshot: {m}"));
+        let take = |data: &[u8], pos: &mut usize, n: usize| -> PyResult<Vec<u8>> {
+            let end = pos
+                .checked_add(n)
+                .filter(|&e| e <= data.len())
+                .ok_or_else(|| err("truncated"))?;
+            let out = data[*pos..end].to_vec();
+            *pos = end;
+            Ok(out)
+        };
+        let mut pos = 0usize;
+        if take(data, &mut pos, 4)? != ENV_SNAPSHOT_MAGIC {
+            return Err(err("bad magic"));
+        }
+        let schema = take(data, &mut pos, 1)?[0];
+        if schema != ENV_SNAPSHOT_SCHEMA {
+            return Err(err(&format!("unsupported schema version {schema}")));
+        }
+        let fp_len = u32::from_le_bytes(take(data, &mut pos, 4)?.try_into().unwrap()) as usize;
+        let fingerprint = String::from_utf8(take(data, &mut pos, fp_len)?)
+            .map_err(|_| err("fingerprint is not utf-8"))?;
+        let rng_state = u64::from_le_bytes(take(data, &mut pos, 8)?.try_into().unwrap());
+        let done = match take(data, &mut pos, 1)?[0] {
+            0 => false,
+            1 => true,
+            b => return Err(err(&format!("done byte {b} is not a bool"))),
+        };
+        let state_len = u32::from_le_bytes(take(data, &mut pos, 4)?.try_into().unwrap()) as usize;
+        let state = take(data, &mut pos, state_len)?;
+        if pos != data.len() {
+            return Err(err("trailing bytes"));
+        }
+        Ok(PyEnvSnapshot {
+            schema,
+            fingerprint,
+            state,
+            rng_state,
+            done,
+        })
+    }
+}
+
 #[pyclass(name = "Env")]
 struct PyEnv {
     inner: Box<dyn ErasedEnv>,
+    // Retained for `fork` (rebuilds the composition) and `resolved_config`/snapshot fingerprints.
+    game_spec: GameSpec,
+    reward_weights: Option<HashMap<String, f64>>,
+    config: Value,
+    fingerprint: String,
 }
 
 impl PyEnv {
@@ -2026,9 +2124,103 @@ impl PyEnv {
     #[new]
     #[pyo3(signature = (game, reward=None, seed=0))]
     fn new(game: GameHandle, reward: Option<PyReward>, seed: u64) -> PyResult<Self> {
+        let game_spec = game.spec.clone();
+        let reward_weights = reward.as_ref().map(|r| r.weights.clone());
+        let reward_cfg = match &reward_weights {
+            None => Value::Null, // reward-free (play/eval): rewards is always None
+            Some(w) => {
+                let vals = resolve_reward(
+                    Some(PyReward { weights: w.clone() }),
+                    reward_schema(&game_spec),
+                )?;
+                Value::Object(
+                    reward_schema(&game_spec)
+                        .iter()
+                        .zip(vals)
+                        .map(|((k, _), v)| ((*k).to_string(), json!(v)))
+                        .collect(),
+                )
+            }
+        };
+        let config = json!({
+            "schema_version": ENV_SNAPSHOT_SCHEMA,
+            "game": game_cfg(&game_spec),
+            "reward": reward_cfg,
+        });
+        let fingerprint = fingerprint_hex(&canonical_config_bytes(&config));
         Ok(PyEnv {
             inner: build_env(game.spec, reward, seed)?,
+            game_spec,
+            reward_weights,
+            config,
+            fingerprint,
         })
+    }
+
+    /// The env's immutable composition (game incl. encoder + resolved reward), JSON-compatible.
+    fn resolved_config<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        value_to_py(py, &self.config)
+    }
+
+    /// Fingerprint of `resolved_config` — embedded in snapshots and checked on `restore`.
+    /// Excludes the reinfors version: a snapshot survives an upgrade with an unchanged schema.
+    fn config_fingerprint(&self) -> String {
+        self.fingerprint.clone()
+    }
+
+    /// An opaque, restorable capture of the env right now (state + RNG + terminal status).
+    fn snapshot(&self) -> PyResult<PyEnvSnapshot> {
+        let (state, rng_state, done) = self.inner.snapshot_parts()?;
+        Ok(PyEnvSnapshot {
+            schema: ENV_SNAPSHOT_SCHEMA,
+            fingerprint: self.fingerprint.clone(),
+            state,
+            rng_state,
+            done,
+        })
+    }
+
+    /// Install a snapshot. Rejects a snapshot from a different composition (fingerprint), an
+    /// unsupported schema, or malformed state bytes (the game codec validates while decoding).
+    /// Restore lands at a step boundary: `rewards` is None until the next step.
+    fn restore(&mut self, snapshot: &PyEnvSnapshot) -> PyResult<()> {
+        if snapshot.schema != ENV_SNAPSHOT_SCHEMA {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unsupported snapshot schema {}",
+                snapshot.schema
+            )));
+        }
+        if snapshot.fingerprint != self.fingerprint {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "snapshot is from a different composition (fingerprint {} != {})",
+                snapshot.fingerprint, self.fingerprint
+            )));
+        }
+        self.inner
+            .restore_parts(&snapshot.state, snapshot.rng_state, snapshot.done)
+    }
+
+    /// A new independent env at this env's exact current point. Clone-exact by default: identical
+    /// state AND identical future chance stream (replay/analysis semantics — the fork and the
+    /// original make the same draws). Pass `seed` to give the fork a divergent chance stream.
+    #[pyo3(signature = (seed=None))]
+    fn fork(&self, seed: Option<u64>) -> PyResult<PyEnv> {
+        let reward = self
+            .reward_weights
+            .clone()
+            .map(|weights| PyReward { weights });
+        let mut forked = PyEnv {
+            inner: build_env(self.game_spec.clone(), reward, 0)?,
+            game_spec: self.game_spec.clone(),
+            reward_weights: self.reward_weights.clone(),
+            config: self.config.clone(),
+            fingerprint: self.fingerprint.clone(),
+        };
+        let (state, rng_state, done) = self.inner.snapshot_parts()?;
+        forked
+            .inner
+            .restore_parts(&state, seed.unwrap_or(rng_state), done)?;
+        Ok(forked)
     }
 
     /// Start a new episode.
@@ -2280,6 +2472,10 @@ impl NativeEvent for GridEvent {
 
 /// A single-game `Env` with its concrete `Game` erased, so one Python `Env` holds any game.
 trait ErasedEnv: Send + Sync {
+    /// Snapshot parts: `(codec state bytes, rng state, done)`. Errors if the game has no codec.
+    fn snapshot_parts(&self) -> PyResult<(Vec<u8>, u64, bool)>;
+    /// Install parts (state bytes decoded + validated by the codec).
+    fn restore_parts(&mut self, state: &[u8], rng_state: u64, done: bool) -> PyResult<()>;
     fn reset(&mut self);
     fn done(&self) -> bool;
     fn num_agents(&self) -> usize;
@@ -2302,6 +2498,8 @@ trait ErasedEnv: Send + Sync {
 struct EnvImpl<G: Game> {
     inner: Env<G>,
     obs_shape: (usize, usize, usize),
+    // The game's persistence codec (built-ins all supply one); `None` = snapshots unsupported.
+    codec: Option<Box<dyn StateCodec<State = G::State>>>,
     // Optional so play/eval stay reward-free (`Env` holds no reward); the training-facing adapters
     // supply one and read back scalars via `last_rewards`. The event→reward mapping stays in Rust.
     reward: Option<Box<dyn Reward<Event = G::Event>>>,
@@ -2314,6 +2512,29 @@ where
     G::State: Send + Sync + NativeState,
     G::Event: NativeEvent,
 {
+    fn snapshot_parts(&self) -> PyResult<(Vec<u8>, u64, bool)> {
+        let codec = self.codec.as_deref().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("this game does not support snapshots")
+        })?;
+        let (state, rng_state, done) = self.inner.parts();
+        Ok((codec.encode(&state), rng_state, done))
+    }
+
+    fn restore_parts(&mut self, state: &[u8], rng_state: u64, done: bool) -> PyResult<()> {
+        let codec = self.codec.as_deref().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("this game does not support snapshots")
+        })?;
+        let decoded = codec.decode(state).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("invalid snapshot state: {e}"))
+        })?;
+        codec.validate_decoded_state(&decoded, done).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("invalid snapshot state: {e}"))
+        })?;
+        self.inner.set_parts(decoded, rng_state, done);
+        self.last_rewards = None; // transient last-step output belongs to the step that produced it
+        Ok(())
+    }
+
     fn reset(&mut self) {
         self.inner.reset();
         self.last_rewards = None;
@@ -2395,6 +2616,14 @@ fn build_env(game: GameSpec, reward: Option<PyReward>, seed: u64) -> PyResult<Bo
                     seed,
                 ),
                 obs_shape,
+                codec: Some(Box::new(Snake {
+                    grid_size,
+                    initial_length,
+                    play_to_last,
+                    win_food_lead,
+                    initial_food_count,
+                    max_ticks,
+                })),
                 reward: reward.map(|rb| match rb {
                     RewardBox::Snake(r) => Box::new(r) as Box<dyn Reward<Event = StepEvent>>,
                     _ => unreachable!("build_reward returns the reward variant matching the game"),
@@ -2407,6 +2636,7 @@ fn build_env(game: GameSpec, reward: Option<PyReward>, seed: u64) -> PyResult<Bo
             Box::new(EnvImpl {
                 inner: Env::new(Connect4, Box::new(Connect4Planes), seed),
                 obs_shape,
+                codec: Some(Box::new(Connect4)),
                 reward: reward.map(|rb| match rb {
                     RewardBox::Connect4(r) => Box::new(r) as Box<dyn Reward<Event = Connect4Event>>,
                     _ => unreachable!("build_reward returns the reward variant matching the game"),
@@ -2420,6 +2650,7 @@ fn build_env(game: GameSpec, reward: Option<PyReward>, seed: u64) -> PyResult<Bo
             Box::new(EnvImpl {
                 inner: Env::new(game, enc, seed),
                 obs_shape,
+                codec: Some(Box::new(chess_parts(max_ticks, encoder).0)),
                 reward: reward.map(|rb| match rb {
                     RewardBox::Chess(r) => Box::new(r) as Box<dyn Reward<Event = ChessEvent>>,
                     _ => unreachable!("build_reward returns the reward variant matching the game"),
@@ -2433,6 +2664,7 @@ fn build_env(game: GameSpec, reward: Option<PyReward>, seed: u64) -> PyResult<Bo
             Box::new(EnvImpl {
                 inner: Env::new(Backgammon { max_ticks }, Box::new(enc), seed),
                 obs_shape,
+                codec: Some(Box::new(Backgammon { max_ticks })),
                 reward: reward.map(|rb| match rb {
                     RewardBox::Backgammon(r) => {
                         Box::new(r) as Box<dyn Reward<Event = BackgammonEvent>>
@@ -2460,6 +2692,11 @@ fn build_env(game: GameSpec, reward: Option<PyReward>, seed: u64) -> PyResult<Bo
                     seed,
                 ),
                 obs_shape,
+                codec: Some(Box::new(GridWorld {
+                    size,
+                    goal,
+                    max_ticks,
+                })),
                 reward: reward.map(|rb| match rb {
                     RewardBox::GridWorld(r) => Box::new(r) as Box<dyn Reward<Event = GridEvent>>,
                     _ => unreachable!("build_reward returns the reward variant matching the game"),
@@ -3180,6 +3417,7 @@ fn core_build_profile() -> &'static str {
 #[pymodule]
 fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
+    m.add_class::<PyEnvSnapshot>()?;
     m.add_function(wrap_pyfunction!(chess_uci_action, m)?)?;
     m.add_function(wrap_pyfunction!(chess_action_uci, m)?)?;
     m.add_function(wrap_pyfunction!(core_build_profile, m)?)?;

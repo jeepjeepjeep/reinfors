@@ -10,10 +10,13 @@ type Pos = (i32, i32);
 const N_CHANNELS: usize = 2; // 0 = agent, 1 = goal
 const DELTAS: [Pos; 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)]; // up, down, left, right
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GridState {
     pub pos: Pos,
-    pub done: bool, // reached the goal
+    /// Reached the goal. Derived (`pos == goal`), so the codec recomputes it at decode rather
+    /// than transporting a second copy of the fact.
+    #[serde(skip)]
+    pub done: bool,
 }
 
 /// The agent's outcome on one tick: whether it reached the goal (terminal) this tick.
@@ -171,6 +174,37 @@ impl StateEncoder for GridWorldPlanes {
     fn observation_space(&self) -> Space {
         let (c, h, w) = self.obs_shape();
         Space::unit_box(vec![c, h, w]) // agent + goal one-hot planes: values in [0, 1]
+    }
+}
+
+impl reinfors_core::StateCodec for GridWorld {
+    type State = GridState;
+
+    fn encode(&self, s: &GridState) -> Vec<u8> {
+        crate::codec_util::serde_encode(2, s)
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Result<GridState, String> {
+        let mut s: GridState = crate::codec_util::serde_decode(2, bytes)?;
+        s.done = s.pos == self.goal;
+        Ok(s)
+    }
+
+    fn validate_decoded_state(&self, state: &GridState, done: bool) -> Result<(), String> {
+        let pos = state.pos;
+        if !(0 <= pos.0 && pos.0 < self.size && 0 <= pos.1 && pos.1 < self.size) {
+            return Err(format!(
+                "position {pos:?} outside the {0}x{0} grid",
+                self.size
+            ));
+        }
+        if state.done != done {
+            return Err(format!(
+                "state done flag {} disagrees with envelope done {done}",
+                state.done
+            ));
+        }
+        Ok(())
     }
 }
 

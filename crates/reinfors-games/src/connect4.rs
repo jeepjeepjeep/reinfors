@@ -11,10 +11,36 @@ const COLS: usize = 7;
 const ROWS: usize = 6;
 const CONNECT: usize = 4;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// serde stops at 32-element arrays; the 42-cell board round-trips through a length-checked Vec.
+mod cells_serde {
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        cells: &[u8; super::COLS * super::ROWS],
+        ser: S,
+    ) -> Result<S::Ok, S::Error> {
+        cells.as_slice().serialize(ser)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        de: D,
+    ) -> Result<[u8; super::COLS * super::ROWS], D::Error> {
+        let v = Vec::<u8>::deserialize(de)?;
+        v.try_into().map_err(|v: Vec<u8>| {
+            D::Error::custom(format!("board has {} cells, expected 42", v.len()))
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Connect4State {
+    #[serde(with = "cells_serde")]
     cells: [u8; COLS * ROWS], // 0 empty, 1 player-0, 2 player-1; index = row*COLS + col, row 0 = bottom
-    turn: usize,              // whose move it is (0 or 1)
+    turn: usize, // whose move it is (0 or 1)
+    /// Derived (some line completed, or the board full), so the codec recomputes it at decode
+    /// rather than transporting a second copy of the fact.
+    #[serde(skip)]
     done: bool,
 }
 
@@ -116,6 +142,20 @@ impl Connect4 {
             }
         }
         false
+    }
+
+    /// Whether the position is terminal by the rules alone: some completed line, or a full board.
+    /// Quantifies [`Self::wins`] — the one definition of a line — over the grid; `step` applies
+    /// the same primitive incrementally at the last drop. The codec recomputes `done` from this
+    /// at decode, so the flag is never transported.
+    fn board_terminal(cells: &[u8; COLS * ROWS]) -> bool {
+        let has_win = (0..ROWS).any(|r| {
+            (0..COLS).any(|c| {
+                let v = cells[r * COLS + c];
+                v != 0 && Self::wins(cells, r, c, v)
+            })
+        });
+        has_win || cells.iter().all(|&c| c != 0)
     }
 
     /// Per-agent terminal event vector for a win by `winner`, or a draw.
@@ -244,6 +284,36 @@ impl StateEncoder for Connect4Planes {
     fn observation_space(&self) -> Space {
         let (c, h, w) = self.obs_shape();
         Space::unit_box(vec![c, h, w]) // both planes are one-hot occupancy: values in [0, 1]
+    }
+}
+
+impl reinfors_core::StateCodec for Connect4 {
+    type State = Connect4State;
+
+    fn encode(&self, s: &Connect4State) -> Vec<u8> {
+        crate::codec_util::serde_encode(2, s)
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Result<Connect4State, String> {
+        let mut s: Connect4State = crate::codec_util::serde_decode(2, bytes)?;
+        s.done = Self::board_terminal(&s.cells);
+        Ok(s)
+    }
+
+    fn validate_decoded_state(&self, state: &Connect4State, done: bool) -> Result<(), String> {
+        if state.cells.iter().any(|&c| c > 2) {
+            return Err("cell value out of range".into());
+        }
+        if state.turn > 1 {
+            return Err(format!("turn {} out of range", state.turn));
+        }
+        if state.done != done {
+            return Err(format!(
+                "derived done flag {} disagrees with envelope done {done}",
+                state.done
+            ));
+        }
+        Ok(())
     }
 }
 

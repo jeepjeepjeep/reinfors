@@ -25,7 +25,7 @@ pub enum DeathCause {
     HeadOn,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SnakeBody {
     pub body: VecDeque<Cell>, // body[0] is the head, body[len-1] the tail
     pub direction: Action,
@@ -67,7 +67,7 @@ pub struct StepEvent {
 
 // ============================ Grid actions ============================
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Action {
     Up,
     Down,
@@ -256,9 +256,38 @@ impl Reward for SnakeReward {
 
 /// Snake's dynamic state: the two snakes and the food. Static config (grid size, rules) lives on
 /// `Snake` and the reward on the decoupled `SnakeReward`, so the search/engine carry just this per node.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Canonical food serialization: a HashSet iterates nondeterministically, which would make
+/// equal states encode to different bytes (breaking snapshot byte-identity) — so food
+/// serializes as a SORTED list, and deserialization rejects duplicates rather than silently
+/// deduplicating them.
+mod food_serde {
+    use super::Cell;
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashSet;
+
+    pub fn serialize<S: Serializer>(food: &HashSet<Cell>, ser: S) -> Result<S::Ok, S::Error> {
+        let mut cells: Vec<Cell> = food.iter().copied().collect();
+        cells.sort_unstable();
+        cells.serialize(ser)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<HashSet<Cell>, D::Error> {
+        let cells = Vec::<Cell>::deserialize(de)?;
+        let mut food = HashSet::with_capacity(cells.len());
+        for cell in cells {
+            if !food.insert(cell) {
+                return Err(D::Error::custom(format!("duplicate food cell {cell:?}")));
+            }
+        }
+        Ok(food)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SnakeState {
     pub snakes: [SnakeBody; 2],
+    #[serde(with = "food_serde")]
     pub food: HashSet<Cell>,
 }
 
@@ -532,26 +561,37 @@ impl Snake {
                 }
             }
         }
-        let mut done = alive_ids.len() <= if self.play_to_last { 0 } else { 1 };
-
-        // Food-lead win: both alive, leader `win_food_lead` apples (length) ahead wins outright.
-        if let Some(lead) = self.win_food_lead {
-            if !done && alive_ids.len() >= 2 {
-                let (i0, i1) = (alive_ids[0], alive_ids[1]);
-                let (leader, runner) = if snakes[i0].len() >= snakes[i1].len() {
-                    (i0, i1)
-                } else {
-                    (i1, i0)
-                };
-                if snakes[leader].len() - snakes[runner].len() >= lead {
-                    events[leader].won = true;
-                    events[runner].lost = true;
-                    done = true;
-                }
-            }
+        let done = self.is_terminal(snakes);
+        // A terminal tick with both still alive can only be the food-lead rule firing: attribute
+        // the outright win/loss (`is_terminal` owns the rule itself).
+        if done && alive_ids.len() >= 2 {
+            let (i0, i1) = (alive_ids[0], alive_ids[1]);
+            let (leader, runner) = if snakes[i0].len() >= snakes[i1].len() {
+                (i0, i1)
+            } else {
+                (i1, i0)
+            };
+            events[leader].won = true;
+            events[runner].lost = true;
         }
 
         (events, done)
+    }
+
+    /// Whether this configuration of snakes ends the episode: the death rule (everyone dead, or a
+    /// lone survivor unless `play_to_last`) or the food-lead rule (both alive, body-length
+    /// difference at or past the configured lead). The single source of terminality — `advance`
+    /// ends the tick on it, and the codec's lifecycle check compares the envelope's `done`
+    /// against it rather than re-implementing the rules.
+    fn is_terminal(&self, snakes: &[SnakeBody; 2]) -> bool {
+        let alive: Vec<usize> = (0..2).filter(|&i| snakes[i].alive).collect();
+        if alive.len() <= if self.play_to_last { 0 } else { 1 } {
+            return true;
+        }
+        if let (Some(lead), &[i0, i1]) = (self.win_food_lead, alive.as_slice()) {
+            return snakes[i0].len().abs_diff(snakes[i1].len()) >= lead;
+        }
+        false
     }
 
     fn resolve_collisions(
@@ -1387,5 +1427,49 @@ mod reward_tests {
             ..Default::default()
         };
         assert!((r.step_reward(&dead, 0) - (-0.5)).abs() < 1e-12); // loss only
+    }
+}
+
+impl reinfors_core::StateCodec for Snake {
+    type State = SnakeState;
+
+    fn encode(&self, s: &SnakeState) -> Vec<u8> {
+        crate::codec_util::serde_encode(2, s)
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Result<SnakeState, String> {
+        crate::codec_util::serde_decode(2, bytes)
+    }
+
+    // Safety per the narrowed codec contract: bounds that game methods index by, plus lifecycle
+    // coherence — `done` controls whether the Env may continue, so it must agree with the game's
+    // own terminal rule (`is_terminal`, the same function `advance` ends ticks on — a shared
+    // source, not a re-implementation). Occupancy rules are NOT re-proved here; unreachable-but-
+    // safe states are accepted.
+    fn validate_decoded_state(&self, state: &SnakeState, done: bool) -> Result<(), String> {
+        let g = self.grid_size;
+        let in_grid = |cell: Cell| 0 <= cell.0 && cell.0 < g && 0 <= cell.1 && cell.1 < g;
+        for (i, snake) in state.snakes.iter().enumerate() {
+            if snake.alive && snake.body.is_empty() {
+                return Err(format!("snake {i} is alive with an empty body"));
+            }
+            for &cell in &snake.body {
+                if !in_grid(cell) {
+                    return Err(format!("snake {i} cell {cell:?} outside the grid"));
+                }
+            }
+        }
+        for &cell in &state.food {
+            if !in_grid(cell) {
+                return Err(format!("food cell {cell:?} outside the grid"));
+            }
+        }
+        let terminal = self.is_terminal(&state.snakes);
+        if terminal != done {
+            return Err(format!(
+                "snakes imply terminal={terminal}, but envelope done is {done}"
+            ));
+        }
+        Ok(())
     }
 }

@@ -75,7 +75,7 @@ pub enum BackgammonEvent {
     Loss(u8),
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BackgammonState {
     /// Checker counts per player per point; X (agent 0) travels 0→23, O (agent 1) 23→0.
     pub board: [[u8; NUM_POINTS]; 2],
@@ -931,5 +931,115 @@ mod tests {
             }
         }
         probs.len() - 1
+    }
+}
+
+impl reinfors_core::StateCodec for Backgammon {
+    type State = BackgammonState;
+
+    fn encode(&self, s: &BackgammonState) -> Vec<u8> {
+        crate::codec_util::serde_encode(2, s)
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Result<BackgammonState, String> {
+        crate::codec_util::serde_decode(2, bytes)
+    }
+
+    // Safety per the narrowed contract: the 15-checker sum bounds every count the move logic
+    // does arithmetic on; ranges cover the indexing paths. Terminality is derived from the
+    // borne-off scores (no state-side flag exists), so the envelope check compares against the
+    // single derived source, not a duplicate.
+    fn validate_decoded_state(&self, state: &BackgammonState, done: bool) -> Result<(), String> {
+        if state.to_move > 1 {
+            return Err(format!("to_move {} out of range", state.to_move));
+        }
+        for (p, (board, (bar, score))) in state
+            .board
+            .iter()
+            .zip(state.bar.iter().zip(state.scores.iter()))
+            .enumerate()
+        {
+            let total = board.iter().map(|&c| u32::from(c)).sum::<u32>()
+                + u32::from(*bar)
+                + u32::from(*score);
+            if total != 15 {
+                return Err(format!("player {p} has {total} checkers, expected 15"));
+            }
+        }
+        for d in state.dice {
+            if d > 12 {
+                return Err(format!(
+                    "die value {d} out of range (0 unrolled, 1-6 fresh, 7-12 used)"
+                ));
+            }
+        }
+        let finished = state.scores.iter().any(|&s| s >= 15);
+        if finished != done {
+            return Err(format!(
+                "borne-off counts {:?} disagree with done {done}",
+                state.scores
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod codec_tests {
+    use super::*;
+    use reinfors_core::StateCodec;
+
+    fn initial() -> (Backgammon, BackgammonState) {
+        struct R(u64);
+        impl reinfors_core::Rng for R {
+            fn below(&mut self, n: usize) -> usize {
+                self.0 = self
+                    .0
+                    .wrapping_mul(2862933555777941757)
+                    .wrapping_add(3037000493);
+                (self.0 >> 33) as usize % n.max(1)
+            }
+            fn unit(&mut self) -> f64 {
+                0.5
+            }
+        }
+        let game = Backgammon { max_ticks: None };
+        let s = game.initial_state(&mut R(9));
+        (game, s)
+    }
+
+    #[test]
+    fn round_trips_canonically_and_validates() {
+        let (game, s) = initial();
+        let bytes = game.encode(&s);
+        let back = game.decode(&bytes).unwrap();
+        assert_eq!(game.encode(&back), bytes);
+        game.validate_decoded_state(&back, false).unwrap();
+    }
+
+    #[test]
+    fn semantic_invariants_reject_tampered_structs() {
+        let (game, s) = initial();
+        let mut extra = s.clone();
+        extra.board[0][0] += 1;
+        assert!(game
+            .validate_decoded_state(&extra, false)
+            .unwrap_err()
+            .contains("checkers"));
+        let mut bad_die = s.clone();
+        bad_die.dice[0] = 13;
+        assert!(game
+            .validate_decoded_state(&bad_die, false)
+            .unwrap_err()
+            .contains("die"));
+        let mut won = s.clone();
+        won.board[0] = [0; NUM_POINTS];
+        won.bar[0] = 0;
+        won.scores[0] = 15;
+        assert!(game
+            .validate_decoded_state(&won, false)
+            .unwrap_err()
+            .contains("borne-off"));
+        game.validate_decoded_state(&won, true).unwrap();
     }
 }

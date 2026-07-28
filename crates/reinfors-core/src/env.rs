@@ -48,11 +48,40 @@ impl<G: Game> Env<G> {
         self.done
     }
 
+    /// The mutable slice of this env — `(state, rng state, done)` — for snapshot/fork. The state
+    /// is cloned; the immutable composition (game/encoder) is NOT part of it and is reconstructed
+    /// from config by the caller.
+    pub fn parts(&self) -> (G::State, u64, bool) {
+        (
+            self.episode.state.clone(),
+            self.episode.rng.state(),
+            self.done,
+        )
+    }
+
+    /// Install a mutable slice captured by [`parts`](Self::parts) (or decoded by a
+    /// [`StateCodec`](crate::StateCodec)). Restore lands at a step boundary: transient last-step
+    /// outputs (events/rewards) belong to the step that produced them and are not part of state.
+    pub fn set_parts(&mut self, state: G::State, rng_state: u64, done: bool) {
+        self.episode.state = state;
+        self.episode.rng = crate::rng::SplitMix64::from_state(rng_state);
+        self.done = done;
+    }
+
+    /// Empty once the episode is over — games without an internal terminal flag (snake with
+    /// `play_to_last=false`, backgammon) would otherwise still report movers after `done`,
+    /// letting a finished env (or a restored terminal snapshot) be stepped.
     pub fn active_agents(&self) -> Vec<usize> {
+        if self.done {
+            return Vec::new();
+        }
         self.episode.active_agents(&self.game)
     }
 
     pub fn legal_actions(&self, agent: usize) -> Vec<usize> {
+        if self.done {
+            return Vec::new();
+        }
         self.game.legal_actions(&self.episode.state, agent)
     }
 
