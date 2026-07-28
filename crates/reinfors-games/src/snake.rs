@@ -561,26 +561,37 @@ impl Snake {
                 }
             }
         }
-        let mut done = alive_ids.len() <= if self.play_to_last { 0 } else { 1 };
-
-        // Food-lead win: both alive, leader `win_food_lead` apples (length) ahead wins outright.
-        if let Some(lead) = self.win_food_lead {
-            if !done && alive_ids.len() >= 2 {
-                let (i0, i1) = (alive_ids[0], alive_ids[1]);
-                let (leader, runner) = if snakes[i0].len() >= snakes[i1].len() {
-                    (i0, i1)
-                } else {
-                    (i1, i0)
-                };
-                if snakes[leader].len() - snakes[runner].len() >= lead {
-                    events[leader].won = true;
-                    events[runner].lost = true;
-                    done = true;
-                }
-            }
+        let done = self.is_terminal(snakes);
+        // A terminal tick with both still alive can only be the food-lead rule firing: attribute
+        // the outright win/loss (`is_terminal` owns the rule itself).
+        if done && alive_ids.len() >= 2 {
+            let (i0, i1) = (alive_ids[0], alive_ids[1]);
+            let (leader, runner) = if snakes[i0].len() >= snakes[i1].len() {
+                (i0, i1)
+            } else {
+                (i1, i0)
+            };
+            events[leader].won = true;
+            events[runner].lost = true;
         }
 
         (events, done)
+    }
+
+    /// Whether this configuration of snakes ends the episode: the death rule (everyone dead, or a
+    /// lone survivor unless `play_to_last`) or the food-lead rule (both alive, body-length
+    /// difference at or past the configured lead). The single source of terminality — `advance`
+    /// ends the tick on it, and the codec's lifecycle check compares the envelope's `done`
+    /// against it rather than re-implementing the rules.
+    fn is_terminal(&self, snakes: &[SnakeBody; 2]) -> bool {
+        let alive: Vec<usize> = (0..2).filter(|&i| snakes[i].alive).collect();
+        if alive.len() <= if self.play_to_last { 0 } else { 1 } {
+            return true;
+        }
+        if let (Some(lead), &[i0, i1]) = (self.win_food_lead, alive.as_slice()) {
+            return snakes[i0].len().abs_diff(snakes[i1].len()) >= lead;
+        }
+        false
     }
 
     fn resolve_collisions(
@@ -1430,10 +1441,12 @@ impl reinfors_core::StateCodec for Snake {
         crate::codec_util::serde_decode(2, bytes)
     }
 
-    // Safety only, per the narrowed codec contract: bounds that game methods index by. Occupancy
-    // and terminality rules are NOT re-proved here — snake carries no state-side done flag, so
-    // the envelope's `done` stands alone, and unreachable-but-safe states are accepted.
-    fn validate_decoded_state(&self, state: &SnakeState, _done: bool) -> Result<(), String> {
+    // Safety per the narrowed codec contract: bounds that game methods index by, plus lifecycle
+    // coherence — `done` controls whether the Env may continue, so it must agree with the game's
+    // own terminal rule (`is_terminal`, the same function `advance` ends ticks on — a shared
+    // source, not a re-implementation). Occupancy rules are NOT re-proved here; unreachable-but-
+    // safe states are accepted.
+    fn validate_decoded_state(&self, state: &SnakeState, done: bool) -> Result<(), String> {
         let g = self.grid_size;
         let in_grid = |cell: Cell| 0 <= cell.0 && cell.0 < g && 0 <= cell.1 && cell.1 < g;
         for (i, snake) in state.snakes.iter().enumerate() {
@@ -1450,6 +1463,12 @@ impl reinfors_core::StateCodec for Snake {
             if !in_grid(cell) {
                 return Err(format!("food cell {cell:?} outside the grid"));
             }
+        }
+        let terminal = self.is_terminal(&state.snakes);
+        if terminal != done {
+            return Err(format!(
+                "snakes imply terminal={terminal}, but envelope done is {done}"
+            ));
         }
         Ok(())
     }

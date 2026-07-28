@@ -169,6 +169,26 @@ def test_deep_codec_invariants_reject_forged_states() -> None:
         c4.restore(_snap_with_state(c4, bad_cell))
 
 
+def test_snake_envelope_done_must_match_the_terminal_rule() -> None:
+    # Snake has no state-side flag, but done still gates the Env lifecycle: both flip directions
+    # must reject (a live envelope over a decided game would allow stepping past the end).
+    env = rf.Env(rf.games.Snake(grid_size=6, initial_length=2, food=1, play_to_last=False), seed=3)
+    env.reset()
+    live = bytearray(env.snapshot().to_bytes())
+    live[4 + 1 + 4 + 64 + 8] = 1  # two living snakes flipped to done
+    with pytest.raises(ValueError, match="terminal=false"):
+        env.restore(rf.EnvSnapshot.from_bytes(bytes(live)))
+    for _ in range(40):
+        if env.done():
+            break
+        env.step(dict.fromkeys(env.active_agents(), 0))
+    assert env.done()
+    ended = bytearray(env.snapshot().to_bytes())
+    ended[4 + 1 + 4 + 64 + 8] = 0  # a genuine one-survivor terminal flipped back to live
+    with pytest.raises(ValueError, match="terminal=true"):
+        env.restore(rf.EnvSnapshot.from_bytes(bytes(ended)))
+
+
 def test_unreachable_but_safe_states_restore_and_play() -> None:
     # The narrowed contract: only reinfors-produced snapshots have meaningful gameplay semantics,
     # so an alternation-violating board (two P0 pieces, none for P1, P0 to move again) restores

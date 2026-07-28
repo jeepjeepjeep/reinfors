@@ -30,8 +30,9 @@ pub trait StateCodec: Send + Sync {
     /// lifecycle state (the independently transported `done` flag) coherent with the state. It
     /// explicitly does NOT prove reachability: states impossible under legal play are accepted as
     /// long as every game operation on them is safe.
-    fn validate_decoded_state(&self, state: &Self::State, done: bool) -> Result<(), String> {
-        let _ = (state, done);
-        Ok(())
-    }
+    ///
+    /// Required rather than defaulted: the contract carries safety obligations, so a codec cannot
+    /// claim it by accident. A game with no invariants beyond structure returns `Ok(())`
+    /// explicitly.
+    fn validate_decoded_state(&self, state: &Self::State, done: bool) -> Result<(), String>;
 }

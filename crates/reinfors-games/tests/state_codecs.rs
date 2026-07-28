@@ -139,6 +139,30 @@ fn validators_reject_unsafe_states() {
         snakes: [a, b],
         food: HashSet::from_iter(food.iter().copied()),
     };
+    // lifecycle coherence, both directions: `done` gates whether the Env may continue, so it
+    // must match the shared terminal rule (`advance`'s own) — a live envelope over a decided
+    // position would let play continue past the end of the game.
+    let both_alive = mk(body(&[(1, 1)], true), body(&[(3, 3)], true), &[]);
+    assert!(snake_game
+        .validate_decoded_state(&both_alive, true)
+        .unwrap_err()
+        .contains("terminal=false"));
+    let survivor = mk(body(&[(1, 1)], true), body(&[(3, 3)], false), &[]);
+    snake_game.validate_decoded_state(&survivor, true).unwrap();
+    assert!(snake_game
+        .validate_decoded_state(&survivor, false)
+        .unwrap_err()
+        .contains("terminal=true"));
+    let lead_game = Snake {
+        win_food_lead: Some(1),
+        ..snake_game
+    };
+    let led = mk(body(&[(1, 1), (1, 2)], true), body(&[(3, 3)], true), &[]);
+    lead_game.validate_decoded_state(&led, true).unwrap();
+    assert!(lead_game
+        .validate_decoded_state(&led, false)
+        .unwrap_err()
+        .contains("terminal=true"));
     // out-of-grid cells index past the observation planes
     let off_grid = mk(body(&[(6, 0)], true), body(&[(3, 3)], true), &[]);
     assert!(snake_game
@@ -233,8 +257,9 @@ fn derived_flags_are_recomputed_at_decode() {
     gw.validate_decoded_state(&back, true).unwrap();
 }
 
-/// The narrowed contract's flip side: unreachable-but-SAFE states are accepted. No occupancy,
-/// alternation, or terminality rules are re-proved at the boundary.
+/// The narrowed contract's flip side: unreachable-but-SAFE states are accepted. No occupancy or
+/// alternation rules are re-proved at the boundary (lifecycle coherence — envelope done vs the
+/// shared terminal rule — is checked, but history is not).
 #[test]
 fn unreachable_but_safe_states_are_accepted() {
     use reinfors_games::snake::{Action, SnakeBody, SnakeState};
@@ -253,14 +278,13 @@ fn unreachable_but_safe_states_are_accepted() {
         direction: Action::Up,
         alive: true,
     };
-    // two living snakes on the same cell, food under one of them, a decisive food lead with
-    // done=false, and both-alive with done=true: all impossible through play, all safe to step
+    // two living snakes on the same cell, food under both: impossible through play (occupancy is
+    // not re-proved), safe to step, and live under the terminal rule (equal lengths, both alive)
     let overlap = SnakeState {
-        snakes: [body(&[(1, 1)]), body(&[(1, 1), (1, 2)])],
+        snakes: [body(&[(1, 1)]), body(&[(1, 1)])],
         food: HashSet::from_iter([(1, 1)]),
     };
     game.validate_decoded_state(&overlap, false).unwrap();
-    game.validate_decoded_state(&overlap, true).unwrap();
 
     // connect4: a parity-violating board (two p0 pieces, none for p1) is safe to play on.
     let c4 = Connect4;
