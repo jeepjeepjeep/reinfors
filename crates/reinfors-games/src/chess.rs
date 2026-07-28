@@ -1399,6 +1399,33 @@ impl reinfors_core::StateCodec for Chess {
                 state.finished.is_some()
             ));
         }
+        // `finished` must be GENUINELY derivable from the position, mirroring `step`'s terminal
+        // logic exactly: cozy's status (mate/stalemate/fifty-move) plus our threefold and
+        // insufficient-material rules. (The illegal-action loss also sets WonBy, but such states
+        // cannot reach a snapshot: the Env boundary rejects illegal actions and searches mask.)
+        let drawn = state.board.status() == GameStatus::Drawn
+            || state.repetition_count() >= 3
+            || insufficient_material(&state.board);
+        match state.finished {
+            None => {
+                if state.board.status() != GameStatus::Ongoing || drawn {
+                    return Err("position is terminal but finished is unset".into());
+                }
+            }
+            Some(ChessOutcome::Draw) => {
+                if !drawn {
+                    return Err("finished says Draw but no draw rule holds".into());
+                }
+            }
+            Some(ChessOutcome::WonBy(w)) => {
+                let mated_agent = usize::from(state.board.side_to_move() == Color::Black);
+                if state.board.status() != GameStatus::Won || w != 1 - mated_agent {
+                    return Err(format!(
+                        "finished says WonBy({w}) but the position shows no such mate"
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 }

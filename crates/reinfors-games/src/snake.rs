@@ -1458,14 +1458,20 @@ impl reinfors_core::StateCodec for Snake {
                 return Err(format!("food cell {cell:?} overlaps a living snake"));
             }
         }
-        // Definitely-terminal states must carry done: all snakes dead, or (without play_to_last)
-        // a lone survivor. The win_food_lead terminal is not statically derivable — done=true is
-        // accepted for it; done=false with a derivably-terminal state is not.
-        let alive = state.snakes.iter().filter(|s| s.alive).count();
-        let terminal = alive == 0 || (!self.play_to_last && alive <= 1);
-        if terminal && !done {
+        // Terminality is EXACTLY derivable (mirroring `advance`): the death rule (all dead, or
+        // a lone survivor without play_to_last) or the food-lead rule (both alive, body-length
+        // difference at or past the configured lead — length IS food eaten plus the initial
+        // length, so the lead reads straight off the bodies).
+        let alive: Vec<&SnakeBody> = state.snakes.iter().filter(|s| s.alive).collect();
+        let mut terminal = alive.len() <= usize::from(!self.play_to_last);
+        if let (Some(lead), [a, b]) = (self.win_food_lead, alive.as_slice()) {
+            terminal |= a.body.len().abs_diff(b.body.len()) >= lead;
+        }
+        if terminal != done {
             return Err(format!(
-                "{alive} snakes alive is terminal but done is false"
+                "{} snakes alive with lead rule {:?} implies terminal={terminal}, but done is {done}",
+                alive.len(),
+                self.win_food_lead
             ));
         }
         Ok(())
