@@ -573,7 +573,15 @@ impl PyEngineSnapshot {
         let fingerprint =
             String::from_utf8(chk(fp_len)?.to_vec()).map_err(|_| err("fingerprint not utf-8"))?;
         let weights_generation = u64::from_le_bytes(chk(8)?.try_into().unwrap());
-        let has_pv = chk(1)?[0] != 0;
+        let has_pv = match chk(1)?[0] {
+            0 => false,
+            1 => true,
+            b => {
+                return Err(err(&format!(
+                    "policy_version presence byte {b} is not a bool"
+                )))
+            }
+        };
         let pv_len = u32::from_le_bytes(chk(4)?.try_into().unwrap()) as usize;
         let pv = String::from_utf8(chk(pv_len)?.to_vec())
             .map_err(|_| err("policy_version not utf-8"))?;

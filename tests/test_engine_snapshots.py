@@ -183,3 +183,11 @@ def test_stream_pause_is_a_lossless_checkpoint_barrier() -> None:
         assert np.array_equal(got.obs, want.obs)
     # and the engines stay record-identical afterwards
     assert np.array_equal(sync_engine.collect(24, infer).obs, stream_engine.collect(24, s_infer).obs)
+
+
+def test_engine_envelope_booleans_are_strict() -> None:
+    engine, _ = _mk("az")
+    blob = bytearray(engine.snapshot().to_bytes())
+    blob[4 + 1 + 4 + 64 + 8] = 2  # policy_version presence byte
+    with pytest.raises(ValueError, match="not a bool"):
+        rf.EngineSnapshot.from_bytes(bytes(blob))
