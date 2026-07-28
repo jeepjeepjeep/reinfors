@@ -442,7 +442,7 @@ fn policy_cfg(spec: &PolicySpec) -> Value {
                     "alpha": noise_alpha,
                     "scope": match noise_scope {
                         NoiseScope::Requester => "requester",
-                        NoiseScope::Both => "both",
+                        NoiseScope::All => "all",
                     },
                 })
             };
@@ -1254,6 +1254,11 @@ impl DqnBatch {
 }
 
 /// `engine.collect` result for the AlphaZero family: root visit distributions + realized returns.
+/// `policy_weights` masks the policy loss — 1.0 on acting-agent rows, 0.0 on value-only rows
+/// (sequential N>2 games buffer every non-mover perspective of each self-play state so Max^N's
+/// per-perspective leaf values are supervised; their π rows are inert zeros). Train with
+/// `(w * cross_entropy(logits, π)).sum() / w.sum()` for the policy term; every row trains the
+/// value head. 2p and simultaneous compositions emit all-ones weights.
 #[pyclass]
 struct AlphaZeroBatch {
     #[pyo3(get)]
@@ -1263,21 +1268,25 @@ struct AlphaZeroBatch {
     #[pyo3(get)]
     value_targets: Py<PyArray1<f64>>, // (M,) — z, discounted realized return
     #[pyo3(get)]
+    policy_weights: Py<PyArray1<f64>>, // (M,) — 1.0 acting rows, 0.0 value-only rows
+    #[pyo3(get)]
     telemetry: Py<PyDict>,
 }
 
 #[pymethods]
 impl AlphaZeroBatch {
     fn __len__(&self) -> usize {
-        4
+        5
     }
-    /// Also unpacks positionally: `obs, policy_targets, value_targets, telemetry = batch`.
+    /// Also unpacks positionally:
+    /// `obs, policy_targets, value_targets, policy_weights, telemetry = batch`.
     fn __getitem__<'py>(&self, py: Python<'py>, i: usize) -> PyResult<Bound<'py, PyAny>> {
         Ok(match i {
             0 => self.obs.bind(py).clone().into_any(),
             1 => self.policy_targets.bind(py).clone().into_any(),
             2 => self.value_targets.bind(py).clone().into_any(),
-            3 => self.telemetry.bind(py).clone().into_any(),
+            3 => self.policy_weights.bind(py).clone().into_any(),
+            4 => self.telemetry.bind(py).clone().into_any(),
             _ => {
                 return Err(pyo3::exceptions::PyIndexError::new_err(
                     "AlphaZeroBatch index out of range",
@@ -1300,10 +1309,12 @@ impl RecordBatch for AlphaZeroRecord {
         let mut obs_flat: Vec<f32> = Vec::with_capacity(m * dim);
         let mut pi_flat: Vec<f64> = Vec::with_capacity(m * a);
         let mut z: Vec<f64> = Vec::with_capacity(m);
-        for (obs, pi, zi) in records {
+        let mut weights: Vec<f64> = Vec::with_capacity(m);
+        for (obs, pi, zi, w) in records {
             obs_flat.extend(obs);
             pi_flat.extend(pi);
             z.push(zi);
+            weights.push(w);
         }
         let obs_arr = Array2::from_shape_vec((m, dim), obs_flat)
             .expect("obs shape")
@@ -1317,6 +1328,7 @@ impl RecordBatch for AlphaZeroRecord {
                 obs: obs_arr.unbind(),
                 policy_targets: pi_arr.unbind(),
                 value_targets: z.into_pyarray(py).unbind(),
+                policy_weights: weights.into_pyarray(py).unbind(),
                 telemetry: telemetry.unbind(),
             },
         )?
@@ -1873,18 +1885,68 @@ fn check_unit(name: &str, v: f64) -> PyResult<()> {
 
 /// The agent-count capability gate (no-panic contract): a policy that cannot plan for this many
 /// agents is a config error here, before `Engine::new`'s assert backstop.
-fn check_max_agents<P: Policy>(policy: &P, label: &str, num_agents: usize) -> PyResult<()> {
+/// A throwaway deterministic RNG for probing `initial_state` (dynamics/legality only — the
+/// probed state is discarded, so the stream never touches collection determinism).
+struct ProbeRng(u64);
+impl reinfors_core::Rng for ProbeRng {
+    fn below(&mut self, n: usize) -> usize {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.0 >> 33) as usize % n.max(1)
+    }
+    fn unit(&mut self) -> f64 {
+        self.below(1 << 20) as f64 / (1 << 20) as f64
+    }
+}
+
+/// The game's decision dynamics, probed from the initial state (games are uniformly one
+/// dynamics; the searches assert against mixing).
+fn game_is_sequential<G: Game>(game: &G) -> bool {
+    matches!(
+        game.actor(&game.initial_state(&mut ProbeRng(7))),
+        reinfors_core::Actor::Agent(_)
+    )
+}
+
+fn check_max_agents<P: Policy, G: Game>(policy: &P, label: &str, game: &G) -> PyResult<()> {
+    let num_agents = game.num_agents();
     if num_agents == 0 {
+        // Before the dynamics probe: a malformed zero-agent game must error here, not panic
+        // inside its own `initial_state`.
         return Err(pyo3::exceptions::PyValueError::new_err(
             "num_agents must be > 0",
         ));
     }
-    match policy.max_agents() {
-        Some(cap) if num_agents > cap => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "the {label} policy supports at most {cap} agents; this game has {num_agents}"
-        ))),
-        _ => Ok(()),
+    let sequential = game_is_sequential(game);
+    if let Some(cap) = policy.max_agents(sequential) {
+        if num_agents > cap {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "the {label} policy supports at most {cap} agents for this game's dynamics; \
+                 this game has {num_agents}"
+            )));
+        }
     }
+    Ok(())
+}
+
+/// Joint-space bound for the search families that build per-node co-mover products (MCTS/AZ:
+/// dense joint tables; expectimax: factored branch fans): the worst case
+/// `action_count ^ num_agents` must fit the documented slot bound, checked here so a too-wide
+/// composition is a config error rather than a mid-collect panic/OOM.
+fn check_joint_space<G: Game>(label: &str, game: &G) -> PyResult<()> {
+    if !game_is_sequential(game) {
+        let worst = (game.action_count() as u128).saturating_pow(game.num_agents() as u32);
+        if worst > reinfors_core::MAX_JOINT_SLOTS as u128 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "the {label} policy's simultaneous joint space (action_count ^ num_agents = \
+                 {worst}) exceeds the {} - slot bound",
+                reinfors_core::MAX_JOINT_SLOTS
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Reject a zero truncation horizon (`max_ticks=0` would truncate before any decision). `None` (never
@@ -1955,7 +2017,8 @@ where
                 opponent,
             };
             let policy = SelectiveExpectimax::new(cfg, n_heads, epsilon);
-            check_max_agents(&policy, "SelectiveExpectimax", game.num_agents())?;
+            check_max_agents(&policy, "SelectiveExpectimax", &game)?;
+            check_joint_space("SelectiveExpectimax", &game)?;
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
@@ -2021,7 +2084,8 @@ where
                 },
                 act_by,
             );
-            check_max_agents(&policy, "Mcts", game.num_agents())?;
+            check_max_agents(&policy, "Mcts", &game)?;
+            check_joint_space("Mcts", &game)?;
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, false);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
@@ -2088,7 +2152,8 @@ where
                 chance,
                 noise_scope,
             });
-            check_max_agents(&policy, "AlphaZero", game.num_agents())?;
+            check_max_agents(&policy, "AlphaZero", &game)?;
+            check_joint_space("AlphaZero", &game)?;
             let learner = AlphaZeroLearner::new(gamma);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
@@ -2113,7 +2178,7 @@ where
             check_unit("epsilon", epsilon)?;
             check_unit("bootstrap_p", bootstrap_p)?;
             let policy = EpsilonGreedyQ::new(n_heads, epsilon);
-            check_max_agents(&policy, "EpsilonGreedyQ", game.num_agents())?;
+            check_max_agents(&policy, "EpsilonGreedyQ", &game)?;
             let learner = Dqn::new(n_heads, bootstrap_p);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
@@ -3502,7 +3567,7 @@ impl ChanceModeHandle {
 
 /// Root-exploration-noise handle (`rf.noise.*`), passed to `rf.policies.AlphaZero(noise=...)`.
 /// `noise=None` disables noise honestly (no `epsilon=0` sentinel); omitting the kwarg keeps the
-/// classic self-play default. `scope` ("requester" | "both") only exists inside the config it
+/// classic self-play default. `scope` ("requester" | "all") only exists inside the config it
 /// modifies: which root prior(s) the noise perturbs in a *simultaneous* search tree.
 #[pyclass]
 #[derive(Clone)]
@@ -3539,10 +3604,10 @@ impl NoiseHandle {
         }
         let scope = match scope {
             "requester" => NoiseScope::Requester,
-            "both" => NoiseScope::Both,
+            "all" => NoiseScope::All,
             other => {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "unknown scope {other:?}; expected \"requester\" or \"both\""
+                    "unknown scope {other:?}; expected \"requester\" or \"all\""
                 )))
             }
         };

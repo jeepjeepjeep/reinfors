@@ -82,8 +82,14 @@ fn search_cfg() -> SearchConfig {
 
 #[test]
 fn policies_declare_their_agent_capability() {
+    // Expectimax stays 2-capped on this branch under either dynamics (its N support lands in
+    // the stacked phase-2 PR).
     assert_eq!(
-        SelectiveExpectimax::new(search_cfg(), 2, 0.0).max_agents(),
+        SelectiveExpectimax::new(search_cfg(), 2, 0.0).max_agents(true),
+        Some(2)
+    );
+    assert_eq!(
+        SelectiveExpectimax::new(search_cfg(), 2, 0.0).max_agents(false),
         Some(2)
     );
     let mcts_cfg = MctsConfig {
@@ -95,7 +101,11 @@ fn policies_declare_their_agent_capability() {
         temperature_drop: 0,
         chance: ChanceMode::Committed { samples: 1 },
     };
-    assert_eq!(Mcts::new(mcts_cfg, ActBy::Value).max_agents(), None);
+    let mcts = Mcts::new(mcts_cfg, ActBy::Value);
+    // Dynamics-aware: UCT sequential caps at 2 (Q leaf values need own-turn decision points);
+    // simultaneous DUCT runs at any N.
+    assert_eq!(mcts.max_agents(true), Some(2));
+    assert_eq!(mcts.max_agents(false), None);
     let az_cfg = AlphaZeroConfig {
         num_simulations: 4,
         c_puct: 1.5,
@@ -108,8 +118,8 @@ fn policies_declare_their_agent_capability() {
         chance: ChanceMode::Committed { samples: 1 },
         noise_scope: reinfors_core::NoiseScope::Requester,
     };
-    assert_eq!(AlphaZero::new(az_cfg).max_agents(), None);
-    assert_eq!(EpsilonGreedyQ::new(1, 0.0).max_agents(), None);
+    assert_eq!(AlphaZero::new(az_cfg).max_agents(true), None);
+    assert_eq!(EpsilonGreedyQ::new(1, 0.0).max_agents(true), None);
 }
 
 /// 3 agents taking turns (agent = tick mod 3); nothing matters, terminal after three plies.
@@ -281,11 +291,107 @@ fn alphazero_engine_collects_on_a_three_agent_sequential_game() {
     );
     let (records, stats) = engine.collect(9, |_obs: Vec<f32>, n: usize| vec![0.0; n * 3]);
     assert!(records.len() >= 9);
-    for (obs, pi, _z) in &records {
+    // Every self-play state yields one row per perspective: the mover's (weight 1, real pi) and
+    // both non-movers' (weight 0, inert zero pi) — Max^N's per-perspective values supervised.
+    let movers = records.iter().filter(|r| r.3 == 1.0).count();
+    let value_only = records.iter().filter(|r| r.3 == 0.0).count();
+    assert_eq!(movers + value_only, records.len());
+    assert_eq!(value_only, 2 * movers);
+    for (obs, pi, _z, w) in &records {
         assert_eq!(obs.len(), 2);
-        assert!((pi.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+        let pi_sum: f64 = pi.iter().sum();
+        if *w == 1.0 {
+            assert!((pi_sum - 1.0).abs() < 1e-9);
+        } else {
+            assert_eq!(pi_sum, 0.0);
+        }
     }
     assert!(stats.decisions > 0 && !stats.episodes.is_empty());
+}
+
+/// RoundRobin with a terminal payoff vector [1, 2, 3]: with gamma 1, EVERY record's z for agent
+/// i is exactly i+1 — per-perspective returns from each agent's own reward stream, value-only
+/// rows included (their rewards land on the correct tick, not the previous decision).
+struct PayoutSeq;
+
+impl Game for PayoutSeq {
+    type State = St;
+    type Event = f64;
+    fn num_agents(&self) -> usize {
+        3
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn actor(&self, s: &St) -> Actor {
+        Actor::Agent(s.tick % 3)
+    }
+    fn legal_actions(&self, s: &St, agent: usize) -> Vec<usize> {
+        if agent == s.tick % 3 && s.tick < 3 {
+            vec![0, 1]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, f64> {
+        let terminal = s.tick + 1 >= 3;
+        Transition {
+            next_state: St { tick: s.tick + 1 },
+            events: if terminal {
+                vec![1.0, 2.0, 3.0]
+            } else {
+                vec![0.0; 3]
+            },
+            terminal,
+        }
+    }
+    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+        St { tick: 0 }
+    }
+}
+
+struct PayoutReward;
+impl Reward for PayoutReward {
+    type Event = f64;
+    fn step_reward(&self, e: &f64, _agent: usize) -> f64 {
+        *e
+    }
+}
+
+#[test]
+fn value_only_rows_carry_each_agents_own_return() {
+    let az_cfg = AlphaZeroConfig {
+        num_simulations: 8,
+        c_puct: 1.5,
+        gamma: 1.0,
+        max_depth: 6,
+        noise_epsilon: 0.0,
+        noise_alpha: 0.3,
+        temperature: 0.0,
+        temperature_drop: 0,
+        chance: ChanceMode::Committed { samples: 1 },
+        noise_scope: reinfors_core::NoiseScope::Requester,
+    };
+    let mut engine = Engine::new(
+        PayoutSeq,
+        Box::new(Enc),
+        Box::new(PayoutReward),
+        AlphaZero::new(az_cfg),
+        reinfors_core::AlphaZeroLearner::new(1.0),
+        EngineParams {
+            n_games: 1,
+            seed: 2,
+        },
+    );
+    let (records, _) = engine.collect(9, |_obs: Vec<f32>, n: usize| vec![0.0; n * 3]);
+    assert!(records.len() >= 9);
+    for (obs, _pi, z, _w) in &records {
+        let agent = obs[1] as f64; // Enc encodes [tick, agent]
+        assert!(
+            (z - (agent + 1.0)).abs() < 1e-12,
+            "agent {agent}'s z must be its own payoff, got {z}"
+        );
+    }
 }
 
 #[test]

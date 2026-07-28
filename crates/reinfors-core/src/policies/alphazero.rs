@@ -38,8 +38,8 @@ pub struct AlphaZeroConfig {
     /// How the search consumes stochastic transitions' declared chance (see
     /// [`ChanceMode`](crate::ChanceMode)). Inert for games that declare no `chance_outcomes`.
     pub chance: crate::policy::ChanceMode,
-    /// Simultaneous games: which root prior(s) the Dirichlet noise perturbs. Irrelevant for
-    /// sequential games (one root table).
+    /// Simultaneous games: which root priors the Dirichlet noise perturbs — the requester's
+    /// only, or every agent's. Irrelevant for sequential games (one root table).
     pub noise_scope: NoiseScope,
 }
 
@@ -73,7 +73,7 @@ where
     let guidance = Guidance::Puct {
         c: cfg.c_puct,
         noise: Some((cfg.noise_epsilon, cfg.noise_alpha, seed)),
-        noise_both: matches!(cfg.noise_scope, NoiseScope::Both),
+        noise_all: matches!(cfg.noise_scope, NoiseScope::All),
     };
     search_many(
         game,
@@ -94,7 +94,7 @@ impl Policy for AlphaZero {
     type Evaluation = SearchEvaluation;
     type PolicyState = u32; // plies acted this episode — drives the temperature_drop cutoff
 
-    fn max_agents(&self) -> Option<usize> {
+    fn max_agents(&self, _sequential: bool) -> Option<usize> {
         None // rides the MCTS tree: negamax at ≤2 sequential, Max^N past that, DUCT-N for sim
     }
 

@@ -57,8 +57,8 @@ pub(crate) enum Guidance {
     Puct {
         c: f64,
         noise: Option<(f64, f64, u64)>,
-        // Simultaneous roots: noise both agents' priors, or only the requester's (see NoiseScope).
-        noise_both: bool,
+        // Simultaneous roots: noise every agent's prior, or only the requester's (see NoiseScope).
+        noise_all: bool,
     },
 }
 
@@ -67,12 +67,12 @@ pub(crate) enum Guidance {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum NoiseScope {
     /// Noise the requesting agent's root prior only: exploration for the agent whose pi target
-    /// this tree produces, while the in-tree opponent model keeps the net's honest beliefs.
+    /// this tree produces, while the in-tree co-mover models keep the net's honest beliefs.
     #[default]
     Requester,
-    /// Noise both agents' root priors: more joint-space exploration, at the cost of deliberately
-    /// perturbed opponent beliefs baked into the search.
-    Both,
+    /// Noise every agent's root prior: more joint-space exploration, at the cost of deliberately
+    /// perturbed co-mover beliefs baked into the search.
+    All,
 }
 
 use crate::policy::ChanceMode;
@@ -118,6 +118,12 @@ pub struct Mcts {
     cfg: MctsConfig,
     act_by: ActBy,
 }
+
+/// Upper bound on one simultaneous node's dense joint-slot count (`∏ per-agent legal widths`).
+/// Construction rejects compositions whose worst case (`action_count ^ num_agents`) exceeds it,
+/// and `sim_leaf` checks the realized product as a backstop — unchecked, the product overflows
+/// `usize` (64 two-action agents) or ODMs into absurd allocations long before that.
+pub const MAX_JOINT_SLOTS: usize = 1 << 20;
 
 impl Mcts {
     pub fn new(cfg: MctsConfig, act_by: ActBy) -> Self {
@@ -367,7 +373,15 @@ fn sim_leaf<G: Game>(
     let tables: Vec<AgentTable> = (0..n)
         .map(|ag| agent_table(game, enc, &state, ag))
         .collect();
-    let width = tables.iter().map(|t| t.actions.len()).product();
+    let width = tables
+        .iter()
+        .try_fold(1usize, |acc, t| {
+            acc.checked_mul(t.actions.len())
+                .filter(|&w| w <= MAX_JOINT_SLOTS)
+        })
+        .unwrap_or_else(|| {
+            panic!("simultaneous joint space exceeds {MAX_JOINT_SLOTS} slots at one node")
+        });
     let mut node = Node::leaf(state, 0, depth, false, vec![0], Vec::new());
     node.actions = Vec::new();
     node.child = Vec::new();
@@ -1419,7 +1433,7 @@ fn consume_row<S: Clone>(
         }
         Guidance::Puct { .. } if maxn_side_row => row_data[a],
         Guidance::Puct {
-            noise, noise_both, ..
+            noise, noise_all, ..
         } => {
             let (logits, value) = row_data.split_at(a);
             // Prior over the LEGAL set only: gather the node's legal actions' logits and softmax
@@ -1436,9 +1450,9 @@ fn consume_row<S: Clone>(
                 .collect();
             let mut prior = softmax(&legal_logits);
             // Root noise scope: a decision root's one table always gets it; a simultaneous root's
-            // tables get it per `noise_scope` — the requester's always, the opponent's only under
-            // `Both` (a deliberately perturbed opponent model is opt-in).
-            let noised = ni == 0 && (!is_sim_node || slot == tree.requester || *noise_both);
+            // tables get it per `noise_scope` — the requester's always, the co-movers' only
+            // under `All` (deliberately perturbed co-mover models are opt-in).
+            let noised = ni == 0 && (!is_sim_node || slot == tree.requester || *noise_all);
             if noised {
                 // Mix in the Dirichlet exploration noise (per-tree stream, so pooled searches stay
                 // deterministic and independent — and cached root rows renoise identically, since
@@ -1532,12 +1546,16 @@ impl Policy for Mcts {
     type Evaluation = SearchEvaluation;
     type PolicyState = u32; // moves acted this episode — drives the temperature_drop cutoff
 
-    fn max_agents(&self) -> Option<usize> {
-        // Simultaneous games: any N (decoupled per-agent tables). The one dynamics-dependent
-        // restriction — UCT over a SEQUENTIAL game caps at 2 agents (Q-derived leaf values need
-        // the evaluated agent's own decision points) — is asserted at the search entry, where the
-        // root's dynamics are known.
-        None
+    fn max_agents(&self, sequential: bool) -> Option<usize> {
+        // Simultaneous games: any N (decoupled per-agent tables). UCT over a SEQUENTIAL game
+        // caps at 2 agents — Q-derived leaf values exist only at the evaluated agent's own
+        // decision points, which sequential games give non-movers none of. (The search entry
+        // keeps an assert as the direct-core backstop.)
+        if sequential {
+            Some(2)
+        } else {
+            None
+        }
     }
 
     fn encode_eval(&self, eval: &SearchEvaluation, out: &mut Vec<u8>) {
@@ -1773,7 +1791,7 @@ mod tests {
                 &Guidance::Puct {
                     c: 1.5,
                     noise: None,
-                    noise_both: false
+                    noise_all: false
                 }
             ),
             1
@@ -1788,7 +1806,7 @@ mod tests {
         let g = Guidance::Puct {
             c: 2.0,
             noise: None,
-            noise_both: false,
+            noise_all: false,
         };
         assert_eq!(select_edge(&node, &g), 0);
     }
@@ -1802,7 +1820,7 @@ mod tests {
                 &Guidance::Puct {
                     c: 0.1,
                     noise: None,
-                    noise_both: false
+                    noise_all: false
                 }
             ),
             0
@@ -2370,12 +2388,12 @@ mod duct_tests {
         };
         assert_eq!(
             run(0.0, NoiseScope::Requester).visits,
-            run(0.0, NoiseScope::Both).visits,
+            run(0.0, NoiseScope::All).visits,
             "noise off: scope must be inert"
         );
         assert_ne!(
             run(0.6, NoiseScope::Requester).visits,
-            run(0.6, NoiseScope::Both).visits,
+            run(0.6, NoiseScope::All).visits,
             "noise on: Both must perturb the opponent's selection stream"
         );
     }

@@ -46,22 +46,25 @@ def _engine(
 def test_collect_returns_named_alphazero_batch() -> None:
     batch = _engine().collect(50, _uniform_infer)
     assert isinstance(batch, rf._reinfors.AlphaZeroBatch)
-    obs, pi, z, telemetry = batch  # positional unpacking mirrors the named fields
-    assert len(batch) == 4
+    obs, pi, z, w, telemetry = batch  # positional unpacking mirrors the named fields
+    assert len(batch) == 5
     m = obs.shape[0]
     assert m >= 50
     assert obs.shape == (m, 2 * 6 * 7) and obs.dtype == np.float32
     assert pi.shape == (m, _A) and pi.dtype == np.float64
     assert z.shape == (m,) and z.dtype == np.float64
+    assert w.shape == (m,) and w.dtype == np.float64
+    assert (w == 1.0).all()  # 2p sequential: every row is a real decision
     assert np.array_equal(batch.obs, obs)
     assert np.array_equal(batch.policy_targets, pi)
     assert np.array_equal(batch.value_targets, z)
+    assert np.array_equal(batch.policy_weights, w)
     assert batch.telemetry is telemetry
     assert "episodes" in batch.telemetry and batch.telemetry["decisions"] > 0
 
 
 def test_policy_targets_are_distributions() -> None:
-    _, pi, _, _ = _engine().collect(80, _uniform_infer)
+    _, pi, _, _, _ = _engine().collect(80, _uniform_infer)
     assert (pi >= 0.0).all()
     np.testing.assert_allclose(pi.sum(axis=1), 1.0, atol=1e-12)
 
@@ -69,7 +72,7 @@ def test_policy_targets_are_distributions() -> None:
 def test_value_targets_are_signed_outcomes() -> None:
     # gamma=1, win/loss=±1, no draws in short self-play: every z is ±1, and both signs appear
     # (each finished game contributes a winner's and a loser's trajectory).
-    _, _, z, _ = _engine().collect(120, _uniform_infer)
+    _, _, z, _, _ = _engine().collect(120, _uniform_infer)
     assert np.isin(z, (-1.0, 1.0)).all()
     assert (z == 1.0).any() and (z == -1.0).any()
 
@@ -88,14 +91,14 @@ def test_collect_is_deterministic_per_seed_with_noise_on() -> None:
 def test_noise_and_temperature_diversify_self_play() -> None:
     # A fixed net + fixed start would replay one game forever; noise + the opening temperature must
     # produce distinct games within a collect.
-    _, _, _, tel = _engine(0, n_games=1).collect(200, _uniform_infer)
+    _, _, _, _, tel = _engine(0, n_games=1).collect(200, _uniform_infer)
     games = {(tuple(r), length) for r, length, _s in tel["episodes"]}
     assert len(games) > 1
 
 
 def test_greedy_noise_free_replays_one_game() -> None:
     # The degenerate regime the knobs exist to escape — pin it so the mechanism stays honest.
-    _, _, _, tel = _engine(0, n_games=1, noise_epsilon=0.0, temperature=0.0).collect(200, _uniform_infer)
+    _, _, _, _, tel = _engine(0, n_games=1, noise_epsilon=0.0, temperature=0.0).collect(200, _uniform_infer)
     games = {(tuple(r), length) for r, length, _s in tel["episodes"]}
     assert len(games) == 1
 
@@ -113,7 +116,7 @@ def test_gridworld_composes() -> None:
         n_games=2,
         seed=0,
     )
-    obs, pi, z, _ = engine.collect(30, infer)
+    obs, pi, z, _, _ = engine.collect(30, infer)
     assert pi.shape[1] == 4 and obs.shape[0] == z.shape[0] >= 30
 
 
@@ -144,10 +147,10 @@ def test_alphazero_trains_on_simultaneous_stochastic_snake() -> None:
 
 def test_noise_scope_kwarg() -> None:
     rf.policies.AlphaZero(noise=rf.noise.Dirichlet(scope="requester"))
-    rf.policies.AlphaZero(noise=rf.noise.Dirichlet(scope="both"))
+    rf.policies.AlphaZero(noise=rf.noise.Dirichlet(scope="all"))
     rf.policies.AlphaZero(noise=None)  # honestly off — no epsilon sentinel
     with pytest.raises(ValueError, match="scope"):
-        rf.noise.Dirichlet(scope="all")
+        rf.noise.Dirichlet(scope="both")  # the pre-rename name is gone, not aliased
 
 
 @pytest.mark.parametrize(
@@ -213,5 +216,5 @@ def test_make_by_name() -> None:
         n_games=1,
         seed=0,
     )
-    obs, _, _, _ = engine.collect(10, _uniform_infer)
+    obs, _, _, _, _ = engine.collect(10, _uniform_infer)
     assert obs.shape[0] >= 10

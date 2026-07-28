@@ -54,7 +54,7 @@ def test_az119_engine_collects() -> None:
         n_games=1,
         seed=0,
     )
-    obs, pi, _, _ = engine.collect(20, infer)
+    obs, pi, _, _, _ = engine.collect(20, infer)
     assert obs.shape == (obs.shape[0], 119 * 8 * 8)
     np.testing.assert_allclose(pi.sum(axis=1), 1.0, atol=1e-12)
 
@@ -69,7 +69,7 @@ def test_az119_env_observation() -> None:
 
 
 def test_alphazero_collect_masks_illegal_actions() -> None:
-    obs, pi, z, telemetry = _engine().collect(60, _az_infer)
+    obs, pi, z, w, telemetry = _engine().collect(60, _az_infer)
     m = obs.shape[0]
     assert m >= 60
     assert obs.shape == (m, 19 * 8 * 8) and pi.shape == (m, _A)
@@ -80,6 +80,9 @@ def test_alphazero_collect_masks_illegal_actions() -> None:
     assert telemetry["decisions"] > 0
     # Truncated episodes bootstrap z from the (zero) value head; outcomes stay in [-1, 1].
     assert (np.abs(z) <= 1.0).all()
+    # 2p sequential: negamax consumes only the mover's perspective, so every row is a real
+    # decision (no value-only rows) and the policy weights are uniformly 1.
+    assert (w == 1.0).all()
 
 
 def test_mcts_treestrap_pairs() -> None:
