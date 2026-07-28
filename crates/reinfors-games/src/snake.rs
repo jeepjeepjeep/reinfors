@@ -402,20 +402,22 @@ impl Snake {
                 "grid_size {g} makes the observation tensor exceed 2^31 elements"
             ));
         }
-        // The declared respawn chance enumerates ordered k-tuples of free cells for k apples
-        // eaten on one tick (k <= min(snakes, food)); bound its worst case so a rare multi-eat
-        // cannot allocate an absurd probability vector (negative grids clamp to zero cells here; the
-        // placement construction below rejects them properly).
+        // The respawn chance indexes ordered k-tuples of free cells for k apples eaten on one
+        // tick (k <= min(snakes, food)). The declaration is O(1) at any size (`Uniform(count)`),
+        // but the index must survive an f64 mantissa (the uniform draw) and a usize decode —
+        // bound the worst case at 2^53. Unreachable for realistic configs (a 20-grid triple-eat
+        // is ~6e7); negative grids clamp to zero cells here and are rejected by the placement
+        // construction below.
         let k_max = self.num_snakes.min(self.initial_food_count) as u128;
         let cell_count = self.grid_size.max(0) as u128 * self.grid_size.max(0) as u128;
         let worst: u128 = (0..k_max)
             .map(|i| cell_count.saturating_sub(i))
             .try_fold(1u128, |acc, f| acc.checked_mul(f))
             .unwrap_or(u128::MAX);
-        if worst > 1 << 22 {
+        if worst > 1 << 53 {
             return Err(format!(
-                "worst-case respawn enumeration ({k_max} apples eatable at once on a \
-                 {cell_count} - cell grid) exceeds 2^22 outcomes; reduce food or grid size"
+                "worst-case respawn index space ({k_max} apples eatable at once on a \
+                 {cell_count} - cell grid) exceeds 2^53; reduce food or grid size"
             ));
         }
         let snakes = self.initial_snakes_checked()?;
@@ -797,25 +799,27 @@ impl Game for Snake {
 
     /// The respawn chance, declared (the game's only chance seam). `k` apples eaten on one tick
     /// (each living head eats at most one, so `k <= min(snakes, food)`) respawn as `k` sequential
-    /// uniform draws over the shrinking free set — enumerated as ordered tuples, mixed-radix with
+    /// uniform draws over the shrinking free set — indexed as ordered tuples, mixed-radix with
     /// bases `n, n-1, …, n-k+1` over the free-cell count `n` (the k = 2 case is exactly the old
     /// `n·(n-1)` ordered-pair layout). Placements cap at the free cells available; a full board
-    /// degenerates to one no-op outcome, keeping the sampler/declaration agreement exact. The
-    /// worst-case enumeration size is bounded at construction (`validate`).
+    /// degenerates to one no-op outcome, keeping the sampler/declaration agreement exact.
+    /// Declared as `Uniform(count)`: O(1) at any size — sampling consumers draw one index and
+    /// `apply_chance` decodes it procedurally; only `ExpandAll` enumerates (bounded at the
+    /// consumer). The index space is validated to fit 2^53 at construction.
     fn chance_outcomes(
         &self,
         state: &SnakeState,
         transition: &Transition<SnakeState, StepEvent>,
-    ) -> Option<Vec<f64>> {
+    ) -> Option<reinfors_core::ChanceDist> {
         let next = &transition.next_state;
         let eaten = state.food.len().saturating_sub(next.food.len());
         if eaten == 0 || transition.terminal {
             return None;
         }
-        let n = self.free_cell_count(next);
-        let placeable = eaten.min(n);
-        let outcomes: usize = (0..placeable).map(|i| n - i).product::<usize>().max(1);
-        Some(vec![1.0 / outcomes as f64; outcomes])
+        let n = self.free_cell_count(next) as u64;
+        let placeable = eaten.min(n as usize) as u64;
+        let outcomes: u64 = (0..placeable).map(|i| n - i).product::<u64>().max(1);
+        Some(reinfors_core::ChanceDist::Uniform(outcomes))
     }
 
     fn apply_chance(
@@ -983,14 +987,14 @@ mod game_tests {
         let st = initial_state(&[(4, 3)]); // in front of A: Forward eats
         let actions = [0usize, 0];
         let t = g.step(&st, &actions);
-        let probs = g
+        let dist = g
             .chance_outcomes(&st, &t)
             .expect("an eaten apple declares chance");
         let realized = reinfors_core::game::step_env(&g, &st, &actions, &mut TestRng(42));
         assert_eq!(realized.events, t.events);
         assert_eq!(realized.terminal, t.terminal);
         assert!(
-            (0..probs.len()).any(|d| realized.next_state == g.apply_chance(&st, &t, d)),
+            (0..dist.count() as usize).any(|d| realized.next_state == g.apply_chance(&st, &t, d)),
             "the realized state must be one of the declared outcomes"
         );
         let again = reinfors_core::game::step_env(&g, &st, &actions, &mut TestRng(42));
@@ -1063,11 +1067,13 @@ mod game_tests {
         let g = game();
         let st = initial_state(&[(4, 3)]);
         let t = g.step(&st, &[0, 0]); // A eats the only apple -> a respawn chance node
-        let probs = g.chance_outcomes(&st, &t).expect("eat declares chance");
+        let dist = g.chance_outcomes(&st, &t).expect("eat declares chance");
         let empties = empty_cells(&t.next_state.snakes, &t.next_state.food, G);
-        assert_eq!(probs.len(), empties.len(), "one outcome per empty cell");
-        let u = 1.0 / empties.len() as f64;
-        assert!(probs.iter().all(|&p| (p - u).abs() < 1e-15), "uniform");
+        assert_eq!(
+            dist,
+            reinfors_core::ChanceDist::Uniform(empties.len() as u64),
+            "one uniform outcome per empty cell"
+        );
         for (i, &cell) in empties.iter().enumerate() {
             let placed: Vec<Cell> = g
                 .apply_chance(&st, &t, i)
@@ -1554,14 +1560,13 @@ mod n_player_tests {
         let mut lead = game(3, 8, 2);
         lead.win_food_lead = Some(2);
         assert!(lead.validate().is_err(), "the lead rule is two-snake only");
-        // The respawn enumeration bound: multi-eat ordered-tuple fans past 2^22 reject at
-        // construction (40000-cell grid: even a double-eat enumerates ~1.6e9 outcomes).
-        assert!(game(3, 200, 3).validate().is_err());
-        assert!(game(3, 200, 2).validate().is_err());
-        assert!(game(3, 200, 1).validate().is_ok()); // one apple: one eat per tick, linear fan
-        assert!(game(3, 20, 2).validate().is_ok()); // double-eat fan on a 20-grid: ~160k, fine
-        assert!(game(3, 12, 3).validate().is_ok()); // triple-eat needs a small grid (~2.9M)
-        assert!(game(3, 20, 3).validate().is_err()); // ~63M outcomes: over the bound
+        // The respawn index space is O(1) to declare (`Uniform`), so the bound is only the
+        // 2^53 index-representability guard: every realistic config passes (the 20-grid
+        // triple-eat's ~6e7 index space included); a 1000-grid triple-eat (~1e18) rejects.
+        assert!(game(3, 20, 3).validate().is_ok());
+        assert!(game(3, 200, 2).validate().is_ok());
+        assert!(game(3, 200, 3).validate().is_ok()); // ~6.4e13: indexable
+        assert!(game(3, 1000, 3).validate().is_err());
     }
 
     #[test]
@@ -1686,7 +1691,7 @@ mod n_player_tests {
         }
         let t = g.step(&state, &[0, 0, 0]); // Forward for everyone
         assert!(state.food.len() == 3 && t.next_state.food.is_empty());
-        let probs = g
+        let dist = g
             .chance_outcomes(&state, &t)
             .expect("3 eats declare chance");
         let n = (6 * 6)
@@ -1696,12 +1701,12 @@ mod n_player_tests {
                 .map(|s| s.body.len())
                 .sum::<usize>() as i32;
         let n = n as usize;
-        assert_eq!(probs.len(), n * (n - 1) * (n - 2));
+        assert_eq!(dist.count() as usize, n * (n - 1) * (n - 2));
         // Every outcome yields exactly 3 fresh apples on free cells; outcome 0 places the three
         // lowest free cells in row-major order (sequential draws at index 0 each time).
         let s0 = g.apply_chance(&state, &t, 0);
         assert_eq!(s0.food.len(), 3);
-        let last = g.apply_chance(&state, &t, probs.len() - 1);
+        let last = g.apply_chance(&state, &t, dist.count() as usize - 1);
         assert_eq!(last.food.len(), 3);
         assert_ne!(s0.food, last.food);
     }

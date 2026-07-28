@@ -166,11 +166,17 @@ enum NodeKind {
     Decision,
     Chance {
         /// The declared outcome distribution (`Game::chance_outcomes`), indexing `apply_chance`.
-        probs: Vec<f64>,
+        dist: crate::game::ChanceDist,
         /// `Committed` mode: the frozen outcome draws (with replacement; `child` is parallel to
         /// this, so duplicated draws keep separate equal-weight branches, like `food_samples`).
-        /// Empty in the other modes, where `child` is parallel to `probs`.
+        /// Empty in the other modes. Under `ExpandAll`, `child` is parallel to the (bounded)
+        /// outcome space instead.
         committed: Vec<usize>,
+        /// `AlwaysResample`: sparse `(outcome, child)` pairs — the outcome space can be
+        /// combinatorial (`Uniform(count)`), so children materialize per DISTINCT drawn outcome
+        /// (at most one per simulation; a linear scan stays cheap) instead of a dense array.
+        /// `node.child` is empty in this mode, which is how the descent recognizes it.
+        resampled: Vec<(usize, usize)>,
     },
     Simultaneous(Box<SimNode>),
 }
@@ -460,14 +466,6 @@ impl<S: Clone> Tree<S> {
         }
     }
 
-    /// Draw an index ∝ `probs` from this tree's chance stream.
-    /// Draw an index ∝ `probs`. An associated fn over the rng (not `&mut self`) so callers can
-    /// split-borrow: `probs` usually borrows the arena, and cloning ~fan-width floats per descent
-    /// just to appease the borrow checker would be a real cost on wide fans.
-    fn draw_outcome(rng: &mut SplitMix64, probs: &[f64]) -> usize {
-        crate::rng::weighted_index(rng, probs)
-    }
-
     /// Select from the root down to an expandable edge (scored by `guidance`; chance nodes are
     /// descended per `chance` mode), create its child (stepping the game and materializing a chance
     /// outcome where the game declares one), and mark it as the leaf to back up. Returns how the
@@ -494,17 +492,21 @@ impl<S: Clone> Tree<S> {
                 // visit (a fresh leaf to evaluate), else keep descending.
                 let slot = self.pick_chance_slot(ni, chance);
                 self.path.push((ni, slot));
-                if self.arena[ni].child[slot] < 0 {
-                    let child = self.materialize_outcome(game, enc, ni, slot);
-                    self.leaf = child;
-                    return if self.arena[child].terminal {
-                        Reached::Terminal
-                    } else {
-                        Reached::Eval
-                    };
+                match self.chance_child(ni, slot) {
+                    Some(child) => {
+                        ni = child;
+                        continue;
+                    }
+                    None => {
+                        let child = self.materialize_outcome(game, enc, ni, slot);
+                        self.leaf = child;
+                        return if self.arena[child].terminal {
+                            Reached::Terminal
+                        } else {
+                            Reached::Eval
+                        };
+                    }
                 }
-                ni = self.arena[ni].child[slot] as usize;
-                continue;
             }
             let node = &self.arena[ni];
             self.max_depth_seen = self.max_depth_seen.max(node.depth);
@@ -591,15 +593,34 @@ impl<S: Clone> Tree<S> {
     /// The outcome slot a descent takes through the chance node `ni`, per mode: `Committed` picks
     /// uniformly among its frozen draws; the resampling modes draw fresh ∝ probability.
     fn pick_chance_slot(&mut self, ni: usize, chance: ChanceMode) -> usize {
-        // Destructure for disjoint borrows: `probs`/`committed` borrow the arena while the draw
-        // needs the rng — no per-descent clone of a fan-width probs vector.
+        // Destructure for disjoint borrows: `dist`/`committed` borrow the arena while the draw
+        // needs the rng.
         let Tree { arena, rng, .. } = self;
-        let NodeKind::Chance { probs, committed } = &arena[ni].kind else {
+        let NodeKind::Chance {
+            dist, committed, ..
+        } = &arena[ni].kind
+        else {
             unreachable!("pick_chance_slot on a decision node");
         };
         match chance {
             ChanceMode::Committed { .. } => rng.below(committed.len()),
-            ChanceMode::AlwaysResample | ChanceMode::ExpandAll => Self::draw_outcome(rng, probs),
+            ChanceMode::AlwaysResample | ChanceMode::ExpandAll => dist.draw(rng),
+        }
+    }
+
+    /// The already-materialized child for chance node `ni`'s `slot`, if any — dense (`Committed`
+    /// keyed by draw, `ExpandAll` by outcome) or sparse (`AlwaysResample` pairs).
+    fn chance_child(&self, ni: usize, slot: usize) -> Option<usize> {
+        let node = &self.arena[ni];
+        if node.child.is_empty() {
+            let NodeKind::Chance { resampled, .. } = &node.kind else {
+                unreachable!("chance_child on a decision node");
+            };
+            resampled.iter().find(|&&(o, _)| o == slot).map(|&(_, c)| c)
+        } else if node.child[slot] >= 0 {
+            Some(node.child[slot] as usize)
+        } else {
+            None
         }
     }
 
@@ -637,7 +658,14 @@ impl<S: Clone> Tree<S> {
         let child = self.child_leaf(game, enc, state, mover, self.arena[cni].depth + 1, false);
         let idx = self.arena.len();
         self.arena.push(child);
-        self.arena[cni].child[slot] = idx as i64;
+        if self.arena[cni].child.is_empty() {
+            let NodeKind::Chance { resampled, .. } = &mut self.arena[cni].kind else {
+                unreachable!()
+            };
+            resampled.push((slot, idx)); // sparse: AlwaysResample keys by distinct outcome
+        } else {
+            self.arena[cni].child[slot] = idx as i64;
+        }
         idx
     }
 
@@ -767,10 +795,10 @@ impl<S: Clone> Tree<S> {
         let t = game.step(&self.arena[ni].state, &joint);
         self.record_edge_reward::<G>(reward, ni, ai, &t);
         let depth = self.arena[ni].depth + 1;
-        if let Some(probs) = game.chance_outcomes(&self.arena[ni].state, &t) {
+        if let Some(dist) = game.chance_outcomes(&self.arena[ni].state, &t) {
             debug_assert!(!t.terminal, "chance_outcomes on a terminal transition");
-            debug_assert!(!probs.is_empty());
-            return self.expand_chance(game, enc, ni, ai, &t, probs, chance);
+            debug_assert!(dist.count() >= 1);
+            return self.expand_chance(game, enc, ni, ai, &t, dist, chance);
         }
         let child = self.child_leaf(game, enc, t.next_state, mover, depth, t.terminal);
         let idx = self.arena.len();
@@ -793,7 +821,7 @@ impl<S: Clone> Tree<S> {
         ni: usize,
         ai: usize,
         t: &crate::game::Transition<S, G::Event>,
-        probs: Vec<f64>,
+        dist: crate::game::ChanceDist,
         chance: ChanceMode,
     ) -> Expanded
     where
@@ -804,19 +832,31 @@ impl<S: Clone> Tree<S> {
             _ => self.arena[ni].actor,
         };
         let depth = self.arena[ni].depth;
-        let committed = match chance {
+        let committed: Vec<usize> = match chance {
             ChanceMode::Committed { samples } => {
                 debug_assert!(samples >= 1, "ChanceMode::Committed requires samples >= 1");
                 (0..samples.max(1))
-                    .map(|_| Self::draw_outcome(&mut self.rng, &probs))
+                    .map(|_| dist.draw(&mut self.rng))
                     .collect()
             }
             _ => Vec::new(),
         };
-        let width = if committed.is_empty() {
-            probs.len()
-        } else {
-            committed.len()
+        // Child storage: dense parallel to the draws (`Committed`) or the bounded outcome space
+        // (`ExpandAll` — exact, so an oversized space is an error); EMPTY for `AlwaysResample`,
+        // whose children materialize sparsely per distinct drawn outcome (see `chance_child`).
+        let width = match chance {
+            ChanceMode::Committed { .. } => committed.len(),
+            ChanceMode::ExpandAll => {
+                let count = dist.count();
+                assert!(
+                    count <= crate::policy::MAX_ENUMERATED_OUTCOMES as u64,
+                    "ExpandAll cannot enumerate {count} chance outcomes (bound {}); use a \
+                     sampling chance mode for combinatorial outcome spaces",
+                    crate::policy::MAX_ENUMERATED_OUTCOMES
+                );
+                count as usize
+            }
+            ChanceMode::AlwaysResample => 0,
         };
         let mut chance_node = Node::leaf(
             t.next_state.clone(),
@@ -826,7 +866,11 @@ impl<S: Clone> Tree<S> {
             vec![0],
             Vec::new(),
         );
-        chance_node.kind = NodeKind::Chance { probs, committed };
+        chance_node.kind = NodeKind::Chance {
+            dist,
+            committed,
+            resampled: Vec::new(),
+        };
         chance_node.actions = Vec::new();
         chance_node.child = vec![-1; width];
         let cni = self.arena.len();
@@ -985,11 +1029,10 @@ impl<S: Clone> Tree<S> {
     /// values mix independently on a simultaneous tree).
     fn fan_backprop(&mut self, gamma: f64) {
         let cni = self.leaf;
-        let NodeKind::Chance { probs, .. } = &self.arena[cni].kind else {
+        let NodeKind::Chance { dist, .. } = &self.arena[cni].kind else {
             unreachable!("fan_backprop on a decision node");
         };
-        let probs = probs.clone();
-        let total: f64 = probs.iter().sum();
+        let dist = dist.clone();
         let mut mix = vec![
             0.0f64;
             match self.mode {
@@ -998,21 +1041,22 @@ impl<S: Clone> Tree<S> {
             }
         ];
         let mut child_actor = self.arena[cni].actor;
-        for (slot, &p) in probs.iter().enumerate() {
+        for slot in 0..self.arena[cni].child.len() {
+            let p = dist.prob(slot); // normalized (the fan's children span the whole space)
             let child = self.arena[cni].child[slot] as usize;
             match &self.arena[child].kind {
                 NodeKind::Simultaneous(sim) => {
                     for (m, t) in mix.iter_mut().zip(&sim.tables) {
-                        *m += p / total * t.value;
+                        *m += p * t.value;
                     }
                 }
                 _ if self.mode == TreeMode::SeqMaxN => {
                     for (m, &v) in mix.iter_mut().zip(&self.arena[child].values_all) {
-                        *m += p / total * v;
+                        *m += p * v;
                     }
                 }
                 _ => {
-                    mix[0] += p / total * self.arena[child].value;
+                    mix[0] += p * self.arena[child].value;
                     child_actor = self.arena[child].actor;
                 }
             }
@@ -2027,10 +2071,15 @@ mod chance_tests {
                 }
             }
         }
-        fn chance_outcomes(&self, s: &St, t: &Transition<St, f64>) -> Option<Vec<f64>> {
+        fn chance_outcomes(
+            &self,
+            s: &St,
+            t: &Transition<St, f64>,
+        ) -> Option<crate::game::ChanceDist> {
             // Only the risky first-ply action (total unchanged by the deterministic part) is
             // stochastic.
-            (s.ply == 0 && t.next_state.total == s.total).then(|| vec![0.5, 0.5])
+            (s.ply == 0 && t.next_state.total == s.total)
+                .then(|| crate::game::ChanceDist::Weighted(vec![0.5, 0.5]))
         }
         fn apply_chance(&self, _s: &St, t: &Transition<St, f64>, outcome: usize) -> St {
             St {

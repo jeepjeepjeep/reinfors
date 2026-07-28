@@ -16,6 +16,12 @@ use crate::reward::Reward;
 /// to a silently empty fan) or attempts absurd allocations long before that.
 pub const MAX_JOINT_SLOTS: usize = 1 << 20;
 
+/// Upper bound on the outcomes an `ExpandAll` chance fan will ENUMERATE. Sampling modes draw
+/// single indices from a [`ChanceDist`](crate::ChanceDist) at any size; only exhaustive fanning
+/// pays per-outcome cost, and an exact fan past this bound is an error (ExpandAll's contract is
+/// exactness — use a sampling mode for combinatorial outcome spaces).
+pub const MAX_ENUMERATED_OUTCOMES: usize = 1 << 20;
+
 /// How an algorithm evaluates states and acts.
 pub trait Policy {
     type Evaluation;

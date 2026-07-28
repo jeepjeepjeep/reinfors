@@ -21,8 +21,22 @@ def test_construction_and_validation() -> None:
         _snake(9, grid_size=20)
     with pytest.raises(ValueError, match="two-snake"):
         _snake(3, win_food_lead=2, play_to_last=False)
-    with pytest.raises(ValueError, match="respawn enumeration"):
-        _snake(3, grid_size=45, food=3)
+    with pytest.raises(ValueError, match="respawn index space"):
+        _snake(3, grid_size=1000, food=3)  # ~1e18 ordered triples: past the 2^53 index guard
+
+
+def test_default_three_snake_config_constructs_and_plays() -> None:
+    # The motivating case for the compact chance declaration: default grid 20 / food 3 with
+    # three snakes has a ~6.4e7 worst-case respawn index space — O(1) to declare, and the env
+    # realizes triple-eats by drawing one index.
+    env = rf.Env(rf.games.Snake(num_snakes=3), seed=1)
+    env.reset()
+    assert env.num_agents() == 3
+    rng = np.random.default_rng(2)
+    for _ in range(60):
+        if env.done():
+            break
+        env.step({a: int(rng.choice(env.legal_actions(a))) for a in env.active_agents()})
 
 
 def test_env_plays_three_snakes_to_the_end() -> None:
