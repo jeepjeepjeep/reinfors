@@ -32,29 +32,36 @@ pub struct Transition<S, E> {
 /// `count` outcomes in O(1) at ANY size — the outcome space can be combinatorial (snake's
 /// k-apple respawn enumerates `P(free, k)` ordered placements) because sampling consumers draw
 /// one index and decode it procedurally through `apply_chance`; only enumeration (`ExpandAll`)
-/// ever pays per-outcome cost, and it bounds itself. `count` must fit 2^53 (indices survive an
-/// f64 mantissa; validated by the declaring game).
+/// ever pays per-outcome cost, and it bounds itself. `count` is the outcome-INDEX type
+/// (`usize`, matching `apply_chance`) and must fit `min(2^53, usize::MAX)` — indices must
+/// survive both an f64 mantissa (the uniform draw) and the platform word (validated by the
+/// declaring game at construction AND against decoded state).
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChanceDist {
     Weighted(Vec<f64>),
-    Uniform(u64),
+    Uniform(usize),
 }
 
 impl ChanceDist {
-    pub fn count(&self) -> u64 {
+    pub fn count(&self) -> usize {
         match self {
-            ChanceDist::Weighted(p) => p.len() as u64,
+            ChanceDist::Weighted(p) => p.len(),
             ChanceDist::Uniform(n) => *n,
         }
     }
 
-    /// The probability of outcome `i` (weights are normalized by their sum, mirroring the
-    /// weighted sampler).
-    pub fn prob(&self, i: usize) -> f64 {
-        match self {
-            ChanceDist::Weighted(p) => p[i] / p.iter().sum::<f64>(),
-            ChanceDist::Uniform(n) => 1.0 / *n as f64,
-        }
+    /// The normalized probabilities in outcome order, for exact enumeration. The weight total is
+    /// computed ONCE up front — a per-outcome normalization would make an N-outcome fan
+    /// quadratic in N (there is deliberately no `prob(i)` accessor for that reason).
+    pub fn iter_probs(&self) -> impl Iterator<Item = f64> + '_ {
+        let (total, uniform) = match self {
+            ChanceDist::Weighted(p) => (p.iter().sum::<f64>(), 0.0),
+            ChanceDist::Uniform(n) => (1.0, 1.0 / *n as f64),
+        };
+        (0..self.count()).map(move |i| match self {
+            ChanceDist::Weighted(p) => p[i] / total,
+            ChanceDist::Uniform(_) => uniform,
+        })
     }
 
     /// Draw one outcome index. Both arms consume exactly one `rng.unit()` — the uniform arm is
@@ -66,7 +73,7 @@ impl ChanceDist {
             ChanceDist::Weighted(p) => crate::rng::weighted_index(rng, p),
             ChanceDist::Uniform(n) => {
                 let u = rng.unit();
-                (((*n as f64) * u) as u64).min(n.saturating_sub(1)) as usize
+                (((*n as f64) * u) as usize).min(n.saturating_sub(1))
             }
         }
     }
@@ -272,5 +279,22 @@ mod step_env_tests {
         }
         let t = step_env(&Det, &4, &[0], &mut Unit(0.5));
         assert_eq!(t.next_state, 5);
+    }
+}
+
+#[cfg(test)]
+mod chance_dist_tests {
+    use super::*;
+
+    #[test]
+    fn iter_probs_normalizes_once_and_matches_both_arms() {
+        // Weighted: normalized by the (single) total; Uniform: 1/count per outcome.
+        let w = ChanceDist::Weighted(vec![1.0, 3.0]);
+        let probs: Vec<f64> = w.iter_probs().collect();
+        assert_eq!(probs, vec![0.25, 0.75]);
+        let u = ChanceDist::Uniform(4);
+        let probs: Vec<f64> = u.iter_probs().collect();
+        assert_eq!(probs, vec![0.25; 4]);
+        assert_eq!(u.count(), 4);
     }
 }

@@ -637,13 +637,14 @@ fn push_branches<G: Game>(
                 // error rather than an approximation — sample (Committed) instead.
                 let count = dist.count();
                 assert!(
-                    count <= crate::policy::MAX_ENUMERATED_OUTCOMES as u64,
+                    count <= crate::policy::MAX_ENUMERATED_OUTCOMES,
                     "ExpandAll cannot enumerate {count} chance outcomes (bound {}); use a \
                      sampling chance mode for combinatorial outcome spaces",
                     crate::policy::MAX_ENUMERATED_OUTCOMES
                 );
-                (0..count as usize)
-                    .map(|idx| (game.apply_chance(state, &t, idx), dist.prob(idx)))
+                dist.iter_probs()
+                    .enumerate()
+                    .map(|(idx, pr)| (game.apply_chance(state, &t, idx), pr))
                     .collect()
             }
             ChanceMode::AlwaysResample => unreachable!(

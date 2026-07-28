@@ -34,6 +34,8 @@
 //! prior-guided, noise-capable search use the `AlphaZero` policy. The reached-state start buffer
 //! remains the complementary coverage source.
 
+use std::collections::HashMap;
+
 use crate::encoder::{ActionView, StateEncoder};
 use crate::engine::CollectStats;
 use crate::evaluator::{Evaluator, Resolve};
@@ -172,11 +174,12 @@ enum NodeKind {
         /// Empty in the other modes. Under `ExpandAll`, `child` is parallel to the (bounded)
         /// outcome space instead.
         committed: Vec<usize>,
-        /// `AlwaysResample`: sparse `(outcome, child)` pairs — the outcome space can be
+        /// `AlwaysResample`: sparse outcome -> child map — the outcome space can be
         /// combinatorial (`Uniform(count)`), so children materialize per DISTINCT drawn outcome
-        /// (at most one per simulation; a linear scan stays cheap) instead of a dense array.
+        /// (at most one per simulation; a map keeps S simulations O(S), where a scanned vec
+        /// would be O(S^2) since combinatorial draws are almost always distinct).
         /// `node.child` is empty in this mode, which is how the descent recognizes it.
-        resampled: Vec<(usize, usize)>,
+        resampled: HashMap<usize, usize>,
     },
     Simultaneous(Box<SimNode>),
 }
@@ -616,7 +619,7 @@ impl<S: Clone> Tree<S> {
             let NodeKind::Chance { resampled, .. } = &node.kind else {
                 unreachable!("chance_child on a decision node");
             };
-            resampled.iter().find(|&&(o, _)| o == slot).map(|&(_, c)| c)
+            resampled.get(&slot).copied()
         } else if node.child[slot] >= 0 {
             Some(node.child[slot] as usize)
         } else {
@@ -662,7 +665,7 @@ impl<S: Clone> Tree<S> {
             let NodeKind::Chance { resampled, .. } = &mut self.arena[cni].kind else {
                 unreachable!()
             };
-            resampled.push((slot, idx)); // sparse: AlwaysResample keys by distinct outcome
+            resampled.insert(slot, idx); // sparse: AlwaysResample keys by distinct outcome
         } else {
             self.arena[cni].child[slot] = idx as i64;
         }
@@ -849,12 +852,12 @@ impl<S: Clone> Tree<S> {
             ChanceMode::ExpandAll => {
                 let count = dist.count();
                 assert!(
-                    count <= crate::policy::MAX_ENUMERATED_OUTCOMES as u64,
+                    count <= crate::policy::MAX_ENUMERATED_OUTCOMES,
                     "ExpandAll cannot enumerate {count} chance outcomes (bound {}); use a \
                      sampling chance mode for combinatorial outcome spaces",
                     crate::policy::MAX_ENUMERATED_OUTCOMES
                 );
-                count as usize
+                count
             }
             ChanceMode::AlwaysResample => 0,
         };
@@ -869,7 +872,7 @@ impl<S: Clone> Tree<S> {
         chance_node.kind = NodeKind::Chance {
             dist,
             committed,
-            resampled: Vec::new(),
+            resampled: HashMap::new(),
         };
         chance_node.actions = Vec::new();
         chance_node.child = vec![-1; width];
@@ -1041,8 +1044,11 @@ impl<S: Clone> Tree<S> {
             }
         ];
         let mut child_actor = self.arena[cni].actor;
-        for slot in 0..self.arena[cni].child.len() {
-            let p = dist.prob(slot); // normalized (the fan's children span the whole space)
+        let fan_probs: Vec<f64> = dist
+            .iter_probs()
+            .take(self.arena[cni].child.len())
+            .collect();
+        for (slot, &p) in fan_probs.iter().enumerate() {
             let child = self.arena[cni].child[slot] as usize;
             match &self.arena[child].kind {
                 NodeKind::Simultaneous(sim) => {

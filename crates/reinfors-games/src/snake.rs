@@ -414,10 +414,11 @@ impl Snake {
             .map(|i| cell_count.saturating_sub(i))
             .try_fold(1u128, |acc, f| acc.checked_mul(f))
             .unwrap_or(u128::MAX);
-        if worst > 1 << 53 {
+        if worst > (1u128 << 53).min(usize::MAX as u128) {
             return Err(format!(
                 "worst-case respawn index space ({k_max} apples eatable at once on a \
-                 {cell_count} - cell grid) exceeds 2^53; reduce food or grid size"
+                 {cell_count} - cell grid) exceeds min(2^53, usize::MAX); reduce food or grid \
+                 size"
             ));
         }
         let snakes = self.initial_snakes_checked()?;
@@ -816,9 +817,14 @@ impl Game for Snake {
         if eaten == 0 || transition.terminal {
             return None;
         }
-        let n = self.free_cell_count(next) as u64;
-        let placeable = eaten.min(n as usize) as u64;
-        let outcomes: u64 = (0..placeable).map(|i| n - i).product::<u64>().max(1);
+        let n = self.free_cell_count(next);
+        let placeable = eaten.min(n);
+        // Checked as a defensive backstop: construction AND decoded-state validation bound the
+        // index space, but a silent wrap here would mean silently wrong probabilities.
+        let outcomes = (0..placeable)
+            .try_fold(1usize, |acc, i| acc.checked_mul(n - i))
+            .expect("respawn index space overflows usize (bounded at construction and decode)")
+            .max(1);
         Some(reinfors_core::ChanceDist::Uniform(outcomes))
     }
 
@@ -994,7 +1000,7 @@ mod game_tests {
         assert_eq!(realized.events, t.events);
         assert_eq!(realized.terminal, t.terminal);
         assert!(
-            (0..dist.count() as usize).any(|d| realized.next_state == g.apply_chance(&st, &t, d)),
+            (0..dist.count()).any(|d| realized.next_state == g.apply_chance(&st, &t, d)),
             "the realized state must be one of the declared outcomes"
         );
         let again = reinfors_core::game::step_env(&g, &st, &actions, &mut TestRng(42));
@@ -1071,7 +1077,7 @@ mod game_tests {
         let empties = empty_cells(&t.next_state.snakes, &t.next_state.food, G);
         assert_eq!(
             dist,
-            reinfors_core::ChanceDist::Uniform(empties.len() as u64),
+            reinfors_core::ChanceDist::Uniform(empties.len()),
             "one uniform outcome per empty cell"
         );
         for (i, &cell) in empties.iter().enumerate() {
@@ -1525,6 +1531,24 @@ impl reinfors_core::StateCodec for Snake {
                 return Err(format!("food cell {cell:?} outside the grid"));
             }
         }
+        // A decoded state may carry MORE food than `initial_food_count` (validation is safety,
+        // not reachability) — but the respawn index space it implies must still be indexable,
+        // or a later multi-eat would overflow the chance arithmetic the construction-time bound
+        // was computed to prevent.
+        let k = self.num_snakes.min(state.food.len()) as u128;
+        let cells = self.grid_size.max(0) as u128 * self.grid_size.max(0) as u128;
+        let worst: u128 = (0..k)
+            .map(|i| cells.saturating_sub(i))
+            .try_fold(1u128, |acc, f| acc.checked_mul(f))
+            .unwrap_or(u128::MAX);
+        if worst > (1u128 << 53).min(usize::MAX as u128) {
+            return Err(format!(
+                "{} food cells with {} snakes imply a respawn index space past \
+                 min(2^53, usize::MAX)",
+                state.food.len(),
+                self.num_snakes
+            ));
+        }
         let terminal = self.is_terminal(&state.snakes);
         if terminal != done {
             return Err(format!(
@@ -1701,14 +1725,41 @@ mod n_player_tests {
                 .map(|s| s.body.len())
                 .sum::<usize>() as i32;
         let n = n as usize;
-        assert_eq!(dist.count() as usize, n * (n - 1) * (n - 2));
+        assert_eq!(dist.count(), n * (n - 1) * (n - 2));
         // Every outcome yields exactly 3 fresh apples on free cells; outcome 0 places the three
         // lowest free cells in row-major order (sequential draws at index 0 each time).
         let s0 = g.apply_chance(&state, &t, 0);
         assert_eq!(s0.food.len(), 3);
-        let last = g.apply_chance(&state, &t, dist.count() as usize - 1);
+        let last = g.apply_chance(&state, &t, dist.count() - 1);
         assert_eq!(last.food.len(), 3);
         assert_ne!(s0.food, last.food);
+    }
+
+    #[test]
+    fn decoded_food_counts_past_the_index_space_reject() {
+        use reinfors_core::StateCodec;
+        // The game constructs with 1 food (worst-case k = 1, trivially indexable) — but a decoded
+        // state can carry any in-grid food set, and 8 snakes x 8 food implies P(400, 8) ≈ 4e20
+        // ordered placements: past the index guard, so validation must reject it before the
+        // chance arithmetic ever sees it.
+        let g = game(8, 20, 1);
+        assert!(g.validate().is_ok());
+        let snakes: Vec<SnakeBody> = (0..8)
+            .map(|i| body_at(&[(2 * i, 0)], Action::Right))
+            .collect();
+        let ok_state = SnakeState {
+            snakes: snakes.clone(),
+            food: (0..3).map(|c| (1, c)).collect(),
+        };
+        g.validate_decoded_state(&ok_state, false).unwrap();
+        let over = SnakeState {
+            snakes,
+            food: (0..8).map(|c| (1, c)).collect(),
+        };
+        assert!(g
+            .validate_decoded_state(&over, false)
+            .unwrap_err()
+            .contains("index space"));
     }
 
     #[test]
