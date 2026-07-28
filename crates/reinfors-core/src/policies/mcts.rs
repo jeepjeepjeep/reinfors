@@ -64,6 +64,19 @@ pub(crate) enum Guidance {
     },
 }
 
+/// Which backup scheme sequential games use (simultaneous games always run DUCT). `Auto` is the
+/// production default: scalar negamax at <=2 agents (zero-sum exact, one value row per leaf),
+/// Max^N past that. `MaxN` forces the Max^N vector backup at 2 agents too — the measurement
+/// seam for the negamax-deletion decision (PUCT only: Max^N consumes per-perspective leaf
+/// VALUES). Under a forced Max^N the engine also emits per-perspective value rows, keeping
+/// supervised perspectives = consumed perspectives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SequentialBackup {
+    #[default]
+    Auto,
+    MaxN,
+}
+
 /// Which root prior(s) receive Dirichlet exploration noise in a *simultaneous* search tree.
 /// Sequential trees have one root table (the requester's), so the scope is irrelevant there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -270,8 +283,11 @@ impl<S> Node<S> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TreeMode {
     /// Sequential, ≤2 agents: scalar negamax (zero-sum sign flip across turn changes) — the
-    /// legacy path, bit-identical for existing games. Kept alongside Max^N until a measured 2p
-    /// comparison justifies deleting it.
+    /// legacy path, bit-identical for existing games. MEASURED against forced Max^N (connect4
+    /// AZ, equal decisions, 2 seeds): negamax ahead head-to-head (~0.60 mean) at ~35% less wall
+    /// (one leaf row vs two) — the zero-sum opponent model comes free here, where Max^N must
+    /// learn both value functions. Negamax therefore stays the 2p default;
+    /// `SequentialBackup::MaxN` remains the re-measurement seam.
     SeqNegamax,
     /// Sequential, N>2 agents (Max^N): per-agent value vectors propagate absolutely (no
     /// perspective flips); each mover's edge keeps its OWN component for selection. Leaves are
@@ -424,13 +440,14 @@ impl<S: Clone> Tree<S> {
         state: S,
         requester: usize,
         chance_seed: u64,
+        force_maxn: bool,
     ) -> Tree<S>
     where
         G: Game<State = S>,
     {
         let n = game.num_agents();
         let (root, mode) = match game.actor(&state) {
-            Actor::Agent(actor) if n > 2 => {
+            Actor::Agent(actor) if n > 2 || (force_maxn && n == 2) => {
                 (maxn_leaf(game, enc, state, actor, 0), TreeMode::SeqMaxN)
             }
             Actor::Agent(actor) => {
@@ -1224,6 +1241,7 @@ where
         seed,
         requests,
         eval,
+        false, // UCT never forces Max^N (its leaf values need own-turn decision points)
     )
 }
 
@@ -1245,6 +1263,7 @@ pub(crate) fn search_many<G, F>(
     seed: u64,
     requests: Vec<(G::State, usize)>,
     eval: &mut Evaluator<'_, F>,
+    force_maxn: bool,
 ) -> Vec<SearchEvaluation>
 where
     G: Game + Sync,
@@ -1263,7 +1282,7 @@ where
             // Per-tree chance stream, disjoint from the PUCT root-noise stream (different salt).
             let chance_seed =
                 seed ^ 0x53A3_C5A9_1D87_2F6B ^ (ti as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-            Tree::new(game, enc, state, agent, chance_seed)
+            Tree::new(game, enc, state, agent, chance_seed, force_maxn)
         })
         .collect();
     // Sequential N>2 (Max^N) needs per-perspective leaf VALUES; a Q-derived (UCT) leaf value is
@@ -1961,6 +1980,7 @@ mod masking_tests {
                 temperature_drop: u32::MAX,
                 chance: ChanceMode::AlwaysResample,
                 noise_scope: NoiseScope::Requester,
+                sequential_backup: Default::default(),
             };
             alphazero_many(
                 &EvenOnly,
@@ -2257,6 +2277,7 @@ mod chance_tests {
             temperature_drop: u32::MAX,
             chance: ChanceMode::AlwaysResample,
             noise_scope: NoiseScope::Requester,
+            sequential_backup: Default::default(),
         };
         let out = alphazero_many(
             &RiskyGame,
@@ -2356,6 +2377,7 @@ mod duct_tests {
             temperature_drop: u32::MAX,
             chance: ChanceMode::AlwaysResample,
             noise_scope: scope,
+            sequential_backup: Default::default(),
         }
     }
 
@@ -2704,6 +2726,7 @@ mod frame_tests {
             temperature_drop: u32::MAX,
             chance: ChanceMode::AlwaysResample,
             noise_scope: NoiseScope::Requester,
+            sequential_backup: Default::default(),
         };
         let run = |use_rot: bool| {
             let mut infer = move |obs: Vec<f32>, n: usize| -> Vec<f64> {
@@ -2852,6 +2875,7 @@ mod maxn_tests {
             temperature_drop: 0,
             chance: ChanceMode::Committed { samples: 1 },
             noise_scope: NoiseScope::Requester,
+            sequential_backup: Default::default(),
         };
         // Uniform logits, zero value: the terminal payoffs are the only signal.
         let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 3];
@@ -2960,5 +2984,153 @@ mod maxn_tests {
                 e.visits
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod forced_maxn_tests {
+    //! The `SequentialBackup::MaxN` seam must actually change the TREE's backup at 2 agents —
+    //! pinned with a general-sum discriminator where negamax (opponent minimizes MY value) and
+    //! Max^N (opponent maximizes ITS OWN) pick different root actions. (An engine-level test
+    //! can't see this: the value-row plumbing looks identical either way.)
+    use super::*;
+    use crate::encoder::StateEncoder;
+    use crate::evaluator::Evaluator;
+    use crate::game::{Actor, Game, Rng, Transition};
+    use crate::policies::alphazero::{alphazero_many, AlphaZeroConfig};
+    use crate::reward::Reward as RewardTrait;
+
+    /// Agent 0: L (0) hands the move to agent 1 — (a) pays (5, 10), (b) pays (0, 0); R (1) ends
+    /// at (3, 0). A self-interested agent 1 picks (a), so Max^N values L at 5 and picks L; the
+    /// paranoid negamax model assumes (b) and picks R.
+    #[derive(Clone)]
+    enum Lr {
+        Root,
+        AfterL,
+        Done,
+    }
+    struct Discriminator2;
+    impl Game for Discriminator2 {
+        type State = Lr;
+        type Event = f64;
+        fn num_agents(&self) -> usize {
+            2
+        }
+        fn action_count(&self) -> usize {
+            2
+        }
+        fn actor(&self, s: &Lr) -> Actor {
+            match s {
+                Lr::AfterL => Actor::Agent(1),
+                _ => Actor::Agent(0),
+            }
+        }
+        fn legal_actions(&self, s: &Lr, agent: usize) -> Vec<usize> {
+            match (s, agent) {
+                (Lr::Root, 0) | (Lr::AfterL, 1) => vec![0, 1],
+                _ => Vec::new(),
+            }
+        }
+        fn step(&self, s: &Lr, actions: &[usize]) -> Transition<Lr, f64> {
+            match s {
+                Lr::Root if actions[0] == 0 => Transition {
+                    next_state: Lr::AfterL,
+                    events: vec![0.0; 2],
+                    terminal: false,
+                },
+                Lr::Root => Transition {
+                    next_state: Lr::Done,
+                    events: vec![3.0, 0.0],
+                    terminal: true,
+                },
+                Lr::AfterL if actions[1] == 0 => Transition {
+                    next_state: Lr::Done,
+                    events: vec![5.0, 10.0],
+                    terminal: true,
+                },
+                Lr::AfterL => Transition {
+                    next_state: Lr::Done,
+                    events: vec![0.0; 2],
+                    terminal: true,
+                },
+                Lr::Done => unreachable!("stepping a terminal state"),
+            }
+        }
+        fn initial_state(&self, _rng: &mut dyn Rng) -> Lr {
+            Lr::Root
+        }
+    }
+
+    struct LrEnc;
+    impl crate::encoder::ActionView for LrEnc {}
+    impl StateEncoder for LrEnc {
+        type State = Lr;
+        fn encode(&self, s: &Lr, agent: usize) -> Vec<f32> {
+            let phase = match s {
+                Lr::Root => 0.0,
+                Lr::AfterL => 1.0,
+                Lr::Done => 2.0,
+            };
+            vec![phase, agent as f32]
+        }
+        fn obs_shape(&self) -> (usize, usize, usize) {
+            (1, 1, 2)
+        }
+    }
+
+    struct Payout;
+    impl RewardTrait for Payout {
+        type Event = f64;
+        fn step_reward(&self, e: &f64, _agent: usize) -> f64 {
+            *e
+        }
+    }
+
+    #[test]
+    fn sequential_backup_maxn_changes_the_two_agent_tree() {
+        let run = |backup| {
+            let cfg = AlphaZeroConfig {
+                num_simulations: 200,
+                c_puct: 1.5,
+                gamma: 1.0,
+                max_depth: 8,
+                noise_epsilon: 0.0,
+                noise_alpha: 0.3,
+                temperature: 0.0,
+                temperature_drop: 0,
+                chance: ChanceMode::Committed { samples: 1 },
+                noise_scope: NoiseScope::Requester,
+                sequential_backup: backup,
+            };
+            let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 3];
+            let mut eval = Evaluator::new(&mut infer, None);
+            alphazero_many(
+                &Discriminator2,
+                &LrEnc,
+                &Payout,
+                &cfg,
+                vec![(Lr::Root, 0)],
+                0,
+                &mut eval,
+            )
+            .remove(0)
+        };
+        let auto = run(SequentialBackup::Auto);
+        assert!(
+            auto.visits[1] > auto.visits[0],
+            "negamax (paranoid at general-sum) must prefer R: {:?}",
+            auto.visits
+        );
+        let maxn = run(SequentialBackup::MaxN);
+        assert!(
+            maxn.visits[0] > maxn.visits[1],
+            "forced Max^N (self-interested opponent) must prefer L: {:?}",
+            maxn.visits
+        );
+        assert!(
+            (maxn.values[0][1] - 3.0).abs() < 1e-9 && maxn.values[0][0] > 4.0,
+            "Max^N root values converge to the self-interested payoffs: {:?}",
+            maxn.values[0]
+        );
     }
 }

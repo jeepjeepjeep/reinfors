@@ -285,7 +285,10 @@ where
             //    emitted only where the search consumes them: 2p-sequential (negamax reads the
             //    mover row only) and simultaneous games (all active agents hold real steps)
             //    buffer nothing extra.
-            if self.sequential && num_agents > 2 {
+            if self
+                .policy
+                .evaluates_all_perspectives(self.sequential, num_agents)
+            {
                 let action_count = self.game.action_count();
                 for (gi, agents) in acted.iter().enumerate() {
                     if agents.iter().all(|s| s.is_none()) {

@@ -116,6 +116,7 @@ fn policies_declare_their_agent_capability() {
         temperature_drop: 0,
         chance: ChanceMode::Committed { samples: 1 },
         noise_scope: reinfors_core::NoiseScope::Requester,
+        sequential_backup: Default::default(),
     };
     assert_eq!(AlphaZero::new(az_cfg).max_agents(true), None);
     assert_eq!(EpsilonGreedyQ::new(1, 0.0).max_agents(true), None);
@@ -368,6 +369,7 @@ fn alphazero_engine_collects_on_a_three_agent_sequential_game() {
         temperature_drop: 0,
         chance: ChanceMode::Committed { samples: 1 },
         noise_scope: reinfors_core::NoiseScope::Requester,
+        sequential_backup: Default::default(),
     };
     let policy = AlphaZero::new(az_cfg);
     let learner = reinfors_core::AlphaZeroLearner::new(0.99);
@@ -464,6 +466,7 @@ fn value_only_rows_carry_each_agents_own_return() {
         temperature_drop: 0,
         chance: ChanceMode::Committed { samples: 1 },
         noise_scope: reinfors_core::NoiseScope::Requester,
+        sequential_backup: Default::default(),
     };
     let mut engine = Engine::new(
         PayoutSeq,
@@ -563,6 +566,7 @@ fn truncation_bootstraps_every_perspectives_own_tail() {
         temperature_drop: 0,
         chance: ChanceMode::Committed { samples: 1 },
         noise_scope: reinfors_core::NoiseScope::Requester,
+        sequential_backup: Default::default(),
     };
     let mut engine = Engine::new(
         EndlessRR,
@@ -750,4 +754,93 @@ fn uniform_draws_cover_the_index_space() {
     );
     // Loose uniformity: no bucket more than 3x the mean.
     assert!(hits.iter().all(|&h| h < 300), "roughly uniform: {hits:?}");
+}
+
+/// Two agents taking turns; terminal after four plies with payoffs [1, 2].
+struct TwoRobin;
+
+impl Game for TwoRobin {
+    type State = St;
+    type Event = f64;
+    fn num_agents(&self) -> usize {
+        2
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn actor(&self, s: &St) -> Actor {
+        Actor::Agent(s.tick % 2)
+    }
+    fn legal_actions(&self, s: &St, agent: usize) -> Vec<usize> {
+        if agent == s.tick % 2 && s.tick < 4 {
+            vec![0, 1]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, f64> {
+        let terminal = s.tick + 1 >= 4;
+        Transition {
+            next_state: St { tick: s.tick + 1 },
+            events: if terminal {
+                vec![1.0, 2.0]
+            } else {
+                vec![0.0; 2]
+            },
+            terminal,
+        }
+    }
+    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+        St { tick: 0 }
+    }
+}
+
+#[test]
+fn forced_maxn_supervises_both_perspectives_at_two_agents() {
+    // The negamax-deletion measurement seam: SequentialBackup::MaxN at 2 agents runs the vector
+    // backup AND emits value-only rows for the non-mover — supervised ≡ consumed. Auto keeps the
+    // mover-only negamax pipeline byte-for-byte.
+    let cfg = |backup| AlphaZeroConfig {
+        num_simulations: 8,
+        c_puct: 1.5,
+        gamma: 1.0,
+        max_depth: 6,
+        noise_epsilon: 0.0,
+        noise_alpha: 0.3,
+        temperature: 0.0,
+        temperature_drop: 0,
+        chance: ChanceMode::Committed { samples: 1 },
+        noise_scope: reinfors_core::NoiseScope::Requester,
+        sequential_backup: backup,
+    };
+    let run = |backup| {
+        let mut engine = Engine::new(
+            TwoRobin,
+            Box::new(Enc),
+            Box::new(PayoutReward),
+            AlphaZero::new(cfg(backup)),
+            reinfors_core::AlphaZeroLearner::new(1.0),
+            EngineParams {
+                n_games: 1,
+                seed: 9,
+            },
+        );
+        engine
+            .collect(8, |_obs: Vec<f32>, n: usize| vec![0.0; n * 3])
+            .0
+    };
+    let auto = run(reinfors_core::SequentialBackup::Auto);
+    assert!(auto.iter().all(|r| r.3 == 1.0), "Auto: mover rows only");
+    let maxn = run(reinfors_core::SequentialBackup::MaxN);
+    let value_only = maxn.iter().filter(|r| r.3 == 0.0).count();
+    let movers = maxn.iter().filter(|r| r.3 == 1.0).count();
+    assert_eq!(value_only, movers, "one non-mover row per decision at N=2");
+    // gamma 1, rewards only at the end: every row's z is its own agent's payoff.
+    for (obs, _pi, z, _w) in &maxn {
+        let expect = f64::from(obs[1]) + 1.0;
+        assert!(
+            (z - expect).abs() < 1e-12,
+            "per-perspective z: got {z}, want {expect}"
+        );
+    }
 }

@@ -85,22 +85,27 @@ def make_infer(net: AlphaZeroNet, device: str) -> Callable[[np.ndarray], tuple[n
 
 
 def alphazero_loss(
-    logits: torch.Tensor, values: torch.Tensor, pi: torch.Tensor, z: torch.Tensor
+    logits: torch.Tensor, values: torch.Tensor, pi: torch.Tensor, z: torch.Tensor, w: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """The paper's two terms: cross-entropy of the policy head against the search's visit
-    distribution, MSE of the value head against the realized outcome."""
-    policy_loss = -(pi * F.log_softmax(logits, dim=-1)).sum(dim=-1).mean()
+    """The paper's two terms, policy-weighted: cross-entropy of the policy head against the
+    search's visit distribution on acting rows (`w` = batch.policy_weights, 0 on value-only
+    non-mover rows — their pi is inert zeros), MSE of the value head against the realized
+    outcome on every row."""
+    ce = -(pi * F.log_softmax(logits, dim=-1)).sum(dim=-1)
+    policy_loss = (w * ce).sum() / w.sum().clamp(min=1.0)
     value_loss = F.mse_loss(values, z)
     return policy_loss, value_loss
 
 
-def build_engine(n_games: int, seed: int) -> rf.Engine:
+def build_engine(n_games: int, seed: int, sequential_backup: str = "auto") -> rf.Engine:
     # Handle defaults are the AlphaZero conventions: noise_epsilon 0.25, noise_alpha 0.3,
     # temperature 1.0 for the first 8 plies. gamma=1 + win/loss=±1 gives the paper's z.
+    # `sequential_backup="maxn"` forces the Max^N vector backup (per-perspective leaf values +
+    # value-only rows for the non-mover) — the negamax-deletion measurement seam.
     return rf.Engine(
         rf.games.Connect4(),
         rf.Reward(win=1.0, loss=-1.0),
-        rf.policies.AlphaZero(num_simulations=48),
+        rf.policies.AlphaZero(num_simulations=48, sequential_backup=sequential_backup),
         rf.learners.AlphaZero(gamma=1.0),
         n_games=n_games,
         seed=seed,
@@ -113,6 +118,7 @@ def train_pass(
     obs: np.ndarray,
     pi: np.ndarray,
     z: np.ndarray,
+    weights: np.ndarray,
     batch_size: int,
     device: str,
 ) -> tuple[float, float]:
@@ -121,12 +127,13 @@ def train_pass(
     o = torch.from_numpy(obs).reshape(-1, c, h, w).to(device)
     p = torch.from_numpy(pi).float().to(device)
     v = torch.from_numpy(z).float().to(device)
+    pw = torch.from_numpy(weights).float().to(device)
     perm = torch.randperm(o.shape[0])
     p_sum, v_sum, batches = 0.0, 0.0, 0
     for start in range(0, o.shape[0], batch_size):
         idx = perm[start : start + batch_size]
         logits, values = net(o[idx])
-        policy_loss, value_loss = alphazero_loss(logits, values, p[idx], v[idx])
+        policy_loss, value_loss = alphazero_loss(logits, values, p[idx], v[idx], pw[idx])
         optimizer.zero_grad()
         (policy_loss + value_loss).backward()  # type: ignore[no-untyped-call]  # torch stub gap
         optimizer.step()
@@ -154,7 +161,10 @@ def eval_vs_random(net: AlphaZeroNet, device: str, games: int, seed: int) -> flo
                 with torch.no_grad():
                     x = torch.from_numpy(env.observe(agent)).reshape(1, c, h, w).to(device)
                     logits, _ = net(x)
-                action = int(logits[0].argmax().item())
+                # Argmax over the LEGAL set: a dense argmax can pick a full column, which the Env
+                # boundary rejects (a trained net rarely ranks one on top, but late-game it can).
+                row = logits[0].cpu().numpy()
+                action = max(env.legal_actions(agent), key=lambda a: row[a])
             else:
                 action = rng.choice(env.legal_actions(agent))
             events = env.step({agent: action})
@@ -174,9 +184,10 @@ def run_iteration(
     batch: rf._reinfors.AlphaZeroBatch,
 ) -> None:
     obs, pi, z = batch.obs, batch.policy_targets, batch.value_targets
+    weights = batch.policy_weights
     policy_loss = value_loss = float("nan")  # --train-passes 0 = collect-only; nothing to report
     for _ in range(args.train_passes):
-        policy_loss, value_loss = train_pass(net, optimizer, obs, pi, z, args.batch_size, args.device)
+        policy_loss, value_loss = train_pass(net, optimizer, obs, pi, z, weights, args.batch_size, args.device)
     print(
         f"  iter {it:3d}  records {obs.shape[0]:4d}  policy_loss {policy_loss:.4f}  "
         f"value_loss {value_loss:.4f}  episodes {len(batch.telemetry['episodes'])}"
@@ -202,15 +213,22 @@ def main() -> None:
     )
     parser.add_argument("--eval-every", type=int, default=10, help="iterations between eval probes (0 = off)")
     parser.add_argument("--eval-games", type=int, default=50)
+    parser.add_argument(
+        "--sequential-backup",
+        choices=["auto", "maxn"],
+        default="auto",
+        help="auto = negamax (2p zero-sum); maxn forces the Max^N vector backup (measurement seam)",
+    )
     parser.add_argument("--device", default="cpu", help="cpu is fastest at these tiny batch sizes")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--save", default=None, help="path to torch.save the final net state_dict")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
     game = rf.games.Connect4()
     net = AlphaZeroNet(game.observation_space().shape, game.action_space().n, args.width).to(args.device)
     optimizer = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
-    engine = build_engine(args.n_games, args.seed)
+    engine = build_engine(args.n_games, args.seed, args.sequential_backup)
 
     mode = "sync" if args.depth is None else f"depth={args.depth}"
     print(
@@ -250,6 +268,9 @@ def main() -> None:
                     collector_net.load_state_dict(net.state_dict())
                 run_iteration(args, net, optimizer, it, batch)
     print(f"  total {time.perf_counter() - t0:.1f}s for {args.iterations} iterations ({mode})")
+    if args.save:
+        torch.save({"state_dict": net.state_dict(), "width": args.width}, args.save)
+        print(f"saved {args.save}")
 
 
 if __name__ == "__main__":

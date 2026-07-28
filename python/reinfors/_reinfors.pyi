@@ -180,6 +180,7 @@ class PolicyHandle:
         temperature_drop: int | None = ...,
         chance: ChanceModeHandle | None = ...,
         noise: NoiseHandle | None = ...,
+        sequential_backup: str = ...,
     ) -> PolicyHandle: ...
 
 class LearnerHandle:

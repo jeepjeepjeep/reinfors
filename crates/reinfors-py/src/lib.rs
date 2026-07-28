@@ -433,6 +433,7 @@ fn policy_cfg(spec: &PolicySpec) -> Value {
             temperature_drop,
             chance,
             noise_scope,
+            sequential_backup,
         } => {
             // `noise=None` is stored as epsilon 0 (the noise-free path) — rendered back as null.
             let noise = if *noise_epsilon == 0.0 {
@@ -457,6 +458,10 @@ fn policy_cfg(spec: &PolicySpec) -> Value {
                 "temperature_drop": drop_cfg(*temperature_drop),
                 "chance": chance_cfg(chance),
                 "noise": noise,
+                "sequential_backup": match sequential_backup {
+                    reinfors_core::SequentialBackup::Auto => "auto",
+                    reinfors_core::SequentialBackup::MaxN => "maxn",
+                },
             })
         }
     }
@@ -1836,6 +1841,7 @@ enum PolicySpec {
         temperature_drop: u32,
         chance: ChanceMode,
         noise_scope: NoiseScope,
+        sequential_backup: reinfors_core::SequentialBackup,
     },
 }
 
@@ -2121,6 +2127,7 @@ where
                 temperature_drop,
                 chance,
                 noise_scope,
+                sequential_backup,
             },
             LearnerSpec::AlphaZero { gamma },
         ) => {
@@ -2158,6 +2165,7 @@ where
                 temperature_drop,
                 chance,
                 noise_scope,
+                sequential_backup,
             });
             check_max_agents(&policy, "AlphaZero", &game)?;
             check_joint_space("AlphaZero", &game, game.num_agents())?;
@@ -3445,8 +3453,9 @@ impl PolicyHandle {
     /// `rf.noise.Dirichlet` handle; `None` disables root noise; omitted = the classic self-play
     /// default `Dirichlet(0.25, 0.3, "requester")`.
     #[staticmethod]
-    #[pyo3(signature = (num_simulations=64, c_puct=1.5, max_depth=64, temperature=1.0, temperature_drop=8, chance=None, noise=Some(NoiseHandle::default_dirichlet())))]
+    #[pyo3(signature = (num_simulations=64, c_puct=1.5, max_depth=64, temperature=1.0, temperature_drop=8, chance=None, noise=Some(NoiseHandle::default_dirichlet()), sequential_backup="auto"))]
     #[pyo3(name = "AlphaZero")]
+    #[allow(clippy::too_many_arguments)]
     fn alphazero(
         num_simulations: usize,
         c_puct: f64,
@@ -3455,6 +3464,7 @@ impl PolicyHandle {
         temperature_drop: Option<u32>,
         chance: Option<ChanceModeHandle>,
         noise: Option<NoiseHandle>,
+        sequential_backup: &str,
     ) -> PyResult<Self> {
         // `noise=None` = off (epsilon 0 internally — the core's noise-free path); the alpha/scope
         // placeholders are inert at epsilon 0.
@@ -3463,6 +3473,17 @@ impl PolicyHandle {
         let (noise_epsilon, noise_alpha, noise_scope) = match noise {
             Some(n) => (n.epsilon, n.alpha, n.scope),
             None => (0.0, 0.3, NoiseScope::Requester),
+        };
+        // The sequential backup scheme: "auto" (negamax at <=2 agents, Max^N past) or "maxn"
+        // (force the Max^N vector backup at 2 — the negamax-deletion measurement seam).
+        let sequential_backup = match sequential_backup {
+            "auto" => reinfors_core::SequentialBackup::Auto,
+            "maxn" => reinfors_core::SequentialBackup::MaxN,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown sequential_backup {other:?}; expected \"auto\" or \"maxn\""
+                )))
+            }
         };
         Ok(PolicyHandle {
             spec: PolicySpec::AlphaZero {
@@ -3475,6 +3496,7 @@ impl PolicyHandle {
                 temperature_drop: temperature_drop.unwrap_or(u32::MAX),
                 chance: chance.map_or(ChanceMode::AlwaysResample, |c| c.mode),
                 noise_scope,
+                sequential_backup,
             },
         })
     }

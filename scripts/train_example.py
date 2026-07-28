@@ -72,18 +72,25 @@ def treestrap_loss(q: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) ->
     return (mask.unsqueeze(-1) * huber).sum() / (mask.sum().clamp(min=1.0) * q.shape[-1])
 
 
-def build_engine(grid: int, n_heads: int, n_games: int, seed: int) -> rf.Engine:
-    game = rf.games.Snake(grid_size=grid, max_ticks=200)  # truncation horizon is the game's now
+def build_engine(
+    grid: int, n_heads: int, n_games: int, seed: int, num_snakes: int = 2, policy_name: str = "expectimax"
+) -> rf.Engine:
+    game = rf.games.Snake(grid_size=grid, max_ticks=200, num_snakes=num_snakes)
     reward = rf.Reward(food=1.0, loss=-10.0, win=10.0, draw=-5.0)
-    policy = rf.policies.SelectiveExpectimax(
-        expansion_budget=32,
-        top_k=4,
-        max_depth=6,
-        beta=1.0,
-        chance=rf.chance_modes.Committed(samples=1),
-        n_heads=n_heads,
-        epsilon=0.1,
-    )
+    if policy_name == "mcts":
+        # The UCT family (DUCT at simultaneous nodes, any N); TreeStrap consumes the same
+        # [K][A] evaluations, so only the policy handle changes.
+        policy = rf.policies.Mcts(num_simulations=48)
+    else:
+        policy = rf.policies.SelectiveExpectimax(
+            expansion_budget=32,
+            top_k=4,
+            max_depth=6,
+            beta=1.0,
+            chance=rf.chance_modes.Committed(samples=1),
+            n_heads=n_heads,
+            epsilon=0.1,
+        )
     learner = rf.learners.TreeStrap(gamma=0.99, outcome_weight=0.3, bootstrap_p=1.0, interior_targets=False)
     return rf.Engine(game, reward, policy, learner, n_games=n_games, seed=seed)
 
@@ -120,6 +127,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--iterations", type=int, default=20, help="collect+train cycles")
     parser.add_argument("--grid", type=int, default=12)
+    parser.add_argument("--num-snakes", type=int, default=2, help="2-8 simultaneous snakes")
+    parser.add_argument("--policy", choices=["expectimax", "mcts"], default="expectimax")
     parser.add_argument("--heads", type=int, default=8)
     parser.add_argument("--n-games", type=int, default=8, help="parallel games per collect")
     parser.add_argument("--collect-size", type=int, default=256, help="record floor per collect")
@@ -128,17 +137,23 @@ def main() -> None:
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
-    game = rf.games.Snake(grid_size=args.grid)
+    game = rf.games.Snake(grid_size=args.grid, num_snakes=args.num_snakes)
     net = ExampleNet(game.observation_space().shape, game.action_space().n, args.heads).to(args.device)
     optimizer = torch.optim.Adam(net.parameters(), lr=2.5e-4)
-    engine = build_engine(args.grid, args.heads, args.n_games, args.seed)
+    engine = build_engine(args.grid, args.heads, args.n_games, args.seed, args.num_snakes, args.policy)
     infer = make_infer(net, args.device)
 
     print(f"training on {args.device} — grid {args.grid}, {args.heads} heads, {args.n_games} games/collect")
     for it in range(args.iterations):
         obs, target, mask, telemetry = engine.collect(args.collect_size, infer)  # search with live weights
         loss = train_step(net, optimizer, obs, target, mask, args.device)
-        print(f"  iter {it:3d}  records {obs.shape[0]:4d}  loss {loss:.4f}  episodes {len(telemetry['episodes'])}")
+        eps = telemetry["episodes"]
+        mean_r = sum(sum(r) / len(r) for r, _len, _s in eps) / len(eps) if eps else float("nan")
+        mean_len = sum(_len for _r, _len, _s in eps) / len(eps) if eps else float("nan")
+        print(
+            f"  iter {it:3d}  records {obs.shape[0]:4d}  loss {loss:.4f}  "
+            f"episodes {len(eps)}  ep_reward {mean_r:+.2f}  ep_len {mean_len:5.1f}"
+        )
 
 
 if __name__ == "__main__":
