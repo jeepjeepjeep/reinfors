@@ -1876,7 +1876,7 @@ fn check_unit(name: &str, v: f64) -> PyResult<()> {
 fn check_max_agents<P: Policy>(policy: &P, label: &str, num_agents: usize) -> PyResult<()> {
     if num_agents == 0 {
         return Err(pyo3::exceptions::PyValueError::new_err(
-            "num_agents must be > 0".to_string(),
+            "num_agents must be > 0",
         ));
     }
     match policy.max_agents() {
