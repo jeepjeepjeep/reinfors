@@ -1025,6 +1025,13 @@ where
     G::State: Send,
     F: FnMut(Vec<f32>, usize) -> Vec<f64>,
 {
+    // Real assert (release builds included): sequential backup is 2-player negamax and sim nodes
+    // carry two agent tables — past two agents the tree silently computes wrong values.
+    assert!(
+        (1..=2).contains(&game.num_agents()),
+        "the MCTS tree supports at most 2 agents; the game has {}",
+        game.num_agents()
+    );
     let a = game.action_count();
     let mut trees: Vec<Tree<G::State>> = requests
         .into_iter()
@@ -1340,6 +1347,10 @@ pub(crate) fn sample_visits(visits: &[f64], temperature: f64, rng: &mut dyn Rng)
 impl Policy for Mcts {
     type Evaluation = SearchEvaluation;
     type PolicyState = u32; // moves acted this episode — drives the temperature_drop cutoff
+
+    fn max_agents(&self) -> Option<usize> {
+        Some(2) // sequential backup is 2-player negamax; sim nodes carry [AgentTable; 2]
+    }
 
     fn encode_eval(&self, eval: &SearchEvaluation, out: &mut Vec<u8>) {
         crate::policies::expectimax::encode_search_eval(eval, out);

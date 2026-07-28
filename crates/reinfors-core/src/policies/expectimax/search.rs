@@ -273,7 +273,13 @@ where
     F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     G::State: Send,
 {
-    debug_assert!((1..=2).contains(&game.num_agents()));
+    // Real assert (release builds included): the search models exactly one opponent, and running
+    // it past two agents silently produces wrong values rather than failing.
+    assert!(
+        (1..=2).contains(&game.num_agents()),
+        "the expectimax search supports at most 2 agents; the game has {}",
+        game.num_agents()
+    );
     let a = game.action_count();
     // Each search gets its own chance-sampling stream, seeded deterministically from the request
     // index, so results are reproducible and independent of the parallel-vs-serial expansion schedule.

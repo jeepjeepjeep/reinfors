@@ -1871,6 +1871,17 @@ fn check_unit(name: &str, v: f64) -> PyResult<()> {
     Ok(())
 }
 
+/// The agent-count capability gate (no-panic contract): a policy that cannot plan for this many
+/// agents is a config error here, before `Engine::new`'s assert backstop.
+fn check_max_agents<P: Policy>(policy: &P, label: &str, num_agents: usize) -> PyResult<()> {
+    match policy.max_agents() {
+        Some(cap) if num_agents > cap => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "the {label} policy supports at most {cap} agents; this game has {num_agents}"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// Reject a zero truncation horizon (`max_ticks=0` would truncate before any decision). `None` (never
 /// truncate) and any positive cap are fine.
 fn check_max_ticks(max_ticks: Option<usize>) -> PyResult<()> {
@@ -1939,6 +1950,7 @@ where
                 opponent,
             };
             let policy = SelectiveExpectimax::new(cfg, n_heads, epsilon);
+            check_max_agents(&policy, "SelectiveExpectimax", game.num_agents())?;
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
@@ -2004,6 +2016,7 @@ where
                 },
                 act_by,
             );
+            check_max_agents(&policy, "Mcts", game.num_agents())?;
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, false);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
@@ -2070,6 +2083,7 @@ where
                 chance,
                 noise_scope,
             });
+            check_max_agents(&policy, "AlphaZero", game.num_agents())?;
             let learner = AlphaZeroLearner::new(gamma);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
@@ -2094,6 +2108,7 @@ where
             check_unit("epsilon", epsilon)?;
             check_unit("bootstrap_p", bootstrap_p)?;
             let policy = EpsilonGreedyQ::new(n_heads, epsilon);
+            check_max_agents(&policy, "EpsilonGreedyQ", game.num_agents())?;
             let learner = Dqn::new(n_heads, bootstrap_p);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),

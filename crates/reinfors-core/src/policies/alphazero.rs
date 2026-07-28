@@ -94,6 +94,10 @@ impl Policy for AlphaZero {
     type Evaluation = SearchEvaluation;
     type PolicyState = u32; // plies acted this episode — drives the temperature_drop cutoff
 
+    fn max_agents(&self) -> Option<usize> {
+        Some(2) // rides the MCTS tree: 2-player negamax + [AgentTable; 2] sim nodes
+    }
+
     fn encode_eval(&self, eval: &SearchEvaluation, out: &mut Vec<u8>) {
         crate::policies::expectimax::encode_search_eval(eval, out);
     }
