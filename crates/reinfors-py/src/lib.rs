@@ -1874,6 +1874,11 @@ fn check_unit(name: &str, v: f64) -> PyResult<()> {
 /// The agent-count capability gate (no-panic contract): a policy that cannot plan for this many
 /// agents is a config error here, before `Engine::new`'s assert backstop.
 fn check_max_agents<P: Policy>(policy: &P, label: &str, num_agents: usize) -> PyResult<()> {
+    if num_agents == 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "num_agents must be > 0; not {num_agents}"
+        )));
+    }
     match policy.max_agents() {
         Some(cap) if num_agents > cap => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "the {label} policy supports at most {cap} agents; this game has {num_agents}"
