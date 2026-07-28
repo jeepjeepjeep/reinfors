@@ -82,15 +82,14 @@ fn search_cfg() -> SearchConfig {
 
 #[test]
 fn policies_declare_their_agent_capability() {
-    // Expectimax stays 2-capped on this branch under either dynamics (its N support lands in
-    // the stacked phase-2 PR).
+    // Expectimax: single-perspective search, agent-count-free under either dynamics.
     assert_eq!(
         SelectiveExpectimax::new(search_cfg(), 2, 0.0).max_agents(true),
-        Some(2)
+        None
     );
     assert_eq!(
         SelectiveExpectimax::new(search_cfg(), 2, 0.0).max_agents(false),
-        Some(2)
+        None
     );
     let mcts_cfg = MctsConfig {
         num_simulations: 4,
@@ -156,17 +155,86 @@ impl Game for RoundRobin {
     }
 }
 
+/// Every built-in policy is agent-count-free now, so the construction gate is pinned with a stub
+/// that still declares a cap (future capped policies keep this seam honest).
+struct CappedStub;
+impl Policy for CappedStub {
+    type Evaluation = ();
+    type PolicyState = ();
+    fn max_agents(&self, _sequential: bool) -> Option<usize> {
+        Some(2)
+    }
+    fn begin_episode(&self, _rng: &mut dyn Rng) {}
+    fn encode_eval(&self, _eval: &(), _out: &mut Vec<u8>) {}
+    fn decode_eval(
+        &self,
+        _r: &mut reinfors_core::codec::bytes::Reader,
+        _action_count: usize,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    fn policy_state_to_u64(&self, _s: &()) -> u64 {
+        0
+    }
+    fn policy_state_from_u64(&self, _v: u64) -> Result<(), String> {
+        Ok(())
+    }
+    fn evaluate<G, F>(
+        &self,
+        _game: &G,
+        _enc: &dyn StateEncoder<State = G::State>,
+        _reward: &dyn reinfors_core::Reward<Event = G::Event>,
+        _requests: Vec<(G::State, usize)>,
+        _seed: u64,
+        _collect_interior: bool,
+        _eval: &mut Evaluator<'_, F>,
+    ) -> Vec<()>
+    where
+        G: Game + Sync,
+        G::State: Send,
+        F: FnMut(Vec<f32>, usize) -> Vec<f64>,
+    {
+        unimplemented!("construction panics before any evaluation")
+    }
+    fn select(&self, _eval: &(), _state: &mut (), _rng: &mut dyn Rng) -> usize {
+        unimplemented!()
+    }
+    fn fold_telemetry(&self, _eval: &(), _stats: &mut reinfors_core::CollectStats) {}
+}
+
+struct StubLearner;
+impl reinfors_core::Learner<()> for StubLearner {
+    type Record = ();
+    fn eval_records(
+        &self,
+        _evaluation: &mut (),
+        _view: &dyn reinfors_core::ActionView,
+        _agent: usize,
+        _rng: &mut dyn Rng,
+    ) -> Vec<()> {
+        unimplemented!()
+    }
+    fn episode_records(
+        &self,
+        _trajectory: &[reinfors_core::Step<()>],
+        _tail: &[f64],
+        _view: &dyn reinfors_core::ActionView,
+        _agent: usize,
+        _rng: &mut dyn Rng,
+    ) -> Vec<()> {
+        unimplemented!()
+    }
+}
+
 #[test]
 #[should_panic(expected = "at most 2 agents")]
 fn engine_rejects_a_capped_policy_on_a_three_agent_game() {
-    let policy = SelectiveExpectimax::new(search_cfg(), 2, 0.0);
-    let learner = TreeStrap::new(0.99, 0.3, 1.0, false);
     let _ = Engine::new(
         ThreeWay,
         Box::new(Enc),
         Box::new(Zero),
-        policy,
-        learner,
+        CappedStub,
+        StubLearner,
         EngineParams {
             n_games: 1,
             seed: 0,
@@ -175,10 +243,31 @@ fn engine_rejects_a_capped_policy_on_a_three_agent_game() {
 }
 
 #[test]
-#[should_panic(expected = "at most 2 agents")]
-fn expectimax_search_backstop_rejects_three_agents() {
-    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
-    let _ = search_many(
+fn expectimax_engine_collects_on_a_three_agent_simultaneous_game() {
+    // Factored co-mover expectimax end to end: the searcher's MAX edges fan over both co-movers'
+    // joint (uniform here), TreeStrap consumes the evaluations.
+    let policy = SelectiveExpectimax::new(search_cfg(), 1, 0.0);
+    let learner = TreeStrap::new(0.99, 0.3, 1.0, false);
+    let mut engine = Engine::new(
+        ThreeWay,
+        Box::new(Enc),
+        Box::new(Zero),
+        policy,
+        learner,
+        EngineParams {
+            n_games: 2,
+            seed: 4,
+        },
+    );
+    let (records, stats) = engine.collect(9, |_obs: Vec<f32>, n: usize| vec![0.0; n * 2]);
+    assert!(records.len() >= 9);
+    assert!(stats.decisions > 0 && !stats.episodes.is_empty());
+}
+
+#[test]
+fn expectimax_searches_a_three_agent_game() {
+    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 4]; // K=2 heads x A=2
+    let results = search_many(
         &ThreeWay,
         &Enc,
         &Zero,
@@ -188,6 +277,10 @@ fn expectimax_search_backstop_rejects_three_agents() {
         0,
         &mut infer,
     );
+    let (values, _, stats) = &results[0];
+    assert_eq!(values.len(), 2);
+    assert!(values.iter().all(|row| row.len() == 2));
+    assert!(stats.expansions > 0);
 }
 
 fn mcts_cfg() -> MctsConfig {

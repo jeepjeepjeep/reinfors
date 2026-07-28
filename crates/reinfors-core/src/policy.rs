@@ -8,6 +8,14 @@ use crate::evaluator::Evaluator;
 use crate::game::{Game, Rng};
 use crate::reward::Reward;
 
+/// Upper bound on one node's simultaneous joint fan — MCTS/AZ's dense joint-slot arrays
+/// (`∏ per-agent legal widths`) and expectimax's per-edge co-mover branch product
+/// (`∏ co-mover legal widths`) both honor it. The binding rejects compositions whose static
+/// worst case exceeds it (a config error); the searches check the realized, state-dependent
+/// products as backstops — unchecked, the product overflows `usize` (65 two-action agents wrap
+/// to a silently empty fan) or attempts absurd allocations long before that.
+pub const MAX_JOINT_SLOTS: usize = 1 << 20;
+
 /// How an algorithm evaluates states and acts.
 pub trait Policy {
     type Evaluation;

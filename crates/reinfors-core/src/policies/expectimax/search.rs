@@ -30,13 +30,16 @@ use crate::policy::ChanceMode;
 use crate::reward::Reward;
 use crate::rng::SplitMix64;
 
-/// The agent's belief about the opponent's move distribution.
+/// The agent's belief about each co-mover's move distribution (applied per co-mover — at N>2
+/// every non-searching agent gets an independent copy of this model; a simultaneous joint is
+/// their factored product).
 #[derive(Clone, Copy)]
 pub enum Opponent {
-    /// Equal weight on each opponent action (no net dependency).
+    /// Equal weight on each of the mover's actions (no net dependency).
     Uniform,
-    /// Softmax over the opponent's (head-mean) Q with a uniform floor: deferred, so opponent
-    /// observations ride the same batched forward as the leaves. `p = (1-floor)*softmax(q/temp) + floor/n`.
+    /// Softmax over that mover's OWN (head-mean) Q — evaluated from its own observation, which
+    /// rides the same batched forward as the leaves — with a uniform floor:
+    /// `p = (1-floor)*softmax(q/temp) + floor/n`.
     Distributional { temperature: f64, floor: f64 },
 }
 
@@ -94,14 +97,15 @@ pub type InteriorTarget = (Vec<f32>, Vec<Vec<f64>>);
 /// unless `collect_interior`), and the search diagnostics.
 pub type SearchResult = (Vec<Vec<f64>>, Vec<InteriorTarget>, SearchStats);
 
-/// A committed agent action's chance branch. `weight` is the resolved chance probability; for a
-/// deferred (distributional) opponent it is filled in during evaluation from `deferred = (opp obs
-/// index this round, opponent action index)`. `scale` (the branch's chance probability on a
-/// fanned-out edge, else 1) multiplies the deferred weight at resolution; fixed weights are
-/// pre-scaled at construction.
+/// A committed agent action's chance branch. `weight` is the resolved chance probability; for
+/// deferred (distributional) co-movers it is filled in during evaluation as the product of every
+/// `(co-mover obs index this round, co-mover action index)` factor in `deferred` — one factor per
+/// distributional co-mover on the branch (a factored joint). `scale` (the branch's chance
+/// probability times any fixed move factors) multiplies the deferred product at resolution; fully
+/// fixed weights are pre-scaled at construction (`deferred` empty).
 struct Branch {
     weight: f64,
-    deferred: Option<(usize, usize)>,
+    deferred: Vec<(usize, usize)>,
     scale: f64,
     reward: f64,
     child: usize,
@@ -131,18 +135,42 @@ enum BranchWeight {
     Deferred(usize, usize),
 }
 
+/// One (joint) co-mover assignment's combined move probability: the product of its fixed factors,
+/// and the deferred (distributional) factors still awaiting the pooled forward. A single co-mover
+/// reduces to exactly the old `BranchWeight` semantics; N co-movers compose factored-independent.
+struct MoveWeight {
+    fixed: f64,
+    deferred: Vec<(usize, usize)>,
+}
+
+impl From<BranchWeight> for MoveWeight {
+    fn from(bw: BranchWeight) -> MoveWeight {
+        match bw {
+            BranchWeight::Fixed(f) => MoveWeight {
+                fixed: f,
+                deferred: Vec::new(),
+            },
+            BranchWeight::Deferred(oi, si) => MoveWeight {
+                fixed: 1.0,
+                deferred: vec![(oi, si)],
+            },
+        }
+    }
+}
+
 /// Per-request search state, advanced one round at a time so several searches can run in lockstep
 /// and pool their per-round observations into a single `infer` call.
 struct Search<S> {
     arena: Vec<Node<S>>,
     frontier: Vec<usize>,
     agent: usize,
-    opp: usize,
     n_heads: usize,
     stats: SearchStats,
     batch: Vec<usize>,
     opp_obs: Vec<Vec<f32>>,
-    opp_legal: Vec<Vec<usize>>, // the mover's legal set for each registered opponent obs
+    // (mover, its legal set) for each registered co-mover obs — the mover tags which agent's
+    // perspective the row was encoded for (its gathers cross the view through that agent).
+    opp_legal: Vec<(usize, Vec<usize>)>,
     new_leaves: Vec<usize>,
     rng: SplitMix64, // this search's chance-sampling stream (apple respawns), seeded per request
 }
@@ -165,7 +193,6 @@ impl<S> Search<S> {
             arena: vec![root],
             frontier: vec![0],
             agent,
-            opp: 1 - agent,
             n_heads: 1,
             stats: SearchStats::default(),
             batch: Vec::new(),
@@ -202,7 +229,7 @@ fn expand_round<G: Game>(
     s.opp_obs.clear();
     s.opp_legal.clear();
     s.new_leaves.clear();
-    let (agent, opp) = (s.agent, s.opp);
+    let agent = s.agent;
     for ni in s.batch.clone() {
         expand_node(
             &mut s.arena,
@@ -212,7 +239,6 @@ fn expand_round<G: Game>(
             cfg,
             ni,
             agent,
-            opp,
             &mut s.opp_obs,
             &mut s.opp_legal,
             &mut s.new_leaves,
@@ -273,12 +299,9 @@ where
     F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     G::State: Send,
 {
-    // Real assert (release builds included): the search models exactly one opponent, and running
-    // it past two agents silently produces wrong values rather than failing.
     assert!(
-        (1..=2).contains(&game.num_agents()),
-        "the expectimax search supports at most 2 agents; the game has {}",
-        game.num_agents()
+        game.num_agents() >= 1,
+        "a game must have at least one agent"
     );
     let a = game.action_count();
     // Each search gets its own chance-sampling stream, seeded deterministically from the request
@@ -364,7 +387,6 @@ where
                         &s.opp_legal,
                         enc,
                         s.agent,
-                        s.opp,
                         &legal_of,
                         slice,
                         n_opp,
@@ -419,13 +441,13 @@ fn evaluate<S, L>(
     arena: &mut [Node<S>],
     batch: &[usize],
     new_leaves: &[usize],
-    opp_legal: &[Vec<usize>],
+    opp_legal: &[(usize, Vec<usize>)],
     // The encoder's action view + the perspectives the rows were encoded for: every leaf row is
-    // the SEARCHER's observation, every opponent row the opponent's. Gathers from raw net rows
-    // cross into the head frame through the matching perspective.
+    // the SEARCHER's observation, every co-mover row that mover's own (tagged per row in
+    // `opp_legal` — sequential N-player interleaves rows from different movers). Gathers from raw
+    // net rows cross into the head frame through the matching perspective.
     view: &dyn ActionView,
     searcher: usize,
-    opp_agent: usize,
     legal_of: &L,
     q: &[f64],
     n_opp: usize,
@@ -445,10 +467,10 @@ fn evaluate<S, L>(
         .map(|i| match cfg.opponent {
             Opponent::Distributional { temperature, floor } => {
                 let mean = head_mean(row(i), k, a);
-                let legal = &opp_legal[i];
+                let (mover, legal) = &opp_legal[i];
                 let gathered: Vec<f64> = legal
                     .iter()
-                    .map(|&aid| mean[view.head_index(aid, opp_agent)])
+                    .map(|&aid| mean[view.head_index(aid, *mover)])
                     .collect();
                 let probs = softmax_floor(&gathered, temperature, floor);
                 let mut full = vec![0.0; a];
@@ -493,9 +515,14 @@ fn evaluate<S, L>(
         if let Some(edges) = &arena[ni].edges {
             for (ei, edge) in edges.iter().enumerate() {
                 for (bi, b) in edge.branches.iter().enumerate() {
-                    let w = match b.deferred {
-                        Some((oi, si)) => opp_probs[oi][si] * b.scale,
-                        None => b.weight,
+                    let w = if b.deferred.is_empty() {
+                        b.weight
+                    } else {
+                        let mut w = b.scale;
+                        for &(oi, si) in &b.deferred {
+                            w *= opp_probs[oi][si];
+                        }
+                        w
                     };
                     weight_updates.push((ni, ei, bi, w));
                     path_updates.push((b.child, parent_pw * w * cfg.gamma));
@@ -536,7 +563,7 @@ fn agent_branching<G: Game>(
     state: &G::State,
     mover: usize,
     opp_obs: &mut Vec<Vec<f32>>,
-    opp_legal: &mut Vec<Vec<usize>>,
+    opp_legal: &mut Vec<(usize, Vec<usize>)>,
 ) -> Vec<(usize, BranchWeight)> {
     let legal = game.legal_actions(state, mover);
     if legal.is_empty() {
@@ -557,7 +584,7 @@ fn agent_branching<G: Game>(
                 .iter()
                 .map(|&a| (a, BranchWeight::Deferred(oi, a)))
                 .collect();
-            opp_legal.push(legal);
+            opp_legal.push((mover, legal));
             branches
         }
     }
@@ -578,7 +605,7 @@ fn push_branches<G: Game>(
     cfg: &SearchConfig,
     state: &G::State,
     joint: &[usize],
-    bw: BranchWeight,
+    mw: MoveWeight,
     agent: usize,
     agent_out_terminal: bool,
     depth: i32,
@@ -618,16 +645,15 @@ fn push_branches<G: Game>(
             ),
         },
     };
-    let (fixed, deferred) = match bw {
-        BranchWeight::Fixed(f) => (Some(f), None),
-        BranchWeight::Deferred(oi, si) => (None, Some((oi, si))),
-    };
     // Each chance child is a distinct state, so its terminality and observation are computed per
     // child (the food position differs across outcomes).
     for (child_state, p) in children {
-        let (weight, scale) = match fixed {
-            Some(f) => (f * p, 1.0),
-            None => (0.0, p),
+        // Fully fixed moves pre-scale into `weight`; any deferred factor leaves the weight to
+        // resolution (scale carries the fixed part x the chance probability).
+        let (weight, scale) = if mw.deferred.is_empty() {
+            (mw.fixed * p, 1.0)
+        } else {
+            (0.0, mw.fixed * p)
         };
         let terminal = t.terminal
             || (agent_out_terminal && game.legal_actions(&child_state, agent).is_empty());
@@ -641,7 +667,7 @@ fn push_branches<G: Game>(
         };
         branches.push(Branch {
             weight,
-            deferred,
+            deferred: mw.deferred.clone(),
             scale,
             reward: step_reward,
             child,
@@ -650,14 +676,18 @@ fn push_branches<G: Game>(
 }
 
 /// Expand `ni` one ply, dispatching on whose turn it is:
-///  - `Simultaneous` (snake): the searching agent's MAX edges, each fanned over the opponent's modeled
-///    move distribution (a co-mover acting this ply). A MAX node.
+///  - `Simultaneous` (snake): the searching agent's MAX edges, each fanned over the FACTORED joint
+///    distribution of every co-mover acting this ply (each co-mover an independent Uniform /
+///    Distributional model; joint probability = product). A MAX node. Per-expansion branch width
+///    is the product of the co-movers' legal counts — exact w.r.t. the factored model; a sampled
+///    co-mover fan is a future knob if agent counts outgrow game-typical widths.
 ///  - `Agent(me)` (single-agent, or our turn in a sequential game): our MAX edges, one deterministic
 ///    branch each, no co-mover. A MAX node.
-///  - `Agent(other)` (an opponent's turn in a sequential game): a single chance edge over that
-///    opponent's modeled move distribution. The searching agent does not choose here, so it is NOT a
-///    MAX node — it backs up as the expectation over the opponent's moves (MAX over its one edge) and
-///    is never collected as a TreeStrap target.
+///  - `Agent(other)` (another agent's turn in a sequential game): a single chance edge over that
+///    mover's modeled move distribution — at N>2 each other agent's turn is simply its own such
+///    node. The searching agent does not choose here, so it is NOT a MAX node — it backs up as the
+///    expectation over the mover's moves (MAX over its one edge) and is never collected as a
+///    TreeStrap target.
 ///
 /// `max_node` marks the searching agent's decision points — the only nodes whose `[K][A]` action
 /// values are valid training targets.
@@ -670,9 +700,8 @@ fn expand_node<G: Game>(
     cfg: &SearchConfig,
     ni: usize,
     agent: usize,
-    opp: usize,
     opp_obs: &mut Vec<Vec<f32>>,
-    opp_legal: &mut Vec<Vec<usize>>,
+    opp_legal: &mut Vec<(usize, Vec<usize>)>,
     new_leaves: &mut Vec<usize>,
     rng: &mut dyn Rng,
 ) {
@@ -682,15 +711,52 @@ fn expand_node<G: Game>(
 
     let (edges, max_node) = match game.actor(&state) {
         Actor::Simultaneous => {
-            let opp_b = agent_branching(game, enc, cfg, &state, opp, opp_obs, opp_legal);
+            let co_movers: Vec<usize> = (0..num_agents).filter(|&i| i != agent).collect();
+            let co_b: Vec<Vec<(usize, BranchWeight)>> = co_movers
+                .iter()
+                .map(|&m| agent_branching(game, enc, cfg, &state, m, opp_obs, opp_legal))
+                .collect();
+            // Checked: an unchecked product wraps (65 two-action co-movers -> 0 combos -> a
+            // silently empty, zero-valued fan) — and exact expectimax has no sparse escape,
+            // every joint transition is evaluated, so an oversized fan is an error (the binding
+            // pre-checks the static worst case; a sampled co-mover mode is the eventual answer
+            // for genuinely large fans).
+            let combos: usize = co_b
+                .iter()
+                .try_fold(1usize, |acc, b| {
+                    acc.checked_mul(b.len())
+                        .filter(|&c| c <= crate::policy::MAX_JOINT_SLOTS)
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "simultaneous co-mover fan exceeds {} joint branches at one node",
+                        crate::policy::MAX_JOINT_SLOTS
+                    )
+                });
             let agent_legal = game.legal_actions(&state, agent);
             let mut edges = Vec::with_capacity(agent_legal.len());
             for &agent_action in &agent_legal {
-                let mut branches = Vec::with_capacity(opp_b.len());
-                for &(opp_action, bw) in &opp_b {
+                let mut branches = Vec::with_capacity(combos);
+                // Mixed-radix walk over the co-mover assignments (last co-mover fastest — the
+                // single-co-mover order is unchanged), composing each joint's factored weight.
+                for combo in 0..combos {
                     let mut joint = vec![0usize; num_agents];
                     joint[agent] = agent_action;
-                    joint[opp] = opp_action;
+                    let mut mw = MoveWeight {
+                        fixed: 1.0,
+                        deferred: Vec::new(),
+                    };
+                    let mut rem = combo;
+                    for ci in (0..co_b.len()).rev() {
+                        let options = &co_b[ci];
+                        let (action, bw) = options[rem % options.len()];
+                        rem /= options.len();
+                        joint[co_movers[ci]] = action;
+                        match bw {
+                            BranchWeight::Fixed(f) => mw.fixed *= f,
+                            BranchWeight::Deferred(oi, si) => mw.deferred.push((oi, si)),
+                        }
+                    }
                     push_branches(
                         arena,
                         game,
@@ -699,7 +765,7 @@ fn expand_node<G: Game>(
                         cfg,
                         &state,
                         &joint,
-                        bw,
+                        mw,
                         agent,
                         true,
                         depth,
@@ -727,7 +793,7 @@ fn expand_node<G: Game>(
                     cfg,
                     &state,
                     &joint,
-                    BranchWeight::Fixed(1.0),
+                    MoveWeight::from(BranchWeight::Fixed(1.0)),
                     agent,
                     false,
                     depth,
@@ -753,7 +819,7 @@ fn expand_node<G: Game>(
                     cfg,
                     &state,
                     &joint,
-                    bw,
+                    MoveWeight::from(bw),
                     agent,
                     false,
                     depth,
@@ -1432,6 +1498,346 @@ mod frame_tests {
         assert_eq!(
             id.1, sw.1,
             "interior targets are game-frame search products: must be frame-invariant"
+        );
+    }
+}
+
+#[cfg(test)]
+mod n_player_tests {
+    //! N>2 co-mover modeling: exact values under factored Uniform co-movers (simultaneous and
+    //! sequential), and the per-row mover perspective — each co-mover's Distributional weights
+    //! come from ITS OWN net row, gathered through ITS OWN action view (the single-`opp` era
+    //! would have gathered every foreign row through `1 - agent`).
+    use super::*;
+    use crate::encoder::StateEncoder;
+    use crate::game::Transition;
+    use crate::reward::Reward as RewardTrait;
+
+    struct Payout;
+    impl RewardTrait for Payout {
+        type Event = f64;
+        fn step_reward(&self, e: &f64, _agent: usize) -> f64 {
+            *e
+        }
+    }
+
+    fn cfg(opponent: Opponent) -> SearchConfig {
+        SearchConfig {
+            gamma: 1.0,
+            beta: 1.0,
+            expansion_budget: 16,
+            top_k: 8,
+            max_depth: 8,
+            chance: ChanceMode::Committed { samples: 1 },
+            opponent,
+        }
+    }
+
+    /// One-shot 3-agent simultaneous: my action 1 pays the SUM of the co-movers' actions, action 0
+    /// pays nothing. Under uniform co-movers the exact root values are 1.0 and 0.0.
+    #[derive(Clone)]
+    struct SimSt(bool);
+    struct SimSum;
+    impl Game for SimSum {
+        type State = SimSt;
+        type Event = f64;
+        fn num_agents(&self) -> usize {
+            3
+        }
+        fn action_count(&self) -> usize {
+            2
+        }
+        fn actor(&self, _s: &SimSt) -> Actor {
+            Actor::Simultaneous
+        }
+        fn legal_actions(&self, s: &SimSt, _agent: usize) -> Vec<usize> {
+            if s.0 {
+                Vec::new()
+            } else {
+                vec![0, 1]
+            }
+        }
+        fn step(&self, _s: &SimSt, actions: &[usize]) -> Transition<SimSt, f64> {
+            let others: f64 = actions[1] as f64 + actions[2] as f64;
+            let mine = if actions[0] == 1 { others } else { 0.0 };
+            Transition {
+                next_state: SimSt(true),
+                events: vec![mine, 0.0, 0.0],
+                terminal: true,
+            }
+        }
+        fn initial_state(&self, _rng: &mut dyn Rng) -> SimSt {
+            SimSt(false)
+        }
+    }
+
+    struct SimEnc;
+    impl ActionView for SimEnc {}
+    impl StateEncoder for SimEnc {
+        type State = SimSt;
+        fn encode(&self, s: &SimSt, agent: usize) -> Vec<f32> {
+            vec![f32::from(u8::from(s.0)), agent as f32]
+        }
+        fn obs_shape(&self) -> (usize, usize, usize) {
+            (1, 1, 2)
+        }
+    }
+
+    #[test]
+    fn factored_uniform_co_movers_average_exactly() {
+        let results = search_many(
+            &SimSum,
+            &SimEnc,
+            &Payout,
+            &cfg(Opponent::Uniform),
+            vec![(SimSt(false), 0)],
+            false,
+            0,
+            |_obs: Vec<f32>, n: usize| vec![0.0; n * 2],
+        );
+        let values = &results[0].0;
+        for head in values {
+            assert!(
+                (head[1] - 1.0).abs() < 1e-12,
+                "E[sum of 2 uniform bits] = 1"
+            );
+            assert_eq!(head[0], 0.0);
+        }
+    }
+
+    /// 3-agent sequential chain: I move (L=0 keeps playing, R=1 ends at exactly 1.0), then agent 1,
+    /// then agent 2, and my terminal payoff is `2·[a1==0] + [a2==0]`.
+    #[derive(Clone)]
+    struct ChainSt {
+        phase: usize,
+        a1: usize,
+    }
+    struct Chain;
+    impl Game for Chain {
+        type State = ChainSt;
+        type Event = f64;
+        fn num_agents(&self) -> usize {
+            3
+        }
+        fn action_count(&self) -> usize {
+            2
+        }
+        fn actor(&self, s: &ChainSt) -> Actor {
+            Actor::Agent(s.phase.min(2))
+        }
+        fn legal_actions(&self, s: &ChainSt, agent: usize) -> Vec<usize> {
+            if s.phase < 3 && agent == s.phase {
+                vec![0, 1]
+            } else {
+                Vec::new()
+            }
+        }
+        fn step(&self, s: &ChainSt, actions: &[usize]) -> Transition<ChainSt, f64> {
+            match s.phase {
+                0 if actions[0] == 1 => Transition {
+                    next_state: ChainSt { phase: 3, a1: 0 },
+                    events: vec![1.0, 0.0, 0.0],
+                    terminal: true,
+                },
+                0 => Transition {
+                    next_state: ChainSt { phase: 1, a1: 0 },
+                    events: vec![0.0; 3],
+                    terminal: false,
+                },
+                1 => Transition {
+                    next_state: ChainSt {
+                        phase: 2,
+                        a1: actions[1],
+                    },
+                    events: vec![0.0; 3],
+                    terminal: false,
+                },
+                2 => {
+                    let mine =
+                        2.0 * f64::from(u8::from(s.a1 == 0)) + f64::from(u8::from(actions[2] == 0));
+                    Transition {
+                        next_state: ChainSt { phase: 3, a1: s.a1 },
+                        events: vec![mine, 0.0, 0.0],
+                        terminal: true,
+                    }
+                }
+                _ => unreachable!("stepping a terminal state"),
+            }
+        }
+        fn initial_state(&self, _rng: &mut dyn Rng) -> ChainSt {
+            ChainSt { phase: 0, a1: 0 }
+        }
+    }
+
+    /// Per-agent action view: agent `g`'s head frame is the game frame rotated by `g` (mod 2) — a
+    /// bijection per agent, so gathers from a co-mover's row MUST use that co-mover's view.
+    struct ChainEnc;
+    impl ActionView for ChainEnc {
+        fn head_index(&self, action: usize, agent: usize) -> usize {
+            (action + agent) % 2
+        }
+        fn game_action(&self, head: usize, agent: usize) -> usize {
+            (head + agent) % 2
+        }
+    }
+    impl StateEncoder for ChainEnc {
+        type State = ChainSt;
+        fn encode(&self, s: &ChainSt, agent: usize) -> Vec<f32> {
+            vec![s.phase as f32, agent as f32, s.a1 as f32]
+        }
+        fn obs_shape(&self) -> (usize, usize, usize) {
+            (1, 1, 3)
+        }
+    }
+
+    #[test]
+    fn sequential_uniform_co_movers_average_exactly() {
+        let results = search_many(
+            &Chain,
+            &ChainEnc,
+            &Payout,
+            &cfg(Opponent::Uniform),
+            vec![(ChainSt { phase: 0, a1: 0 }, 0)],
+            false,
+            0,
+            |_obs: Vec<f32>, n: usize| vec![0.0; n * 2],
+        );
+        let values = &results[0].0;
+        for head in values {
+            assert!(
+                (head[0] - 1.5).abs() < 1e-12,
+                "L = E[2·b1 + b2] = 1.5: {head:?}"
+            );
+            assert!((head[1] - 1.0).abs() < 1e-12, "R pays exactly 1");
+        }
+    }
+
+    #[test]
+    fn distributional_weights_come_from_each_movers_own_row_and_view() {
+        // Both co-mover rows are the SAME bytes ([0, 10] in their own head frames), but their
+        // views differ: agent 1's frame is rotated (so its row favors GAME action 0), agent 2's
+        // is identity-parity (favoring GAME action 1). p1(0) = ph, p2(0) = 1 - ph, so
+        // L = 2·ph + (1 - ph) — a single shared foreign perspective would compute 3·ph instead.
+        let (temperature, floor) = (1.0, 0.05);
+        let results = search_many(
+            &Chain,
+            &ChainEnc,
+            &Payout,
+            &cfg(Opponent::Distributional { temperature, floor }),
+            vec![(ChainSt { phase: 0, a1: 0 }, 0)],
+            false,
+            0,
+            |obs: Vec<f32>, n: usize| {
+                let mut out = Vec::with_capacity(n * 2);
+                for r in 0..n {
+                    let agent = obs[r * 3 + 1];
+                    if agent == 0.0 {
+                        out.extend([0.0, 0.0]); // searcher leaf bootstraps: inert
+                    } else {
+                        out.extend([0.0, 10.0]); // co-mover Q in its OWN head frame
+                    }
+                }
+                out
+            },
+        );
+        let ph = softmax_floor(&[10.0, 0.0], temperature, floor)[0];
+        let expect_l = 2.0 * ph + (1.0 - ph);
+        let values = &results[0].0;
+        for head in values {
+            assert!(
+                (head[0] - expect_l).abs() < 1e-9,
+                "L must mix each mover's own distribution: got {}, want {expect_l}",
+                head[0]
+            );
+            assert!((head[1] - 1.0).abs() < 1e-12);
+        }
+    }
+}
+
+#[cfg(test)]
+mod joint_fan_bound_tests {
+    use super::*;
+    use crate::encoder::StateEncoder;
+    use crate::game::Transition;
+    use crate::reward::Reward as RewardTrait;
+
+    /// 65 two-action agents: the unchecked co-mover product would wrap to 0 (a silently empty,
+    /// zero-valued fan); the checked fold must panic at the bound instead.
+    #[derive(Clone)]
+    struct WSt(bool);
+    struct Wide;
+    impl Game for Wide {
+        type State = WSt;
+        type Event = f64;
+        fn num_agents(&self) -> usize {
+            65
+        }
+        fn action_count(&self) -> usize {
+            2
+        }
+        fn actor(&self, _s: &WSt) -> Actor {
+            Actor::Simultaneous
+        }
+        fn legal_actions(&self, s: &WSt, _agent: usize) -> Vec<usize> {
+            if s.0 {
+                Vec::new()
+            } else {
+                vec![0, 1]
+            }
+        }
+        fn step(&self, _s: &WSt, _actions: &[usize]) -> Transition<WSt, f64> {
+            Transition {
+                next_state: WSt(true),
+                events: vec![0.0; 65],
+                terminal: true,
+            }
+        }
+        fn initial_state(&self, _rng: &mut dyn Rng) -> WSt {
+            WSt(false)
+        }
+    }
+
+    struct WEnc;
+    impl ActionView for WEnc {}
+    impl StateEncoder for WEnc {
+        type State = WSt;
+        fn encode(&self, s: &WSt, agent: usize) -> Vec<f32> {
+            vec![f32::from(u8::from(s.0)), agent as f32]
+        }
+        fn obs_shape(&self) -> (usize, usize, usize) {
+            (1, 1, 2)
+        }
+    }
+
+    struct Zero;
+    impl RewardTrait for Zero {
+        type Event = f64;
+        fn step_reward(&self, e: &f64, _agent: usize) -> f64 {
+            *e
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "joint branches")]
+    fn oversized_co_mover_fans_panic_instead_of_wrapping() {
+        let cfg = SearchConfig {
+            gamma: 1.0,
+            beta: 1.0,
+            expansion_budget: 1,
+            top_k: 1,
+            max_depth: 2,
+            chance: ChanceMode::Committed { samples: 1 },
+            opponent: Opponent::Uniform,
+        };
+        let _ = search_many(
+            &Wide,
+            &WEnc,
+            &Zero,
+            &cfg,
+            vec![(WSt(false), 0)],
+            false,
+            0,
+            |_obs: Vec<f32>, n: usize| vec![0.0; n * 2],
         );
     }
 }
