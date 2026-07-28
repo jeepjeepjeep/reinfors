@@ -51,7 +51,9 @@ def test_env_plays_three_snakes_to_the_end() -> None:
         if env.done():
             break
         env.step({a: int(rng.choice(env.legal_actions(a))) for a in env.active_agents()})
-    assert env.done() or True  # max_ticks may or may not hit; the walk must never raise
+    # rf.Env never truncates (that is an Engine concern): the seeded random walk must end the
+    # game by deaths — with these seeds all three snakes are gone within a handful of ticks.
+    assert env.done()
 
 
 def test_env_snapshot_round_trips_three_snakes() -> None:
@@ -150,7 +152,9 @@ def test_start_buffer_runs_with_three_snakes() -> None:
     )
     obs, _, _, telemetry = engine.collect(40, lambda a: np.zeros((a.shape[0], 1, 3)))
     assert obs.shape[0] >= 40
-    assert "seeded" in str(telemetry["episodes"][0]) or len(telemetry["episodes"]) >= 0
+    # The episode tuples are (reward_vec, length, seeded): with the buffer on, some episodes must
+    # actually have STARTED from a buffered state (deterministic with these seeds).
+    assert any(ep[2] for ep in telemetry["episodes"])
 
 
 def test_resolved_config_round_trips_num_snakes() -> None:
