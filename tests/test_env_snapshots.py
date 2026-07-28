@@ -84,6 +84,10 @@ def test_restore_rejects_wrong_composition_and_malformed_bytes() -> None:
     blob[0] ^= 0xFF
     with pytest.raises(ValueError, match="magic"):
         rf._reinfors.EnvSnapshot.from_bytes(bytes(blob))
+    blob[0] ^= 0xFF  # restore the magic
+    blob[4 + 1 + 4 + 64 + 8] = 2  # envelope done byte: strictly 0|1, never canonicalized
+    with pytest.raises(ValueError, match="not a bool"):
+        rf._reinfors.EnvSnapshot.from_bytes(bytes(blob))
 
 
 def test_codec_validates_state_payload() -> None:

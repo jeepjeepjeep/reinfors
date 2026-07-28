@@ -2074,7 +2074,11 @@ impl PyEnvSnapshot {
         let fingerprint = String::from_utf8(take(data, &mut pos, fp_len)?)
             .map_err(|_| err("fingerprint is not utf-8"))?;
         let rng_state = u64::from_le_bytes(take(data, &mut pos, 8)?.try_into().unwrap());
-        let done = take(data, &mut pos, 1)?[0] != 0;
+        let done = match take(data, &mut pos, 1)?[0] {
+            0 => false,
+            1 => true,
+            b => return Err(err(&format!("done byte {b} is not a bool"))),
+        };
         let state_len = u32::from_le_bytes(take(data, &mut pos, 4)?.try_into().unwrap()) as usize;
         let state = take(data, &mut pos, state_len)?;
         if pos != data.len() {
