@@ -95,7 +95,7 @@ fn policies_declare_their_agent_capability() {
         temperature_drop: 0,
         chance: ChanceMode::Committed { samples: 1 },
     };
-    assert_eq!(Mcts::new(mcts_cfg, ActBy::Value).max_agents(), Some(2));
+    assert_eq!(Mcts::new(mcts_cfg, ActBy::Value).max_agents(), None);
     let az_cfg = AlphaZeroConfig {
         num_simulations: 4,
         c_puct: 1.5,
@@ -108,8 +108,42 @@ fn policies_declare_their_agent_capability() {
         chance: ChanceMode::Committed { samples: 1 },
         noise_scope: reinfors_core::NoiseScope::Requester,
     };
-    assert_eq!(AlphaZero::new(az_cfg).max_agents(), Some(2));
+    assert_eq!(AlphaZero::new(az_cfg).max_agents(), None);
     assert_eq!(EpsilonGreedyQ::new(1, 0.0).max_agents(), None);
+}
+
+/// 3 agents taking turns (agent = tick mod 3); nothing matters, terminal after three plies.
+struct RoundRobin;
+
+impl Game for RoundRobin {
+    type State = St;
+    type Event = ();
+    fn num_agents(&self) -> usize {
+        3
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn actor(&self, s: &St) -> Actor {
+        Actor::Agent(s.tick % 3)
+    }
+    fn legal_actions(&self, s: &St, agent: usize) -> Vec<usize> {
+        if agent == s.tick % 3 && s.tick < 3 {
+            vec![0, 1]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
+        Transition {
+            next_state: St { tick: s.tick + 1 },
+            events: vec![(); 3],
+            terminal: s.tick + 1 >= 3,
+        }
+    }
+    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+        St { tick: 0 }
+    }
 }
 
 #[test]
@@ -146,29 +180,112 @@ fn expectimax_search_backstop_rejects_three_agents() {
     );
 }
 
-#[test]
-#[should_panic(expected = "at most 2 agents")]
-fn mcts_search_backstop_rejects_three_agents() {
-    let cfg = MctsConfig {
-        num_simulations: 4,
+fn mcts_cfg() -> MctsConfig {
+    MctsConfig {
+        num_simulations: 16,
         uct_c: 1.0,
         gamma: 0.99,
-        max_depth: 4,
+        max_depth: 6,
         temperature: 0.0,
         temperature_drop: 0,
         chance: ChanceMode::Committed { samples: 1 },
-    };
+    }
+}
+
+#[test]
+#[should_panic(expected = "value head")]
+fn uct_rejects_sequential_three_agent_games() {
+    // Q-derived (UCT) leaf values exist only at the evaluated agent's own decision points, which
+    // a sequential game gives non-movers none of — N>2 sequential search needs PUCT.
     let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
     let mut eval = Evaluator::new(&mut infer, None);
     let _ = mcts_many(
-        &ThreeWay,
+        &RoundRobin,
         &Enc,
         &Zero,
-        &cfg,
+        &mcts_cfg(),
         vec![(St { tick: 0 }, 0)],
         0,
         &mut eval,
     );
+}
+
+#[test]
+fn uct_searches_a_simultaneous_three_agent_game() {
+    // DUCT-N: every agent owns a decoupled table, so simultaneous games search at any N.
+    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+    let mut eval = Evaluator::new(&mut infer, None);
+    let evals = mcts_many(
+        &ThreeWay,
+        &Enc,
+        &Zero,
+        &mcts_cfg(),
+        vec![(St { tick: 0 }, 0), (St { tick: 0 }, 2)],
+        0,
+        &mut eval,
+    );
+    for e in &evals {
+        assert_eq!(e.legal, vec![0, 1]);
+        assert_eq!(e.visits.iter().sum::<f64>() as usize, 16); // requester's table, all sims
+    }
+}
+
+#[test]
+fn mcts_engine_collects_on_a_three_agent_simultaneous_game() {
+    let policy = Mcts::new(mcts_cfg(), ActBy::Value);
+    let learner = TreeStrap::new(0.99, 0.3, 1.0, false);
+    let mut engine = Engine::new(
+        ThreeWay,
+        Box::new(Enc),
+        Box::new(Zero),
+        policy,
+        learner,
+        EngineParams {
+            n_games: 2,
+            seed: 3,
+        },
+    );
+    let (records, stats) = engine.collect(9, |_obs: Vec<f32>, n: usize| vec![0.0; n * 2]);
+    assert!(records.len() >= 9);
+    assert!(stats.decisions > 0 && !stats.episodes.is_empty());
+}
+
+#[test]
+fn alphazero_engine_collects_on_a_three_agent_sequential_game() {
+    // Sequential N>2 runs Max^N under PUCT: every leaf is evaluated from all three perspectives
+    // through the same pooled forward.
+    let az_cfg = AlphaZeroConfig {
+        num_simulations: 8,
+        c_puct: 1.5,
+        gamma: 0.99,
+        max_depth: 6,
+        noise_epsilon: 0.0,
+        noise_alpha: 0.3,
+        temperature: 0.0,
+        temperature_drop: 0,
+        chance: ChanceMode::Committed { samples: 1 },
+        noise_scope: reinfors_core::NoiseScope::Requester,
+    };
+    let policy = AlphaZero::new(az_cfg);
+    let learner = reinfors_core::AlphaZeroLearner::new(0.99);
+    let mut engine = Engine::new(
+        RoundRobin,
+        Box::new(Enc),
+        Box::new(Zero),
+        policy,
+        learner,
+        EngineParams {
+            n_games: 2,
+            seed: 5,
+        },
+    );
+    let (records, stats) = engine.collect(9, |_obs: Vec<f32>, n: usize| vec![0.0; n * 3]);
+    assert!(records.len() >= 9);
+    for (obs, pi, _z) in &records {
+        assert_eq!(obs.len(), 2);
+        assert!((pi.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+    }
+    assert!(stats.decisions > 0 && !stats.episodes.is_empty());
 }
 
 #[test]

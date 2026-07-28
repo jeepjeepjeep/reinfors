@@ -95,7 +95,7 @@ impl Policy for AlphaZero {
     type PolicyState = u32; // plies acted this episode — drives the temperature_drop cutoff
 
     fn max_agents(&self) -> Option<usize> {
-        Some(2) // rides the MCTS tree: 2-player negamax + [AgentTable; 2] sim nodes
+        None // rides the MCTS tree: negamax at ≤2 sequential, Max^N past that, DUCT-N for sim
     }
 
     fn encode_eval(&self, eval: &SearchEvaluation, out: &mut Vec<u8>) {
