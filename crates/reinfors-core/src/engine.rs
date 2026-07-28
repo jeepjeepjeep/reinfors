@@ -535,6 +535,8 @@ where
             Vec::with_capacity(n_games);
         for _ in 0..n_games {
             let state = codec.decode(r.blob()?)?;
+            // Engine episodes are always live (terminal episodes flush and reset immediately).
+            codec.validate_decoded_state(&state, false)?;
             let rng = r.u64()?;
             let tick = r.u64()? as usize;
             if horizon.is_some_and(|hz| tick >= hz) {
@@ -609,8 +611,11 @@ where
         }
         let start_blob = r.blob()?.to_vec();
         r.done()?;
-        self.start_dist
-            .restore_bytes(&start_blob, &|b| codec.decode(b))?;
+        self.start_dist.restore_bytes(&start_blob, &|b| {
+            let s = codec.decode(b)?;
+            codec.validate_decoded_state(&s, false)?; // buffered start states are mid-episode: live
+            Ok(s)
+        })?;
         self.search_rng = SplitMix64::from_state(search_rng);
         self.buffer_rng = SplitMix64::from_state(buffer_rng);
         for (gi, slice) in slices.into_iter().enumerate() {
