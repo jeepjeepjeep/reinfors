@@ -844,3 +844,99 @@ fn forced_maxn_supervises_both_perspectives_at_two_agents() {
         );
     }
 }
+
+/// Two agents taking turns forever; the engine's horizon truncates at tick 2.
+struct EndlessTwo;
+
+impl Game for EndlessTwo {
+    type State = St;
+    type Event = ();
+    fn num_agents(&self) -> usize {
+        2
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn actor(&self, s: &St) -> Actor {
+        Actor::Agent(s.tick % 2)
+    }
+    fn legal_actions(&self, s: &St, agent: usize) -> Vec<usize> {
+        if agent == s.tick % 2 {
+            vec![0, 1]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
+        Transition {
+            next_state: St { tick: s.tick + 1 },
+            events: vec![(); 2],
+            terminal: false,
+        }
+    }
+    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+        St { tick: 0 }
+    }
+    fn truncation_horizon(&self) -> Option<usize> {
+        Some(2)
+    }
+}
+
+#[test]
+fn forced_maxn_truncation_bootstraps_both_perspectives() {
+    // sequential_backup="maxn" at TWO agents: the tree consumes both perspectives' leaf values
+    // and both hold per-tick trajectories — so a truncation must tail-bootstrap BOTH, not just
+    // the currently active agent (the regression: the tail gate hardcoded n > 2, silently
+    // seeding the non-mover's z from zero).
+    let cfg = AlphaZeroConfig {
+        num_simulations: 8,
+        c_puct: 1.5,
+        gamma: 1.0,
+        max_depth: 6,
+        noise_epsilon: 0.0,
+        noise_alpha: 0.3,
+        temperature: 0.0,
+        temperature_drop: 0,
+        chance: ChanceMode::Committed { samples: 1 },
+        noise_scope: reinfors_core::NoiseScope::Requester,
+        sequential_backup: reinfors_core::SequentialBackup::MaxN,
+    };
+    let mut engine = Engine::new(
+        EndlessTwo,
+        Box::new(Enc),
+        Box::new(Zero),
+        AlphaZero::new(cfg),
+        reinfors_core::AlphaZeroLearner::new(1.0),
+        EngineParams {
+            n_games: 1,
+            seed: 8,
+        },
+    );
+    // The net returns a distinct value per encoded agent ((agent+1)/10); zero rewards, gamma 1:
+    // every record's z must equal ITS OWN agent's tail value.
+    let infer = |obs: Vec<f32>, n: usize| {
+        let mut out = Vec::with_capacity(n * 3);
+        for r in 0..n {
+            let agent = f64::from(obs[r * 2 + 1]);
+            out.extend([0.0, 0.0, (agent + 1.0) / 10.0]);
+        }
+        out
+    };
+    let (records, stats) = engine.collect(4, infer);
+    assert_eq!(
+        stats.episodes[0].length, 2,
+        "the horizon truncates at tick 2"
+    );
+    assert!(
+        records.iter().any(|r| r.3 == 0.0),
+        "value-only rows present"
+    );
+    for (obs, _pi, z, _w) in &records {
+        let expect = (f64::from(obs[1]) + 1.0) / 10.0;
+        assert!(
+            (z - expect).abs() < 1e-12,
+            "agent {}'s z must bootstrap from ITS tail: got {z}, want {expect}",
+            obs[1]
+        );
+    }
+}

@@ -135,6 +135,11 @@ def main() -> None:
     parser.add_argument("--device", default=default_device())
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
+    if args.policy == "mcts" and args.heads != 1:
+        # The Mcts composition is single-head (its [1][A] evaluations pair with a K=1 net);
+        # ensemble heads are the expectimax family's axis.
+        print(f"--policy mcts is single-head: overriding --heads {args.heads} -> 1")
+        args.heads = 1
 
     torch.manual_seed(args.seed)
     game = rf.games.Snake(grid_size=args.grid, num_snakes=args.num_snakes)

@@ -130,8 +130,10 @@ def train_pass(
 
 
 def eval_vs_random(net: SnakeAzNet, args: argparse.Namespace, games: int, seed: int) -> float:
-    """Search-free probe: the raw policy head (argmax logits) drives one snake against a
-    uniform-random opponent; returns the net side's mean episode reward (food - death)."""
+    """Search-free probe: the raw policy head (argmax logits) drives one snake against
+    uniform-random opponents; returns the net side's mean episode reward (food - death). The
+    net seat rotates through every position (placement is not seat-identical, so evaluating
+    only seats 0/1 would bias multi-snake results)."""
     c, h, w = net.obs_shape
     rng = random.Random(seed)
     was_training = net.training
@@ -143,7 +145,7 @@ def eval_vs_random(net: SnakeAzNet, args: argparse.Namespace, games: int, seed: 
             rf.Reward(food=1.0, loss=-1.0),
             seed=rng.randrange(2**31),
         )
-        net_side = g % 2
+        net_side = g % args.num_snakes
         episode = 0.0
         ticks = 0
         # rf.Env never truncates (that is an Engine concern), so cap the episode here — otherwise
