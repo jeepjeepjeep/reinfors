@@ -37,7 +37,7 @@ pub use policies::expectimax::search::{
     search_many, InteriorTarget, Opponent, SearchConfig, SearchResult, SearchStats,
 };
 pub use policies::expectimax::{SearchEvaluation, SelectiveExpectimax};
-pub use policies::mcts::{mcts_many, ActBy, Mcts, MctsConfig, NoiseScope};
+pub use policies::mcts::{mcts_many, ActBy, Mcts, MctsConfig, NoiseScope, MAX_JOINT_SLOTS};
 pub use policy::{ChanceMode, Policy, SearchPolicy};
 pub use reward::Reward;
 pub use space::Space;

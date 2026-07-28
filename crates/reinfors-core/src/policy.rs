@@ -14,12 +14,16 @@ pub trait Policy {
 
     type PolicyState;
 
-    /// The largest `Game::num_agents` this policy can plan for, or `None` if agent-count-agnostic.
+    /// The largest `Game::num_agents` this policy can plan for under the game's dynamics
+    /// (`sequential` = the game's decisions are `Actor::Agent` turns, probed from the initial
+    /// state; `false` = simultaneous), or `None` if agent-count-agnostic there. Capability can
+    /// depend on dynamics — UCT-guided MCTS searches simultaneous games at any N but sequential
+    /// ones only to 2 (Q-derived leaf values need the evaluated agent's own decision points).
     /// Checked at construction (the binding turns a violation into a config error; `Engine::new`
     /// asserts as the direct-core backstop) — never mid-collect. Required rather than defaulted:
     /// a capability claim must be deliberate, and running an unsupported agent count doesn't fail
     /// loudly, it silently computes wrong values (e.g. negamax past two players).
-    fn max_agents(&self) -> Option<usize>;
+    fn max_agents(&self, sequential: bool) -> Option<usize>;
 
     fn begin_episode(&self, rng: &mut dyn Rng) -> Self::PolicyState;
 

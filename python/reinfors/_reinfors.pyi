@@ -124,7 +124,7 @@ class ChanceModeHandle:
 
 class NoiseHandle:
     # Root exploration noise (rf.noise.*; AlphaZero `noise=` kwarg — None disables, omitted = the
-    # self-play default Dirichlet(0.25, 0.3, "requester")). scope: "requester" | "both".
+    # self-play default Dirichlet(0.25, 0.3, "requester")). scope: "requester" | "all".
     @staticmethod
     def Dirichlet(epsilon: float = ..., alpha: float = ..., scope: str = ...) -> NoiseHandle: ...
 
@@ -165,7 +165,7 @@ class PolicyHandle:
         chance: ChanceModeHandle | None = ...,
     ) -> PolicyHandle: ...
     # AlphaZero (PUCT); pairs with learners.AlphaZero; sequential, single-agent, and simultaneous
-    # (DUCT) games — noise_scope: "requester" (default) | "both" picks which root priors the
+    # (DUCT) games — noise_scope: "requester" (default) | "all" picks which root priors the
     # Dirichlet noise perturbs in a simultaneous tree. The infer
     # callback returns a (policy_logits (N, A) f64, values (N,) f64) tuple — one forward, both heads.
     # Root Dirichlet noise (noise_epsilon/noise_alpha) + acting temperature drive self-play diversity;
@@ -198,11 +198,16 @@ class LearnerHandle:
 
 class AlphaZeroBatch:
     """`Engine.collect` result for the AlphaZero family. Also unpacks positionally as
-    `obs, policy_targets, value_targets, telemetry = batch`."""
+    `obs, policy_targets, value_targets, policy_weights, telemetry = batch`.
+    `policy_weights` masks the policy loss: 1.0 on acting-agent rows, 0.0 on value-only rows
+    (non-mover perspectives, emitted by sequential N>2 games; their pi rows are inert zeros).
+    Policy term: `(w * cross_entropy(logits, pi)).sum() / w.sum()`; every row trains the value
+    head. 2p and simultaneous compositions emit all-ones weights."""
 
     obs: NDArray[np.float32]
     policy_targets: NDArray[np.float64]
     value_targets: NDArray[np.float64]
+    policy_weights: NDArray[np.float64]
     telemetry: dict[str, Any]
     def __len__(self) -> int: ...
     def __getitem__(self, i: int) -> Any: ...

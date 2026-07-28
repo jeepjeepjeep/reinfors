@@ -68,7 +68,7 @@ impl Policy for SelectiveExpectimax {
     type Evaluation = SearchEvaluation;
     type PolicyState = usize; // the Thompson head for the current episode
 
-    fn max_agents(&self) -> Option<usize> {
+    fn max_agents(&self, _sequential: bool) -> Option<usize> {
         Some(2) // the search models a single opponent (`opp = 1 - agent`, one belief stream)
     }
 

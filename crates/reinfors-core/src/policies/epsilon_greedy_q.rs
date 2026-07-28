@@ -38,7 +38,7 @@ impl Policy for EpsilonGreedyQ {
     type Evaluation = QEvaluation;
     type PolicyState = usize; // the Thompson head for the current episode
 
-    fn max_agents(&self) -> Option<usize> {
+    fn max_agents(&self, _sequential: bool) -> Option<usize> {
         None // each agent acts greedily on its own Q row; no cross-agent structure
     }
 

@@ -99,6 +99,9 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     // `Evaluator` — the single path every consumer's forwards take. Lifetime spans collects;
     // cleared when the shared weights generation is bumped (`weights_updated` at the binding).
     infer_cache: Option<crate::infer_cache::InferCache>,
+    // The game's decision dynamics (probed once from the initial state): sequential games with
+    // N>2 agents buffer value-only steps for non-mover perspectives (see `collect`).
+    sequential: bool,
     buffer_rng: SplitMix64,
     seeded: Vec<bool>, // per game: was the current episode seeded from the start buffer?
     policy_states: Vec<P::PolicyState>, // per-game acting state for the current episode (Thompson head)
@@ -118,17 +121,8 @@ where
         learner: L,
         params: EngineParams,
     ) -> Self {
-        // A real assert, not a debug one: an unsupported agent count doesn't fail loudly later,
-        // it silently computes wrong values. The binding pre-checks and errors; this is the
-        // backstop for direct core callers.
         let n = game.num_agents();
         assert!(n >= 1, "a game must have at least one agent");
-        if let Some(cap) = policy.max_agents() {
-            assert!(
-                n <= cap,
-                "this policy supports at most {cap} agents; the game has {n}"
-            );
-        }
         let mut episodes: Vec<Episode<G>> = (0..params.n_games)
             .map(|i| {
                 Episode::new(
@@ -139,6 +133,19 @@ where
                 )
             })
             .collect();
+        // Real asserts, not debug ones: an unsupported composition doesn't fail loudly later, it
+        // silently computes wrong values (or overflows the joint space). The binding pre-checks
+        // and errors; these are the backstops for direct core callers. Dynamics are probed from
+        // the initial state (games are uniformly one dynamics; the searches assert mixing).
+        let sequential = episodes
+            .first()
+            .is_some_and(|ep| matches!(game.actor(&ep.state), crate::game::Actor::Agent(_)));
+        if let Some(cap) = policy.max_agents(sequential) {
+            assert!(
+                n <= cap,
+                "this policy supports at most {cap} agents for this game's dynamics; the game has {n}"
+            );
+        }
         let policy_states: Vec<P::PolicyState> = episodes
             .iter_mut()
             .map(|ep| policy.begin_episode(&mut ep.rng))
@@ -161,6 +168,7 @@ where
             search_rng,
             start_dist: Box::new(AlwaysInitialState),
             infer_cache: None,
+            sequential,
             buffer_rng,
             seeded,
             policy_states,
@@ -269,6 +277,40 @@ where
                 });
             }
 
+            // 3b. Sequential N>2 general-sum: every non-mover perspective of this real self-play
+            //    state gets a VALUE-ONLY step in its own trajectory (its observation now; its own
+            //    reward stream stamps it below, exactly per tick) — so the per-perspective leaf
+            //    values Max^N consumes are supervised. The learner opts in by supplying the
+            //    placeholder evaluation; its records carry policy weight 0. Perspectives are
+            //    emitted only where the search consumes them: 2p-sequential (negamax reads the
+            //    mover row only) and simultaneous games (all active agents hold real steps)
+            //    buffer nothing extra.
+            if self.sequential && num_agents > 2 {
+                let action_count = self.game.action_count();
+                for (gi, agents) in acted.iter().enumerate() {
+                    if agents.iter().all(|s| s.is_none()) {
+                        continue; // no decision this tick
+                    }
+                    for (si, slot) in agents.iter().enumerate() {
+                        if slot.is_none() {
+                            if let Some(evaluation) =
+                                self.learner.value_only_evaluation(action_count)
+                            {
+                                self.traj[gi][si].push(Step {
+                                    obs: self.episodes[gi].observe(&*self.encoder, si),
+                                    evaluation,
+                                    action: 0,
+                                    reward: 0.0, // stamped from this tick's transition below
+                                    next_obs: Vec::new(),
+                                    next_legal: Vec::new(),
+                                    terminal: false,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
             // 4. Advance every game via the env transition (sampling its chance from the per-game RNG);
             //    record the executed decisions' rewards; flush finished games' trajectories with
             //    z-mixing and reset them. On a truncation tick the game stamps the truncation outcome
@@ -306,9 +348,9 @@ where
                     } else if let Some(step) = self.traj[gi][si].last_mut() {
                         // An agent that did not act this tick can still be scored by it — in a
                         // sequential game the loser's terminal event fires on the winner's move.
-                        // Fold the reward into their last decision (0 for the common Ongoing/dead
-                        // events, so this only ever carries real outcomes) and mark it terminal so
-                        // the episode outcome reaches their trajectory.
+                        // Fold the reward into their last buffered step (their previous decision;
+                        // or, when value-only steps are on, THIS tick's value step — per-tick
+                        // exact) and mark it terminal so the outcome reaches their trajectory.
                         step.reward += reward;
                         step.terminal |= terminal;
                     }
@@ -410,6 +452,13 @@ where
         }
         let a = self.game.action_count();
         let num_agents = self.game.num_agents();
+        // Under the value-only regime every perspective holds a per-tick trajectory and the
+        // search consumes every perspective's value at the final state — so every non-empty
+        // trajectory gets its own tail V_i(final_state), active or not (a sequential non-mover
+        // has no legal actions there, but the AZ tail reads the value slot, not the legal set).
+        // Off the regime, the active-only condition is unchanged.
+        let all_perspectives =
+            self.sequential && num_agents > 2 && self.learner.value_only_evaluation(a).is_some();
         let mut obs_flat: Vec<f32> = Vec::new();
         let mut meta: Vec<(usize, usize)> = Vec::new();
         for &(gi, terminal) in finished {
@@ -417,7 +466,9 @@ where
                 continue;
             }
             for si in 0..num_agents {
-                if self.episodes[gi].agent_active(&self.game, si) && !self.traj[gi][si].is_empty() {
+                if (all_perspectives || self.episodes[gi].agent_active(&self.game, si))
+                    && !self.traj[gi][si].is_empty()
+                {
                     obs_flat.extend(self.episodes[gi].observe(&*self.encoder, si));
                     meta.push((gi, si));
                 }

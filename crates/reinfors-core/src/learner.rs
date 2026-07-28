@@ -58,6 +58,17 @@ pub trait Learner<E> {
             .collect()
     }
 
+    /// Sequential N>2 general-sum games: the placeholder evaluation for a VALUE-ONLY step — a
+    /// non-mover perspective buffered at another agent's decision tick, so the per-perspective
+    /// leaf values an N-player search consumes (e.g. Max^N) are supervised by the collection
+    /// pipeline rather than left out-of-distribution. `None` (the default) opts out: the engine
+    /// buffers steps only at the agent's own decisions, exactly as before. An opting-in learner
+    /// must emit a policy-mask convention for these steps (AlphaZero: an all-zero π row).
+    fn value_only_evaluation(&self, action_count: usize) -> Option<E> {
+        let _ = action_count;
+        None
+    }
+
     /// Whether the engine should fill each buffered `Step`'s `next_obs` (the post-transition `s'`).
     /// True for transition learners (DQN); false (default) for return-based learners (TreeStrap), so
     /// they pay no per-step observation cost.

@@ -9,8 +9,16 @@ use crate::game::Rng;
 use crate::learner::{Learner, Step};
 use crate::policies::expectimax::SearchEvaluation;
 
-/// One collected AlphaZero record: observation, policy target `π [A]`, value target `z`.
-pub type AlphaZeroRecord = (Vec<f32>, Vec<f64>, f64);
+/// One collected AlphaZero record: observation, policy target `π [A]`, value target `z`, and the
+/// policy weight (1.0 for the acting agent's row, 0.0 for a value-only row).
+///
+/// **Value-only records** exist for sequential N>2 games: every non-mover perspective of a real
+/// self-play state is buffered at the decision tick, so the per-perspective leaf values Max^N
+/// consumes are supervised (their π rows are inert zeros). The training loss must weight the
+/// policy term: `(w * cross_entropy(logits, π)).sum() / w.sum()` — every row trains the value
+/// head, only weight-1 rows train the policy head. 2p-sequential and simultaneous games emit
+/// weight-1 rows only (supervised perspectives ≡ the perspectives their searches consume).
+pub type AlphaZeroRecord = (Vec<f32>, Vec<f64>, f64, f64);
 
 /// The AlphaZero learner. Pairs with the `AlphaZero` (PUCT) policy: it reads the search's root visit
 /// counts as `π`, so the policy must produce visit-bearing evaluations.
@@ -26,11 +34,12 @@ impl AlphaZeroLearner {
 
 /// τ=1 policy target: visit counts normalized to a distribution. The root's counts sum to
 /// `num_simulations − 1` (sim 1 evaluates the root itself), so the sum is positive for any
-/// `num_simulations ≥ 2` (enforced by the binding).
+/// `num_simulations ≥ 2` (enforced by the binding). All-zero visits mark a VALUE-ONLY step
+/// (a non-mover perspective) and yield the all-zero π mask — never a fabricated uniform.
 fn normalized_visits(visits: &[f64]) -> Vec<f64> {
     let total: f64 = visits.iter().sum();
     if total <= 0.0 {
-        return vec![1.0 / visits.len().max(1) as f64; visits.len()];
+        return vec![0.0; visits.len()];
     }
     visits.iter().map(|&v| v / total).collect()
 }
@@ -54,6 +63,18 @@ impl Learner<SearchEvaluation> for AlphaZeroLearner {
         _agent: usize,
     ) -> Vec<f64> {
         vec![row[action_count]]
+    }
+
+    /// The value-only placeholder: zero values, full-width zero visits (the codec's AZ shape),
+    /// empty legal set. Its record is `(obs, all-zero π, z, weight 0)` — see [`AlphaZeroRecord`].
+    fn value_only_evaluation(&self, action_count: usize) -> Option<SearchEvaluation> {
+        Some(SearchEvaluation {
+            values: vec![vec![0.0; action_count]],
+            visits: vec![0.0; action_count],
+            interior: Vec::new(),
+            legal: Vec::new(),
+            stats: Default::default(),
+        })
     }
 
     fn eval_records(
@@ -85,6 +106,12 @@ impl Learner<SearchEvaluation> for AlphaZeroLearner {
         let mut out: Vec<AlphaZeroRecord> = Vec::with_capacity(trajectory.len());
         for step in trajectory.iter().rev() {
             z = step.reward + self.gamma * z;
+            // Zero visit sum = a value-only step (non-mover perspective): weight 0, inert π.
+            let weight = if step.evaluation.visits.iter().sum::<f64>() > 0.0 {
+                1.0
+            } else {
+                0.0
+            };
             let visits_game = normalized_visits(&step.evaluation.visits);
             let pi = if identity {
                 visits_game
@@ -95,7 +122,7 @@ impl Learner<SearchEvaluation> for AlphaZeroLearner {
                 }
                 pi
             };
-            out.push((step.obs.clone(), pi, z));
+            out.push((step.obs.clone(), pi, z, weight));
         }
         out.reverse();
         out
@@ -173,6 +200,29 @@ pub(crate) mod tests {
             learner.tail_from_row(&[9.0, 9.0, 9.0, 0.4], 3, &[0, 1, 2], &IdentityView, 0),
             vec![0.4]
         );
+    }
+
+    #[test]
+    fn value_only_steps_emit_weight_zero_and_inert_pi() {
+        // A trajectory of [mover step, value-only step]: the value row carries this agent's own
+        // z, an all-zero pi, and policy weight 0 — the mover row weight 1.
+        let learner = AlphaZeroLearner::new(1.0);
+        let vo = Step {
+            obs: vec![7.0; 2],
+            evaluation: learner.value_only_evaluation(3).unwrap(),
+            action: 0,
+            reward: 2.0,
+            next_obs: Vec::new(),
+            next_legal: Vec::new(),
+            terminal: true,
+        };
+        let steps = vec![step(vec![6.0, 2.0, 0.0], 0, 0.0), vo];
+        let recs = learner.episode_records(&steps, &[], &IdentityView, 1, &mut SplitMix64::new(0));
+        assert_eq!(recs[0].3, 1.0);
+        assert_eq!(recs[1].3, 0.0);
+        assert_eq!(recs[1].1, vec![0.0; 3], "value-only pi is inert zeros");
+        assert_eq!(recs[1].2, 2.0, "the value row carries its own return");
+        assert_eq!(recs[0].2, 2.0, "gamma 1: the mover's z includes it");
     }
 
     #[test]
