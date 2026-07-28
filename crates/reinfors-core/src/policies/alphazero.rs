@@ -16,7 +16,7 @@ use crate::engine::CollectStats;
 use crate::evaluator::Evaluator;
 use crate::game::{Game, Rng};
 use crate::policies::expectimax::SearchEvaluation;
-use crate::policies::mcts::{sample_visits, search_many, Guidance, NoiseScope};
+use crate::policies::mcts::{sample_visits, search_many, Guidance, NoiseScope, SequentialBackup};
 use crate::policy::{argmax, ChanceMode, Policy, SearchPolicy};
 use crate::reward::Reward;
 
@@ -41,6 +41,9 @@ pub struct AlphaZeroConfig {
     /// Simultaneous games: which root priors the Dirichlet noise perturbs — the requester's
     /// only, or every agent's. Irrelevant for sequential games (one root table).
     pub noise_scope: NoiseScope,
+    /// Sequential backup scheme: `Auto` (negamax at <=2 agents, Max^N past) or `MaxN` forced at
+    /// 2 — the negamax-deletion measurement seam (see [`SequentialBackup`]).
+    pub sequential_backup: SequentialBackup,
 }
 
 pub struct AlphaZero {
@@ -87,6 +90,7 @@ where
         seed,
         requests,
         eval,
+        matches!(cfg.sequential_backup, SequentialBackup::MaxN),
     )
 }
 
@@ -96,6 +100,14 @@ impl Policy for AlphaZero {
 
     fn max_agents(&self, _sequential: bool) -> Option<usize> {
         None // rides the MCTS tree: negamax at ≤2 sequential, Max^N past that, DUCT-N for sim
+    }
+
+    fn evaluates_all_perspectives(&self, sequential: bool, num_agents: usize) -> bool {
+        // Max^N consumes every perspective's leaf values — at N>2 always, and at 2 when forced.
+        sequential
+            && (num_agents > 2
+                || (num_agents == 2
+                    && matches!(self.cfg.sequential_backup, SequentialBackup::MaxN)))
     }
 
     fn encode_eval(&self, eval: &SearchEvaluation, out: &mut Vec<u8>) {

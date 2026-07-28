@@ -81,7 +81,7 @@ def make_infer(net: SnakeAzNet, device: str) -> Callable[[np.ndarray], tuple[np.
 
 def build_engine(args: argparse.Namespace) -> rf.Engine:
     return rf.Engine(
-        rf.games.Snake(grid_size=args.grid, max_ticks=args.max_ticks),
+        rf.games.Snake(grid_size=args.grid, max_ticks=args.max_ticks, num_snakes=args.num_snakes),
         rf.Reward(food=1.0, loss=-1.0),
         rf.policies.AlphaZero(
             num_simulations=args.sims,
@@ -130,8 +130,10 @@ def train_pass(
 
 
 def eval_vs_random(net: SnakeAzNet, args: argparse.Namespace, games: int, seed: int) -> float:
-    """Search-free probe: the raw policy head (argmax logits) drives one snake against a
-    uniform-random opponent; returns the net side's mean episode reward (food - death)."""
+    """Search-free probe: the raw policy head (argmax logits) drives one snake against
+    uniform-random opponents; returns the net side's mean episode reward (food - death). The
+    net seat rotates through every position (placement is not seat-identical, so evaluating
+    only seats 0/1 would bias multi-snake results)."""
     c, h, w = net.obs_shape
     rng = random.Random(seed)
     was_training = net.training
@@ -139,11 +141,11 @@ def eval_vs_random(net: SnakeAzNet, args: argparse.Namespace, games: int, seed: 
     total = 0.0
     for g in range(games):
         env = rf.Env(
-            rf.games.Snake(grid_size=args.grid, max_ticks=args.max_ticks),
+            rf.games.Snake(grid_size=args.grid, max_ticks=args.max_ticks, num_snakes=args.num_snakes),
             rf.Reward(food=1.0, loss=-1.0),
             seed=rng.randrange(2**31),
         )
-        net_side = g % 2
+        net_side = g % args.num_snakes
         episode = 0.0
         ticks = 0
         # rf.Env never truncates (that is an Engine concern), so cap the episode here — otherwise
@@ -172,6 +174,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--iterations", type=int, default=30, help="collect+train cycles")
     parser.add_argument("--grid", type=int, default=8)
+    parser.add_argument("--num-snakes", type=int, default=2, help="2-8 simultaneous snakes")
     parser.add_argument("--max-ticks", type=int, default=120)
     parser.add_argument("--n-games", type=int, default=8)
     parser.add_argument("--collect-size", type=int, default=768, help="record floor per collect")
@@ -192,7 +195,7 @@ def main() -> None:
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
     engine = build_engine(args)
-    game = rf.games.Snake(grid_size=args.grid, max_ticks=args.max_ticks)
+    game = rf.games.Snake(grid_size=args.grid, max_ticks=args.max_ticks, num_snakes=args.num_snakes)
     obs_shape = tuple(game.observation_space().shape)
     net = SnakeAzNet(obs_shape, game.action_space().n).to(args.device)
     optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)

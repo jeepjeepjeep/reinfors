@@ -29,6 +29,7 @@ fn cfg(num_simulations: usize, noise_epsilon: f64) -> AlphaZeroConfig {
         temperature_drop: u32::MAX,
         chance: ChanceMode::AlwaysResample,
         noise_scope: NoiseScope::Requester,
+        sequential_backup: Default::default(),
     }
 }
 
@@ -209,6 +210,7 @@ fn searches_simultaneous_stochastic_snake() {
                 temperature_drop: u32::MAX,
                 chance: ChanceMode::Committed { samples: 2 },
                 noise_scope: NoiseScope::Requester,
+                sequential_backup: Default::default(),
             },
             vec![(state.clone(), 0), (state.clone(), 1)],
             seed,
@@ -298,6 +300,7 @@ fn searches_backgammon_dice_chance() {
                 temperature_drop: u32::MAX,
                 chance: ChanceMode::AlwaysResample,
                 noise_scope: NoiseScope::Requester,
+                sequential_backup: Default::default(),
             },
             vec![(state.clone(), 0)],
             seed,

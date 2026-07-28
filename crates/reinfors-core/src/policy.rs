@@ -39,6 +39,16 @@ pub trait Policy {
     /// loudly, it silently computes wrong values (e.g. negamax past two players).
     fn max_agents(&self, sequential: bool) -> Option<usize>;
 
+    /// Whether this policy's search consumes EVERY agent's perspective at sequential decision
+    /// points (Max^N). The engine then buffers value-only steps for non-movers (when the paired
+    /// learner opts in) and bootstraps every perspective's truncation tail — the emission
+    /// principle: supervised perspectives ≡ consumed perspectives. Default: no (negamax and
+    /// non-search policies read only the mover's row).
+    fn evaluates_all_perspectives(&self, sequential: bool, num_agents: usize) -> bool {
+        let _ = (sequential, num_agents);
+        false
+    }
+
     fn begin_episode(&self, rng: &mut dyn Rng) -> Self::PolicyState;
 
     /// Pooled evaluation of a batch of active `(state, agent)` requests against the engine's

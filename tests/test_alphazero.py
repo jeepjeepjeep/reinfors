@@ -145,6 +145,40 @@ def test_alphazero_trains_on_simultaneous_stochastic_snake() -> None:
     assert batch.value_targets.min() >= -1.0 - 1e-9  # a death is the worst single outcome
 
 
+def test_sequential_backup_kwarg() -> None:
+    # The negamax-deletion measurement seam: "maxn" forces the vector backup at 2 agents and
+    # emits value-only (weight-0) rows for the non-mover; "auto" keeps mover-only supervision.
+    def collect(backup: str) -> object:
+        return rf.Engine(
+            rf.games.Connect4(),
+            rf.Reward(win=1.0, loss=-1.0),
+            rf.policies.AlphaZero(num_simulations=12, sequential_backup=backup),
+            rf.learners.AlphaZero(),
+            n_games=2,
+            seed=2,
+        ).collect(40, _uniform_infer)
+
+    auto = collect("auto")
+    assert (auto.policy_weights == 1.0).all()
+    maxn = collect("maxn")
+    w = maxn.policy_weights
+    assert (w == 0.0).sum() == (w == 1.0).sum() > 0  # one value row per decision at N=2
+    # zero-sum z on the value rows: the non-mover's return is the mover's negated at gamma 1
+    cfg = rf.Engine(
+        rf.games.Connect4(),
+        rf.Reward(win=1.0, loss=-1.0),
+        rf.policies.AlphaZero(num_simulations=12, sequential_backup="maxn"),
+        rf.learners.AlphaZero(),
+        n_games=1,
+        seed=3,
+    ).resolved_config()
+    assert cfg["policy"]["sequential_backup"] == "maxn"
+    rebuilt = rf.engine_from_config(cfg)
+    assert rebuilt.resolved_config() == cfg
+    with pytest.raises(ValueError, match="sequential_backup"):
+        rf.policies.AlphaZero(sequential_backup="negamax")
+
+
 def test_noise_scope_kwarg() -> None:
     rf.policies.AlphaZero(noise=rf.noise.Dirichlet(scope="requester"))
     rf.policies.AlphaZero(noise=rf.noise.Dirichlet(scope="all"))

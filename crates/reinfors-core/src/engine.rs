@@ -285,7 +285,10 @@ where
             //    emitted only where the search consumes them: 2p-sequential (negamax reads the
             //    mover row only) and simultaneous games (all active agents hold real steps)
             //    buffer nothing extra.
-            if self.sequential && num_agents > 2 {
+            if self
+                .policy
+                .evaluates_all_perspectives(self.sequential, num_agents)
+            {
                 let action_count = self.game.action_count();
                 for (gi, agents) in acted.iter().enumerate() {
                     if agents.iter().all(|s| s.is_none()) {
@@ -457,8 +460,10 @@ where
         // trajectory gets its own tail V_i(final_state), active or not (a sequential non-mover
         // has no legal actions there, but the AZ tail reads the value slot, not the legal set).
         // Off the regime, the active-only condition is unchanged.
-        let all_perspectives =
-            self.sequential && num_agents > 2 && self.learner.value_only_evaluation(a).is_some();
+        let all_perspectives = self
+            .policy
+            .evaluates_all_perspectives(self.sequential, num_agents)
+            && self.learner.value_only_evaluation(a).is_some();
         let mut obs_flat: Vec<f32> = Vec::new();
         let mut meta: Vec<(usize, usize)> = Vec::new();
         for &(gi, terminal) in finished {
