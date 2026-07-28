@@ -22,6 +22,21 @@ pub trait Policy {
     /// searching policy value the in-tree immediate rewards (the engine's per-step reward source);
     /// non-search policies ignore it.
     #[allow(clippy::too_many_arguments)]
+    /// Serialize/deserialize this policy's per-decision evaluation — buffered `Step`s carry them,
+    /// so exact engine snapshots need them portable. Decode validates (untrusted-bytes boundary).
+    fn encode_eval(&self, eval: &Self::Evaluation, out: &mut Vec<u8>);
+    fn decode_eval(
+        &self,
+        r: &mut crate::codec::bytes::Reader,
+        action_count: usize,
+    ) -> Result<Self::Evaluation, String>;
+
+    /// The per-episode acting state as a plain integer (Thompson head / temperature ply) — every
+    /// current policy's state fits; a future richer state would widen this seam.
+    fn policy_state_to_u64(&self, s: &Self::PolicyState) -> u64;
+    fn policy_state_from_u64(&self, v: u64) -> Result<Self::PolicyState, String>;
+
+    #[allow(clippy::too_many_arguments)]
     fn evaluate<G, F>(
         &self,
         game: &G,

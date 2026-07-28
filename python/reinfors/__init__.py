@@ -23,6 +23,7 @@ from typing import Any
 from . import _reinfors, chance_modes, encoders, games, gym, learners, noise, policies, spaces
 from ._reinfors import (
     Engine,
+    EngineSnapshot,
     Env,
     EnvSnapshot,
     Reward,
@@ -129,6 +130,7 @@ def engine_from_config(config: dict[str, Any]) -> Engine:
 
 __all__ = [
     "Engine",
+    "EngineSnapshot",
     "Env",
     "EnvSnapshot",
     "Reward",

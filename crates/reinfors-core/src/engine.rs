@@ -438,3 +438,202 @@ where
         tails
     }
 }
+
+/// Exact-resume snapshot/restore of the engine's MUTABLE collection state. Immutable composition
+/// (game/reward/policy/learner/encoder config) is NOT here — it is reconstructed from the resolved
+/// config, and the binding gates restore on the config fingerprint. The infer cache is deliberately
+/// excluded: cache hits return bit-identical rows to the forwards they replace, so collected
+/// RECORDS after restore are byte-identical with a cold cache — the guarantee is record-exact,
+/// not inference-call-pattern-exact.
+impl<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> Engine<G, P, L>
+where
+    G::State: Send,
+{
+    pub fn snapshot_bytes(
+        &self,
+        codec: &dyn crate::StateCodec<State = G::State>,
+    ) -> Result<Vec<u8>, String> {
+        use crate::codec::bytes::*;
+        let mut out = vec![1u8]; // engine payload layout version
+        let n_games = self.episodes.len();
+        let num_agents = self.game.num_agents();
+        put_u32(&mut out, n_games as u32);
+        put_u32(&mut out, num_agents as u32);
+        put_u64(&mut out, self.search_rng.state());
+        put_u64(&mut out, self.buffer_rng.state());
+        for gi in 0..n_games {
+            put_blob(&mut out, &codec.encode(&self.episodes[gi].state));
+            put_u64(&mut out, self.episodes[gi].rng.state());
+            put_u64(&mut out, self.ticks[gi] as u64);
+            put_u8(&mut out, u8::from(self.seeded[gi]));
+            put_u64(
+                &mut out,
+                self.policy.policy_state_to_u64(&self.policy_states[gi]),
+            );
+            for si in 0..num_agents {
+                let steps = &self.traj[gi][si];
+                put_u32(&mut out, steps.len() as u32);
+                for step in steps {
+                    put_f32s(&mut out, &step.obs);
+                    self.policy.encode_eval(&step.evaluation, &mut out);
+                    put_u64(&mut out, step.action as u64);
+                    put_f64(&mut out, step.reward);
+                    put_f32s(&mut out, &step.next_obs);
+                    put_usizes(&mut out, &step.next_legal);
+                    put_u8(&mut out, u8::from(step.terminal));
+                }
+            }
+        }
+        put_blob(
+            &mut out,
+            &self.start_dist.snapshot_bytes(&|s| codec.encode(s)),
+        );
+        Ok(out)
+    }
+
+    pub fn restore_bytes(
+        &mut self,
+        codec: &dyn crate::StateCodec<State = G::State>,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        use crate::codec::bytes::*;
+        let mut r = Reader::new(bytes);
+        if r.u8()? != 1 {
+            return Err("unsupported engine snapshot layout version".into());
+        }
+        let n_games = r.u32()? as usize;
+        let num_agents = r.u32()? as usize;
+        if n_games != self.episodes.len() || num_agents != self.game.num_agents() {
+            return Err(format!(
+                "snapshot shape ({n_games} games, {num_agents} agents) does not match the engine"
+            ));
+        }
+        let search_rng = r.u64()?;
+        let buffer_rng = r.u64()?;
+        let (c, h, w) = self.encoder.obs_shape();
+        let obs_dim = c * h * w;
+        let action_count = self.game.action_count();
+        let horizon = self.game.truncation_horizon();
+        let bool_byte = |b: u8| -> Result<bool, String> {
+            match b {
+                0 => Ok(false),
+                1 => Ok(true),
+                other => Err(format!("byte {other} is not a bool")),
+            }
+        };
+        // Decode EVERYTHING before mutating anything: a malformed snapshot must leave the engine
+        // untouched.
+        struct GameSlice<S, E, PS> {
+            state: S,
+            rng: u64,
+            tick: usize,
+            seeded: bool,
+            policy_state: PS,
+            traj: Vec<Vec<Step<E>>>,
+        }
+        let mut slices: Vec<GameSlice<G::State, P::Evaluation, P::PolicyState>> =
+            Vec::with_capacity(n_games);
+        for _ in 0..n_games {
+            let state = codec.decode(r.blob()?)?;
+            // Engine episodes are always live (terminal episodes flush and reset immediately).
+            codec.validate_decoded_state(&state, false)?;
+            let rng = r.u64()?;
+            let tick = r.u64()? as usize;
+            if horizon.is_some_and(|hz| tick >= hz) {
+                return Err(format!("tick {tick} at or past the truncation horizon"));
+            }
+            if tick > (1 << 48) {
+                return Err(format!("implausible tick count {tick}"));
+            }
+            let seeded = bool_byte(r.u8()?)?;
+            let policy_state = self.policy.policy_state_from_u64(r.u64()?)?;
+            let mut traj = Vec::with_capacity(num_agents);
+            for _ in 0..num_agents {
+                let n_steps = r.u32()? as usize;
+                if n_steps > 1_000_000 {
+                    return Err(format!("implausible trajectory length {n_steps}"));
+                }
+                let mut steps = Vec::with_capacity(n_steps);
+                if n_steps > tick {
+                    return Err(format!(
+                        "{n_steps} buffered decisions exceed tick count {tick}"
+                    ));
+                }
+                for _ in 0..n_steps {
+                    let obs = f32s(&mut r)?;
+                    if obs.len() != obs_dim {
+                        return Err(format!("obs width {} != {obs_dim}", obs.len()));
+                    }
+                    let evaluation = self.policy.decode_eval(&mut r, action_count)?;
+                    let action = r.u64()? as usize;
+                    if action >= action_count {
+                        return Err(format!("action {action} out of range"));
+                    }
+                    let reward = r.f64()?;
+                    if !reward.is_finite() {
+                        return Err("non-finite reward in trajectory".into());
+                    }
+                    let next_obs = f32s(&mut r)?;
+                    if !(next_obs.is_empty() || next_obs.len() == obs_dim) {
+                        return Err(format!("next_obs width {} != {obs_dim}", next_obs.len()));
+                    }
+                    let next_legal = usizes(&mut r)?;
+                    if next_legal.iter().any(|&a| a >= action_count) {
+                        return Err("next_legal action id out of range".into());
+                    }
+                    let terminal = bool_byte(r.u8()?)?;
+                    if terminal {
+                        return Err(
+                            "buffered trajectories never hold terminal steps (they flush at episode end)"
+                                .into(),
+                        );
+                    }
+                    steps.push(Step {
+                        obs,
+                        evaluation,
+                        action,
+                        reward,
+                        next_obs,
+                        next_legal,
+                        terminal,
+                    });
+                }
+                traj.push(steps);
+            }
+            slices.push(GameSlice {
+                state,
+                rng,
+                tick,
+                seeded,
+                policy_state,
+                traj,
+            });
+        }
+        let start_blob = r.blob()?.to_vec();
+        r.done()?;
+        // The first mutation on a still-fallible path: the trait contract requires implementors
+        // to restore transactionally (decode fully, then swap), so an Err here leaves the
+        // distribution — and everything below, not yet touched — unchanged.
+        self.start_dist.restore_bytes(&start_blob, &|b| {
+            let s = codec.decode(b)?;
+            codec.validate_decoded_state(&s, false)?; // buffered start states are mid-episode: live
+            Ok(s)
+        })?;
+        self.search_rng = SplitMix64::from_state(search_rng);
+        self.buffer_rng = SplitMix64::from_state(buffer_rng);
+        for (gi, slice) in slices.into_iter().enumerate() {
+            self.episodes[gi].state = slice.state;
+            self.episodes[gi].rng = SplitMix64::from_state(slice.rng);
+            self.ticks[gi] = slice.tick;
+            self.seeded[gi] = slice.seeded;
+            self.policy_states[gi] = slice.policy_state;
+            self.traj[gi] = slice.traj;
+        }
+        // The cache may hold rows from OTHER weights at a numerically equal generation — stale
+        // rows would silently break the record-exact restore contract. Cold cache = same records.
+        if let Some(cache) = self.infer_cache.as_mut() {
+            cache.force_clear();
+        }
+        Ok(())
+    }
+}

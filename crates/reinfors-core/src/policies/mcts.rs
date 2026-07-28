@@ -1341,6 +1341,28 @@ impl Policy for Mcts {
     type Evaluation = SearchEvaluation;
     type PolicyState = u32; // moves acted this episode — drives the temperature_drop cutoff
 
+    fn encode_eval(&self, eval: &SearchEvaluation, out: &mut Vec<u8>) {
+        crate::policies::expectimax::encode_search_eval(eval, out);
+    }
+
+    fn decode_eval(
+        &self,
+        r: &mut crate::codec::bytes::Reader,
+        action_count: usize,
+    ) -> Result<SearchEvaluation, String> {
+        // the tree's root evaluation is always one value row plus full-width visits (both acting
+        // modes; `Tree::evaluation` densifies)
+        crate::policies::expectimax::decode_search_eval(r, action_count, 1, true)
+    }
+
+    fn policy_state_to_u64(&self, s: &u32) -> u64 {
+        u64::from(*s)
+    }
+
+    fn policy_state_from_u64(&self, v: u64) -> Result<u32, String> {
+        u32::try_from(v).map_err(|_| format!("acting-ply counter {v} out of range"))
+    }
+
     fn begin_episode(&self, _rng: &mut dyn Rng) -> u32 {
         0
     }

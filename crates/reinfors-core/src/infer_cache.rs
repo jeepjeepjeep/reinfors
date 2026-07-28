@@ -102,6 +102,14 @@ impl InferCache {
         self.sync_generation();
     }
 
+    /// Clear everything unconditionally — restore installs state that may pair with different
+    /// net weights than whatever warmed this cache, even at an equal generation NUMBER (the
+    /// counter is engine-local, not a weights identity).
+    pub fn force_clear(&mut self) {
+        self.current.clear();
+        self.prev.clear();
+    }
+
     /// Clear everything if the trainer bumped the weights generation. Called at round boundaries
     /// (one relaxed atomic load), so a mid-collect sync under `collect_stream` pipelining takes
     /// effect within one search round.

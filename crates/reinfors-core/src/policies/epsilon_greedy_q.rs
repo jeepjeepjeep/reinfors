@@ -42,6 +42,61 @@ impl Policy for EpsilonGreedyQ {
         rng.below(self.n_heads)
     }
 
+    fn encode_eval(&self, eval: &QEvaluation, out: &mut Vec<u8>) {
+        use crate::codec::bytes::*;
+        put_u32(out, eval.values.len() as u32);
+        for row in &eval.values {
+            put_f64s(out, row);
+        }
+        put_usizes(out, &eval.legal);
+    }
+
+    fn decode_eval(
+        &self,
+        r: &mut crate::codec::bytes::Reader,
+        action_count: usize,
+    ) -> Result<QEvaluation, String> {
+        use crate::codec::bytes::*;
+        let k = r.u32()? as usize;
+        if k != self.n_heads {
+            return Err(format!(
+                "evaluation has {k} heads, policy has {}",
+                self.n_heads
+            ));
+        }
+        let values = (0..k).map(|_| f64s(r)).collect::<Result<Vec<_>, _>>()?;
+        for row in &values {
+            if row.len() != action_count {
+                return Err(format!(
+                    "Q row width {} != action count {action_count}",
+                    row.len()
+                ));
+            }
+            if row.iter().any(|v| !v.is_finite()) {
+                return Err("non-finite Q value in evaluation".into());
+            }
+        }
+        let legal = usizes(r)?;
+        if legal.iter().any(|&a| a >= action_count) {
+            return Err("legal action id out of range".into());
+        }
+        Ok(QEvaluation { values, legal })
+    }
+
+    fn policy_state_to_u64(&self, s: &usize) -> u64 {
+        *s as u64
+    }
+
+    fn policy_state_from_u64(&self, v: u64) -> Result<usize, String> {
+        if v as usize >= self.n_heads {
+            return Err(format!(
+                "Thompson head {v} out of range for {} heads",
+                self.n_heads
+            ));
+        }
+        Ok(v as usize)
+    }
+
     fn evaluate<G, F>(
         &self,
         game: &G,

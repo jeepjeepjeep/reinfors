@@ -494,6 +494,110 @@ fn fingerprint_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+const ENGINE_SNAPSHOT_SCHEMA: u8 = 1;
+const ENGINE_SNAPSHOT_MAGIC: &[u8; 4] = b"RFGS";
+
+/// A quiescent, restorable capture of an `Engine`'s mutable collection state: live episodes and
+/// their RNGs, tick counts, seeded flags, per-game policy state, partially accumulated
+/// trajectories (with their evaluations), the start-buffer reservoirs, and the weights
+/// generation. The infer cache is deliberately excluded — cache hits return bit-identical rows
+/// to the forwards they replace, so collected RECORDS after restore are byte-identical with a
+/// cold cache: the guarantee is record-exact, not inference-call-pattern-exact.
+#[pyclass(name = "EngineSnapshot")]
+#[derive(Clone)]
+struct PyEngineSnapshot {
+    schema: u8,
+    fingerprint: String,
+    weights_generation: u64,
+    policy_version: Option<String>,
+    payload: Vec<u8>,
+}
+
+#[pymethods]
+impl PyEngineSnapshot {
+    /// Fingerprint of the engine composition (reinfors version excluded, so snapshots survive
+    /// upgrades with unchanged schemas).
+    #[getter]
+    fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    #[getter]
+    fn schema_version(&self) -> u8 {
+        self.schema
+    }
+
+    /// The engine's weights-generation counter at capture, plus the user-supplied external net
+    /// version (if any) — reinfors cannot know the user's net, so strict checking is opt-in.
+    #[getter]
+    fn weights_generation(&self) -> u64 {
+        self.weights_generation
+    }
+
+    #[getter]
+    fn policy_version(&self) -> Option<&str> {
+        self.policy_version.as_deref()
+    }
+
+    fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
+        let mut out = Vec::with_capacity(self.payload.len() + 96);
+        out.extend_from_slice(ENGINE_SNAPSHOT_MAGIC);
+        out.push(self.schema);
+        out.extend_from_slice(&(self.fingerprint.len() as u32).to_le_bytes());
+        out.extend_from_slice(self.fingerprint.as_bytes());
+        out.extend_from_slice(&self.weights_generation.to_le_bytes());
+        let pv = self.policy_version.as_deref().unwrap_or("");
+        out.push(u8::from(self.policy_version.is_some()));
+        out.extend_from_slice(&(pv.len() as u32).to_le_bytes());
+        out.extend_from_slice(pv.as_bytes());
+        out.extend_from_slice(&(self.payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.payload);
+        pyo3::types::PyBytes::new(py, &out)
+    }
+
+    #[staticmethod]
+    fn from_bytes(data: &[u8]) -> PyResult<Self> {
+        let err = |m: &str| {
+            pyo3::exceptions::PyValueError::new_err(format!("invalid EngineSnapshot: {m}"))
+        };
+        let mut r = reinfors_core::codec::bytes::Reader::new(data);
+        let mut chk = |n: usize| r.take(n).map_err(|_| err("truncated"));
+        if chk(4)? != ENGINE_SNAPSHOT_MAGIC {
+            return Err(err("bad magic"));
+        }
+        let schema = chk(1)?[0];
+        if schema != ENGINE_SNAPSHOT_SCHEMA {
+            return Err(err(&format!("unsupported schema version {schema}")));
+        }
+        let fp_len = u32::from_le_bytes(chk(4)?.try_into().unwrap()) as usize;
+        let fingerprint =
+            String::from_utf8(chk(fp_len)?.to_vec()).map_err(|_| err("fingerprint not utf-8"))?;
+        let weights_generation = u64::from_le_bytes(chk(8)?.try_into().unwrap());
+        let has_pv = match chk(1)?[0] {
+            0 => false,
+            1 => true,
+            b => {
+                return Err(err(&format!(
+                    "policy_version presence byte {b} is not a bool"
+                )))
+            }
+        };
+        let pv_len = u32::from_le_bytes(chk(4)?.try_into().unwrap()) as usize;
+        let pv = String::from_utf8(chk(pv_len)?.to_vec())
+            .map_err(|_| err("policy_version not utf-8"))?;
+        let payload_len = u32::from_le_bytes(chk(4)?.try_into().unwrap()) as usize;
+        let payload = chk(payload_len)?.to_vec();
+        r.done().map_err(|_| err("trailing bytes"))?;
+        Ok(PyEngineSnapshot {
+            schema,
+            fingerprint,
+            weights_generation,
+            policy_version: has_pv.then_some(pv),
+            payload,
+        })
+    }
+}
+
 /// The unified parallel rollout engine: composes a game + policy + learner handle and drives N games,
 /// yielding the learner's records. Holds the composition type-erased, so one class serves every
 /// `(game, policy, learner)`. Construct the handles via `rf.games.*` / `rf.policies.*` / `rf.learners.*`.
@@ -503,6 +607,8 @@ struct PyEngine {
     inner: Option<Box<dyn ErasedEngine>>,
     // The immutable composition, resolved (defaults included) at construction — see `resolved_config`.
     config: Value,
+    // `config` minus the reinfors version, fingerprinted — what snapshots embed and check.
+    snapshot_fp: String,
     // Weights-version counter shared with the infer cache (if enabled). Held here — OUTSIDE the
     // movable engine — so `weights_updated()` works from the consumer thread while a stream's
     // worker owns the engine.
@@ -585,7 +691,16 @@ impl PyEngine {
         let weights_generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let cache =
             (infer_cache > 0).then(|| InferCache::new(infer_cache, weights_generation.clone()));
+        let snapshot_fp = {
+            let mut stripped = config.clone();
+            stripped
+                .as_object_mut()
+                .expect("config is an object")
+                .remove("reinfors_version");
+            fingerprint_hex(&canonical_config_bytes(&stripped))
+        };
         Ok(PyEngine {
+            snapshot_fp,
             inner: Some(build_engine(
                 game.spec,
                 reward,
@@ -624,6 +739,63 @@ impl PyEngine {
     /// re-serialized JSON. The algorithm may change with the config `schema_version`.
     fn config_fingerprint(&self) -> String {
         fingerprint_hex(&canonical_config_bytes(&self.config))
+    }
+
+    /// A quiescent snapshot of the engine's mutable collection state (see `EngineSnapshot`).
+    /// `policy_version`: an optional caller-owned tag for the external net's weights, checked on
+    /// restore only when the restorer asks. Unavailable while a `collect_stream` worker owns the
+    /// engine — stop (or, later, pause) the stream first.
+    #[pyo3(signature = (policy_version=None))]
+    fn snapshot(&self, policy_version: Option<String>) -> PyResult<PyEngineSnapshot> {
+        let engine = self.inner.as_ref().ok_or_else(stream_active_err)?;
+        Ok(PyEngineSnapshot {
+            schema: ENGINE_SNAPSHOT_SCHEMA,
+            fingerprint: self.snapshot_fp.clone(),
+            weights_generation: self
+                .weights_generation
+                .load(std::sync::atomic::Ordering::Relaxed),
+            policy_version,
+            payload: engine.snapshot_payload()?,
+        })
+    }
+
+    /// Install a snapshot. Rejects a different composition (fingerprint), an unsupported schema,
+    /// a malformed payload (engine left untouched), or — when `expect_policy_version` is given —
+    /// a snapshot whose recorded net version differs. Restores the weights generation, so a
+    /// restored engine's cache-clear behavior matches the captured one.
+    #[pyo3(signature = (snapshot, expect_policy_version=None))]
+    fn restore(
+        &mut self,
+        snapshot: &PyEngineSnapshot,
+        expect_policy_version: Option<String>,
+    ) -> PyResult<()> {
+        if snapshot.schema != ENGINE_SNAPSHOT_SCHEMA {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unsupported snapshot schema {}",
+                snapshot.schema
+            )));
+        }
+        if snapshot.fingerprint != self.snapshot_fp {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "snapshot is from a different composition (fingerprint {} != {})",
+                snapshot.fingerprint, self.snapshot_fp
+            )));
+        }
+        if let Some(expect) = expect_policy_version {
+            if snapshot.policy_version.as_deref() != Some(expect.as_str()) {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "policy_version mismatch: snapshot has {:?}, expected {expect:?}",
+                    snapshot.policy_version
+                )));
+            }
+        }
+        let engine = self.inner.as_mut().ok_or_else(stream_active_err)?;
+        engine.restore_payload(&snapshot.payload)?;
+        self.weights_generation.store(
+            snapshot.weights_generation,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        Ok(())
     }
 
     /// Roll forward until at least `n_records` records are gathered. `infer` maps an (N, C*H*W) float32
@@ -672,13 +844,19 @@ impl PyEngine {
             .ok_or_else(stream_active_err)?;
 
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pause = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let queued = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (tx, rx) = StreamChannel::new(depth);
         let worker = {
             let (stop, queued) = (stop.clone(), queued.clone());
+            let pause = pause.clone();
             std::thread::spawn(move || {
                 loop {
-                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    // `pause` is honored only at batch boundaries: the in-flight collect finishes
+                    // with real inference, so the engine's state matches the delivered batches.
+                    if stop.load(std::sync::atomic::Ordering::Relaxed)
+                        || pause.load(std::sync::atomic::Ordering::Relaxed)
+                    {
                         break;
                     }
                     let result = engine.collect_thunk(collect_size, &infer, stop.clone());
@@ -697,6 +875,7 @@ impl PyEngine {
         Ok(CollectStream {
             rx: Some(std::sync::Mutex::new(rx)),
             stop,
+            pause,
             queued,
             handle: Some(worker),
             engine: slf.clone().unbind(),
@@ -813,6 +992,7 @@ impl StreamChannel {
 struct CollectStream {
     rx: Option<std::sync::Mutex<std::sync::mpsc::Receiver<PyResult<BatchThunk>>>>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pause: std::sync::Arc<std::sync::atomic::AtomicBool>,
     queued: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     handle: Option<std::thread::JoinHandle<Box<dyn ErasedEngine>>>,
     engine: Py<PyEngine>,
@@ -847,6 +1027,44 @@ impl CollectStream {
 
     /// Stop the worker and return the engine to its `Engine` (idempotent). Any queued batches are
     /// discarded. The engine is reusable afterwards — `collect` or a fresh `collect_stream`.
+    /// Lossless quiescence, the checkpoint barrier: stop BEGINNING new collects, let the
+    /// in-flight collect finish with real inference, drain and return every completed batch, and
+    /// hand the engine back — its state then corresponds exactly to the returned batches, so
+    /// `engine.snapshot()` right after is record-exact. (`stop()` is the fast lossy abort:
+    /// it short-circuits the in-flight collect and discards the queue.)
+    fn pause<'py>(&mut self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        self.pause.store(true, std::sync::atomic::Ordering::Relaxed);
+        let rx = self
+            .rx
+            .take()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("stream already stopped"))?;
+        // Drain until the worker drops its sender (it breaks at the batch boundary). recv blocks
+        // while the worker finishes the in-flight batch, whose infer callback needs the GIL —
+        // so recv MUST run with the GIL released (the Mutex wrapper keeps the receiver Sync).
+        let mut thunks = Vec::new();
+        loop {
+            let item = py.allow_threads(|| {
+                rx.lock()
+                    .map_err(|_| ())
+                    .and_then(|guard| guard.recv().map_err(|_| ()))
+            });
+            match item {
+                Ok(item) => thunks.push(item),
+                Err(()) => break, // disconnected: worker is at the boundary
+            }
+        }
+        if let Some(handle) = self.handle.take() {
+            let engine = py
+                .allow_threads(|| handle.join())
+                .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("stream worker panicked"))?;
+            self.engine.bind(py).borrow_mut().inner = Some(engine);
+        }
+        thunks
+            .into_iter()
+            .map(|item| item.and_then(|thunk| Ok(thunk(py)?.into_bound(py))))
+            .collect()
+    }
+
     fn stop(&mut self, py: Python<'_>) -> PyResult<()> {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         self.rx.take(); // unblocks a worker waiting on a full bounded queue
@@ -903,6 +1121,9 @@ impl Drop for CollectStream {
 /// A rollout engine with its concrete `(Game, Policy, Learner)` types erased, so one Python `Engine`
 /// holds any composition. `collect` returns the learner's record batch as an opaque Python object.
 trait ErasedEngine: Send + Sync {
+    /// Snapshot the mutable collection state (record-exact contract; see core `snapshot_bytes`).
+    fn snapshot_payload(&self) -> PyResult<Vec<u8>>;
+    fn restore_payload(&mut self, bytes: &[u8]) -> PyResult<()>;
     fn collect<'py>(
         &mut self,
         py: Python<'py>,
@@ -1318,6 +1539,8 @@ fn build_telemetry<'py>(
 /// new record shape, a `RecordBatch` impl).
 struct EngineImpl<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     inner: Engine<G, P, L>,
+    // The game's persistence codec — `None` = engine snapshots unsupported for this game.
+    codec: Option<Box<dyn StateCodec<State = G::State>>>,
     dim: usize,
     action_count: usize,
     n_heads: usize,
@@ -1334,6 +1557,24 @@ where
     L: Learner<P::Evaluation> + Send + Sync + 'static,
     L::Record: RecordBatch + Send + 'static,
 {
+    fn snapshot_payload(&self) -> PyResult<Vec<u8>> {
+        let codec = self.codec.as_deref().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("this game does not support engine snapshots")
+        })?;
+        self.inner
+            .snapshot_bytes(codec)
+            .map_err(pyo3::exceptions::PyValueError::new_err)
+    }
+
+    fn restore_payload(&mut self, bytes: &[u8]) -> PyResult<()> {
+        let codec = self.codec.as_deref().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("this game does not support engine snapshots")
+        })?;
+        self.inner.restore_bytes(codec, bytes).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("invalid engine snapshot: {e}"))
+        })
+    }
+
     fn collect_thunk(
         &mut self,
         n_records: usize,
@@ -1650,6 +1891,7 @@ fn build_for_game<G: Game + Send + Sync + 'static>(
     enc: Box<dyn StateEncoder<State = G::State>>,
     reward: Box<dyn Reward<Event = G::Event>>,
     start_dist: Box<dyn StartDistribution<G::State>>,
+    mut codec: Option<Box<dyn StateCodec<State = G::State>>>,
     policy: PolicySpec,
     learner: LearnerSpec,
     engine_params: EngineParams,
@@ -1699,6 +1941,7 @@ where
             let policy = SelectiveExpectimax::new(cfg, n_heads, epsilon);
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
             Ok(Box::new(EngineImpl {
+                codec: codec.take(),
                 inner: {
                     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
                         .with_start_distribution(start_dist);
@@ -1763,6 +2006,7 @@ where
             );
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, false);
             Ok(Box::new(EngineImpl {
+                codec: codec.take(),
                 inner: {
                     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
                         .with_start_distribution(start_dist);
@@ -1828,6 +2072,7 @@ where
             });
             let learner = AlphaZeroLearner::new(gamma);
             Ok(Box::new(EngineImpl {
+                codec: codec.take(),
                 inner: {
                     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
                         .with_start_distribution(start_dist);
@@ -1851,6 +2096,7 @@ where
             let policy = EpsilonGreedyQ::new(n_heads, epsilon);
             let learner = Dqn::new(n_heads, bootstrap_p);
             Ok(Box::new(EngineImpl {
+                codec: codec.take(),
                 inner: {
                     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
                         .with_start_distribution(start_dist);
@@ -1930,6 +2176,14 @@ fn build_engine(
                 Box::new(EgocentricSnake { grid_size }),
                 Box::new(reward),
                 start_dist,
+                Some(Box::new(Snake {
+                    grid_size,
+                    initial_length,
+                    play_to_last,
+                    win_food_lead,
+                    initial_food_count,
+                    max_ticks,
+                })),
                 policy,
                 learner,
                 engine_params,
@@ -1941,6 +2195,7 @@ fn build_engine(
             Box::new(Connect4Planes),
             Box::new(reward),
             Box::new(AlwaysInitialState),
+            Some(Box::new(Connect4)),
             policy,
             learner,
             engine_params,
@@ -1953,6 +2208,7 @@ fn build_engine(
                 enc,
                 Box::new(reward),
                 Box::new(AlwaysInitialState),
+                Some(Box::new(chess_parts(max_ticks, encoder).0)),
                 policy,
                 learner,
                 engine_params,
@@ -1964,6 +2220,7 @@ fn build_engine(
             Box::new(BackgammonTesauro),
             Box::new(reward),
             Box::new(AlwaysInitialState),
+            Some(Box::new(Backgammon { max_ticks })),
             policy,
             learner,
             engine_params,
@@ -1985,6 +2242,11 @@ fn build_engine(
             Box::new(GridWorldPlanes { size, goal }),
             Box::new(reward),
             Box::new(AlwaysInitialState),
+            Some(Box::new(GridWorld {
+                size,
+                goal,
+                max_ticks,
+            })),
             policy,
             learner,
             engine_params,
@@ -3418,6 +3680,7 @@ fn core_build_profile() -> &'static str {
 fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
     m.add_class::<PyEnvSnapshot>()?;
+    m.add_class::<PyEngineSnapshot>()?;
     m.add_function(wrap_pyfunction!(chess_uci_action, m)?)?;
     m.add_function(wrap_pyfunction!(chess_action_uci, m)?)?;
     m.add_function(wrap_pyfunction!(core_build_profile, m)?)?;

@@ -38,6 +38,32 @@ pub trait StartDistribution<S>: Send + Sync {
     fn observe(&mut self, state: &S, rng: &mut dyn Rng) {
         let _ = (state, rng);
     }
+
+    /// Snapshot this distribution's mutable state (`encode_state` = the game codec). The default
+    /// (stateless distributions, e.g. `AlwaysInitialState`) is an empty payload.
+    fn snapshot_bytes(&self, encode_state: &dyn Fn(&S) -> Vec<u8>) -> Vec<u8> {
+        let _ = encode_state;
+        Vec::new()
+    }
+
+    /// Restore a payload produced by [`snapshot_bytes`](Self::snapshot_bytes).
+    ///
+    /// CONTRACT: restoration must be transactional — on `Err`, `self` is unchanged. Decode (and
+    /// validate) the complete payload into replacement state before mutating anything.
+    /// `Engine::restore_bytes` promises that a malformed snapshot leaves the engine untouched,
+    /// and it relies on this seam honoring the same guarantee.
+    fn restore_bytes(
+        &mut self,
+        bytes: &[u8],
+        decode_state: &dyn Fn(&[u8]) -> Result<S, String>,
+    ) -> Result<(), String> {
+        let _ = decode_state;
+        if bytes.is_empty() {
+            Ok(())
+        } else {
+            Err("this start distribution carries no snapshot state".into())
+        }
+    }
 }
 
 /// The default distribution: every episode starts fresh from the game's `initial_state`. Draws no
@@ -142,6 +168,54 @@ impl<S: Clone + Send + Sync> StartDistribution<S> for ReachedStateBuffer<S> {
                 res.items[j] = state.clone();
             }
         }
+    }
+
+    fn snapshot_bytes(&self, encode_state: &dyn Fn(&S) -> Vec<u8>) -> Vec<u8> {
+        use crate::codec::bytes::*;
+        let mut out = Vec::new();
+        put_u32(&mut out, self.cells.len() as u32);
+        for (key, res) in &self.cells {
+            put_u64(&mut out, *key);
+            put_u64(&mut out, res.count as u64);
+            put_u32(&mut out, res.items.len() as u32);
+            for item in &res.items {
+                put_blob(&mut out, &encode_state(item));
+            }
+        }
+        out
+    }
+
+    fn restore_bytes(
+        &mut self,
+        bytes: &[u8],
+        decode_state: &dyn Fn(&[u8]) -> Result<S, String>,
+    ) -> Result<(), String> {
+        use crate::codec::bytes::*;
+        let mut r = Reader::new(bytes);
+        let n_cells = r.u32()? as usize;
+        let mut cells = std::collections::BTreeMap::new();
+        for _ in 0..n_cells {
+            let key = r.u64()?;
+            let count = r.u64()? as usize;
+            let n_items = r.u32()? as usize;
+            if n_items > self.capacity {
+                return Err(format!(
+                    "reservoir holds {n_items} items over capacity {}",
+                    self.capacity
+                ));
+            }
+            let mut items = Vec::with_capacity(n_items);
+            for _ in 0..n_items {
+                items.push(decode_state(r.blob()?)?);
+            }
+            if count < items.len() {
+                return Err("reservoir count below item count".into());
+            }
+            cells.insert(key, Reservoir { items, count });
+        }
+        r.done()?;
+        self.cells = cells;
+        Ok(())
     }
 }
 

@@ -68,6 +68,34 @@ impl Policy for SelectiveExpectimax {
     type Evaluation = SearchEvaluation;
     type PolicyState = usize; // the Thompson head for the current episode
 
+    fn encode_eval(&self, eval: &SearchEvaluation, out: &mut Vec<u8>) {
+        crate::policies::expectimax::encode_search_eval(eval, out);
+    }
+
+    fn decode_eval(
+        &self,
+        r: &mut crate::codec::bytes::Reader,
+        action_count: usize,
+    ) -> Result<SearchEvaluation, String> {
+        // expectimax evaluations are always [n_heads][A] (broadcast at the search seam) and
+        // carry no visits (acting is by value)
+        crate::policies::expectimax::decode_search_eval(r, action_count, self.n_heads, false)
+    }
+
+    fn policy_state_to_u64(&self, s: &usize) -> u64 {
+        *s as u64
+    }
+
+    fn policy_state_from_u64(&self, v: u64) -> Result<usize, String> {
+        if v as usize >= self.n_heads {
+            return Err(format!(
+                "Thompson head {v} out of range for {} heads",
+                self.n_heads
+            ));
+        }
+        Ok(v as usize)
+    }
+
     fn begin_episode(&self, rng: &mut dyn Rng) -> usize {
         rng.below(self.n_heads)
     }
@@ -241,5 +269,161 @@ mod select_masking_tests {
             1,
             "the best LEGAL action, not the illegal densified zero"
         );
+    }
+}
+
+/// Shared `SearchEvaluation` (de)serialization for the search-family policies' snapshot seams.
+/// `interior` is always drained at decision time (`eval_records` moves it out), so buffered
+/// evaluations never carry it — encoding asserts that and decoding restores it empty.
+pub(crate) fn encode_search_eval(e: &SearchEvaluation, out: &mut Vec<u8>) {
+    use crate::codec::bytes::*;
+    debug_assert!(
+        e.interior.is_empty(),
+        "interior is drained before buffering"
+    );
+    put_u32(out, e.values.len() as u32);
+    for row in &e.values {
+        put_f64s(out, row);
+    }
+    put_f64s(out, &e.visits);
+    put_usizes(out, &e.legal);
+    let st = &e.stats;
+    put_i64(out, i64::from(st.max_depth));
+    for v in [st.expansions, st.leaves, st.rounds] {
+        put_u64(out, v as u64);
+    }
+    put_f64(out, st.sigma_sum);
+    for v in [
+        st.terminal_sims,
+        st.depthcap_sims,
+        st.shared_rows,
+        st.fresh_rows,
+        st.hit_rows,
+        st.extra_eval_rows,
+    ] {
+        put_u64(out, v as u64);
+    }
+}
+
+/// Decoding is POLICY-SPECIFIC: each policy passes the evaluation shape its learners consume —
+/// `expected_heads` (TreeStrap indexes `values[0]` and z-mixes `z[h]` across every step, so head
+/// counts must be exact and uniform) and whether `visits` is full-width (the AZ family's π
+/// source) or empty (expectimax acts by value and buffers none). A permissive shared decoder let
+/// restored evaluations violate those assumptions and panic at flush time.
+pub(crate) fn decode_search_eval(
+    r: &mut crate::codec::bytes::Reader,
+    action_count: usize,
+    expected_heads: usize,
+    expect_visits: bool,
+) -> Result<SearchEvaluation, String> {
+    use crate::codec::bytes::*;
+    let k = r.u32()? as usize;
+    if k != expected_heads {
+        return Err(format!(
+            "evaluation has {k} value heads; this policy requires {expected_heads}"
+        ));
+    }
+    let values = (0..k).map(|_| f64s(r)).collect::<Result<Vec<_>, _>>()?;
+    for row in &values {
+        if row.len() != action_count {
+            return Err(format!(
+                "value row width {} != action count {action_count}",
+                row.len()
+            ));
+        }
+        if row.iter().any(|v| !v.is_finite()) {
+            return Err("non-finite search value in evaluation".into());
+        }
+    }
+    let visits = f64s(r)?;
+    if expect_visits {
+        if visits.len() != action_count {
+            return Err(format!(
+                "visit vector width {} != action count {action_count}",
+                visits.len()
+            ));
+        }
+    } else if !visits.is_empty() {
+        return Err(format!(
+            "this policy buffers no visit counts, got {}",
+            visits.len()
+        ));
+    }
+    if visits.iter().any(|v| !v.is_finite() || *v < 0.0) {
+        return Err("invalid visit count".into());
+    }
+    let legal = usizes(r)?;
+    if legal.iter().any(|&a| a >= action_count) {
+        return Err("legal action id out of range".into());
+    }
+    let mut stats = crate::policies::expectimax::search::SearchStats {
+        max_depth: i32::try_from(r.i64()?).map_err(|_| "max_depth out of range".to_string())?,
+        ..Default::default()
+    };
+    stats.expansions = r.u64()? as usize;
+    stats.leaves = r.u64()? as usize;
+    stats.rounds = r.u64()? as usize;
+    stats.sigma_sum = r.f64()?;
+    stats.terminal_sims = r.u64()? as usize;
+    stats.depthcap_sims = r.u64()? as usize;
+    stats.shared_rows = r.u64()? as usize;
+    stats.fresh_rows = r.u64()? as usize;
+    stats.hit_rows = r.u64()? as usize;
+    stats.extra_eval_rows = r.u64()? as usize;
+    Ok(SearchEvaluation {
+        values,
+        visits,
+        interior: Vec::new(),
+        legal,
+        stats,
+    })
+}
+
+#[cfg(test)]
+mod eval_codec_tests {
+    use super::*;
+    use crate::codec::bytes::Reader;
+
+    fn encoded(heads: usize, visits: bool, actions: usize) -> Vec<u8> {
+        let e = SearchEvaluation {
+            values: vec![vec![0.0; actions]; heads],
+            visits: if visits {
+                vec![0.0; actions]
+            } else {
+                Vec::new()
+            },
+            interior: Vec::new(),
+            legal: vec![0, 1],
+            stats: Default::default(),
+        };
+        let mut out = Vec::new();
+        encode_search_eval(&e, &mut out);
+        out
+    }
+
+    #[test]
+    fn decoding_enforces_the_policy_shape() {
+        let a = 4;
+        // the expectimax shape round-trips only under expectimax expectations
+        let ex = encoded(2, false, a);
+        decode_search_eval(&mut Reader::new(&ex), a, 2, false)
+            .map(|_| ())
+            .unwrap();
+        let err = |bytes: &[u8], heads: usize, visits: bool| {
+            decode_search_eval(&mut Reader::new(bytes), a, heads, visits)
+                .map(|_| ())
+                .unwrap_err()
+        };
+        assert!(err(&ex, 1, true).contains("value heads"));
+        assert!(err(&ex, 3, false).contains("value heads"));
+        // zero heads can never decode (TreeStrap indexes values[0] at flush)
+        assert!(err(&encoded(0, true, a), 1, true).contains("value heads"));
+        // the AZ/MCTS shape requires full-width visits (the learner's pi source)...
+        assert!(err(&encoded(1, false, a), 1, true).contains("visit vector width"));
+        // ...while expectimax buffers none
+        assert!(err(&encoded(1, true, a), 1, false).contains("no visit counts"));
+        decode_search_eval(&mut Reader::new(&encoded(1, true, a)), a, 1, true)
+            .map(|_| ())
+            .unwrap();
     }
 }
