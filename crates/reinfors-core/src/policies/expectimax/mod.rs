@@ -69,7 +69,11 @@ impl Policy for SelectiveExpectimax {
     type PolicyState = usize; // the Thompson head for the current episode
 
     fn max_agents(&self, _sequential: bool) -> Option<usize> {
-        Some(2) // the search models a single opponent (`opp = 1 - agent`, one belief stream)
+        // Single-perspective search at any N under either dynamics: each other agent is modeled
+        // chance (sequential — a node per foreign turn; simultaneous — a factored co-mover
+        // joint), and only the searcher's values ever back up, so no per-agent value plumbing
+        // is needed.
+        None
     }
 
     fn encode_eval(&self, eval: &SearchEvaluation, out: &mut Vec<u8>) {
