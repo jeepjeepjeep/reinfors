@@ -149,13 +149,9 @@ def test_resolved_config_round_trips_num_snakes() -> None:
 
 
 def test_pettingzoo_parallel_env_at_three_snakes() -> None:
-    pettingzoo = pytest.importorskip("pettingzoo")  # noqa: F841
-    env = rf.gym.parallel_env(_snake(3), seed=0)
-    obs, _ = env.reset()
-    assert sorted(obs) == ["player_0", "player_1", "player_2"]
-    for _ in range(5):
-        if not env.agents:
-            break
-        actions = {a: env.action_space(a).sample() for a in env.agents}
-        obs, _rewards, _terms, _truncs, _infos = env.step(actions)
-    env.close()
+    pytest.importorskip("pettingzoo")
+    from pettingzoo.test import parallel_api_test
+
+    env = rf.gym.parallel_env(_snake(3), rf.Reward(food=1.0, loss=-1.0))
+    assert sorted(env.possible_agents) == ["player_0", "player_1", "player_2"]
+    parallel_api_test(env, num_cycles=150)
