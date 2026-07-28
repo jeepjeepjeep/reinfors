@@ -298,10 +298,18 @@ impl reinfors_core::StateCodec for Connect4 {
         }
         let c1 = cells.iter().filter(|&&c| c == 1).count();
         let c2 = cells.iter().filter(|&&c| c == 2).count();
-        if !(c1 == c2 && state.turn == 0 || c1 == c2 + 1 && state.turn == 1) {
+        // Alternation, with the terminal wrinkle: `step` does NOT flip the turn on a terminal
+        // move, so on live states the NEXT mover's parity holds, while on done states `turn` is
+        // the LAST mover — the relation inverts.
+        let parity_ok = if state.done {
+            c1 == c2 + 1 && state.turn == 0 || c1 == c2 && state.turn == 1
+        } else {
+            c1 == c2 && state.turn == 0 || c1 == c2 + 1 && state.turn == 1
+        };
+        if !parity_ok {
             return Err(format!(
-                "piece counts ({c1}, {c2}) inconsistent with turn {}",
-                state.turn
+                "piece counts ({c1}, {c2}) inconsistent with turn {} (done: {})",
+                state.turn, state.done
             ));
         }
         let has_win = (0..ROWS).any(|r| {

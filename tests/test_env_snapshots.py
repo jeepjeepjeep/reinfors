@@ -169,3 +169,26 @@ def test_env_snapshot_is_public_api() -> None:
     env = rf.Env(rf.games.Connect4(), seed=1)
     env.reset()
     assert isinstance(rf.EnvSnapshot.from_bytes(env.snapshot().to_bytes()), rf.EnvSnapshot)
+
+
+def test_terminal_connect4_snapshots_restore() -> None:
+    # Regression: step does not flip the turn on a terminal move, so terminal states carry the
+    # LAST mover's turn — the parity invariant inverts on done states, and both win parities
+    # (plus cross-env restore) must round-trip.
+    def play(moves: list[tuple[int, int]]) -> rf.Env:
+        env = rf.Env(rf.games.Connect4(), seed=0)
+        env.reset()
+        for agent, col in moves:
+            env.step({agent: col})
+        assert env.done()
+        return env
+
+    p0_win = play([(0, 0), (1, 1), (0, 0), (1, 1), (0, 0), (1, 1), (0, 0)])
+    p1_win = play([(0, 6), (1, 0), (0, 1), (1, 0), (0, 1), (1, 0), (0, 2), (1, 0)])
+    for env in (p0_win, p1_win):
+        snap = env.snapshot()
+        env.restore(snap)
+        fresh = rf.Env(rf.games.Connect4(), seed=9)
+        fresh.reset()
+        fresh.restore(rf.EnvSnapshot.from_bytes(snap.to_bytes()))
+        assert fresh.done() and fresh.active_agents() == []

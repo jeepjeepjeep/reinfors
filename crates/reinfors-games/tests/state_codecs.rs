@@ -52,6 +52,16 @@ where
             .collect();
         let t = reinfors_core::game::step_env(&game, &state, &joint, &mut rng);
         if t.terminal {
+            // TERMINAL states are snapshot-restorable too — the round-trip + validation
+            // property must hold for them with done=true (the connect4 turn-parity inversion
+            // was exactly the bug this arm exists to catch).
+            let bytes = game.encode(&t.next_state);
+            let back = game
+                .decode(&bytes)
+                .unwrap_or_else(|e| panic!("terminal state failed to decode: {e}"));
+            assert_eq!(game.encode(&back), bytes);
+            game.validate_state(&back, true)
+                .unwrap_or_else(|e| panic!("reachable terminal state failed validation: {e}"));
             state = game.initial_state(&mut rng);
         } else {
             state = t.next_state;
@@ -136,9 +146,10 @@ fn validators_reject_invalid_states() {
     // side). Fields are private, so the undecided-but-done state is built via decode: postcard
     // layout = version, cells len varint, 42 cells, turn, done.
     let c4 = Connect4;
-    let mut undecided_done = vec![2u8, 42];
-    undecided_done.extend([0u8; 42]);
-    undecided_done.extend([0u8, 1]); // turn 0, done TRUE on an empty board
+    let mut undecided_done = vec![2u8, 42, 1];
+    undecided_done.extend([0u8; 41]);
+    undecided_done.extend([0u8, 1]); // one P0 piece, turn 0, done TRUE: parity-consistent
+                                     // for a terminal state, but nothing is won or full
     let forged = c4.decode(&undecided_done).unwrap();
     assert!(c4
         .validate_state(&forged, true)
