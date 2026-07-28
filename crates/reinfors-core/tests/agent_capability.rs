@@ -415,3 +415,93 @@ fn a_capability_free_policy_collects_on_a_three_agent_game() {
     assert!(records.len() >= 12);
     assert!(stats.decisions > 0 && !stats.episodes.is_empty());
 }
+
+/// RoundRobin that never terminates on its own — the engine's truncation horizon ends episodes.
+struct EndlessRR;
+
+impl Game for EndlessRR {
+    type State = St;
+    type Event = ();
+    fn num_agents(&self) -> usize {
+        3
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn actor(&self, s: &St) -> Actor {
+        Actor::Agent(s.tick % 3)
+    }
+    fn legal_actions(&self, s: &St, agent: usize) -> Vec<usize> {
+        if agent == s.tick % 3 {
+            vec![0, 1]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
+        Transition {
+            next_state: St { tick: s.tick + 1 },
+            events: vec![(); 3],
+            terminal: false,
+        }
+    }
+    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+        St { tick: 0 }
+    }
+    fn truncation_horizon(&self) -> Option<usize> {
+        Some(2)
+    }
+}
+
+#[test]
+fn truncation_bootstraps_every_perspectives_own_tail() {
+    // The net returns a DISTINCT value per encoded agent ((agent+1)/10). With zero rewards and
+    // gamma 1, every record's z must equal its own agent's value of the truncated final state —
+    // non-mover value-only trajectories included (they were previously seeded with zero because
+    // only the final mover counted as active).
+    let az_cfg = AlphaZeroConfig {
+        num_simulations: 8,
+        c_puct: 1.5,
+        gamma: 1.0,
+        max_depth: 6,
+        noise_epsilon: 0.0,
+        noise_alpha: 0.3,
+        temperature: 0.0,
+        temperature_drop: 0,
+        chance: ChanceMode::Committed { samples: 1 },
+        noise_scope: reinfors_core::NoiseScope::Requester,
+    };
+    let mut engine = Engine::new(
+        EndlessRR,
+        Box::new(Enc),
+        Box::new(Zero),
+        AlphaZero::new(az_cfg),
+        reinfors_core::AlphaZeroLearner::new(1.0),
+        EngineParams {
+            n_games: 1,
+            seed: 6,
+        },
+    );
+    let infer = |obs: Vec<f32>, n: usize| {
+        let mut out = Vec::with_capacity(n * 3);
+        for r in 0..n {
+            let agent = f64::from(obs[r * 2 + 1]);
+            out.extend([0.0, 0.0, (agent + 1.0) / 10.0]); // 2 logits + the per-agent value
+        }
+        out
+    };
+    let (records, stats) = engine.collect(6, infer);
+    assert!(records.len() >= 6);
+    assert_eq!(
+        stats.episodes[0].length, 2,
+        "the horizon truncates at tick 2"
+    );
+    for (obs, _pi, z, _w) in &records {
+        let expect = (f64::from(obs[1]) + 1.0) / 10.0;
+        assert!(
+            (z - expect).abs() < 1e-12,
+            "agent {}'s z must bootstrap from ITS tail: got {z}, want {expect}",
+            obs[1]
+        );
+    }
+}

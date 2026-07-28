@@ -452,6 +452,13 @@ where
         }
         let a = self.game.action_count();
         let num_agents = self.game.num_agents();
+        // Under the value-only regime every perspective holds a per-tick trajectory and the
+        // search consumes every perspective's value at the final state — so every non-empty
+        // trajectory gets its own tail V_i(final_state), active or not (a sequential non-mover
+        // has no legal actions there, but the AZ tail reads the value slot, not the legal set).
+        // Off the regime, the active-only condition is unchanged.
+        let all_perspectives =
+            self.sequential && num_agents > 2 && self.learner.value_only_evaluation(a).is_some();
         let mut obs_flat: Vec<f32> = Vec::new();
         let mut meta: Vec<(usize, usize)> = Vec::new();
         for &(gi, terminal) in finished {
@@ -459,7 +466,9 @@ where
                 continue;
             }
             for si in 0..num_agents {
-                if self.episodes[gi].agent_active(&self.game, si) && !self.traj[gi][si].is_empty() {
+                if (all_perspectives || self.episodes[gi].agent_active(&self.game, si))
+                    && !self.traj[gi][si].is_empty()
+                {
                     obs_flat.extend(self.episodes[gi].observe(&*self.encoder, si));
                     meta.push((gi, si));
                 }
