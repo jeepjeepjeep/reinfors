@@ -1350,7 +1350,9 @@ impl Policy for Mcts {
         r: &mut crate::codec::bytes::Reader,
         action_count: usize,
     ) -> Result<SearchEvaluation, String> {
-        crate::policies::expectimax::decode_search_eval(r, action_count)
+        // the tree's root evaluation is always one value row plus full-width visits (both acting
+        // modes; `Tree::evaluation` densifies)
+        crate::policies::expectimax::decode_search_eval(r, action_count, 1, true)
     }
 
     fn policy_state_to_u64(&self, s: &u32) -> u64 {

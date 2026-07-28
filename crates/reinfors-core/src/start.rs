@@ -47,6 +47,11 @@ pub trait StartDistribution<S>: Send + Sync {
     }
 
     /// Restore a payload produced by [`snapshot_bytes`](Self::snapshot_bytes).
+    ///
+    /// CONTRACT: restoration must be transactional — on `Err`, `self` is unchanged. Decode (and
+    /// validate) the complete payload into replacement state before mutating anything.
+    /// `Engine::restore_bytes` promises that a malformed snapshot leaves the engine untouched,
+    /// and it relies on this seam honoring the same guarantee.
     fn restore_bytes(
         &mut self,
         bytes: &[u8],

@@ -103,7 +103,8 @@ impl Policy for AlphaZero {
         r: &mut crate::codec::bytes::Reader,
         action_count: usize,
     ) -> Result<SearchEvaluation, String> {
-        crate::policies::expectimax::decode_search_eval(r, action_count)
+        // one value row plus full-width visits (the π source the AZ learner requires)
+        crate::policies::expectimax::decode_search_eval(r, action_count, 1, true)
     }
 
     fn policy_state_to_u64(&self, s: &u32) -> u64 {

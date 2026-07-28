@@ -611,6 +611,9 @@ where
         }
         let start_blob = r.blob()?.to_vec();
         r.done()?;
+        // The first mutation on a still-fallible path: the trait contract requires implementors
+        // to restore transactionally (decode fully, then swap), so an Err here leaves the
+        // distribution — and everything below, not yet touched — unchanged.
         self.start_dist.restore_bytes(&start_blob, &|b| {
             let s = codec.decode(b)?;
             codec.validate_decoded_state(&s, false)?; // buffered start states are mid-episode: live

@@ -77,7 +77,9 @@ impl Policy for SelectiveExpectimax {
         r: &mut crate::codec::bytes::Reader,
         action_count: usize,
     ) -> Result<SearchEvaluation, String> {
-        crate::policies::expectimax::decode_search_eval(r, action_count)
+        // expectimax evaluations are always [n_heads][A] (broadcast at the search seam) and
+        // carry no visits (acting is by value)
+        crate::policies::expectimax::decode_search_eval(r, action_count, self.n_heads, false)
     }
 
     fn policy_state_to_u64(&self, s: &usize) -> u64 {
@@ -303,14 +305,23 @@ pub(crate) fn encode_search_eval(e: &SearchEvaluation, out: &mut Vec<u8>) {
     }
 }
 
+/// Decoding is POLICY-SPECIFIC: each policy passes the evaluation shape its learners consume —
+/// `expected_heads` (TreeStrap indexes `values[0]` and z-mixes `z[h]` across every step, so head
+/// counts must be exact and uniform) and whether `visits` is full-width (the AZ family's π
+/// source) or empty (expectimax acts by value and buffers none). A permissive shared decoder let
+/// restored evaluations violate those assumptions and panic at flush time.
 pub(crate) fn decode_search_eval(
     r: &mut crate::codec::bytes::Reader,
     action_count: usize,
+    expected_heads: usize,
+    expect_visits: bool,
 ) -> Result<SearchEvaluation, String> {
     use crate::codec::bytes::*;
     let k = r.u32()? as usize;
-    if k > 4096 {
-        return Err(format!("implausible head count {k}"));
+    if k != expected_heads {
+        return Err(format!(
+            "evaluation has {k} value heads; this policy requires {expected_heads}"
+        ));
     }
     let values = (0..k).map(|_| f64s(r)).collect::<Result<Vec<_>, _>>()?;
     for row in &values {
@@ -325,9 +336,16 @@ pub(crate) fn decode_search_eval(
         }
     }
     let visits = f64s(r)?;
-    if visits.len() != action_count && !visits.is_empty() {
+    if expect_visits {
+        if visits.len() != action_count {
+            return Err(format!(
+                "visit vector width {} != action count {action_count}",
+                visits.len()
+            ));
+        }
+    } else if !visits.is_empty() {
         return Err(format!(
-            "visit vector width {} != action count {action_count}",
+            "this policy buffers no visit counts, got {}",
             visits.len()
         ));
     }
@@ -359,4 +377,53 @@ pub(crate) fn decode_search_eval(
         legal,
         stats,
     })
+}
+
+#[cfg(test)]
+mod eval_codec_tests {
+    use super::*;
+    use crate::codec::bytes::Reader;
+
+    fn encoded(heads: usize, visits: bool, actions: usize) -> Vec<u8> {
+        let e = SearchEvaluation {
+            values: vec![vec![0.0; actions]; heads],
+            visits: if visits {
+                vec![0.0; actions]
+            } else {
+                Vec::new()
+            },
+            interior: Vec::new(),
+            legal: vec![0, 1],
+            stats: Default::default(),
+        };
+        let mut out = Vec::new();
+        encode_search_eval(&e, &mut out);
+        out
+    }
+
+    #[test]
+    fn decoding_enforces_the_policy_shape() {
+        let a = 4;
+        // the expectimax shape round-trips only under expectimax expectations
+        let ex = encoded(2, false, a);
+        decode_search_eval(&mut Reader::new(&ex), a, 2, false)
+            .map(|_| ())
+            .unwrap();
+        let err = |bytes: &[u8], heads: usize, visits: bool| {
+            decode_search_eval(&mut Reader::new(bytes), a, heads, visits)
+                .map(|_| ())
+                .unwrap_err()
+        };
+        assert!(err(&ex, 1, true).contains("value heads"));
+        assert!(err(&ex, 3, false).contains("value heads"));
+        // zero heads can never decode (TreeStrap indexes values[0] at flush)
+        assert!(err(&encoded(0, true, a), 1, true).contains("value heads"));
+        // the AZ/MCTS shape requires full-width visits (the learner's pi source)...
+        assert!(err(&encoded(1, false, a), 1, true).contains("visit vector width"));
+        // ...while expectimax buffers none
+        assert!(err(&encoded(1, true, a), 1, false).contains("no visit counts"));
+        decode_search_eval(&mut Reader::new(&encoded(1, true, a)), a, 1, true)
+            .map(|_| ())
+            .unwrap();
+    }
 }
