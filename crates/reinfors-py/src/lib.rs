@@ -314,6 +314,7 @@ fn chance_cfg(mode: &ChanceMode) -> Value {
 fn game_cfg(spec: &GameSpec) -> Value {
     match spec {
         GameSpec::Snake {
+            num_snakes,
             grid_size,
             initial_length,
             initial_food_count,
@@ -322,6 +323,7 @@ fn game_cfg(spec: &GameSpec) -> Value {
             max_ticks,
         } => json!({
             "name": "snake",
+            "num_snakes": num_snakes,
             "grid_size": grid_size,
             "initial_length": initial_length,
             "food": initial_food_count,
@@ -1639,6 +1641,7 @@ where
 #[derive(Clone)]
 enum GameSpec {
     Snake {
+        num_snakes: usize,
         grid_size: i32,
         initial_length: usize,
         initial_food_count: usize,
@@ -1673,6 +1676,7 @@ impl GameSpec {
         }
         match *self {
             GameSpec::Snake {
+                num_snakes,
                 grid_size,
                 initial_length,
                 initial_food_count,
@@ -1681,6 +1685,7 @@ impl GameSpec {
                 max_ticks,
             } => of(
                 Snake {
+                    num_snakes,
                     grid_size,
                     initial_length,
                     play_to_last,
@@ -2234,6 +2239,7 @@ fn build_engine(
     match (game, reward) {
         (
             GameSpec::Snake {
+                num_snakes,
                 grid_size,
                 initial_length,
                 initial_food_count,
@@ -2253,6 +2259,7 @@ fn build_engine(
             };
             build_for_game(
                 Snake {
+                    num_snakes,
                     grid_size,
                     initial_length,
                     play_to_last,
@@ -2264,6 +2271,7 @@ fn build_engine(
                 Box::new(reward),
                 start_dist,
                 Some(Box::new(Snake {
+                    num_snakes,
                     grid_size,
                     initial_length,
                     play_to_last,
@@ -2942,6 +2950,7 @@ fn build_env(game: GameSpec, reward: Option<PyReward>, seed: u64) -> PyResult<Bo
     let reward = reward.map(|r| build_reward(&game, Some(r))).transpose()?;
     Ok(match game {
         GameSpec::Snake {
+            num_snakes,
             grid_size,
             initial_length,
             initial_food_count,
@@ -2954,6 +2963,7 @@ fn build_env(game: GameSpec, reward: Option<PyReward>, seed: u64) -> PyResult<Bo
             Box::new(EnvImpl {
                 inner: Env::new(
                     Snake {
+                        num_snakes,
                         grid_size,
                         initial_length,
                         play_to_last,
@@ -2966,6 +2976,7 @@ fn build_env(game: GameSpec, reward: Option<PyReward>, seed: u64) -> PyResult<Bo
                 ),
                 obs_shape,
                 codec: Some(Box::new(Snake {
+                    num_snakes,
                     grid_size,
                     initial_length,
                     play_to_last,
@@ -3181,8 +3192,9 @@ impl GameHandle {
     // Snake can loop forever (circling without eating/dying), so `max_ticks` defaults to a finite cap:
     // it keeps `Engine.collect` from spinning on a non-terminating episode. Pass `max_ticks=None` to
     // explicitly opt into never truncating.
-    #[pyo3(signature = (grid_size=20, initial_length=3, food=3, play_to_last=true, win_food_lead=None, max_ticks=1000))]
+    #[pyo3(signature = (grid_size=20, initial_length=3, food=3, play_to_last=true, win_food_lead=None, max_ticks=1000, num_snakes=2))]
     #[pyo3(name = "Snake")]
+    #[allow(clippy::too_many_arguments)]
     fn snake(
         grid_size: i32,
         initial_length: usize,
@@ -3190,10 +3202,12 @@ impl GameHandle {
         play_to_last: bool,
         win_food_lead: Option<usize>,
         max_ticks: Option<usize>,
+        num_snakes: usize,
     ) -> PyResult<Self> {
         check_max_ticks(max_ticks)?;
         // Validate by constructing: the game's own invariants are the single source of truth.
         Snake {
+            num_snakes,
             grid_size,
             initial_length,
             initial_food_count: food,
@@ -3205,6 +3219,7 @@ impl GameHandle {
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
         Ok(GameHandle {
             spec: GameSpec::Snake {
+                num_snakes,
                 grid_size,
                 initial_length,
                 initial_food_count: food,

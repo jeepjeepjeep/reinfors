@@ -174,6 +174,7 @@ fn searches_simultaneous_stochastic_snake() {
     // declared respawn chance. Both seats' pooled requests must produce sane per-agent
     // evaluations, deterministically per seed.
     let snake = Snake {
+        num_snakes: 2,
         grid_size: 8,
         initial_length: 3,
         play_to_last: false,

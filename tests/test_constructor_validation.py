@@ -25,6 +25,7 @@ SWEEP: list[tuple[Any, bool, dict[str, list[Any]]]] = [
             "food": INT_EDGES,
             "win_food_lead": INT_EDGES,
             "max_ticks": INT_EDGES,
+            "num_snakes": INT_EDGES,
         },
     ),
     (

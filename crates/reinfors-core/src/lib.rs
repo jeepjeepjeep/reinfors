@@ -25,7 +25,7 @@ pub use encoder::{check_action_view, ActionView, IdentityView, StateEncoder};
 pub use engine::{CollectStats, Engine, EngineParams, EpisodeSummary};
 pub use env::Env;
 pub use evaluator::{CommittedRows, EvalBatch, Evaluator, Resolve};
-pub use game::{Actor, Game, Rng, Transition};
+pub use game::{Actor, ChanceDist, Game, Rng, Transition};
 pub use infer_cache::InferCache;
 pub use learner::{Learner, Step};
 pub use learners::alphazero::{AlphaZeroLearner, AlphaZeroRecord};
@@ -38,7 +38,7 @@ pub use policies::expectimax::search::{
 };
 pub use policies::expectimax::{SearchEvaluation, SelectiveExpectimax};
 pub use policies::mcts::{mcts_many, ActBy, Mcts, MctsConfig, NoiseScope, MAX_JOINT_SLOTS};
-pub use policy::{ChanceMode, Policy, SearchPolicy};
+pub use policy::{ChanceMode, Policy, SearchPolicy, MAX_ENUMERATED_OUTCOMES};
 pub use reward::Reward;
 pub use space::Space;
 pub use start::{AlwaysInitialState, ReachedStateBuffer, Start, StartDistribution};

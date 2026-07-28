@@ -85,6 +85,7 @@ fn every_game_round_trips_reachable_states() {
     reachable_states_round_trip(Connect4, 200);
     reachable_states_round_trip(
         Snake {
+            num_snakes: 2,
             grid_size: 6,
             initial_length: 2,
             play_to_last: true,
@@ -96,6 +97,7 @@ fn every_game_round_trips_reachable_states() {
     );
     reachable_states_round_trip(
         Snake {
+            num_snakes: 2,
             grid_size: 6,
             initial_length: 2,
             play_to_last: true,
@@ -123,6 +125,7 @@ fn validators_reject_unsafe_states() {
     use std::collections::{HashSet, VecDeque};
 
     let snake_game = Snake {
+        num_snakes: 2,
         grid_size: 6,
         initial_length: 2,
         play_to_last: false,
@@ -136,9 +139,28 @@ fn validators_reject_unsafe_states() {
         alive,
     };
     let mk = |a: SnakeBody, b: SnakeBody, food: &[(i32, i32)]| SnakeState {
-        snakes: [a, b],
+        snakes: vec![a, b],
         food: HashSet::from_iter(food.iter().copied()),
     };
+    // a state with the wrong snake count would index out of the game's agent range
+    let three = Snake {
+        num_snakes: 3,
+        grid_size: 6,
+        initial_length: 2,
+        play_to_last: false,
+        win_food_lead: None,
+        initial_food_count: 1,
+        max_ticks: None,
+    };
+    let two_state = SnakeState {
+        snakes: vec![body(&[(1, 1)], true), body(&[(3, 3)], true)],
+        food: HashSet::new(),
+    };
+    assert!(three
+        .validate_decoded_state(&two_state, false)
+        .unwrap_err()
+        .contains("has 2 snakes"));
+
     // lifecycle coherence, both directions: `done` gates whether the Env may continue, so it
     // must match the shared terminal rule (`advance`'s own) — a live envelope over a decided
     // position would let play continue past the end of the game.
@@ -266,6 +288,7 @@ fn unreachable_but_safe_states_are_accepted() {
     use std::collections::{HashSet, VecDeque};
 
     let game = Snake {
+        num_snakes: 2,
         grid_size: 6,
         initial_length: 2,
         play_to_last: false,
@@ -281,7 +304,7 @@ fn unreachable_but_safe_states_are_accepted() {
     // two living snakes on the same cell, food under both: impossible through play (occupancy is
     // not re-proved), safe to step, and live under the terminal rule (equal lengths, both alive)
     let overlap = SnakeState {
-        snakes: [body(&[(1, 1)]), body(&[(1, 1)])],
+        snakes: vec![body(&[(1, 1)]), body(&[(1, 1)])],
         food: HashSet::from_iter([(1, 1)]),
     };
     game.validate_decoded_state(&overlap, false).unwrap();

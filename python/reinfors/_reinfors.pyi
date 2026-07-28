@@ -63,6 +63,7 @@ class GameHandle:
         play_to_last: bool = ...,
         win_food_lead: int | None = ...,
         max_ticks: int | None = ...,
+        num_snakes: int = ...,
     ) -> GameHandle: ...
     @staticmethod
     def Connect4() -> GameHandle: ...

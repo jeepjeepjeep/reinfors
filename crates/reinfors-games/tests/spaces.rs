@@ -14,6 +14,7 @@ fn unit(shape: Vec<usize>) -> Space {
 #[test]
 fn snake_advertises_egocentric_box_and_three_actions() {
     let game = Snake {
+        num_snakes: 2,
         grid_size: 12,
         initial_length: 3,
         play_to_last: false,
@@ -80,6 +81,7 @@ fn encoders_emit_observations_within_the_advertised_bounds() {
     assert_obs_within_advertised_bounds(
         Env::new(
             Snake {
+                num_snakes: 2,
                 grid_size: 8,
                 initial_length: 3,
                 play_to_last: false,
