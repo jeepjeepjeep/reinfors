@@ -246,10 +246,15 @@ pub struct ChessState {
     /// pays nothing for it in tree-node clones.
     #[serde(with = "board_serde::pairs")]
     recent: Vec<(Board, u8)>,
+    /// Derived by [`position_outcome`] (the same function `step` uses), so the codec recomputes
+    /// it at decode rather than transporting a second copy. The one non-derivable outcome — the
+    /// illegal-action loss, where the board shows no mate — is thereby unrepresentable in a
+    /// snapshot; it is unreachable through the Env/search boundaries anyway.
+    #[serde(skip)]
     finished: Option<ChessOutcome>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ChessOutcome {
     /// The stored agent index won (its opponent is mated or played an illegal action).
     WonBy(usize),
@@ -333,6 +338,25 @@ fn insufficient_material(board: &Board) -> bool {
         .map(|sq| (sq.rank() as usize + sq.file() as usize) % 2);
     let first = square_colors.next().expect("non-empty bishops");
     square_colors.all(|c| c == first)
+}
+
+/// The position's outcome by the rules alone: cozy's status (mate / stalemate / fifty-move) plus
+/// our threefold-repetition and dead-position rules. The single source of terminality — `step`
+/// applies it after each move, and the codec recomputes `finished` from it at decode. Requires a
+/// non-empty hash history (`repetition_count`'s invariant).
+fn position_outcome(state: &ChessState) -> Option<ChessOutcome> {
+    match state.board.status() {
+        // The side to move is mated: its opponent won.
+        GameStatus::Won => Some(ChessOutcome::WonBy(1 - state.turn())),
+        GameStatus::Drawn => Some(ChessOutcome::Draw),
+        GameStatus::Ongoing => {
+            if state.repetition_count() >= 3 || insufficient_material(&state.board) {
+                Some(ChessOutcome::Draw)
+            } else {
+                None
+            }
+        }
+    }
 }
 
 impl ChessState {
@@ -420,18 +444,7 @@ impl Game for Chess {
             }
         }
 
-        let outcome = match next.board.status() {
-            GameStatus::Won => Some(ChessOutcome::WonBy(mover)), // side to move is mated
-            GameStatus::Drawn => Some(ChessOutcome::Draw),       // stalemate or fifty-move
-            GameStatus::Ongoing => {
-                if next.repetition_count() >= 3 || insufficient_material(&next.board) {
-                    Some(ChessOutcome::Draw)
-                } else {
-                    None
-                }
-            }
-        };
-        if let Some(outcome) = outcome {
+        if let Some(outcome) = position_outcome(&next) {
             next.finished = Some(outcome);
             match outcome {
                 ChessOutcome::WonBy(w) => {
@@ -1371,10 +1384,15 @@ impl reinfors_core::StateCodec for Chess {
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<ChessState, String> {
-        crate::codec_util::serde_decode(2, bytes)
+        let mut s: ChessState = crate::codec_util::serde_decode(2, bytes)?;
+        if s.hashes.is_empty() {
+            return Err("empty hash history (must contain at least the current position)".into());
+        }
+        s.finished = position_outcome(&s);
+        Ok(s)
     }
 
-    fn validate_state(&self, state: &ChessState, done: bool) -> Result<(), String> {
+    fn validate_decoded_state(&self, state: &ChessState, done: bool) -> Result<(), String> {
         if state.hashes.is_empty() {
             return Err("empty hash history (must contain at least the current position)".into());
         }
@@ -1384,6 +1402,8 @@ impl reinfors_core::StateCodec for Chess {
                 state.hashes.len()
             ));
         }
+        // `repetition_count` (and so the derived outcome) is defined against the current position
+        // sitting at the end of the threefold window.
         if *state.hashes.last().expect("non-empty") != state.board.hash() {
             return Err("hash history does not end at the current position".into());
         }
@@ -1395,36 +1415,9 @@ impl reinfors_core::StateCodec for Chess {
         }
         if state.finished.is_some() != done {
             return Err(format!(
-                "state finished flag {} disagrees with envelope done {done}",
-                state.finished.is_some()
+                "derived outcome {:?} disagrees with envelope done {done}",
+                state.finished
             ));
-        }
-        // `finished` must be GENUINELY derivable from the position, mirroring `step`'s terminal
-        // logic exactly: cozy's status (mate/stalemate/fifty-move) plus our threefold and
-        // insufficient-material rules. (The illegal-action loss also sets WonBy, but such states
-        // cannot reach a snapshot: the Env boundary rejects illegal actions and searches mask.)
-        let drawn = state.board.status() == GameStatus::Drawn
-            || state.repetition_count() >= 3
-            || insufficient_material(&state.board);
-        match state.finished {
-            None => {
-                if state.board.status() != GameStatus::Ongoing || drawn {
-                    return Err("position is terminal but finished is unset".into());
-                }
-            }
-            Some(ChessOutcome::Draw) => {
-                if !drawn {
-                    return Err("finished says Draw but no draw rule holds".into());
-                }
-            }
-            Some(ChessOutcome::WonBy(w)) => {
-                let mated_agent = usize::from(state.board.side_to_move() == Color::Black);
-                if state.board.status() != GameStatus::Won || w != 1 - mated_agent {
-                    return Err(format!(
-                        "finished says WonBy({w}) but the position shows no such mate"
-                    ));
-                }
-            }
         }
         Ok(())
     }
@@ -1469,29 +1462,63 @@ mod codec_tests {
             .decode(&bytes)
             .unwrap_or_else(|e| panic!("decode failed: {e}"));
         assert_eq!(game.encode(&back), bytes); // canonical: re-encode is byte-identical
-        game.validate_state(&back, false).unwrap();
+        game.validate_decoded_state(&back, false).unwrap();
         assert!(game.decode(&bytes[..bytes.len() - 1]).is_err()); // structural: truncated
         assert!(game.decode(&[1, 0, 0]).unwrap_err().contains("version")); // old layout rejected
     }
 
     #[test]
-    fn semantic_invariants_reject_tampered_structs() {
+    fn safety_invariants_reject_tampered_structs() {
         let (game, s) = played();
         let mut no_tail = s.clone();
         no_tail.hashes.pop(); // history no longer ends at the current position
         assert!(game
-            .validate_state(&no_tail, false)
+            .validate_decoded_state(&no_tail, false)
             .unwrap_err()
             .contains("hash history"));
         let mut fat_ring = s.clone();
         fat_ring.recent = vec![(s.board.clone(), 1); 9];
         assert!(game
-            .validate_state(&fat_ring, false)
+            .validate_decoded_state(&fat_ring, false)
             .unwrap_err()
             .contains("8-slot"));
+        // envelope coherence: a live position under done=true (the outcome is derived, so the
+        // mismatch can only come from the envelope side)
         assert!(game
-            .validate_state(&s, true)
+            .validate_decoded_state(&s, true)
             .unwrap_err()
-            .contains("finished"));
+            .contains("disagrees"));
+    }
+
+    #[test]
+    fn outcome_is_recomputed_at_decode() {
+        // Fool's mate: the decoded state must rediscover the mate through `position_outcome`
+        // (the flag is never on the wire).
+        let game = Chess {
+            max_ticks: None,
+            history_len: 0,
+        };
+        struct R;
+        impl reinfors_core::Rng for R {
+            fn below(&mut self, _: usize) -> usize {
+                0
+            }
+            fn unit(&mut self) -> f64 {
+                0.0
+            }
+        }
+        let mut s = game.initial_state(&mut R);
+        for uci in ["f2f3", "e7e5", "g2g4", "d8h4"] {
+            let mv: Move = uci.parse().unwrap();
+            let a = encode_move(mv, s.board.side_to_move());
+            let mover = s.turn();
+            let mut joint = vec![0usize; 2];
+            joint[mover] = a;
+            s = game.step(&s, &joint).next_state;
+        }
+        assert!(s.is_done());
+        let back = game.decode(&game.encode(&s)).unwrap();
+        assert!(back.is_done(), "mate must be rediscovered at decode");
+        game.validate_decoded_state(&back, true).unwrap();
     }
 }

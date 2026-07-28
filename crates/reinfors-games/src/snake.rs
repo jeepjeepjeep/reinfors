@@ -1430,13 +1430,12 @@ impl reinfors_core::StateCodec for Snake {
         crate::codec_util::serde_decode(2, bytes)
     }
 
-    fn validate_state(&self, state: &SnakeState, done: bool) -> Result<(), String> {
+    // Safety only, per the narrowed codec contract: bounds that game methods index by. Occupancy
+    // and terminality rules are NOT re-proved here — snake carries no state-side done flag, so
+    // the envelope's `done` stands alone, and unreachable-but-safe states are accepted.
+    fn validate_decoded_state(&self, state: &SnakeState, _done: bool) -> Result<(), String> {
         let g = self.grid_size;
         let in_grid = |cell: Cell| 0 <= cell.0 && cell.0 < g && 0 <= cell.1 && cell.1 < g;
-        // Occupancy invariants hold among the LIVING only: dead snakes' bodies remain in the
-        // state as corpses that living snakes (and other corpses — head-on deaths share a cell)
-        // may overlap. The reachability property test is what pinned this boundary.
-        let mut occupied: HashSet<Cell> = HashSet::new();
         for (i, snake) in state.snakes.iter().enumerate() {
             if snake.alive && snake.body.is_empty() {
                 return Err(format!("snake {i} is alive with an empty body"));
@@ -1445,34 +1444,12 @@ impl reinfors_core::StateCodec for Snake {
                 if !in_grid(cell) {
                     return Err(format!("snake {i} cell {cell:?} outside the grid"));
                 }
-                if snake.alive && !occupied.insert(cell) {
-                    return Err(format!("living snakes overlap or revisit at {cell:?}"));
-                }
             }
         }
         for &cell in &state.food {
             if !in_grid(cell) {
                 return Err(format!("food cell {cell:?} outside the grid"));
             }
-            if occupied.contains(&cell) {
-                return Err(format!("food cell {cell:?} overlaps a living snake"));
-            }
-        }
-        // Terminality is EXACTLY derivable (mirroring `advance`): the death rule (all dead, or
-        // a lone survivor without play_to_last) or the food-lead rule (both alive, body-length
-        // difference at or past the configured lead — length IS food eaten plus the initial
-        // length, so the lead reads straight off the bodies).
-        let alive: Vec<&SnakeBody> = state.snakes.iter().filter(|s| s.alive).collect();
-        let mut terminal = alive.len() <= usize::from(!self.play_to_last);
-        if let (Some(lead), [a, b]) = (self.win_food_lead, alive.as_slice()) {
-            terminal |= a.body.len().abs_diff(b.body.len()) >= lead;
-        }
-        if terminal != done {
-            return Err(format!(
-                "{} snakes alive with lead rule {:?} implies terminal={terminal}, but done is {done}",
-                alive.len(),
-                self.win_food_lead
-            ));
         }
         Ok(())
     }

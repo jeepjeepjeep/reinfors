@@ -131,13 +131,14 @@ def test_done_gates_active_agents_and_stepping() -> None:
 
 
 def test_done_mismatch_between_envelope_and_state_is_rejected() -> None:
+    # The state-side flag is derived at decode (never on the wire), so the only forgeable copy
+    # is the envelope's — flipping it must trip the lifecycle-coherence check.
     env = rf.Env(rf.games.GridWorld(size=5), seed=0)
     env.reset()
     blob = bytearray(env.snapshot().to_bytes())
-    assert blob[-1] == 0  # gridworld state layout ends with its done byte
-    blob[-1] = 1  # state says done, envelope still says live
+    blob[4 + 1 + 4 + 64 + 8] = 1  # envelope says done, the position is not at the goal
     snap = rf.EnvSnapshot.from_bytes(bytes(blob))
-    with pytest.raises(ValueError, match=r"disagrees|inconsistent"):
+    with pytest.raises(ValueError, match="disagrees"):
         env.restore(snap)
 
 
@@ -149,9 +150,10 @@ def _snap_with_state(env: rf.Env, state: bytes) -> rf.EnvSnapshot:
 
 
 def test_deep_codec_invariants_reject_forged_states() -> None:
-    # Structural classes here (semantic false-accept probes live in the Rust suite, where states
-    # are typed): stale layout versions and truncation reject; a postcard-forged connect4 state
-    # violating alternation rejects semantically.
+    # Safety classes here (typed probes live in the Rust suite): stale layout versions and
+    # truncation reject structurally; a postcard-forged connect4 state with an out-of-range cell
+    # code rejects at the safety boundary. Postcard layout = version, cells len varint, 42 cells,
+    # turn — the done flag is derived at decode, never on the wire.
     env = rf.Env(rf.games.Snake(grid_size=6, initial_length=2, food=1), seed=0)
     env.reset()
     good = env.snapshot().to_bytes()
@@ -162,10 +164,22 @@ def test_deep_codec_invariants_reject_forged_states() -> None:
 
     c4 = rf.Env(rf.games.Connect4(), seed=0)
     c4.reset()
-    board = bytes([2, 42, 1]) + bytes(41) + bytes([0, 0])
-    # one P0 piece (bottom-left, gravity-legal) but turn 0 (P0 to move): alternation violated
-    with pytest.raises(ValueError, match="inconsistent with turn"):
-        c4.restore(_snap_with_state(c4, board))
+    bad_cell = bytes([2, 42, 3]) + bytes(41) + bytes([0])
+    with pytest.raises(ValueError, match="cell value"):
+        c4.restore(_snap_with_state(c4, bad_cell))
+
+
+def test_unreachable_but_safe_states_restore_and_play() -> None:
+    # The narrowed contract: only reinfors-produced snapshots have meaningful gameplay semantics,
+    # so an alternation-violating board (two P0 pieces, none for P1, P0 to move again) restores
+    # and every game operation on it is safe.
+    c4 = rf.Env(rf.games.Connect4(), seed=0)
+    c4.reset()
+    board = bytes([2, 42, 1, 1]) + bytes(40) + bytes([0])
+    c4.restore(_snap_with_state(c4, board))
+    assert not c4.done() and c4.active_agents() == [0]
+    assert len(c4.legal_actions(0)) == 7
+    c4.step({0: 3})  # safe to play on
 
 
 def test_env_snapshot_is_public_api() -> None:

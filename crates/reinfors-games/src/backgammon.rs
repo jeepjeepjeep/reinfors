@@ -945,7 +945,11 @@ impl reinfors_core::StateCodec for Backgammon {
         crate::codec_util::serde_decode(2, bytes)
     }
 
-    fn validate_state(&self, state: &BackgammonState, done: bool) -> Result<(), String> {
+    // Safety per the narrowed contract: the 15-checker sum bounds every count the move logic
+    // does arithmetic on; ranges cover the indexing paths. Terminality is derived from the
+    // borne-off scores (no state-side flag exists), so the envelope check compares against the
+    // single derived source, not a duplicate.
+    fn validate_decoded_state(&self, state: &BackgammonState, done: bool) -> Result<(), String> {
         if state.to_move > 1 {
             return Err(format!("to_move {} out of range", state.to_move));
         }
@@ -1010,7 +1014,7 @@ mod codec_tests {
         let bytes = game.encode(&s);
         let back = game.decode(&bytes).unwrap();
         assert_eq!(game.encode(&back), bytes);
-        game.validate_state(&back, false).unwrap();
+        game.validate_decoded_state(&back, false).unwrap();
     }
 
     #[test]
@@ -1019,13 +1023,13 @@ mod codec_tests {
         let mut extra = s.clone();
         extra.board[0][0] += 1;
         assert!(game
-            .validate_state(&extra, false)
+            .validate_decoded_state(&extra, false)
             .unwrap_err()
             .contains("checkers"));
         let mut bad_die = s.clone();
         bad_die.dice[0] = 13;
         assert!(game
-            .validate_state(&bad_die, false)
+            .validate_decoded_state(&bad_die, false)
             .unwrap_err()
             .contains("die"));
         let mut won = s.clone();
@@ -1033,9 +1037,9 @@ mod codec_tests {
         won.bar[0] = 0;
         won.scores[0] = 15;
         assert!(game
-            .validate_state(&won, false)
+            .validate_decoded_state(&won, false)
             .unwrap_err()
             .contains("borne-off"));
-        game.validate_state(&won, true).unwrap();
+        game.validate_decoded_state(&won, true).unwrap();
     }
 }

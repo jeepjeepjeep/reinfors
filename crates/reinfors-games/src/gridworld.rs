@@ -13,7 +13,10 @@ const DELTAS: [Pos; 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)]; // up, down, left, 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GridState {
     pub pos: Pos,
-    pub done: bool, // reached the goal
+    /// Reached the goal. Derived (`pos == goal`), so the codec recomputes it at decode rather
+    /// than transporting a second copy of the fact.
+    #[serde(skip)]
+    pub done: bool,
 }
 
 /// The agent's outcome on one tick: whether it reached the goal (terminal) this tick.
@@ -182,21 +185,17 @@ impl reinfors_core::StateCodec for GridWorld {
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<GridState, String> {
-        crate::codec_util::serde_decode(2, bytes)
+        let mut s: GridState = crate::codec_util::serde_decode(2, bytes)?;
+        s.done = s.pos == self.goal;
+        Ok(s)
     }
 
-    fn validate_state(&self, state: &GridState, done: bool) -> Result<(), String> {
+    fn validate_decoded_state(&self, state: &GridState, done: bool) -> Result<(), String> {
         let pos = state.pos;
         if !(0 <= pos.0 && pos.0 < self.size && 0 <= pos.1 && pos.1 < self.size) {
             return Err(format!(
                 "position {pos:?} outside the {0}x{0} grid",
                 self.size
-            ));
-        }
-        if state.done != (state.pos == self.goal) {
-            return Err(format!(
-                "done flag {} inconsistent with position vs goal {:?}",
-                state.done, self.goal
             ));
         }
         if state.done != done {

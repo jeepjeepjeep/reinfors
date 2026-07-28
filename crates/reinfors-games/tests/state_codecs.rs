@@ -1,7 +1,10 @@
 //! The reachability property every state codec must satisfy: any state produced by real play
-//! round-trips canonically (encode∘decode = identity on bytes) and validates as a live state.
-//! This is the false-REJECTION guard for `validate_state` — targeted false-ACCEPT probes live
-//! next to each game's codec.
+//! round-trips canonically (encode∘decode = identity on bytes) and validates — live states with
+//! done=false, terminal states with done=true. This is the false-REJECTION guard for
+//! `validate_decoded_state`. The contract is safety, not reachability: probes below check that
+//! unsafe states reject, that derived flags are recomputed at decode rather than transported,
+//! and that unreachable-but-safe states are ACCEPTED (only reinfors-produced snapshots have
+//! meaningful gameplay semantics).
 
 use reinfors_core::{Game, Rng, StateCodec};
 use reinfors_games::{Backgammon, Chess, Connect4, GridWorld, Snake};
@@ -37,7 +40,7 @@ where
             bytes,
             "re-encode must be byte-identical"
         );
-        game.validate_state(&back, false)
+        game.validate_decoded_state(&back, false)
             .unwrap_or_else(|e| panic!("reachable live state failed validation: {e}"));
 
         let joint: Vec<usize> = (0..game.num_agents())
@@ -53,14 +56,14 @@ where
         let t = reinfors_core::game::step_env(&game, &state, &joint, &mut rng);
         if t.terminal {
             // TERMINAL states are snapshot-restorable too — the round-trip + validation
-            // property must hold for them with done=true (the connect4 turn-parity inversion
-            // was exactly the bug this arm exists to catch).
+            // property must hold for them with done=true (the recomputed state-side flags must
+            // agree with the envelope).
             let bytes = game.encode(&t.next_state);
             let back = game
                 .decode(&bytes)
                 .unwrap_or_else(|e| panic!("terminal state failed to decode: {e}"));
             assert_eq!(game.encode(&back), bytes);
-            game.validate_state(&back, true)
+            game.validate_decoded_state(&back, true)
                 .unwrap_or_else(|e| panic!("reachable terminal state failed validation: {e}"));
             state = game.initial_state(&mut rng);
         } else {
@@ -96,7 +99,7 @@ fn every_game_round_trips_reachable_states() {
             grid_size: 6,
             initial_length: 2,
             play_to_last: true,
-            win_food_lead: Some(1), // exercises the food-lead terminal in the derived check
+            win_food_lead: Some(1),
             initial_food_count: 2,
             max_ticks: None,
         },
@@ -112,9 +115,10 @@ fn every_game_round_trips_reachable_states() {
     );
 }
 
-/// False-ACCEPT probes: hand-built invalid states each validator must reject.
+/// False-ACCEPT probes for the SAFETY contract: states game methods cannot operate on safely
+/// (out-of-bounds indexing, panicking representation) must reject.
 #[test]
-fn validators_reject_invalid_states() {
+fn validators_reject_unsafe_states() {
     use reinfors_games::snake::{Action, SnakeBody, SnakeState};
     use std::collections::{HashSet, VecDeque};
 
@@ -135,64 +139,112 @@ fn validators_reject_invalid_states() {
         snakes: [a, b],
         food: HashSet::from_iter(food.iter().copied()),
     };
-    // living overlap rejected; the same overlap with one snake DEAD is legitimate
-    let overlap = mk(body(&[(1, 1)], true), body(&[(1, 1)], true), &[]);
+    // out-of-grid cells index past the observation planes
+    let off_grid = mk(body(&[(6, 0)], true), body(&[(3, 3)], true), &[]);
     assert!(snake_game
-        .validate_state(&overlap, false)
+        .validate_decoded_state(&off_grid, false)
         .unwrap_err()
-        .contains("overlap"));
-    let corpse = mk(body(&[(1, 1)], true), body(&[(1, 1)], false), &[]);
-    snake_game.validate_state(&corpse, true).unwrap(); // lone survivor: terminal (no play_to_last)
+        .contains("outside the grid"));
+    let off_grid_food = mk(body(&[(1, 1)], true), body(&[(3, 3)], true), &[(0, -1)]);
     assert!(snake_game
-        .validate_state(&corpse, false)
+        .validate_decoded_state(&off_grid_food, false)
         .unwrap_err()
-        .contains("terminal"));
-    let food_on_body = mk(body(&[(1, 1)], true), body(&[(3, 3)], true), &[(1, 1)]);
+        .contains("outside the grid"));
+    // an alive snake with no body panics `head()`
+    let headless = mk(body(&[], true), body(&[(3, 3)], true), &[]);
     assert!(snake_game
-        .validate_state(&food_on_body, false)
+        .validate_decoded_state(&headless, false)
         .unwrap_err()
-        .contains("living snake"));
+        .contains("empty body"));
 
-    // connect4: terminal consistency BOTH directions (the byte-era codec missed the done=true
-    // side). Fields are private, so the undecided-but-done state is built via decode: postcard
-    // layout = version, cells len varint, 42 cells, turn, done.
+    // connect4: cell codes outside {empty, p0, p1} and out-of-range movers reject. Fields are
+    // private, so states are built via decode: postcard layout = version, cells len varint,
+    // 42 cells, turn (done is derived, never on the wire).
     let c4 = Connect4;
-    let mut undecided_done = vec![2u8, 42, 1];
-    undecided_done.extend([0u8; 41]);
-    undecided_done.extend([0u8, 1]); // one P0 piece, turn 0, done TRUE: parity-consistent
-                                     // for a terminal state, but nothing is won or full
-    let forged = c4.decode(&undecided_done).unwrap();
+    let mut bad_cell = vec![2u8, 42, 3];
+    bad_cell.extend([0u8; 41]);
+    bad_cell.push(0); // turn 0
+    let forged = c4.decode(&bad_cell).unwrap();
     assert!(c4
-        .validate_state(&forged, true)
+        .validate_decoded_state(&forged, false)
         .unwrap_err()
-        .contains("neither won nor full"));
+        .contains("cell value"));
+    let mut bad_turn = vec![2u8, 42];
+    bad_turn.extend([0u8; 42]);
+    bad_turn.push(2); // turn 2
+    let forged = c4.decode(&bad_turn).unwrap();
+    assert!(c4
+        .validate_decoded_state(&forged, false)
+        .unwrap_err()
+        .contains("turn 2"));
 
     let gw = GridWorld {
         size: 5,
         goal: (4, 4),
         max_ticks: None,
     };
-    let mut at_goal = gw.initial_state(&mut Lcg(1));
-    let bytes = gw.encode(&at_goal);
-    at_goal = gw.decode(&bytes).unwrap();
+    // lifecycle coherence: envelope done must agree with the recomputed state flag
+    let live = gw.initial_state(&mut Lcg(1));
     assert!(gw
-        .validate_state(&at_goal, true)
+        .validate_decoded_state(&live, true)
         .unwrap_err()
         .contains("disagrees"));
 }
 
-/// The review's exact malformed snapshots: done=true over genuinely non-terminal states.
+/// Derived flags never travel: decode recomputes them from the same rule functions `step` uses,
+/// so a stored flag cannot disagree with the position (the old duplicated-fact forgeries are now
+/// unrepresentable, not just rejected).
 #[test]
-fn duplicated_done_flags_without_real_terminality_reject() {
+fn derived_flags_are_recomputed_at_decode() {
+    // connect4: play to a win, round-trip, and the decoded state knows it is done.
+    let c4 = Connect4;
+    let mut rng = Lcg(3);
+    let mut s = c4.initial_state(&mut rng);
+    loop {
+        let mover = match c4.actor(&s) {
+            reinfors_core::Actor::Agent(a) => a,
+            _ => unreachable!(),
+        };
+        let legal = c4.legal_actions(&s, mover);
+        let mut joint = vec![0usize; 2];
+        joint[mover] = legal[rng.below(legal.len())];
+        let t = c4.step(&s, &joint);
+        s = t.next_state;
+        if t.terminal {
+            break;
+        }
+    }
+    let back = c4.decode(&c4.encode(&s)).unwrap();
+    assert!(back.is_done(), "terminal flag must be recomputed at decode");
+    c4.validate_decoded_state(&back, true).unwrap();
+
+    // gridworld: a state at the goal decodes as done.
+    let gw = GridWorld {
+        size: 5,
+        goal: (0, 1),
+        max_ticks: None,
+    };
+    let s = reinfors_games::GridState {
+        pos: (0, 1),
+        done: true,
+    };
+    let back = gw.decode(&gw.encode(&s)).unwrap();
+    assert!(back.done, "goal position must decode as done");
+    gw.validate_decoded_state(&back, true).unwrap();
+}
+
+/// The narrowed contract's flip side: unreachable-but-SAFE states are accepted. No occupancy,
+/// alternation, or terminality rules are re-proved at the boundary.
+#[test]
+fn unreachable_but_safe_states_are_accepted() {
     use reinfors_games::snake::{Action, SnakeBody, SnakeState};
     use std::collections::{HashSet, VecDeque};
 
-    // Snake: both snakes alive, no win_food_lead, envelope done=true.
     let game = Snake {
         grid_size: 6,
         initial_length: 2,
         play_to_last: false,
-        win_food_lead: None,
+        win_food_lead: Some(1),
         initial_food_count: 1,
         max_ticks: None,
     };
@@ -201,55 +253,21 @@ fn duplicated_done_flags_without_real_terminality_reject() {
         direction: Action::Up,
         alive: true,
     };
-    let both_alive = SnakeState {
-        snakes: [body(&[(1, 1)]), body(&[(3, 3)])],
-        food: HashSet::new(),
+    // two living snakes on the same cell, food under one of them, a decisive food lead with
+    // done=false, and both-alive with done=true: all impossible through play, all safe to step
+    let overlap = SnakeState {
+        snakes: [body(&[(1, 1)]), body(&[(1, 1), (1, 2)])],
+        food: HashSet::from_iter([(1, 1)]),
     };
-    assert!(game
-        .validate_state(&both_alive, true)
-        .unwrap_err()
-        .contains("terminal=false"));
-    // And the lead rule derives terminality exactly: a 1-length lead with the rule configured
-    // REQUIRES done.
-    let lead_game = Snake {
-        win_food_lead: Some(1),
-        ..game
-    };
-    let led = SnakeState {
-        snakes: [body(&[(1, 1), (1, 2)]), body(&[(3, 3)])],
-        food: HashSet::new(),
-    };
-    assert!(lead_game
-        .validate_state(&led, false)
-        .unwrap_err()
-        .contains("terminal=true"));
-    lead_game.validate_state(&led, true).unwrap();
+    game.validate_decoded_state(&overlap, false).unwrap();
+    game.validate_decoded_state(&overlap, true).unwrap();
 
-    // Chess: the initial position tagged Draw.
-    let chess = Chess {
-        max_ticks: None,
-        history_len: 0,
-    };
-    let mut rng = Lcg(1);
-    let initial = chess.initial_state(&mut rng);
-    let bytes = chess.encode(&initial);
-    // Rebuild with finished=Draw by decoding a tampered payload: postcard Option<enum> tail.
-    // Easier and layout-free: decode the good bytes, then... fields are private — go through
-    // the game itself: play nothing, just assert the good state under done=true is rejected
-    // for BOTH reasons (flag disagreement is checked first on the untampered state).
-    let back = chess.decode(&bytes).unwrap_or_else(|e| panic!("{e}"));
-    assert!(chess
-        .validate_state(&back, true)
-        .unwrap_err()
-        .contains("disagrees"));
-    // The genuine-terminality arm: forge finished=Draw structurally. postcard encodes
-    // Option::Some(Draw) as [1, 1] where None is [0] — swap the final byte(s).
-    let mut tampered = bytes.clone();
-    assert_eq!(tampered.pop(), Some(0)); // trailing None
-    tampered.extend([1, 1]); // Some(Draw)
-    let forged = chess.decode(&tampered).unwrap_or_else(|e| panic!("{e}"));
-    assert!(chess
-        .validate_state(&forged, true)
-        .unwrap_err()
-        .contains("no draw rule holds"));
+    // connect4: a parity-violating board (two p0 pieces, none for p1) is safe to play on.
+    let c4 = Connect4;
+    let mut bytes = vec![2u8, 42, 1, 1];
+    bytes.extend([0u8; 40]);
+    bytes.push(0); // turn 0 again — alternation violated
+    let s = c4.decode(&bytes).unwrap();
+    c4.validate_decoded_state(&s, false).unwrap();
+    assert!(!c4.legal_actions(&s, 0).is_empty());
 }

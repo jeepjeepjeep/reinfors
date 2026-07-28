@@ -38,6 +38,9 @@ pub struct Connect4State {
     #[serde(with = "cells_serde")]
     cells: [u8; COLS * ROWS], // 0 empty, 1 player-0, 2 player-1; index = row*COLS + col, row 0 = bottom
     turn: usize, // whose move it is (0 or 1)
+    /// Derived (some line completed, or the board full), so the codec recomputes it at decode
+    /// rather than transporting a second copy of the fact.
+    #[serde(skip)]
     done: bool,
 }
 
@@ -139,6 +142,20 @@ impl Connect4 {
             }
         }
         false
+    }
+
+    /// Whether the position is terminal by the rules alone: some completed line, or a full board.
+    /// Quantifies [`Self::wins`] — the one definition of a line — over the grid; `step` applies
+    /// the same primitive incrementally at the last drop. The codec recomputes `done` from this
+    /// at decode, so the flag is never transported.
+    fn board_terminal(cells: &[u8; COLS * ROWS]) -> bool {
+        let has_win = (0..ROWS).any(|r| {
+            (0..COLS).any(|c| {
+                let v = cells[r * COLS + c];
+                v != 0 && Self::wins(cells, r, c, v)
+            })
+        });
+        has_win || cells.iter().all(|&c| c != 0)
     }
 
     /// Per-agent terminal event vector for a win by `winner`, or a draw.
@@ -278,58 +295,21 @@ impl reinfors_core::StateCodec for Connect4 {
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<Connect4State, String> {
-        crate::codec_util::serde_decode(2, bytes)
+        let mut s: Connect4State = crate::codec_util::serde_decode(2, bytes)?;
+        s.done = Self::board_terminal(&s.cells);
+        Ok(s)
     }
 
-    fn validate_state(&self, state: &Connect4State, done: bool) -> Result<(), String> {
-        let cells = &state.cells;
-        if cells.iter().any(|&c| c > 2) {
+    fn validate_decoded_state(&self, state: &Connect4State, done: bool) -> Result<(), String> {
+        if state.cells.iter().any(|&c| c > 2) {
             return Err("cell value out of range".into());
         }
         if state.turn > 1 {
             return Err(format!("turn {} out of range", state.turn));
         }
-        for col in 0..COLS {
-            for row in 1..ROWS {
-                if cells[row * COLS + col] != 0 && cells[(row - 1) * COLS + col] == 0 {
-                    return Err(format!("floating piece at row {row} col {col}"));
-                }
-            }
-        }
-        let c1 = cells.iter().filter(|&&c| c == 1).count();
-        let c2 = cells.iter().filter(|&&c| c == 2).count();
-        // Alternation, with the terminal wrinkle: `step` does NOT flip the turn on a terminal
-        // move, so on live states the NEXT mover's parity holds, while on done states `turn` is
-        // the LAST mover — the relation inverts.
-        let parity_ok = if state.done {
-            c1 == c2 + 1 && state.turn == 0 || c1 == c2 && state.turn == 1
-        } else {
-            c1 == c2 && state.turn == 0 || c1 == c2 + 1 && state.turn == 1
-        };
-        if !parity_ok {
-            return Err(format!(
-                "piece counts ({c1}, {c2}) inconsistent with turn {} (done: {})",
-                state.turn, state.done
-            ));
-        }
-        let has_win = (0..ROWS).any(|r| {
-            (0..COLS).any(|c| {
-                let v = cells[r * COLS + c];
-                v != 0 && Self::wins(cells, r, c, v)
-            })
-        });
-        let full = cells.iter().all(|&c| c != 0);
-        // Terminal consistency BOTH ways: a live board holds neither a win nor a full grid, and
-        // a finished one holds at least one of them (the gap the byte-era codec left open).
-        if !state.done && (has_win || full) {
-            return Err("board is decided but done is false".into());
-        }
-        if state.done && !(has_win || full) {
-            return Err("done is true but the board is neither won nor full".into());
-        }
         if state.done != done {
             return Err(format!(
-                "state done flag {} disagrees with envelope done {done}",
+                "derived done flag {} disagrees with envelope done {done}",
                 state.done
             ));
         }
