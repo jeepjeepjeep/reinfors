@@ -1931,17 +1931,19 @@ fn check_max_agents<P: Policy, G: Game>(policy: &P, label: &str, game: &G) -> Py
     Ok(())
 }
 
-/// Joint-space bound for the search families that build per-node co-mover products (MCTS/AZ:
-/// dense joint tables; expectimax: factored branch fans): the worst case
-/// `action_count ^ num_agents` must fit the documented slot bound, checked here so a too-wide
-/// composition is a config error rather than a mid-collect panic/OOM.
-fn check_joint_space<G: Game>(label: &str, game: &G) -> PyResult<()> {
+/// Joint-space bound for the search families that build per-node co-mover products, checked
+/// here so a too-wide composition is a config error rather than a mid-collect panic/OOM.
+/// `movers` is the exponent of the static worst case (`action_count ^ movers`): every agent for
+/// MCTS/AZ's dense joint tables, the co-movers only for expectimax (its product is per MAX edge,
+/// so the searcher's own width is not a factor). The searches still check the realized,
+/// state-dependent products as backstops.
+fn check_joint_space<G: Game>(label: &str, game: &G, movers: usize) -> PyResult<()> {
     if !game_is_sequential(game) {
-        let worst = (game.action_count() as u128).saturating_pow(game.num_agents() as u32);
+        let worst = (game.action_count() as u128).saturating_pow(movers as u32);
         if worst > reinfors_core::MAX_JOINT_SLOTS as u128 {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "the {label} policy's simultaneous joint space (action_count ^ num_agents = \
-                 {worst}) exceeds the {} - slot bound",
+                "the {label} policy's simultaneous joint fan (action_count ^ {movers} = \
+                 {worst}) exceeds the {} - branch bound",
                 reinfors_core::MAX_JOINT_SLOTS
             )));
         }
@@ -2018,7 +2020,7 @@ where
             };
             let policy = SelectiveExpectimax::new(cfg, n_heads, epsilon);
             check_max_agents(&policy, "SelectiveExpectimax", &game)?;
-            check_joint_space("SelectiveExpectimax", &game)?;
+            check_joint_space("SelectiveExpectimax", &game, game.num_agents().saturating_sub(1))?;
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
@@ -2085,7 +2087,7 @@ where
                 act_by,
             );
             check_max_agents(&policy, "Mcts", &game)?;
-            check_joint_space("Mcts", &game)?;
+            check_joint_space("Mcts", &game, game.num_agents())?;
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, false);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
@@ -2153,7 +2155,7 @@ where
                 noise_scope,
             });
             check_max_agents(&policy, "AlphaZero", &game)?;
-            check_joint_space("AlphaZero", &game)?;
+            check_joint_space("AlphaZero", &game, game.num_agents())?;
             let learner = AlphaZeroLearner::new(gamma);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),

@@ -716,7 +716,23 @@ fn expand_node<G: Game>(
                 .iter()
                 .map(|&m| agent_branching(game, enc, cfg, &state, m, opp_obs, opp_legal))
                 .collect();
-            let combos: usize = co_b.iter().map(|b| b.len()).product();
+            // Checked: an unchecked product wraps (65 two-action co-movers -> 0 combos -> a
+            // silently empty, zero-valued fan) — and exact expectimax has no sparse escape,
+            // every joint transition is evaluated, so an oversized fan is an error (the binding
+            // pre-checks the static worst case; a sampled co-mover mode is the eventual answer
+            // for genuinely large fans).
+            let combos: usize = co_b
+                .iter()
+                .try_fold(1usize, |acc, b| {
+                    acc.checked_mul(b.len())
+                        .filter(|&c| c <= crate::policy::MAX_JOINT_SLOTS)
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "simultaneous co-mover fan exceeds {} joint branches at one node",
+                        crate::policy::MAX_JOINT_SLOTS
+                    )
+                });
             let agent_legal = game.legal_actions(&state, agent);
             let mut edges = Vec::with_capacity(agent_legal.len());
             for &agent_action in &agent_legal {
@@ -1735,5 +1751,93 @@ mod n_player_tests {
             );
             assert!((head[1] - 1.0).abs() < 1e-12);
         }
+    }
+}
+
+#[cfg(test)]
+mod joint_fan_bound_tests {
+    use super::*;
+    use crate::encoder::StateEncoder;
+    use crate::game::Transition;
+    use crate::reward::Reward as RewardTrait;
+
+    /// 65 two-action agents: the unchecked co-mover product would wrap to 0 (a silently empty,
+    /// zero-valued fan); the checked fold must panic at the bound instead.
+    #[derive(Clone)]
+    struct WSt(bool);
+    struct Wide;
+    impl Game for Wide {
+        type State = WSt;
+        type Event = f64;
+        fn num_agents(&self) -> usize {
+            65
+        }
+        fn action_count(&self) -> usize {
+            2
+        }
+        fn actor(&self, _s: &WSt) -> Actor {
+            Actor::Simultaneous
+        }
+        fn legal_actions(&self, s: &WSt, _agent: usize) -> Vec<usize> {
+            if s.0 {
+                Vec::new()
+            } else {
+                vec![0, 1]
+            }
+        }
+        fn step(&self, _s: &WSt, _actions: &[usize]) -> Transition<WSt, f64> {
+            Transition {
+                next_state: WSt(true),
+                events: vec![0.0; 65],
+                terminal: true,
+            }
+        }
+        fn initial_state(&self, _rng: &mut dyn Rng) -> WSt {
+            WSt(false)
+        }
+    }
+
+    struct WEnc;
+    impl ActionView for WEnc {}
+    impl StateEncoder for WEnc {
+        type State = WSt;
+        fn encode(&self, s: &WSt, agent: usize) -> Vec<f32> {
+            vec![f32::from(u8::from(s.0)), agent as f32]
+        }
+        fn obs_shape(&self) -> (usize, usize, usize) {
+            (1, 1, 2)
+        }
+    }
+
+    struct Zero;
+    impl RewardTrait for Zero {
+        type Event = f64;
+        fn step_reward(&self, e: &f64, _agent: usize) -> f64 {
+            *e
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "joint branches")]
+    fn oversized_co_mover_fans_panic_instead_of_wrapping() {
+        let cfg = SearchConfig {
+            gamma: 1.0,
+            beta: 1.0,
+            expansion_budget: 1,
+            top_k: 1,
+            max_depth: 2,
+            chance: ChanceMode::Committed { samples: 1 },
+            opponent: Opponent::Uniform,
+        };
+        let _ = search_many(
+            &Wide,
+            &WEnc,
+            &Zero,
+            &cfg,
+            vec![(WSt(false), 0)],
+            false,
+            0,
+            |_obs: Vec<f32>, n: usize| vec![0.0; n * 2],
+        );
     }
 }

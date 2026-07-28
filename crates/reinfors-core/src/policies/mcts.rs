@@ -119,11 +119,7 @@ pub struct Mcts {
     act_by: ActBy,
 }
 
-/// Upper bound on one simultaneous node's dense joint-slot count (`∏ per-agent legal widths`).
-/// Construction rejects compositions whose worst case (`action_count ^ num_agents`) exceeds it,
-/// and `sim_leaf` checks the realized product as a backstop — unchecked, the product overflows
-/// `usize` (64 two-action agents) or ODMs into absurd allocations long before that.
-pub const MAX_JOINT_SLOTS: usize = 1 << 20;
+pub use crate::policy::MAX_JOINT_SLOTS;
 
 impl Mcts {
     pub fn new(cfg: MctsConfig, act_by: ActBy) -> Self {
