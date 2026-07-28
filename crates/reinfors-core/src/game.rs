@@ -55,7 +55,7 @@ impl ChanceDist {
     /// quadratic in N (there is deliberately no `prob(i)` accessor for that reason).
     pub fn iter_probs(&self) -> impl Iterator<Item = f64> + '_ {
         let (total, uniform) = match self {
-            ChanceDist::Weighted(p) => (p.iter().sum::<f64>(), 0.0),
+            ChanceDist::Weighted(p) => (Self::checked_total(p), 0.0),
             ChanceDist::Uniform(n) => (1.0, 1.0 / *n as f64),
         };
         (0..self.count()).map(move |i| match self {
@@ -64,13 +64,29 @@ impl ChanceDist {
         })
     }
 
+    /// The weight total, asserted finite and positive — weights that sum to `inf` (e.g. two
+    /// `f64::MAX` entries), `0`, or `NaN` would make enumeration yield zero probabilities and
+    /// sampling degenerate to the last index, silently. A real assert: silently-wrong chance is
+    /// worse than a panic, and the check is one pass over a fan-bounded vector.
+    fn checked_total(p: &[f64]) -> f64 {
+        let total: f64 = p.iter().sum();
+        assert!(
+            total.is_finite() && total > 0.0,
+            "Weighted chance needs a finite positive weight total, got {total}"
+        );
+        total
+    }
+
     /// Draw one outcome index. Both arms consume exactly one `rng.unit()` — the uniform arm is
     /// the closed form of the weighted scan on an equal-weight vector, so seeded streams stay
     /// aligned with the vector-era realization (indices can differ only at float-tie
     /// boundaries, ~1e-13 per draw).
     pub fn draw(&self, rng: &mut dyn Rng) -> usize {
         match self {
-            ChanceDist::Weighted(p) => crate::rng::weighted_index(rng, p),
+            ChanceDist::Weighted(p) => {
+                Self::checked_total(p);
+                crate::rng::weighted_index(rng, p)
+            }
             ChanceDist::Uniform(n) => {
                 let u = rng.unit();
                 (((*n as f64) * u) as usize).min(n.saturating_sub(1))
@@ -285,6 +301,29 @@ mod step_env_tests {
 #[cfg(test)]
 mod chance_dist_tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "finite positive weight total")]
+    fn infinite_weight_totals_panic_instead_of_degenerating() {
+        let d = ChanceDist::Weighted(vec![f64::MAX, f64::MAX]); // sums to inf
+        let _ = d.iter_probs().count();
+    }
+
+    #[test]
+    #[should_panic(expected = "finite positive weight total")]
+    fn zero_weight_totals_panic_on_draw() {
+        struct R;
+        impl Rng for R {
+            fn below(&mut self, _n: usize) -> usize {
+                0
+            }
+            fn unit(&mut self) -> f64 {
+                0.5
+            }
+        }
+        let d = ChanceDist::Weighted(vec![0.0, 0.0]);
+        let _ = d.draw(&mut R);
+    }
 
     #[test]
     fn iter_probs_normalizes_once_and_matches_both_arms() {
