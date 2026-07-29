@@ -5,8 +5,8 @@
 //! `Env` drives one game move-by-move for play, evaluation, and debugging.
 
 use crate::encoder::StateEncoder;
-use crate::episode::Episode;
 use crate::game::Game;
+use crate::rollout::episode::Episode;
 use crate::space::Space;
 
 pub struct Env<G: Game> {

@@ -7,11 +7,11 @@
 pub mod search;
 
 use crate::encoder::StateEncoder;
-use crate::engine::CollectStats;
-use crate::evaluator::Evaluator;
 use crate::game::{Game, Rng};
 use crate::policy::{ChanceMode, Policy, SearchPolicy};
 use crate::reward::Reward;
+use crate::rollout::engine::CollectStats;
+use crate::rollout::evaluator::Evaluator;
 use search::{search_many, InteriorTarget, SearchConfig, SearchStats};
 
 /// A search's per-decision evaluation: root per-head values (for acting and the z-mix target),
@@ -85,7 +85,7 @@ impl Policy for SelectiveExpectimax {
     }
 
     fn encode_eval(&self, eval: &SearchEvaluation, out: &mut Vec<u8>) {
-        crate::policies::expectimax::encode_search_eval(eval, out);
+        crate::policies::tree::expectimax::encode_search_eval(eval, out);
     }
 
     fn decode_eval(
@@ -95,7 +95,7 @@ impl Policy for SelectiveExpectimax {
     ) -> Result<SearchEvaluation, String> {
         // expectimax evaluations are always [n_heads][A] (broadcast at the search seam) and
         // carry no visits (acting is by value)
-        crate::policies::expectimax::decode_search_eval(r, action_count, self.n_heads, false)
+        crate::policies::tree::expectimax::decode_search_eval(r, action_count, self.n_heads, false)
     }
 
     fn policy_state_to_u64(&self, s: &usize) -> u64 {
@@ -372,7 +372,7 @@ pub(crate) fn decode_search_eval(
     if legal.iter().any(|&a| a >= action_count) {
         return Err("legal action id out of range".into());
     }
-    let mut stats = crate::policies::expectimax::search::SearchStats {
+    let mut stats = crate::policies::tree::expectimax::search::SearchStats {
         max_depth: i32::try_from(r.i64()?).map_err(|_| "max_depth out of range".to_string())?,
         ..Default::default()
     };

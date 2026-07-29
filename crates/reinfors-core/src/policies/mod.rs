@@ -1,8 +1,13 @@
-//! Concrete `Policy` implementations. Each module is one policy family: `epsilon_greedy_q` (a lone
-//! model-free policy acting on Q-values) is a single file; `expectimax` is a family with shared search
-//! machinery + room for variants (selective today, exhaustive later), so it is a directory.
+//! Policies grouped by their INFORMATION CONDITIONING — which projection of the state each
+//! algorithm is allowed to read, the axis the capability seams
+//! ([`Policy::supports_imperfect_information`](crate::Policy::supports_imperfect_information),
+//! [`Policy::supports_chance_nodes`](crate::Policy::supports_chance_nodes)) enforce:
+//!
+//! - [`tree`]: plan over the TRUE state — sound only on perfect-information games without
+//!   chance-node states (both rejected at construction).
+//! - [`modelfree`]: act on each agent's OWN observation only — sound anywhere.
+//! - `infoset` (future): plan over information sets — sound on imperfect information by
+//!   construction (IS-MCTS; tabular strategies from the `solvers` family).
 
-pub mod alphazero;
-pub mod epsilon_greedy_q;
-pub mod expectimax;
-pub mod mcts;
+pub mod modelfree;
+pub mod tree;

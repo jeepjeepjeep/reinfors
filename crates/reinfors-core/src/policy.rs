@@ -3,10 +3,10 @@
 //! any of them, and a `Learner` consuming the matching `Evaluation` produces the training records.
 
 use crate::encoder::StateEncoder;
-use crate::engine::CollectStats;
-use crate::evaluator::Evaluator;
 use crate::game::{Game, Rng};
 use crate::reward::Reward;
+use crate::rollout::engine::CollectStats;
+use crate::rollout::evaluator::Evaluator;
 
 /// Upper bound on one node's simultaneous joint fan — MCTS/AZ's dense joint-slot arrays
 /// (`∏ per-agent legal widths`) and expectimax's per-edge co-mover branch product
@@ -182,7 +182,9 @@ impl ChanceMode {
 /// compiler-checked contract that they produce [`SearchEvaluation`]s (root values, visits, search
 /// stats). Non-search policies (e.g. `EpsilonGreedyQ`) simply do not implement it — the absence of
 /// the capability IS the distinction; there is no `NonSearchPolicy`.
-pub trait SearchPolicy: Policy<Evaluation = crate::policies::expectimax::SearchEvaluation> {
+pub trait SearchPolicy:
+    Policy<Evaluation = crate::policies::tree::expectimax::SearchEvaluation>
+{
     /// Whether this search paradigm can express `mode` (see
     /// [`ChanceMode::requires_repeated_traversal`]). Checked when a configuration is built — the
     /// binding turns a `false` into a construction error — never mid-collect.
@@ -191,7 +193,7 @@ pub trait SearchPolicy: Policy<Evaluation = crate::policies::expectimax::SearchE
     /// Fold the search diagnostics common to every search family into the collect telemetry;
     /// policies layer their extras on top in their `Policy::fold_telemetry`.
     fn fold_search_stats(
-        eval: &crate::policies::expectimax::SearchEvaluation,
+        eval: &crate::policies::tree::expectimax::SearchEvaluation,
         stats: &mut CollectStats,
     ) {
         let s = &eval.stats;

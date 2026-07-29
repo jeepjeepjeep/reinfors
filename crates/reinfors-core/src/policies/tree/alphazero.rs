@@ -12,13 +12,15 @@
 //! counts; the AlphaZero learner reads the visits as its policy target `π`.
 
 use crate::encoder::StateEncoder;
-use crate::engine::CollectStats;
-use crate::evaluator::Evaluator;
 use crate::game::{Game, Rng};
-use crate::policies::expectimax::SearchEvaluation;
-use crate::policies::mcts::{sample_visits, search_many, Guidance, NoiseScope, SequentialBackup};
+use crate::policies::tree::expectimax::SearchEvaluation;
+use crate::policies::tree::mcts::{
+    sample_visits, search_many, Guidance, NoiseScope, SequentialBackup,
+};
 use crate::policy::{argmax, ChanceMode, Policy, SearchPolicy};
 use crate::reward::Reward;
+use crate::rollout::engine::CollectStats;
+use crate::rollout::evaluator::Evaluator;
 
 #[derive(Clone, Copy, Debug)]
 pub struct AlphaZeroConfig {
@@ -119,7 +121,7 @@ impl Policy for AlphaZero {
     }
 
     fn encode_eval(&self, eval: &SearchEvaluation, out: &mut Vec<u8>) {
-        crate::policies::expectimax::encode_search_eval(eval, out);
+        crate::policies::tree::expectimax::encode_search_eval(eval, out);
     }
 
     fn decode_eval(
@@ -128,7 +130,7 @@ impl Policy for AlphaZero {
         action_count: usize,
     ) -> Result<SearchEvaluation, String> {
         // one value row plus full-width visits (the π source the AZ learner requires)
-        crate::policies::expectimax::decode_search_eval(r, action_count, 1, true)
+        crate::policies::tree::expectimax::decode_search_eval(r, action_count, 1, true)
     }
 
     fn policy_state_to_u64(&self, s: &u32) -> u64 {

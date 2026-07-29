@@ -5,7 +5,7 @@
 use crate::encoder::ActionView;
 use crate::game::Rng;
 use crate::learner::{sample_mask, Learner, Step};
-use crate::policies::expectimax::SearchEvaluation;
+use crate::policies::tree::expectimax::SearchEvaluation;
 
 /// One collected TreeStrap record: observation, per-head `[K][A]` target, and per-head bootstrap mask.
 pub type TreeStrapRecord = (Vec<f32>, Vec<Vec<f64>>, Vec<f32>);
@@ -165,7 +165,7 @@ fn to_head_frame(values: Vec<Vec<f64>>, perm: &[usize], identity: bool) -> Vec<V
 mod tests {
     use super::*;
     use crate::encoder::IdentityView;
-    use crate::policies::expectimax::search::{InteriorTarget, SearchStats};
+    use crate::policies::tree::expectimax::search::{InteriorTarget, SearchStats};
     use crate::rng::SplitMix64;
 
     fn eval(values: Vec<Vec<f64>>, interior: Vec<InteriorTarget>) -> SearchEvaluation {
@@ -289,7 +289,7 @@ mod frame_tests {
 
     fn eval(
         values: Vec<Vec<f64>>,
-        interior: Vec<crate::policies::expectimax::search::InteriorTarget>,
+        interior: Vec<crate::policies::tree::expectimax::search::InteriorTarget>,
     ) -> SearchEvaluation {
         SearchEvaluation {
             values,

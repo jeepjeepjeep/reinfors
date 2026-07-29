@@ -1370,7 +1370,7 @@ mod chance_mode_tests {
             chance: ChanceMode::AlwaysResample,
             opponent: Opponent::Uniform,
         };
-        let _ = crate::policies::expectimax::SelectiveExpectimax::new(cfg, 1, 0.0);
+        let _ = crate::policies::tree::expectimax::SelectiveExpectimax::new(cfg, 1, 0.0);
     }
 }
 

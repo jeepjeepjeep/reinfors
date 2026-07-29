@@ -37,14 +37,14 @@
 use std::collections::HashMap;
 
 use crate::encoder::{ActionView, StateEncoder};
-use crate::engine::CollectStats;
-use crate::evaluator::{Evaluator, Resolve};
 use crate::game::{Actor, Game, Rng};
-use crate::policies::expectimax::search::SearchStats;
-use crate::policies::expectimax::SearchEvaluation;
+use crate::policies::tree::expectimax::search::SearchStats;
+use crate::policies::tree::expectimax::SearchEvaluation;
 use crate::policy::{argmax, Policy, SearchPolicy};
 use crate::reward::Reward;
 use crate::rng::{dirichlet, SplitMix64};
+use crate::rollout::engine::CollectStats;
+use crate::rollout::evaluator::{Evaluator, Resolve};
 
 /// Which rule guides selection, and what the net returns per leaf. The tree machinery below is shared;
 /// this is the only axis the UCT (`Mcts`) and PUCT (`AlphaZero`) policies differ on.
@@ -1641,7 +1641,7 @@ impl Policy for Mcts {
     }
 
     fn encode_eval(&self, eval: &SearchEvaluation, out: &mut Vec<u8>) {
-        crate::policies::expectimax::encode_search_eval(eval, out);
+        crate::policies::tree::expectimax::encode_search_eval(eval, out);
     }
 
     fn decode_eval(
@@ -1651,7 +1651,7 @@ impl Policy for Mcts {
     ) -> Result<SearchEvaluation, String> {
         // the tree's root evaluation is always one value row plus full-width visits (both acting
         // modes; `Tree::evaluation` densifies)
-        crate::policies::expectimax::decode_search_eval(r, action_count, 1, true)
+        crate::policies::tree::expectimax::decode_search_eval(r, action_count, 1, true)
     }
 
     fn policy_state_to_u64(&self, s: &u32) -> u64 {
@@ -1917,7 +1917,7 @@ mod masking_tests {
     use super::*;
     use crate::encoder::StateEncoder;
     use crate::game::{Actor, Game, Rng, Transition};
-    use crate::policies::alphazero::{alphazero_many, AlphaZeroConfig};
+    use crate::policies::tree::alphazero::{alphazero_many, AlphaZeroConfig};
     use crate::reward::Reward as RewardTrait;
 
     /// A 1-player counting game over A=10 actions where only EVEN action ids are ever legal.
@@ -2069,7 +2069,7 @@ mod chance_tests {
     use super::*;
     use crate::encoder::StateEncoder;
     use crate::game::{Actor, Game, Rng, Transition};
-    use crate::policies::alphazero::{alphazero_many, AlphaZeroConfig};
+    use crate::policies::tree::alphazero::{alphazero_many, AlphaZeroConfig};
     use crate::reward::Reward as RewardTrait;
 
     #[derive(Clone)]
@@ -2322,7 +2322,7 @@ mod duct_tests {
     use super::*;
     use crate::encoder::StateEncoder;
     use crate::game::{Actor, Game, Rng, Transition};
-    use crate::policies::alphazero::{alphazero_many, AlphaZeroConfig};
+    use crate::policies::tree::alphazero::{alphazero_many, AlphaZeroConfig};
     use crate::reward::Reward as RewardTrait;
 
     #[derive(Clone)]
@@ -2611,7 +2611,7 @@ mod frame_tests {
     use super::*;
     use crate::encoder::StateEncoder;
     use crate::game::{Actor, Game, Rng, Transition};
-    use crate::policies::alphazero::{alphazero_many, AlphaZeroConfig};
+    use crate::policies::tree::alphazero::{alphazero_many, AlphaZeroConfig};
     use crate::reward::Reward as RewardTrait;
 
     /// A=4 but only {0, 2} legal (sparse) — the gathers iterate the legal set, so a wrong frame
@@ -2786,10 +2786,10 @@ mod maxn_tests {
     //! (simultaneous) must let every agent find its own dominant action.
     use super::*;
     use crate::encoder::StateEncoder;
-    use crate::evaluator::Evaluator;
     use crate::game::{Actor, Game, Rng, Transition};
-    use crate::policies::alphazero::{alphazero_many, AlphaZeroConfig};
+    use crate::policies::tree::alphazero::{alphazero_many, AlphaZeroConfig};
     use crate::reward::Reward as RewardTrait;
+    use crate::rollout::evaluator::Evaluator;
 
     /// Agent 0 picks L or R; R ends at payoffs (3, 0, 0). L hands the move to agent 1: action a
     /// ends at (5, 10, 0), action b at (0, 0, 0). Agent 2 exists (forcing the N>2 path) but never
@@ -3012,10 +3012,10 @@ mod forced_maxn_tests {
     //! can't see this: the value-row plumbing looks identical either way.)
     use super::*;
     use crate::encoder::StateEncoder;
-    use crate::evaluator::Evaluator;
     use crate::game::{Actor, Game, Rng, Transition};
-    use crate::policies::alphazero::{alphazero_many, AlphaZeroConfig};
+    use crate::policies::tree::alphazero::{alphazero_many, AlphaZeroConfig};
     use crate::reward::Reward as RewardTrait;
+    use crate::rollout::evaluator::Evaluator;
 
     /// Agent 0: L (0) hands the move to agent 1 — (a) pays (5, 10), (b) pays (0, 0); R (1) ends
     /// at (3, 0). A self-interested agent 1 picks (a), so Max^N values L at 5 and picks L; the

@@ -108,11 +108,11 @@ pub trait StateEncoder: ActionView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{Engine, EngineParams};
     use crate::game::{Actor, Game, Rng, Transition};
     use crate::learners::dqn::Dqn;
-    use crate::policies::epsilon_greedy_q::EpsilonGreedyQ;
+    use crate::policies::modelfree::epsilon_greedy_q::EpsilonGreedyQ;
     use crate::reward::Reward;
+    use crate::rollout::engine::{Engine, EngineParams};
 
     /// Single-agent, 3 actions, always legal, terminal after one step. State is a tick counter so
     /// observations are well-defined; the game itself is inert scaffolding for the frame tests.
@@ -253,11 +253,11 @@ mod dispatch_tests {
     //! wall-clock is flaky in unit tests, so we count the mechanism instead: virtual
     //! `head_index` calls must be O(A) table builds, never O(K x A x n) per-scalar gathers).
     use super::*;
-    use crate::evaluator::Evaluator;
     use crate::game::{Actor, Game, Rng, Transition};
-    use crate::policies::epsilon_greedy_q::EpsilonGreedyQ;
+    use crate::policies::modelfree::epsilon_greedy_q::EpsilonGreedyQ;
     use crate::policy::Policy;
     use crate::reward::Reward;
+    use crate::rollout::evaluator::Evaluator;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A=3 with only {0, 2} legal.
@@ -337,8 +337,8 @@ mod dispatch_tests {
 
     #[test]
     fn sparse_legal_sets_map_and_select_under_a_permutation() {
-        use crate::engine::{Engine, EngineParams};
         use crate::learners::dqn::Dqn;
+        use crate::rollout::engine::{Engine, EngineParams};
         let mut engine = Engine::new(
             SparseShot,
             Box::new(RotEnc),

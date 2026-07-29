@@ -1,12 +1,12 @@
 //! Model-free bootstrapped DQN — records half. Emits off-policy transitions `(s, a, r, s', done)`,
 //! bootstrapped by the (Python) learner against a target net rather than episode-end z-mixed. Consumes
-//! `QEvaluation` from `crate::policies::epsilon_greedy_q`. Together these exercise the seam's two hardest cases: a
+//! `QEvaluation` from `crate::policies::modelfree::epsilon_greedy_q`. Together these exercise the seam's two hardest cases: a
 //! non-search evaluation and a transition record (a different shape from TreeStrap's targets).
 
 use crate::encoder::ActionView;
 use crate::game::Rng;
 use crate::learner::{sample_mask, Learner, Step};
-use crate::policies::epsilon_greedy_q::QEvaluation;
+use crate::policies::modelfree::epsilon_greedy_q::QEvaluation;
 
 /// One off-policy transition: `(obs, action, reward, next_obs, terminal, mask[K])`. The TD target is
 /// computed in the (Python) learner from `next_obs`/`terminal` against a target net, so the engine
@@ -112,10 +112,10 @@ impl Learner<QEvaluation> for Dqn {
 mod tests {
     use super::*;
     use crate::encoder::IdentityView;
-    use crate::engine::Engine;
     use crate::game::{Actor, Game, Transition};
-    use crate::policies::epsilon_greedy_q::EpsilonGreedyQ;
+    use crate::policies::modelfree::epsilon_greedy_q::EpsilonGreedyQ;
     use crate::rng::SplitMix64;
+    use crate::rollout::engine::Engine;
 
     fn step(
         obs: Vec<f32>,

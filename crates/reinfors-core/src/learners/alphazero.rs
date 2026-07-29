@@ -7,7 +7,7 @@
 use crate::encoder::ActionView;
 use crate::game::Rng;
 use crate::learner::{Learner, Step};
-use crate::policies::expectimax::SearchEvaluation;
+use crate::policies::tree::expectimax::SearchEvaluation;
 
 /// One collected AlphaZero record: observation, policy target `π [A]`, value target `z`, and the
 /// policy weight (1.0 for the acting agent's row, 0.0 for a value-only row).
@@ -133,7 +133,7 @@ impl Learner<SearchEvaluation> for AlphaZeroLearner {
 pub(crate) mod tests {
     use super::*;
     use crate::encoder::IdentityView;
-    use crate::policies::expectimax::search::SearchStats;
+    use crate::policies::tree::expectimax::search::SearchStats;
     use crate::rng::SplitMix64;
 
     fn eval(visits: Vec<f64>) -> SearchEvaluation {

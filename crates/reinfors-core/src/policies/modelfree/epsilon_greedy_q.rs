@@ -5,10 +5,10 @@
 use std::collections::HashMap;
 
 use crate::encoder::StateEncoder;
-use crate::evaluator::Evaluator;
 use crate::game::{Game, Rng};
 use crate::policy::Policy;
 use crate::reward::Reward;
+use crate::rollout::evaluator::Evaluator;
 
 /// DQN's per-decision evaluation: just the per-head Q-values `[K][A]` from one network forward (no
 /// search tree, interior targets, or stats — the seam's non-search case).

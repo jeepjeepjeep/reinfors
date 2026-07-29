@@ -21,7 +21,7 @@
 //! (the sim-fate identity) lives in the trees that know what a simulation is. A tail bootstrap is
 //! therefore not a category here — just another batch.
 
-use crate::infer_cache::InferCache;
+use crate::rollout::infer_cache::InferCache;
 
 pub struct Evaluator<'a, F> {
     infer: &'a mut F,
