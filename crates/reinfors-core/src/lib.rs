@@ -13,6 +13,7 @@ pub mod policy;
 pub mod reward;
 pub(crate) mod rng;
 pub mod rollout;
+pub mod solvers;
 pub mod space;
 
 pub use codec::StateCodec;
@@ -38,6 +39,8 @@ pub use rollout::env::Env;
 pub use rollout::evaluator::{CommittedRows, EvalBatch, Evaluator, Resolve};
 pub use rollout::infer_cache::InferCache;
 pub use rollout::start::{AlwaysInitialState, ReachedStateBuffer, Start, StartDistribution};
+pub use solvers::best_response::{best_response_value, exploitability};
+pub use solvers::cfr::{CfrSolver, CfrVariant};
 pub use space::Space;
 
 pub fn version() -> &'static str {

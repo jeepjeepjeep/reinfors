@@ -3661,6 +3661,203 @@ impl GameHandle {
     }
 }
 
+/// Type-erased CFR solver — one concrete `CfrSolver<G>` per solvable game behind a uniform
+/// surface (the solver is generic; Python is not).
+trait ErasedCfr: Send + Sync {
+    fn iterate(&mut self, n: u64);
+    fn iterations(&self) -> u64;
+    fn num_infosets(&self) -> usize;
+    fn exploitability(&self) -> f64;
+    fn expected_value(&self, player: usize) -> f64;
+    fn average_strategy(&self, key: &[u8]) -> Option<(Vec<usize>, Vec<f64>)>;
+    fn save(&self) -> Vec<u8>;
+    fn load(&mut self, bytes: &[u8]) -> Result<(), String>;
+}
+
+impl<G: Game + Send + Sync> ErasedCfr for reinfors_core::CfrSolver<G> {
+    fn iterate(&mut self, n: u64) {
+        reinfors_core::CfrSolver::iterate(self, n)
+    }
+    fn iterations(&self) -> u64 {
+        reinfors_core::CfrSolver::iterations(self)
+    }
+    fn num_infosets(&self) -> usize {
+        reinfors_core::CfrSolver::num_infosets(self)
+    }
+    fn exploitability(&self) -> f64 {
+        reinfors_core::CfrSolver::exploitability(self)
+    }
+    fn expected_value(&self, player: usize) -> f64 {
+        reinfors_core::CfrSolver::expected_value(self, player)
+    }
+    fn average_strategy(&self, key: &[u8]) -> Option<(Vec<usize>, Vec<f64>)> {
+        reinfors_core::CfrSolver::average_strategy(self, key)
+    }
+    fn save(&self) -> Vec<u8> {
+        reinfors_core::CfrSolver::save(self)
+    }
+    fn load(&mut self, bytes: &[u8]) -> Result<(), String> {
+        reinfors_core::CfrSolver::load(self, bytes)
+    }
+}
+
+/// `rf.solvers.Cfr` — counterfactual regret minimization over a 2-player game with declared
+/// chance and information-state keys (the poker family). Variants: "vanilla", "plus" (CFR+),
+/// "external_mccfr". The output is the AVERAGE strategy (`average_strategy` by
+/// `env.information_state_key` bytes); `exploitability()` is the exact convergence metric
+/// (enumeration-capped: Kuhn/Leduc-sized games, not full hold'em).
+#[pyclass(name = "Cfr")]
+struct PyCfr {
+    inner: Box<dyn ErasedCfr>,
+    /// SHA-256 over the canonical composition JSON (game + reward + variant), embedded in
+    /// `save` payloads and checked by `load` — the engine/env-snapshot pattern: a checkpoint
+    /// silently loaded into a different composition would corrupt the tables.
+    fingerprint: String,
+}
+
+const CFR_SNAPSHOT_MAGIC: &[u8; 4] = b"RFCF";
+const CFR_SNAPSHOT_SCHEMA: u8 = 1;
+
+#[pymethods]
+impl PyCfr {
+    #[new]
+    #[pyo3(signature = (game, variant="plus", seed=0))]
+    fn new(game: &GameHandle, variant: &str, seed: u64) -> PyResult<Self> {
+        use reinfors_core::{CfrSolver, CfrVariant};
+        let variant_name = variant;
+        let variant = match variant {
+            "vanilla" => CfrVariant::Vanilla,
+            "plus" => CfrVariant::Plus,
+            "external_mccfr" => CfrVariant::ExternalMccfr,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown CFR variant {other:?}: expected \"vanilla\", \"plus\", or \"external_mccfr\""
+                )))
+            }
+        };
+        let reward = HoldemReward { scale: 1.0 }; // solver utilities are raw chip deltas
+        let inner: Box<dyn ErasedCfr> = match game.spec {
+            GameSpec::KuhnPoker => {
+                Box::new(CfrSolver::new(KuhnPoker, Box::new(reward), variant, seed))
+            }
+            GameSpec::LeducPoker => {
+                Box::new(CfrSolver::new(LeducPoker, Box::new(reward), variant, seed))
+            }
+            GameSpec::TexasHoldem {
+                num_players,
+                stack,
+                small_blind,
+                big_blind,
+            } => {
+                if num_players != 2 {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "CFR solves 2-player games only; construct TexasHoldem(num_players=2)",
+                    ));
+                }
+                if variant != CfrVariant::ExternalMccfr {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "full hold'em's chance fans are unenumerable: use variant=\"external_mccfr\"",
+                    ));
+                }
+                Box::new(CfrSolver::new(
+                    TexasHoldem {
+                        num_players,
+                        stack,
+                        small_blind,
+                        big_blind,
+                    },
+                    Box::new(reward),
+                    variant,
+                    seed,
+                ))
+            }
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "CFR requires a 2-player game with declared chance and information-state \
+                     keys (KuhnPoker, LeducPoker, heads-up TexasHoldem)",
+                ))
+            }
+        };
+        let composition = json!({
+            "solver": {"name": "cfr", "variant": variant_name},
+            "game": game_cfg(&game.spec),
+            "reward": {"scale": 1.0},
+        });
+        let fingerprint = fingerprint_hex(&canonical_config_bytes(&composition));
+        Ok(PyCfr { inner, fingerprint })
+    }
+
+    /// Run `n` iterations (one regret/strategy pass per player each).
+    fn iterate(&mut self, py: Python<'_>, n: u64) {
+        py.allow_threads(|| self.inner.iterate(n));
+    }
+
+    #[getter]
+    fn iterations(&self) -> u64 {
+        self.inner.iterations()
+    }
+
+    #[getter]
+    fn num_infosets(&self) -> usize {
+        self.inner.num_infosets()
+    }
+
+    /// Exact exploitability of the average profile (pyspiel's definition: NashConv / 2);
+    /// zero at Nash.
+    fn exploitability(&self, py: Python<'_>) -> f64 {
+        py.allow_threads(|| self.inner.exploitability())
+    }
+
+    /// Expected value for `player` when both play the average profile.
+    fn expected_value(&self, py: Python<'_>, player: usize) -> PyResult<f64> {
+        if player >= 2 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "player must be 0 or 1",
+            ));
+        }
+        Ok(py.allow_threads(|| self.inner.expected_value(player)))
+    }
+
+    /// The average strategy at an `env.information_state_key(...)` key:
+    /// `(action ids, probabilities)`, or `None` if the solve never visited it (play uniform).
+    fn average_strategy(&self, key: &[u8]) -> Option<(Vec<usize>, Vec<f64>)> {
+        self.inner.average_strategy(key)
+    }
+
+    /// Serialize the solve — tables, iteration counter, and the sampling rng: an exact
+    /// checkpoint (a restored MCCFR solve continues bit-identically). The payload carries a
+    /// fingerprint of the composition (game, reward, variant); `load` refuses a payload saved
+    /// from a different one.
+    fn save<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
+        let mut out = Vec::new();
+        out.extend_from_slice(CFR_SNAPSHOT_MAGIC);
+        out.push(CFR_SNAPSHOT_SCHEMA);
+        out.extend_from_slice(self.fingerprint.as_bytes()); // fixed 64 hex bytes
+        out.extend_from_slice(&self.inner.save());
+        pyo3::types::PyBytes::new(py, &out)
+    }
+
+    fn load(&mut self, bytes: &[u8]) -> PyResult<()> {
+        let err = pyo3::exceptions::PyValueError::new_err;
+        if bytes.len() < 4 + 1 + 64 || &bytes[..4] != CFR_SNAPSHOT_MAGIC {
+            return Err(err("not a CFR snapshot payload"));
+        }
+        if bytes[4] != CFR_SNAPSHOT_SCHEMA {
+            return Err(err("unknown CFR snapshot schema version"));
+        }
+        let fingerprint = &bytes[5..69];
+        if fingerprint != self.fingerprint.as_bytes() {
+            return Err(err(
+                "this snapshot was saved from a different composition (game parameters, \
+                 reward, or CFR variant)",
+            ));
+        }
+        self.inner
+            .load(&bytes[69..])
+            .map_err(pyo3::exceptions::PyValueError::new_err)
+    }
+}
+
 /// Policy handle (`rf.policies.SelectiveExpectimax` / `.EpsilonGreedyQ`).
 #[pyclass]
 #[derive(Clone)]
@@ -4139,6 +4336,7 @@ fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(core_build_profile, m)?)?;
     m.add_class::<PyEngine>()?;
     m.add_class::<PyEnv>()?;
+    m.add_class::<PyCfr>()?;
     m.add_class::<GameHandle>()?;
     m.add_class::<PolicyHandle>()?;
     m.add_class::<LearnerHandle>()?;
