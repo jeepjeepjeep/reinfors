@@ -6,6 +6,7 @@
 
 pub mod search;
 
+use crate::codec::bytes::Reader;
 use crate::encoder::StateEncoder;
 use crate::game::{Game, Rng};
 use crate::policy::{ChanceMode, Policy, SearchPolicy};
@@ -85,17 +86,13 @@ impl Policy for SelectiveExpectimax {
     }
 
     fn encode_eval(&self, eval: &SearchEvaluation, out: &mut Vec<u8>) {
-        crate::policies::tree::expectimax::encode_search_eval(eval, out);
+        encode_search_eval(eval, out);
     }
 
-    fn decode_eval(
-        &self,
-        r: &mut crate::codec::bytes::Reader,
-        action_count: usize,
-    ) -> Result<SearchEvaluation, String> {
+    fn decode_eval(&self, r: &mut Reader, action_count: usize) -> Result<SearchEvaluation, String> {
         // expectimax evaluations are always [n_heads][A] (broadcast at the search seam) and
         // carry no visits (acting is by value)
-        crate::policies::tree::expectimax::decode_search_eval(r, action_count, self.n_heads, false)
+        decode_search_eval(r, action_count, self.n_heads, false)
     }
 
     fn policy_state_to_u64(&self, s: &usize) -> u64 {
@@ -266,7 +263,7 @@ mod select_masking_tests {
                 expansion_budget: 4,
                 top_k: 2,
                 max_depth: 2,
-                chance: crate::policy::ChanceMode::Committed { samples: 1 },
+                chance: ChanceMode::Committed { samples: 1 },
                 opponent: search::Opponent::Uniform,
             },
             1,
@@ -327,7 +324,7 @@ pub(crate) fn encode_search_eval(e: &SearchEvaluation, out: &mut Vec<u8>) {
 /// source) or empty (expectimax acts by value and buffers none). A permissive shared decoder let
 /// restored evaluations violate those assumptions and panic at flush time.
 pub(crate) fn decode_search_eval(
-    r: &mut crate::codec::bytes::Reader,
+    r: &mut Reader,
     action_count: usize,
     expected_heads: usize,
     expect_visits: bool,
@@ -372,7 +369,7 @@ pub(crate) fn decode_search_eval(
     if legal.iter().any(|&a| a >= action_count) {
         return Err("legal action id out of range".into());
     }
-    let mut stats = crate::policies::tree::expectimax::search::SearchStats {
+    let mut stats = SearchStats {
         max_depth: i32::try_from(r.i64()?).map_err(|_| "max_depth out of range".to_string())?,
         ..Default::default()
     };
@@ -398,7 +395,7 @@ pub(crate) fn decode_search_eval(
 #[cfg(test)]
 mod eval_codec_tests {
     use super::*;
-    use crate::codec::bytes::Reader;
+    use Reader;
 
     fn encoded(heads: usize, visits: bool, actions: usize) -> Vec<u8> {
         let e = SearchEvaluation {

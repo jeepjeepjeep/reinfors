@@ -2,6 +2,7 @@
 //! can drive it without knowing the game. The framework consumes a game through this trait only;
 //! nothing here is game-specific. Concrete games (e.g. snake) live in the `reinfors-games` crate.
 
+use crate::rng::weighted_index;
 use crate::space::Space;
 
 /// Minimal random source the rollout passes to a game's *realized* (non-belief) transitions.
@@ -85,7 +86,7 @@ impl ChanceDist {
         match self {
             ChanceDist::Weighted(p) => {
                 Self::checked_total(p);
-                crate::rng::weighted_index(rng, p)
+                weighted_index(rng, p)
             }
             ChanceDist::Uniform(n) => {
                 let u = rng.unit();

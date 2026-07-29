@@ -2,7 +2,7 @@
 //! action, interior MAX-node targets, and a per-head bootstrap mask on every record. Consumes the
 //! expectimax family's `SearchEvaluation`, so it pairs with any expectimax policy (selective today).
 
-use crate::encoder::ActionView;
+use crate::encoder::{head_permutation, ActionView};
 use crate::game::Rng;
 use crate::learner::{sample_mask, Learner, Step};
 use crate::policies::tree::expectimax::SearchEvaluation;
@@ -88,7 +88,7 @@ impl Learner<SearchEvaluation> for TreeStrap {
         // head frame here — otherwise training would supervise a different slot than the one
         // whose value drove acting.
         let a = evaluation.interior.first().map_or(0, |(_, v)| v[0].len());
-        let (perm, identity) = crate::encoder::head_permutation(view, a, agent);
+        let (perm, identity) = head_permutation(view, a, agent);
         // Move the interior nodes out so they are emitted now and never buffered with the step.
         std::mem::take(&mut evaluation.interior)
             .into_iter()
@@ -125,7 +125,7 @@ impl Learner<SearchEvaluation> for TreeStrap {
         // each FINISHED `[K][A]` target then scatters into the head frame at emission, since the
         // record supervises the net's raw output.
         let a = trajectory[0].evaluation.values[0].len();
-        let (perm, identity) = crate::encoder::head_permutation(view, a, agent);
+        let (perm, identity) = head_permutation(view, a, agent);
         let blended = Self::blend_outcome_targets(&traj, self.gamma, self.outcome_weight, &tail);
         trajectory
             .iter()
@@ -274,6 +274,7 @@ mod tests {
 mod frame_tests {
     use super::*;
     use crate::learner::Step;
+    use crate::policies::tree::expectimax::search::InteriorTarget;
     use crate::rng::SplitMix64;
 
     /// head = (game + 1) % 3 — targets must land in the slot acting read, not the game id.
@@ -287,10 +288,7 @@ mod frame_tests {
         }
     }
 
-    fn eval(
-        values: Vec<Vec<f64>>,
-        interior: Vec<crate::policies::tree::expectimax::search::InteriorTarget>,
-    ) -> SearchEvaluation {
+    fn eval(values: Vec<Vec<f64>>, interior: Vec<InteriorTarget>) -> SearchEvaluation {
         SearchEvaluation {
             values,
             visits: Vec::new(),

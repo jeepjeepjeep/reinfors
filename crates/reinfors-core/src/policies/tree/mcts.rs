@@ -36,11 +36,12 @@
 
 use std::collections::HashMap;
 
+use crate::codec::bytes::Reader;
 use crate::encoder::{ActionView, StateEncoder};
-use crate::game::{Actor, Game, Rng};
+use crate::game::{Actor, ChanceDist, Game, Rng, Transition};
 use crate::policies::tree::expectimax::search::SearchStats;
-use crate::policies::tree::expectimax::SearchEvaluation;
-use crate::policy::{argmax, Policy, SearchPolicy};
+use crate::policies::tree::expectimax::{decode_search_eval, encode_search_eval, SearchEvaluation};
+use crate::policy::{argmax, Policy, SearchPolicy, MAX_ENUMERATED_OUTCOMES};
 use crate::reward::Reward;
 use crate::rng::{dirichlet, SplitMix64};
 use crate::rollout::engine::CollectStats;
@@ -181,7 +182,7 @@ enum NodeKind {
     Decision,
     Chance {
         /// The declared outcome distribution (`Game::chance_outcomes`), indexing `apply_chance`.
-        dist: crate::game::ChanceDist,
+        dist: ChanceDist,
         /// `Committed` mode: the frozen outcome draws (with replacement; `child` is parallel to
         /// this, so duplicated draws keep separate equal-weight branches, like `food_samples`).
         /// Empty in the other modes. Under `ExpandAll`, `child` is parallel to the (bounded)
@@ -716,7 +717,7 @@ impl<S: Clone> Tree<S> {
         reward: &dyn Reward<Event = G::Event>,
         ni: usize,
         ai: usize,
-        t: &crate::game::Transition<S, G::Event>,
+        t: &Transition<S, G::Event>,
     ) where
         G: Game<State = S>,
     {
@@ -840,8 +841,8 @@ impl<S: Clone> Tree<S> {
         enc: &dyn StateEncoder<State = S>,
         ni: usize,
         ai: usize,
-        t: &crate::game::Transition<S, G::Event>,
-        dist: crate::game::ChanceDist,
+        t: &Transition<S, G::Event>,
+        dist: ChanceDist,
         chance: ChanceMode,
     ) -> Expanded
     where
@@ -869,10 +870,10 @@ impl<S: Clone> Tree<S> {
             ChanceMode::ExpandAll => {
                 let count = dist.count();
                 assert!(
-                    count <= crate::policy::MAX_ENUMERATED_OUTCOMES,
+                    count <= MAX_ENUMERATED_OUTCOMES,
                     "ExpandAll cannot enumerate {count} chance outcomes (bound {}); use a \
                      sampling chance mode for combinatorial outcome spaces",
-                    crate::policy::MAX_ENUMERATED_OUTCOMES
+                    MAX_ENUMERATED_OUTCOMES
                 );
                 count
             }
@@ -1641,17 +1642,13 @@ impl Policy for Mcts {
     }
 
     fn encode_eval(&self, eval: &SearchEvaluation, out: &mut Vec<u8>) {
-        crate::policies::tree::expectimax::encode_search_eval(eval, out);
+        encode_search_eval(eval, out);
     }
 
-    fn decode_eval(
-        &self,
-        r: &mut crate::codec::bytes::Reader,
-        action_count: usize,
-    ) -> Result<SearchEvaluation, String> {
+    fn decode_eval(&self, r: &mut Reader, action_count: usize) -> Result<SearchEvaluation, String> {
         // the tree's root evaluation is always one value row plus full-width visits (both acting
         // modes; `Tree::evaluation` densifies)
-        crate::policies::tree::expectimax::decode_search_eval(r, action_count, 1, true)
+        decode_search_eval(r, action_count, 1, true)
     }
 
     fn policy_state_to_u64(&self, s: &u32) -> u64 {
@@ -2114,15 +2111,11 @@ mod chance_tests {
                 }
             }
         }
-        fn chance_outcomes(
-            &self,
-            s: &St,
-            t: &Transition<St, f64>,
-        ) -> Option<crate::game::ChanceDist> {
+        fn chance_outcomes(&self, s: &St, t: &Transition<St, f64>) -> Option<ChanceDist> {
             // Only the risky first-ply action (total unchanged by the deterministic part) is
             // stochastic.
             (s.ply == 0 && t.next_state.total == s.total)
-                .then(|| crate::game::ChanceDist::Weighted(vec![0.5, 0.5]))
+                .then(|| ChanceDist::Weighted(vec![0.5, 0.5]))
         }
         fn apply_chance(&self, _s: &St, t: &Transition<St, f64>, outcome: usize) -> St {
             St {
@@ -2855,7 +2848,7 @@ mod maxn_tests {
     }
 
     struct LrEnc;
-    impl crate::encoder::ActionView for LrEnc {}
+    impl ActionView for LrEnc {}
     impl StateEncoder for LrEnc {
         type State = Lr;
         fn encode(&self, s: &Lr, agent: usize) -> Vec<f32> {
@@ -2960,7 +2953,7 @@ mod maxn_tests {
     }
 
     struct DEnc;
-    impl crate::encoder::ActionView for DEnc {}
+    impl ActionView for DEnc {}
     impl StateEncoder for DEnc {
         type State = DSt;
         fn encode(&self, s: &DSt, agent: usize) -> Vec<f32> {
@@ -3079,7 +3072,7 @@ mod forced_maxn_tests {
     }
 
     struct LrEnc;
-    impl crate::encoder::ActionView for LrEnc {}
+    impl ActionView for LrEnc {}
     impl StateEncoder for LrEnc {
         type State = Lr;
         fn encode(&self, s: &Lr, agent: usize) -> Vec<f32> {

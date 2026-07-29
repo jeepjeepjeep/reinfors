@@ -4,7 +4,8 @@
 
 use std::collections::HashMap;
 
-use crate::encoder::StateEncoder;
+use crate::codec::bytes::Reader;
+use crate::encoder::{head_permutation, StateEncoder};
 use crate::game::{Game, Rng};
 use crate::policy::Policy;
 use crate::reward::Reward;
@@ -63,11 +64,7 @@ impl Policy for EpsilonGreedyQ {
         put_usizes(out, &eval.legal);
     }
 
-    fn decode_eval(
-        &self,
-        r: &mut crate::codec::bytes::Reader,
-        action_count: usize,
-    ) -> Result<QEvaluation, String> {
+    fn decode_eval(&self, r: &mut Reader, action_count: usize) -> Result<QEvaluation, String> {
         use crate::codec::bytes::*;
         let k = r.u32()? as usize;
         if k != self.n_heads {
@@ -145,7 +142,7 @@ impl Policy for EpsilonGreedyQ {
             .map(|(i, (state, agent))| {
                 let (perm, identity) = perms
                     .entry(*agent)
-                    .or_insert_with(|| crate::encoder::head_permutation(enc, a, *agent));
+                    .or_insert_with(|| head_permutation(enc, a, *agent));
                 // Materialize the net's head-frame row into GAME-frame per-action values (the
                 // internal currency of select and the search seam).
                 let values = (0..k)
