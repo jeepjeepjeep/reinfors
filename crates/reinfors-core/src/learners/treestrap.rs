@@ -8,7 +8,8 @@ use crate::learner::{sample_mask, Learner, Step};
 use crate::policies::tree::expectimax::SearchEvaluation;
 
 /// One collected TreeStrap record: observation, per-head `[K][A]` target, and per-head bootstrap mask.
-pub type TreeStrapRecord = (Vec<f32>, Vec<Vec<f64>>, Vec<f32>);
+/// `(obs, [K][A] targets, [K] mask, player)` — the player whose decision produced the record.
+pub type TreeStrapRecord = (Vec<f32>, Vec<Vec<f64>>, Vec<f32>, usize);
 
 /// The TreeStrap learner: z-mix `outcome_weight`, gamma, the bootstrap masking probability, and whether
 /// to collect interior MAX-node targets (`interior_targets`, reported via `needs_interior` so the
@@ -94,7 +95,7 @@ impl Learner<SearchEvaluation> for TreeStrap {
             .into_iter()
             .map(|(obs, values)| {
                 let mask = sample_mask(rng, k, self.bootstrap_p);
-                (obs, to_head_frame(values, &perm, identity), mask)
+                (obs, to_head_frame(values, &perm, identity), mask, agent)
             })
             .collect()
     }
@@ -136,6 +137,7 @@ impl Learner<SearchEvaluation> for TreeStrap {
                     step.obs.clone(),
                     to_head_frame(target, &perm, identity),
                     mask,
+                    agent,
                 )
             })
             .collect()
@@ -199,7 +201,7 @@ mod tests {
         );
         assert_eq!(recs.len(), 2);
         let mut rng = SplitMix64::new(5);
-        for (i, (obs, values, mask)) in recs.iter().enumerate() {
+        for (i, (obs, values, mask, _player)) in recs.iter().enumerate() {
             assert_eq!(*obs, interior[i].0);
             assert_eq!(*values, interior[i].1);
             assert_eq!(*mask, sample_mask(&mut rng, 2, 0.7));
@@ -234,7 +236,8 @@ mod tests {
         let blended = TreeStrap::blend_outcome_targets(&traj, 0.99, 0.3, &tail);
         let mut rng = SplitMix64::new(9);
         assert_eq!(recs.len(), 3);
-        for ((obs, target, mask), (step, exp_target)) in recs.iter().zip(steps.iter().zip(blended))
+        for ((obs, target, mask, _player), (step, exp_target)) in
+            recs.iter().zip(steps.iter().zip(blended))
         {
             assert_eq!(*obs, step.obs);
             assert_eq!(*target, exp_target);

@@ -274,7 +274,7 @@ fn expectimax_engine_collects_on_a_three_agent_simultaneous_game() {
 
 #[test]
 fn expectimax_searches_a_three_agent_game() {
-    let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 4]; // K=2 heads x A=2
+    let mut infer = |_players: &[usize], _obs: Vec<f32>, n: usize| vec![0.0; n * 4]; // K=2 heads x A=2
     let results = search_many(
         &ThreeWay,
         &Enc,
@@ -361,11 +361,8 @@ fn mcts_engine_collects_on_a_three_agent_simultaneous_game() {
     assert!(stats.decisions > 0 && !stats.episodes.is_empty());
 }
 
-#[test]
-fn alphazero_engine_collects_on_a_three_agent_sequential_game() {
-    // Sequential N>2 runs Max^N under PUCT: every leaf is evaluated from all three perspectives
-    // through the same pooled forward.
-    let az_cfg = AlphaZeroConfig {
+fn az_collect_cfg() -> AlphaZeroConfig {
+    AlphaZeroConfig {
         num_simulations: 8,
         c_puct: 1.5,
         gamma: 0.99,
@@ -377,8 +374,14 @@ fn alphazero_engine_collects_on_a_three_agent_sequential_game() {
         chance: ChanceMode::Committed { samples: 1 },
         noise_scope: reinfors_core::NoiseScope::Requester,
         sequential_backup: Default::default(),
-    };
-    let policy = AlphaZero::new(az_cfg);
+    }
+}
+
+#[test]
+fn alphazero_engine_collects_on_a_three_agent_sequential_game() {
+    // Sequential N>2 runs Max^N under PUCT: every leaf is evaluated from all three perspectives
+    // through the same pooled forward.
+    let policy = AlphaZero::new(az_collect_cfg());
     let learner = reinfors_core::AlphaZeroLearner::new(0.99);
     let mut engine = Engine::new(
         RoundRobin,
@@ -399,7 +402,7 @@ fn alphazero_engine_collects_on_a_three_agent_sequential_game() {
     let value_only = records.iter().filter(|r| r.3 == 0.0).count();
     assert_eq!(movers + value_only, records.len());
     assert_eq!(value_only, 2 * movers);
-    for (obs, pi, _z, w) in &records {
+    for (obs, pi, _z, w, _player) in &records {
         assert_eq!(obs.len(), 2);
         let pi_sum: f64 = pi.iter().sum();
         if *w == 1.0 {
@@ -416,24 +419,11 @@ fn learn_players_filters_value_only_perspectives() {
     // Frozen players must not leak through the sequential-Max^N value-only path either: with
     // only player 0 learning, each RoundRobin episode leaves its mover record (ply 0) plus its
     // two value-only perspectives (plies 1 and 2) — nothing from players 1 and 2.
-    let az_cfg = AlphaZeroConfig {
-        num_simulations: 8,
-        c_puct: 1.5,
-        gamma: 0.99,
-        max_depth: 6,
-        noise_epsilon: 0.0,
-        noise_alpha: 0.3,
-        temperature: 0.0,
-        temperature_drop: 0,
-        chance: ChanceMode::Committed { samples: 1 },
-        noise_scope: reinfors_core::NoiseScope::Requester,
-        sequential_backup: Default::default(),
-    };
     let mut engine = Engine::new(
         RoundRobin,
         Box::new(Enc),
         Box::new(Zero),
-        AlphaZero::new(az_cfg),
+        AlphaZero::new(az_collect_cfg()),
         reinfors_core::AlphaZeroLearner::new(0.99),
         EngineParams {
             n_games: 2,
@@ -452,6 +442,174 @@ fn learn_players_filters_value_only_perspectives() {
     for r in &records {
         assert_eq!(r.0[1], 0.0, "every record is player 0's perspective");
     }
+}
+
+/// Two players alternating for four plies; free actions, zero reward.
+struct TwoTurn;
+
+impl Game for TwoTurn {
+    type State = St;
+    type Event = ();
+    fn num_agents(&self) -> usize {
+        2
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn actor(&self, s: &St) -> Actor {
+        Actor::Agent(s.tick % 2)
+    }
+    fn legal_actions(&self, s: &St, agent: usize) -> Vec<usize> {
+        if agent == s.tick % 2 && s.tick < 4 {
+            vec![0, 1]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
+        Transition {
+            next_state: St { tick: s.tick + 1 },
+            events: vec![(); 2],
+            terminal: s.tick + 1 >= 4,
+        }
+    }
+    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+        St { tick: 0 }
+    }
+}
+
+/// `Enc` writes the encoded-for agent into `obs[1]`, so "net `p` only ever receives observations
+/// encoded for perspective `p`" pins every pooled row's routing — leaf, value-only,
+/// opponent-model, and bootstrap rows alike.
+fn assert_rows_encoded_for(p: usize, obs: &[f32]) {
+    for row in obs.chunks(2) {
+        assert_eq!(
+            row[1] as usize, p,
+            "net {p} received an obs encoded for agent {}",
+            row[1]
+        );
+    }
+}
+
+#[test]
+fn alphazero_routes_each_perspective_to_its_own_network() {
+    let mut engine = Engine::new(
+        RoundRobin,
+        Box::new(Enc),
+        Box::new(Zero),
+        AlphaZero::new(az_collect_cfg()),
+        reinfors_core::AlphaZeroLearner::new(0.99),
+        EngineParams {
+            n_games: 2,
+            seed: 5,
+        },
+    );
+    let mut seen = std::collections::HashSet::new();
+    let (records, _) =
+        engine.collect_routed(9, reinfors_core::InferMode::PerPlayer, |p, obs, n| {
+            assert_rows_encoded_for(p, &obs);
+            seen.insert(p);
+            vec![0.0; n * 3]
+        });
+    assert!(records.len() >= 9);
+    assert_eq!(
+        seen,
+        (0..3).collect(),
+        "sequential Max^N requests all three perspectives"
+    );
+}
+
+#[test]
+fn uct_routes_sequential_leaf_rows_to_the_leaf_mover() {
+    let mut engine = Engine::new(
+        TwoTurn,
+        Box::new(Enc),
+        Box::new(Zero),
+        Mcts::new(mcts_cfg(), ActBy::Value),
+        TreeStrap::new(0.99, 0.3, 1.0, false),
+        EngineParams {
+            n_games: 2,
+            seed: 3,
+        },
+    );
+    let mut seen = std::collections::HashSet::new();
+    let (records, _) =
+        engine.collect_routed(6, reinfors_core::InferMode::PerPlayer, |p, obs, n| {
+            assert_rows_encoded_for(p, &obs);
+            seen.insert(p);
+            vec![0.0; n * 2]
+        });
+    assert!(records.len() >= 6);
+    assert_eq!(
+        seen,
+        (0..2).collect(),
+        "negamax leaves alternate between both movers' networks"
+    );
+}
+
+#[test]
+fn duct_routes_every_perspective_to_its_own_network() {
+    let mut engine = Engine::new(
+        ThreeWay,
+        Box::new(Enc),
+        Box::new(Zero),
+        Mcts::new(mcts_cfg(), ActBy::Value),
+        TreeStrap::new(0.99, 0.3, 1.0, false),
+        EngineParams {
+            n_games: 2,
+            seed: 3,
+        },
+    );
+    let mut seen = std::collections::HashSet::new();
+    let (records, _) =
+        engine.collect_routed(9, reinfors_core::InferMode::PerPlayer, |p, obs, n| {
+            assert_rows_encoded_for(p, &obs);
+            seen.insert(p);
+            vec![0.0; n * 2]
+        });
+    assert!(records.len() >= 9);
+    assert_eq!(
+        seen,
+        (0..3).collect(),
+        "DUCT requests every co-mover's perspective"
+    );
+}
+
+#[test]
+fn expectimax_routes_opponent_model_rows_to_that_mover() {
+    // Distributional opponent: opponent nodes evaluate the MOVER's own observation through the
+    // mover's network; requester leaves stay on the requester's.
+    let cfg = SearchConfig {
+        opponent: Opponent::Distributional {
+            temperature: 1.0,
+            floor: 0.1,
+        },
+        ..search_cfg()
+    };
+    let mut engine = Engine::new(
+        TwoTurn,
+        Box::new(Enc),
+        Box::new(Zero),
+        SelectiveExpectimax::new(cfg, 1, 0.0),
+        TreeStrap::new(0.99, 0.3, 1.0, false),
+        EngineParams {
+            n_games: 2,
+            seed: 4,
+        },
+    );
+    let mut seen = std::collections::HashSet::new();
+    let (records, _) =
+        engine.collect_routed(6, reinfors_core::InferMode::PerPlayer, |p, obs, n| {
+            assert_rows_encoded_for(p, &obs);
+            seen.insert(p);
+            vec![0.0; n * 2]
+        });
+    assert!(records.len() >= 6);
+    assert_eq!(
+        seen,
+        (0..2).collect(),
+        "opponent-model rows reach the opponent's network"
+    );
 }
 
 /// RoundRobin with a terminal payoff vector [1, 2, 3]: with gamma 1, EVERY record's z for agent
@@ -531,7 +689,7 @@ fn value_only_rows_carry_each_agents_own_return() {
     );
     let (records, _) = engine.collect(9, |_obs: Vec<f32>, n: usize| vec![0.0; n * 3]);
     assert!(records.len() >= 9);
-    for (obs, _pi, z, _w) in &records {
+    for (obs, _pi, z, _w, _player) in &records {
         let agent = obs[1] as f64; // Enc encodes [tick, agent]
         assert!(
             (z - (agent + 1.0)).abs() < 1e-12,
@@ -643,7 +801,7 @@ fn truncation_bootstraps_every_perspectives_own_tail() {
         stats.episodes[0].length, 2,
         "the horizon truncates at tick 2"
     );
-    for (obs, _pi, z, _w) in &records {
+    for (obs, _pi, z, _w, _player) in &records {
         let expect = (f64::from(obs[1]) + 1.0) / 10.0;
         assert!(
             (z - expect).abs() < 1e-12,
@@ -908,7 +1066,7 @@ fn direct_expectimax_rejects_hidden_information() {
         vec![(St { tick: 0 }, 0)],
         false,
         0,
-        |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2],
+        |_players: &[usize], _obs: Vec<f32>, n: usize| vec![0.0; n * 2],
     );
 }
 
@@ -939,7 +1097,7 @@ fn direct_expectimax_rejects_chance_node_games() {
         vec![(St { tick: 0 }, 0)],
         false,
         0,
-        |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2],
+        |_players: &[usize], _obs: Vec<f32>, n: usize| vec![0.0; n * 2],
     );
 }
 
@@ -1208,7 +1366,7 @@ fn forced_maxn_supervises_both_perspectives_at_two_agents() {
     let movers = maxn.iter().filter(|r| r.3 == 1.0).count();
     assert_eq!(value_only, movers, "one non-mover row per decision at N=2");
     // gamma 1, rewards only at the end: every row's z is its own agent's payoff.
-    for (obs, _pi, z, _w) in &maxn {
+    for (obs, _pi, z, _w, _player) in &maxn {
         let expect = f64::from(obs[1]) + 1.0;
         assert!(
             (z - expect).abs() < 1e-12,
@@ -1303,7 +1461,7 @@ fn forced_maxn_truncation_bootstraps_both_perspectives() {
         records.iter().any(|r| r.3 == 0.0),
         "value-only rows present"
     );
-    for (obs, _pi, z, _w) in &records {
+    for (obs, _pi, z, _w, _player) in &records {
         let expect = (f64::from(obs[1]) + 1.0) / 10.0;
         assert!(
             (z - expect).abs() < 1e-12,

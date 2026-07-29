@@ -143,9 +143,7 @@ impl Policy for SelectiveExpectimax {
             requests,
             collect_interior,
             seed,
-            // Row players are untagged (zeros): the search families run Shared-mode only —
-            // per-player routing for pooled search rows is the follow-up's work.
-            &mut |_p, obs, n: usize| eval.forward(&vec![0; n], obs, n),
+            &mut |players: &[usize], obs, n| eval.forward(players, obs, n),
         )
         .into_iter()
         .zip(legal)

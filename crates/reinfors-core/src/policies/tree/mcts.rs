@@ -1363,9 +1363,10 @@ where
                                 break; // one or more rows await the pooled forward
                             }
                         } else {
-                            // Untagged (0): negamax rows run Shared-mode only until the
-                            // follow-up threads per-player routing through the search pools.
-                            match batch.resolve_or_stage(0, &tree.arena[leaf].obs) {
+                            // A negamax row is the leaf MOVER's perspective (and network).
+                            match batch
+                                .resolve_or_stage(tree.arena[leaf].actor, &tree.arena[leaf].obs)
+                            {
                                 Resolve::Resolved(row) => {
                                     tree.hit_rows += 1;
                                     consume_row(tree, leaf, 0, &row, guidance, gamma, a, ti, enc);
@@ -1407,7 +1408,14 @@ where
                                     }
                                     _ => std::mem::take(&mut tree.arena[child].obs),
                                 };
-                                match batch.resolve_or_stage(ag, &obs) {
+                                // Multi-perspective fans tag per perspective; a negamax fan's
+                                // single row is the CHILD mover's.
+                                let row_player = if rows_per_child == 1 {
+                                    tree.arena[child].actor
+                                } else {
+                                    ag
+                                };
+                                match batch.resolve_or_stage(row_player, &obs) {
                                     Resolve::Resolved(row) => {
                                         tree.hit_rows += 1;
                                         consume_row(
