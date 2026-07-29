@@ -198,10 +198,15 @@ impl<G: Game> DeepCfrSolver<G> {
             "Deep CFR samples declared chance and requires it fully declared \
              (Game::all_chance_declared)"
         );
-        let root = game.initial_state(&mut PoisonedRng); // verifies the root claim loudly
+        let _ = game.initial_state(&mut PoisonedRng); // verifies the root claim loudly
+                                                      // Gate on the REALIZED root: a declared game's raw root is commonly a chance node,
+                                                      // which says nothing about decision dynamics — probing it would let a chance-root
+                                                      // simultaneous game through to a mid-collect panic. (Uniform dynamics per game is a
+                                                      // framework contract; a mid-game switch is caught by the loud runtime backstop.)
+        let realized = crate::game::realize_initial_state(&game, &mut SplitMix64::new(0x0517_B0BE));
         assert!(
-            !matches!(game.actor(&root), Actor::Simultaneous),
-            "simultaneous games are not supported by Deep CFR v1"
+            !matches!(game.actor(&realized), Actor::Simultaneous),
+            "simultaneous games are not supported by Deep CFR v1 (sequential 2-player only)"
         );
         let generation = Arc::new(AtomicU64::new(0));
         DeepCfrSolver {
@@ -471,7 +476,7 @@ impl<G: Game> DeepCfrSolver<G> {
                             break;
                         }
                         Actor::Simultaneous => {
-                            unreachable!("asserted away at construction")
+                            panic!("a simultaneous decision was reached mid-game: solvers support uniformly SEQUENTIAL games (the framework assumes one dynamics per game; mixing violates that contract)")
                         }
                     }
                 },

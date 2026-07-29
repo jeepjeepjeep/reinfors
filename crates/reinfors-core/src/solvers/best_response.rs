@@ -113,7 +113,7 @@ fn build_arena<G: Game>(game: &G, reward: &dyn Reward<Event = G::Event>) -> Aren
                     }
                     ArenaNode::Decision { who, key, children }
                 }
-                Actor::Simultaneous => unreachable!("2-player sequential games only"),
+                Actor::Simultaneous => panic!("a simultaneous decision was reached mid-game: solvers support uniformly SEQUENTIAL games (the framework assumes one dynamics per game; mixing violates that contract)"),
             };
             self.nodes[idx] = node;
             idx
@@ -319,7 +319,7 @@ pub fn enumerate_infosets<G: Game>(game: &G) -> Vec<(Vec<u8>, G::State, usize)> 
                         }
                     }
                 }
-                Actor::Simultaneous => unreachable!("2-player sequential games only"),
+                Actor::Simultaneous => panic!("a simultaneous decision was reached mid-game: solvers support uniformly SEQUENTIAL games (the framework assumes one dynamics per game; mixing violates that contract)"),
             }
         }
     }

@@ -236,6 +236,102 @@ fn the_solver_rejects_games_without_information_states() {
     );
 }
 
+/// A fully declared game whose chance ROOT leads to SIMULTANEOUS decisions — the raw-root
+/// probe saw only `Actor::Chance` and let it through to a mid-collect panic (review repro).
+struct ChanceRootSim;
+
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct SimState {
+    tick: u8,
+}
+
+struct SimEnc;
+impl reinfors_core::ActionView for SimEnc {}
+impl reinfors_core::StateEncoder for SimEnc {
+    type State = SimState;
+    fn encode(&self, s: &SimState, _agent: usize) -> Vec<f32> {
+        vec![f32::from(s.tick)]
+    }
+    fn obs_shape(&self) -> (usize, usize, usize) {
+        (1, 1, 1)
+    }
+    fn observation_space(&self) -> reinfors_core::Space {
+        reinfors_core::Space::unit_box(vec![1, 1, 1])
+    }
+}
+
+impl reinfors_core::Game for ChanceRootSim {
+    type State = SimState;
+    type Event = f64;
+    fn num_agents(&self) -> usize {
+        2
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn perfect_information(&self) -> bool {
+        false
+    }
+    fn all_chance_declared(&self) -> bool {
+        true
+    }
+    fn information_states(&self) -> bool {
+        true
+    }
+    fn information_state_key(&self, s: &SimState, agent: usize) -> Vec<u8> {
+        vec![agent as u8, s.tick]
+    }
+    fn actor(&self, s: &SimState) -> reinfors_core::Actor {
+        if s.tick == 0 {
+            reinfors_core::Actor::Chance
+        } else {
+            reinfors_core::Actor::Simultaneous
+        }
+    }
+    fn chance_node(&self, _s: &SimState) -> reinfors_core::ChanceDist {
+        reinfors_core::ChanceDist::Uniform(2)
+    }
+    fn apply_chance_node(
+        &self,
+        s: &SimState,
+        _outcome: usize,
+    ) -> reinfors_core::Transition<SimState, f64> {
+        reinfors_core::Transition {
+            next_state: SimState { tick: s.tick + 1 },
+            events: vec![0.0; 2],
+            terminal: false,
+        }
+    }
+    fn legal_actions(&self, s: &SimState, _agent: usize) -> Vec<usize> {
+        if s.tick == 1 {
+            vec![0, 1]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, _s: &SimState, _actions: &[usize]) -> reinfors_core::Transition<SimState, f64> {
+        reinfors_core::Transition {
+            next_state: SimState { tick: 2 },
+            events: vec![0.0; 2],
+            terminal: true,
+        }
+    }
+    fn initial_state(&self, _rng: &mut dyn reinfors_core::Rng) -> SimState {
+        SimState { tick: 0 }
+    }
+}
+
+#[test]
+#[should_panic(expected = "sequential 2-player only")]
+fn chance_root_simultaneous_games_fail_at_construction() {
+    let _ = DeepCfrSolver::new(
+        ChanceRootSim,
+        Box::new(SimEnc),
+        Box::new(HoldemReward { scale: 1.0 }),
+        0,
+    );
+}
+
 #[test]
 fn holdem_traversals_run_at_scale() {
     // Full hold'em is the target scale: sampled traversals must run (no enumeration

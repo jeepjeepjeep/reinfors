@@ -136,10 +136,13 @@ impl<G: Game> CfrSolver<G> {
             game.all_chance_declared(),
             "CFR enumerates chance and requires it fully declared (Game::all_chance_declared)"
         );
-        let root = game.initial_state(&mut PoisonedRng); // verifies the root claim loudly
+        let _ = game.initial_state(&mut PoisonedRng); // verifies the root claim loudly
+                                                      // Gate on the REALIZED root — the raw root of a declared game is commonly a chance
+                                                      // node, which says nothing about decision dynamics (see the same gate in Deep CFR).
+        let realized = crate::game::realize_initial_state(&game, &mut SplitMix64::new(0x0517_B0BE));
         assert!(
-            !matches!(game.actor(&root), Actor::Simultaneous),
-            "simultaneous games are not supported by CFR v1"
+            !matches!(game.actor(&realized), Actor::Simultaneous),
+            "simultaneous games are not supported by CFR v1 (sequential 2-player only)"
         );
         CfrSolver {
             game,
@@ -381,7 +384,7 @@ impl<G: Game> CfrSolver<G> {
                 }
                 v
             }
-            Actor::Simultaneous => unreachable!("asserted away at construction"),
+            Actor::Simultaneous => panic!("a simultaneous decision was reached mid-game: solvers support uniformly SEQUENTIAL games (the framework assumes one dynamics per game; mixing violates that contract)"),
         }
     }
 
@@ -485,7 +488,7 @@ impl<G: Game> CfrSolver<G> {
                     self.sampled_transition(state, &t, player)
                 }
             }
-            Actor::Simultaneous => unreachable!("asserted away at construction"),
+            Actor::Simultaneous => panic!("a simultaneous decision was reached mid-game: solvers support uniformly SEQUENTIAL games (the framework assumes one dynamics per game; mixing violates that contract)"),
         }
     }
 
@@ -542,7 +545,7 @@ impl<G: Game> CfrSolver<G> {
                 }
                 v
             }
-            Actor::Simultaneous => unreachable!("asserted away at construction"),
+            Actor::Simultaneous => panic!("a simultaneous decision was reached mid-game: solvers support uniformly SEQUENTIAL games (the framework assumes one dynamics per game; mixing violates that contract)"),
         }
     }
 
