@@ -156,8 +156,10 @@ enum Step<S> {
 struct Machine<S> {
     stack: Vec<Frame<S>>,
     step: Option<Step<S>>,
-    /// `(player, cache key, obs)` of the pending σ query.
-    blocked: Option<(usize, u128, Vec<f32>)>,
+    /// `(player, cache key, obs, already-missed)` of the pending σ query — the flag keeps
+    /// the post-miss re-check out of the hit statistics (a miss would otherwise manufacture
+    /// exactly one "hit" when its own inserted row resolves it).
+    blocked: Option<(usize, u128, Vec<f32>, bool)>,
     rng: SplitMix64,
     done: bool,
 }
@@ -284,12 +286,19 @@ impl<G: Game> DeepCfrSolver<G> {
                         break;
                     }
                     all_done = false;
-                    if let Some((who, key, _)) = m.blocked {
-                        stats.cache_lookups += 1;
+                    if let Some((who, key, _, missed)) = m.blocked {
+                        if !missed {
+                            stats.cache_lookups += 1;
+                        }
                         if let Some(row) = self.caches[who].lookup(key) {
-                            stats.cache_hits += 1;
+                            if !missed {
+                                stats.cache_hits += 1;
+                            }
                             self.resume(m, &row, player, &mut advantage, &mut strategy);
                         } else {
+                            if let Some(b) = m.blocked.as_mut() {
+                                b.3 = true;
+                            }
                             misses.entry(who).or_default().push(mi);
                             break;
                         }
@@ -312,7 +321,7 @@ impl<G: Game> DeepCfrSolver<G> {
                 let mut obs_flat: Vec<f32> = Vec::new();
                 let mut seen: HashMap<u128, ()> = HashMap::new();
                 for &mi in &misses[&who] {
-                    let (_, key, obs) = machines[mi].blocked.as_ref().expect("blocked");
+                    let (_, key, obs, _) = machines[mi].blocked.as_ref().expect("blocked");
                     if seen.insert(*key, ()).is_none() {
                         order.push(*key);
                         obs_flat.extend_from_slice(obs);
@@ -439,7 +448,7 @@ impl<G: Game> DeepCfrSolver<G> {
                                 self.start_child(m, player);
                             } else {
                                 let key = InferCache::key(&obs);
-                                m.blocked = Some((who, key, obs.clone()));
+                                m.blocked = Some((who, key, obs.clone(), false));
                                 m.stack.push(Frame::OpponentAwait {
                                     who,
                                     state,
@@ -484,7 +493,7 @@ impl<G: Game> DeepCfrSolver<G> {
                             // All children valued: request the traverser's σ for the baseline.
                             if let Some(Frame::Traverser { obs, .. }) = m.stack.last() {
                                 let key = InferCache::key(obs);
-                                m.blocked = Some((player, key, obs.clone()));
+                                m.blocked = Some((player, key, obs.clone(), false));
                             }
                         } else {
                             self.start_child(m, player);
