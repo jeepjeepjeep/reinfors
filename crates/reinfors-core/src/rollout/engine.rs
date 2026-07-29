@@ -29,7 +29,7 @@ use crate::policy::Policy;
 use crate::reward::Reward;
 use crate::rng::SplitMix64;
 use crate::rollout::episode::Episode;
-use crate::rollout::evaluator::Evaluator;
+use crate::rollout::evaluator::{Evaluator, InferMode};
 use crate::rollout::infer_cache::InferCache;
 use crate::rollout::start::{AlwaysInitialState, Start, StartDistribution};
 
@@ -101,7 +101,13 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     // Optional net-evaluation cache (see `infer_cache`), applied inside the per-collect
     // `Evaluator` — the single path every consumer's forwards take. Lifetime spans collects;
     // cleared when the shared weights generation is bumped (`weights_updated` at the binding).
-    infer_cache: Option<InferCache>,
+    /// Slot 0: the shared-network cache. Slots 1..=num_agents: per-player caches (used only
+    /// under `InferMode::PerPlayer`; two networks must never share an observation-keyed slot).
+    infer_caches: Option<Vec<InferCache>>,
+    /// Which players' decisions become training records (default: all). Frozen opponents are
+    /// skipped at SOURCE — their transitions are nobody's off-policy data; telemetry stays
+    /// complete via the episode-return accumulator, which is independent of steps.
+    learn_mask: Vec<bool>,
     // Per-agent running return for the current episode, accumulated on every reward event
     // independently of step attribution. The episode summary cannot be derived from buffered
     // steps: an agent can be scored without ever acting (poker's big blind wins a fold-out
@@ -185,7 +191,8 @@ where
             episodes,
             search_rng,
             start_dist: Box::new(AlwaysInitialState),
-            infer_cache: None,
+            infer_caches: None,
+            learn_mask: vec![true; num_agents],
             episode_returns: vec![vec![0.0; num_agents]; params.n_games],
             sequential,
             buffer_rng,
@@ -209,8 +216,31 @@ where
     }
 
     /// Enable the net-evaluation cache (consuming builder, like `with_start_distribution`).
-    pub fn with_infer_cache(mut self, cache: InferCache) -> Self {
-        self.infer_cache = Some(cache);
+    /// Restrict training-record emission to `players` (frozen opponents keep acting but leave
+    /// no records). Records also carry their player, so the unrestricted default supports
+    /// routing each player's records to its own buffer.
+    pub fn with_learn_players(mut self, players: &[usize]) -> Self {
+        assert!(!players.is_empty(), "at least one player must learn");
+        let n = self.game.num_agents();
+        let mut mask = vec![false; n];
+        for &p in players {
+            assert!(p < n, "learn player {p} out of range (game has {n} agents)");
+            mask[p] = true;
+        }
+        self.learn_mask = mask;
+        self
+    }
+
+    /// Enable the net-evaluation cache. One cache per slot — slot 0 serves the shared-network
+    /// mode, slots 1..=N the per-player networks (each with its own weights generation, so
+    /// per-player nets invalidate independently; unused slots allocate nothing).
+    pub fn with_infer_caches(mut self, caches: Vec<InferCache>) -> Self {
+        assert_eq!(
+            caches.len(),
+            self.game.num_agents() + 1,
+            "one cache per slot: shared + one per player"
+        );
+        self.infer_caches = Some(caches);
         self
     }
 
@@ -218,9 +248,29 @@ where
     /// returning each record's observation (a flat `[C*H*W]` buffer), per-head target `[K][A]`,
     /// and per-head bootstrap mask `[K]`. Executed decisions are z-mixed at episode end; interior MAX
     /// nodes (when enabled) are emitted immediately. `infer` is the value-network forward.
+    /// Collect with ONE shared network — the historical entry point, byte-identical to the
+    /// pre-routing behavior. Per-player networks go through [`collect_routed`](Self::collect_routed).
     pub fn collect<F>(&mut self, n_records: usize, mut infer: F) -> (Vec<L::Record>, CollectStats)
     where
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
+    {
+        self.collect_routed(n_records, InferMode::Shared, move |_player, obs, n| {
+            infer(obs, n)
+        })
+    }
+
+    /// Collect with the given routing: `infer(player, obs, rows)` serves each row's PLAYER —
+    /// under [`InferMode::PerPlayer`] rows batch per player and cache per player, enabling
+    /// frozen opponents and simultaneous heterogeneous training (records carry their player;
+    /// see `learn_players` for skipping frozen players' records at source).
+    pub fn collect_routed<F>(
+        &mut self,
+        n_records: usize,
+        mode: InferMode,
+        mut infer: F,
+    ) -> (Vec<L::Record>, CollectStats)
+    where
+        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
         let mut out: Vec<L::Record> = Vec::new();
         let mut stats = CollectStats::default();
@@ -228,14 +278,22 @@ where
         let collect_interior = self.learner.needs_interior();
         // Take the cache out of `self` for the collect so the Evaluator (which lives across the
         // whole loop) can hold it without pinning a long-lived borrow of `self`; restored at the end.
-        let mut cache = self.infer_cache.take();
-        if let Some(c) = cache.as_mut() {
-            c.begin_collect();
+        let mut caches = self.infer_caches.take();
+        if let Some(c) = caches.as_mut() {
+            for cache in c.iter_mut() {
+                cache.begin_collect();
+            }
         }
+        // Slot 0 serves Shared mode; slots 1..=N serve the per-player networks (allocation is
+        // lazy inside the cache maps, so the unused slots cost nothing).
+        let cache_slice = caches.as_mut().map(|c| match mode {
+            InferMode::Shared => &mut c[..1],
+            InferMode::PerPlayer => &mut c[1..],
+        });
         // The single evaluation service for this collect: every consumer's forwards (search
         // leaves, episode-tail bootstraps, plain policy forwards) route through it, picking up
         // caching, within-batch dedup, and throughput telemetry uniformly.
-        let mut evaluator = Evaluator::new(&mut infer, cache.as_mut());
+        let mut evaluator = Evaluator::new(&mut infer, mode, cache_slice);
 
         while out.len() < n_records {
             // 1. Gather one search request per active agent across all games.
@@ -273,6 +331,17 @@ where
             for (mut eval, &(gi, si)) in evals.into_iter().zip(meta.iter()) {
                 stats.decisions += 1;
                 self.policy.fold_telemetry(&eval, &mut stats);
+                if !self.learn_mask[si] {
+                    // A frozen player acts but leaves no records: its transitions are nobody's
+                    // training data (episode telemetry stays complete via `episode_returns`).
+                    let rel = self.policy.select(
+                        &eval,
+                        &mut self.policy_states[gi],
+                        &mut self.episodes[gi].rng,
+                    );
+                    acted[gi][si] = Some(rel);
+                    continue;
+                }
                 out.extend(self.learner.eval_records(
                     &mut eval,
                     &*self.encoder,
@@ -395,7 +464,7 @@ where
             (evaluator.seconds, evaluator.calls, evaluator.rows);
         (stats.cache_lookups, stats.cache_hits) =
             (evaluator.cache_lookups(), evaluator.cache_hits());
-        self.infer_cache = cache; // the evaluator's borrow ends above; put the cache back
+        self.infer_caches = caches; // the evaluator's borrow ends above; put the caches back
         (out, stats)
     }
 
@@ -409,7 +478,7 @@ where
         stats: &mut CollectStats,
         evaluator: &mut Evaluator<'_, F>,
     ) where
-        F: FnMut(Vec<f32>, usize) -> Vec<f64>,
+        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
         let tails = self.tail_values(finished, evaluator);
         let num_agents = self.game.num_agents();
@@ -470,7 +539,7 @@ where
         evaluator: &mut Evaluator<'_, F>,
     ) -> HashMap<(usize, usize), Vec<f64>>
     where
-        F: FnMut(Vec<f32>, usize) -> Vec<f64>,
+        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
         let mut tails: HashMap<(usize, usize), Vec<f64>> = HashMap::new();
         if !self.learner.uses_episode_tail() {
@@ -503,7 +572,8 @@ where
             }
         }
         if !meta.is_empty() {
-            let q = evaluator.forward(obs_flat, meta.len()); // one flat row per state; layout = the family's contract
+            let players: Vec<usize> = meta.iter().map(|&(_, si)| si).collect();
+            let q = evaluator.forward(&players, obs_flat, meta.len()); // one flat row per state; layout = the family's contract
             let stride = q.len() / meta.len();
             for (i, &(gi, si)) in meta.iter().enumerate() {
                 let row = &q[i * stride..(i + 1) * stride];
@@ -728,8 +798,10 @@ where
         }
         // The cache may hold rows from OTHER weights at a numerically equal generation — stale
         // rows would silently break the record-exact restore contract. Cold cache = same records.
-        if let Some(cache) = self.infer_cache.as_mut() {
-            cache.force_clear();
+        if let Some(caches) = self.infer_caches.as_mut() {
+            for cache in caches.iter_mut() {
+                cache.force_clear();
+            }
         }
         Ok(())
     }

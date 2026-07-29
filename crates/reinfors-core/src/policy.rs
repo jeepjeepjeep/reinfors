@@ -98,7 +98,7 @@ pub trait Policy {
     where
         G: Game + Sync,
         G::State: Send,
-        F: FnMut(Vec<f32>, usize) -> Vec<f64>;
+        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>;
 
     /// Choose an action from an evaluation, using the game's per-episode state and acting RNG.
     fn select(

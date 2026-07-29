@@ -124,6 +124,14 @@ impl InferCache {
 
     /// The key for an observation — exposed so callers staging batch rows can reuse it for
     /// within-batch dedup without hashing twice.
+    /// A key salted with the PLAYER whose network the row belongs to — per-player routing must
+    /// never let two nets share an observation-keyed entry. (Shared-network mode keeps the
+    /// untagged [`key`](Self::key), preserving its hit behavior byte-for-byte.)
+    pub fn key_for_player(player: usize, obs: &[f32]) -> u128 {
+        Self::key(obs)
+            ^ u128::from(avalanche(player as u64 ^ 0x9E37_79B9_7F4A_7C15)).rotate_left(64)
+    }
+
     pub fn key(obs: &[f32]) -> u128 {
         obs_key(obs)
     }

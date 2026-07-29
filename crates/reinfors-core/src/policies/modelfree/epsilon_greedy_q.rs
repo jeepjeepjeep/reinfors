@@ -119,7 +119,7 @@ impl Policy for EpsilonGreedyQ {
     where
         G: Game + Sync,
         G::State: Send,
-        F: FnMut(Vec<f32>, usize) -> Vec<f64>,
+        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
         let n = requests.len();
         if n == 0 {
@@ -130,7 +130,8 @@ impl Policy for EpsilonGreedyQ {
         for (state, agent) in &requests {
             obs_flat.extend(enc.encode(state, *agent));
         }
-        let q = eval.forward(obs_flat, n); // flat [n, K, A]
+        let players: Vec<usize> = requests.iter().map(|(_, agent)| *agent).collect();
+        let q = eval.forward(&players, obs_flat, n); // flat [n, K, A]
         let k = q.len() / (n * a);
         // Per-agent permutation tables, computed once: this dense materialization is the reactive
         // path's throughput ceiling, so it must not pay a virtual `head_index` call per scalar.

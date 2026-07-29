@@ -200,7 +200,7 @@ impl Policy for CappedStub {
     where
         G: Game + Sync,
         G::State: Send,
-        F: FnMut(Vec<f32>, usize) -> Vec<f64>,
+        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
         unimplemented!("construction panics before any evaluation")
     }
@@ -274,7 +274,7 @@ fn expectimax_engine_collects_on_a_three_agent_simultaneous_game() {
 
 #[test]
 fn expectimax_searches_a_three_agent_game() {
-    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 4]; // K=2 heads x A=2
+    let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 4]; // K=2 heads x A=2
     let results = search_many(
         &ThreeWay,
         &Enc,
@@ -308,8 +308,8 @@ fn mcts_cfg() -> MctsConfig {
 fn uct_rejects_sequential_three_agent_games() {
     // Q-derived (UCT) leaf values exist only at the evaluated agent's own decision points, which
     // a sequential game gives non-movers none of — N>2 sequential search needs PUCT.
-    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
-    let mut eval = Evaluator::new(&mut infer, None);
+    let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+    let mut eval = Evaluator::new(&mut infer, reinfors_core::InferMode::Shared, None);
     let _ = mcts_many(
         &RoundRobin,
         &Enc,
@@ -324,8 +324,8 @@ fn uct_rejects_sequential_three_agent_games() {
 #[test]
 fn uct_searches_a_simultaneous_three_agent_game() {
     // DUCT-N: every agent owns a decoupled table, so simultaneous games search at any N.
-    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
-    let mut eval = Evaluator::new(&mut infer, None);
+    let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+    let mut eval = Evaluator::new(&mut infer, reinfors_core::InferMode::Shared, None);
     let evals = mcts_many(
         &ThreeWay,
         &Enc,
@@ -685,8 +685,8 @@ fn sampling_modes_traverse_combinatorial_uniform_chance() {
             temperature_drop: 0,
             chance,
         };
-        let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
-        let mut eval = Evaluator::new(&mut infer, None);
+        let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+        let mut eval = Evaluator::new(&mut infer, reinfors_core::InferMode::Shared, None);
         let evals = mcts_many(
             &WideChance,
             &WEnc,
@@ -720,8 +720,8 @@ fn expand_all_rejects_combinatorial_outcome_spaces() {
         temperature_drop: 0,
         chance: ChanceMode::ExpandAll,
     };
-    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
-    let mut eval = Evaluator::new(&mut infer, None);
+    let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+    let mut eval = Evaluator::new(&mut infer, reinfors_core::InferMode::Shared, None);
     let _ = mcts_many(
         &WideChance,
         &WEnc,
@@ -841,8 +841,8 @@ impl Game for NodeyTwo {
 #[test]
 #[should_panic(expected = "clairvoyant")]
 fn direct_mcts_rejects_hidden_information() {
-    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
-    let mut eval = Evaluator::new(&mut infer, None);
+    let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+    let mut eval = Evaluator::new(&mut infer, reinfors_core::InferMode::Shared, None);
     let _ = mcts_many(
         &HiddenTwo,
         &Enc,
@@ -865,15 +865,15 @@ fn direct_expectimax_rejects_hidden_information() {
         vec![(St { tick: 0 }, 0)],
         false,
         0,
-        |_obs: Vec<f32>, n: usize| vec![0.0; n * 2],
+        |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2],
     );
 }
 
 #[test]
 #[should_panic(expected = "chance-node")]
 fn direct_mcts_rejects_chance_node_games() {
-    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
-    let mut eval = Evaluator::new(&mut infer, None);
+    let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+    let mut eval = Evaluator::new(&mut infer, reinfors_core::InferMode::Shared, None);
     let _ = mcts_many(
         &NodeyTwo,
         &Enc,
@@ -896,7 +896,7 @@ fn direct_expectimax_rejects_chance_node_games() {
         vec![(St { tick: 0 }, 0)],
         false,
         0,
-        |_obs: Vec<f32>, n: usize| vec![0.0; n * 2],
+        |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2],
     );
 }
 

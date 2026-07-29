@@ -36,7 +36,7 @@ pub use policy::{ChanceMode, Policy, SearchPolicy, MAX_ENUMERATED_OUTCOMES};
 pub use reward::Reward;
 pub use rollout::engine::{CollectStats, Engine, EngineParams, EpisodeSummary};
 pub use rollout::env::Env;
-pub use rollout::evaluator::{CommittedRows, EvalBatch, Evaluator, Resolve};
+pub use rollout::evaluator::{CommittedRows, EvalBatch, Evaluator, InferMode, Resolve};
 pub use rollout::infer_cache::InferCache;
 pub use rollout::start::{AlwaysInitialState, ReachedStateBuffer, Start, StartDistribution};
 pub use solvers::best_response::{best_response_value, enumerate_infosets, exploitability};

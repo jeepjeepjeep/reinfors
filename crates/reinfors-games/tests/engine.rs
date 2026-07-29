@@ -401,7 +401,7 @@ fn collected_targets_equal_a_direct_search() {
         vec![(state.clone(), 0), (state, 1)],
         false,
         0,
-        infer,
+        |_p, o, n| infer(o, n),
     );
 
     assert_eq!(records.len(), 2);
