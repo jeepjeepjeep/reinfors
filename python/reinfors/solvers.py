@@ -12,5 +12,6 @@ from __future__ import annotations
 from . import _reinfors
 
 Cfr = _reinfors.Cfr
+DeepCfr = _reinfors.DeepCfr
 
-__all__ = ["Cfr"]
+__all__ = ["Cfr", "DeepCfr"]

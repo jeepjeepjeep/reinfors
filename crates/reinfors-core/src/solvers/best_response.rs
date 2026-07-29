@@ -269,6 +269,80 @@ pub fn best_response_value<G: Game>(
     pass.value(0)
 }
 
+/// Every reachable information set, with one exemplar state and the acting agent — the
+/// enumeration behind the net-policy exploitability instrument (a full capped tree walk over
+/// all three chance seams; enumerable games only). First-visit exemplar per key; the key
+/// contract guarantees every member state yields the same features and ordered legal list.
+pub fn enumerate_infosets<G: Game>(game: &G) -> Vec<(Vec<u8>, G::State, usize)> {
+    struct Walk<'a, G: Game> {
+        game: &'a G,
+        seen: HashMap<Vec<u8>, ()>,
+        out: Vec<(Vec<u8>, G::State, usize)>,
+        visited: usize,
+    }
+    impl<G: Game> Walk<'_, G> {
+        fn go(&mut self, state: &G::State) {
+            self.visited += 1;
+            assert!(
+                self.visited < MAX_TREE_NODES,
+                "game tree exceeds the enumeration cap ({MAX_TREE_NODES} nodes) — the                  exploitability instrument is for enumerable games"
+            );
+            match self.game.actor(state) {
+                Actor::Chance => {
+                    let dist = self.game.chance_node(state);
+                    for outcome in 0..dist.count() {
+                        let t = self.game.apply_chance_node(state, outcome);
+                        if !t.terminal {
+                            self.go(&t.next_state);
+                        }
+                    }
+                }
+                Actor::Agent(who) => {
+                    let key = self.game.information_state_key(state, who);
+                    if self.seen.insert(key.clone(), ()).is_none() {
+                        self.out.push((key, state.clone(), who));
+                    }
+                    for a in self.game.legal_actions(state, who) {
+                        let mut joint = vec![0; self.game.num_agents()];
+                        joint[who] = a;
+                        let t = self.game.step(state, &joint);
+                        if t.terminal {
+                            continue;
+                        }
+                        if let Some(dist) = self.game.chance_outcomes(state, &t) {
+                            for outcome in 0..dist.count() {
+                                let child = self.game.apply_chance(state, &t, outcome);
+                                self.go(&child);
+                            }
+                        } else {
+                            self.go(&t.next_state);
+                        }
+                    }
+                }
+                Actor::Simultaneous => unreachable!("2-player sequential games only"),
+            }
+        }
+    }
+    struct Poisoned;
+    impl crate::game::Rng for Poisoned {
+        fn below(&mut self, _n: usize) -> usize {
+            panic!("infoset enumeration requires all_chance_declared (initial_state drew)")
+        }
+        fn unit(&mut self) -> f64 {
+            panic!("infoset enumeration requires all_chance_declared (initial_state drew)")
+        }
+    }
+    let mut walk = Walk {
+        game,
+        seen: HashMap::new(),
+        out: Vec::new(),
+        visited: 0,
+    };
+    let root = game.initial_state(&mut Poisoned);
+    walk.go(&root);
+    walk.out
+}
+
 /// pyspiel's exploitability: `(br_0 + br_1) / 2` for a 2-player zero-sum game — zero exactly
 /// at a Nash equilibrium of `profile`.
 pub fn exploitability<G: Game>(

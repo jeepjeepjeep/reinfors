@@ -70,6 +70,33 @@ class Cfr:
     def save(self) -> bytes: ...
     def load(self, bytes: bytes) -> None: ...
 
+class DeepCfrBatch:
+    advantage_obs: NDArray[np.float32]
+    advantage_iterations: NDArray[np.int64]
+    advantage_legal_offsets: NDArray[np.int64]
+    advantage_legal_ids: NDArray[np.int64]
+    advantage_targets: NDArray[np.float64]
+    strategy_obs: NDArray[np.float32]
+    strategy_iterations: NDArray[np.int64]
+    strategy_players: NDArray[np.int64]
+    strategy_legal_offsets: NDArray[np.int64]
+    strategy_legal_ids: NDArray[np.int64]
+    strategy_probs: NDArray[np.float64]
+    telemetry: dict[str, Any]
+
+class DeepCfr:
+    """Deep CFR data generator (external sampling): traversals query the current advantage
+    networks through `infer` (one callable, or a per-player sequence) and emit advantage and
+    strategy training samples; buffers, weighting, and training are the caller's."""
+
+    def __init__(self, game: GameHandle, seed: int = ...) -> None: ...
+    def next_iteration(self) -> None: ...
+    @property
+    def iteration(self) -> int: ...
+    def resolved_config(self) -> dict[str, Any]: ...
+    def collect(self, player: int, traversals: int, infer: Any) -> DeepCfrBatch: ...
+    def exploitability(self, policy_infer: Any) -> float: ...
+
 # Opaque composition handles, built via the staticmethod constructors and passed to `Engine`.
 class GameHandle:
     @staticmethod
