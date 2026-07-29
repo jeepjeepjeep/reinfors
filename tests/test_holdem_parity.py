@@ -8,6 +8,8 @@ enough that the betting caps bound every commitment — the all-in/side-pot logi
 the Rust unit tests instead. Dev-oracle only: skipped wherever pyspiel is not installed.
 """
 
+from typing import Any
+
 import numpy as np
 import pytest
 import reinfors as rf
@@ -18,7 +20,7 @@ STACK = 1_000_000  # deep: the limit caps bound commitments at 240, so no all-in
 SB, BB = 5, 10
 
 
-def _pyspiel_game(n: int):
+def _pyspiel_game(n: int) -> Any:
     blind = " ".join(str(x) for x in [SB, BB] + [0] * (n - 2))
     first = "1 2 2 2" if n == 2 else "3 1 1 1"
     return pyspiel.load_game(
@@ -53,8 +55,11 @@ def test_legal_actions_and_payoffs_match_universal_poker(n: int) -> None:
         st = env.state()
         # Seat mapping: our small blind becomes pyspiel seat 0 (positions are fixed by the ACPC
         # config; our button rotates per episode).
-        sb_seat = st["button"] if n == 2 else (st["button"] + 1) % n
-        to_ps = lambda s, sb=sb_seat: (s - sb) % n  # noqa: E731
+        sb_seat = int(st["button"]) if n == 2 else (int(st["button"]) + 1) % n
+
+        def to_ps(s: int, sb: int = sb_seat) -> int:
+            return (s - sb) % n
+
         ps = game.new_initial_state()
         # Hole cards, player-major in pyspiel seat order, forced to our deal.
         for p in range(n):

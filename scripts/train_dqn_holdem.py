@@ -31,6 +31,7 @@ import time
 import numpy as np
 import reinfors as rf
 import torch
+from reinfors._reinfors import DqnBatch
 from torch import nn
 
 
@@ -50,7 +51,7 @@ class QNet(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.trunk(x).view(-1, self.n_heads, self.n_actions)
+        return self.trunk(x).view(-1, self.n_heads, self.n_actions)  # type: ignore[no-any-return]  # torch stub gap
 
 
 def dense_mask(offsets: np.ndarray, ids: np.ndarray, m: int, a: int) -> np.ndarray:
@@ -70,10 +71,18 @@ class Replay:
         self.size = 0
         self.head = 0
 
-    def push(self, batch: object, n_actions: int) -> None:
+    def push(self, batch: DqnBatch, n_actions: int) -> None:
         m = batch.obs.shape[0]
         legal = dense_mask(np.asarray(batch.next_legal_offsets), np.asarray(batch.next_legal_ids), m, n_actions)
-        cols = [batch.obs, batch.actions, batch.rewards, batch.next_obs, batch.dones, batch.masks, legal]
+        cols: list[np.ndarray] = [
+            batch.obs,
+            batch.actions,
+            batch.rewards,
+            batch.next_obs,
+            batch.dones,
+            batch.masks,
+            legal,
+        ]
         if self.cols is None:
             self.cols = [np.empty((self.capacity, *c.shape[1:]), dtype=c.dtype) for c in cols]
         idx = (self.head + np.arange(m)) % self.capacity
@@ -120,7 +129,7 @@ def train_step(
         huber = nn.functional.smooth_l1_loss(q_sa, td, reduction="none")
         loss = (masks * huber).sum() / masks.sum().clamp(min=1.0)
         optimizer.zero_grad()
-        loss.backward()
+        loss.backward()  # type: ignore[no-untyped-call]  # torch stubs leave Tensor.backward untyped
         optimizer.step()
         total += float(loss.item())
         batches += 1
@@ -151,8 +160,8 @@ def eval_vs(net: QNet, args: argparse.Namespace, opponent: str, games: int, seed
             legal = env.legal_actions(agent)
             if agent == net_seat:
                 with torch.no_grad():
-                    x = torch.from_numpy(env.observe(agent).reshape(1, -1))
-                    q = net(x)[0].mean(dim=0).numpy()  # head-mean Q
+                    x = torch.from_numpy(env.observe(agent).reshape(1, -1)).to(args.device)
+                    q = net(x)[0].mean(dim=0).cpu().numpy()  # head-mean Q
                 action = max(legal, key=lambda a: q[a])
             elif opponent == "random":
                 action = rng.choice(legal)
@@ -217,12 +226,14 @@ def main() -> None:
     def infer(arr: np.ndarray) -> np.ndarray:
         with torch.no_grad():
             x = torch.from_numpy(arr).to(args.device)
-            return net(x).double().cpu().numpy()
+            # .cpu() before .double(): MPS has no float64.
+            return np.asarray(net(x).cpu().double().numpy())
 
     t0 = time.perf_counter()
     print(f"DQN hold'em: {args.num_players} seats, {args.heads} heads, {args.n_games} games/collect")
     for it in range(1, args.iterations + 1):
         batch = engine.collect(args.collect_size, infer)
+        assert isinstance(batch, DqnBatch)
         replay.push(batch, 3)
         loss = train_step(
             net, target, optimizer, replay, rng, args.updates_per_iter, args.gamma, args.batch_size, args.device
