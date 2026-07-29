@@ -26,14 +26,16 @@ impl<G: Game> Episode<G> {
         Self::assert_decision_state(game, &self.state);
     }
 
-    /// Chance nodes are interior (see [`Game::chance_nodes`]): an episode is born at a decision
-    /// state. A real assert — a root chance node would leave every consumer actor-less (empty
+    /// Chance nodes are interior (see [`Game::chance_nodes`]): an episode starts at a decision
+    /// state, wherever the start comes from — `initial_state` or a restored start-distribution
+    /// state. A real assert — a chance-node start would leave every consumer actor-less (empty
     /// active set, a collect that gathers nothing) rather than fail loudly.
-    fn assert_decision_state(game: &G, state: &G::State) {
+    pub(crate) fn assert_decision_state(game: &G, state: &G::State) {
         assert!(
             !matches!(game.actor(state), crate::game::Actor::Chance),
-            "initial_state returned a chance node; chance nodes are interior — draw initial \
-             randomness from the rng inside initial_state"
+            "an episode cannot start at a chance node; chance nodes are interior — initial \
+             randomness draws from the rng inside initial_state, and start distributions must \
+             restore realized decision states"
         );
     }
 

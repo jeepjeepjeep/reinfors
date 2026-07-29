@@ -974,6 +974,74 @@ fn episode_birth_rejects_root_chance_nodes() {
     );
 }
 
+#[test]
+#[should_panic(expected = "cannot start at a chance node")]
+fn start_distribution_restores_must_be_decision_states() {
+    // A game with an INTERIOR chance node (tick 5, unreachable in play): construction passes on
+    // the tick-0 decision state, then a hostile start distribution restores the chance node —
+    // the restore path must hold the same decision-state start contract as `initial_state`.
+    struct MidNodey;
+    impl Game for MidNodey {
+        type State = St;
+        type Event = ();
+        fn num_agents(&self) -> usize {
+            2
+        }
+        fn action_count(&self) -> usize {
+            2
+        }
+        fn chance_nodes(&self) -> bool {
+            true
+        }
+        fn actor(&self, s: &St) -> Actor {
+            if s.tick >= 5 {
+                Actor::Chance
+            } else {
+                Actor::Agent(s.tick % 2)
+            }
+        }
+        fn legal_actions(&self, s: &St, agent: usize) -> Vec<usize> {
+            if s.tick < 4 && agent == s.tick % 2 {
+                vec![0, 1]
+            } else {
+                Vec::new()
+            }
+        }
+        fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
+            Transition {
+                next_state: St { tick: s.tick + 1 },
+                events: vec![(); 2],
+                terminal: s.tick + 1 >= 4,
+            }
+        }
+        fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+            St { tick: 0 }
+        }
+    }
+    struct ChanceRestore;
+    impl reinfors_core::StartDistribution<St> for ChanceRestore {
+        fn choose(&mut self, _rng: &mut dyn Rng) -> reinfors_core::Start<St> {
+            reinfors_core::Start::Restore(St { tick: 5 })
+        }
+    }
+    let mut engine = Engine::new(
+        MidNodey,
+        Box::new(Enc),
+        Box::new(Zero),
+        EpsilonGreedyQ::new(2, 0.1),
+        Dqn::new(2, 1.0),
+        EngineParams {
+            n_games: 1,
+            seed: 0,
+        },
+    )
+    .with_start_distribution(Box::new(ChanceRestore));
+    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2 * 2];
+    for _ in 0..8 {
+        let _ = engine.collect(64, &mut infer);
+    }
+}
+
 /// Two agents taking turns; terminal after four plies with payoffs [1, 2].
 struct TwoRobin;
 

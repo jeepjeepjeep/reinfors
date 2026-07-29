@@ -440,6 +440,9 @@ where
             // RNG, so this is the current reset path unchanged.
             match self.start_dist.choose(&mut self.buffer_rng) {
                 Start::Restore(state) => {
+                    // A public injection seam: hold a custom distribution to the same
+                    // decision-state start contract as `initial_state`.
+                    crate::episode::Episode::assert_decision_state(&self.game, &state);
                     self.episodes[gi].state = state;
                     self.seeded[gi] = true;
                 }
