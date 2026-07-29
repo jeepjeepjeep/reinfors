@@ -1088,15 +1088,18 @@ mod tests {
 
 // ===================== Egocentric observation =====================
 
-/// The per-seat observation: `(11 + 2·(N-1) + 8, 4, 13)` planes over a suit x rank card grid.
+/// The per-seat observation: `(11 + 2·(N-1) + 10, 4, 13)` planes over a suit x rank card grid.
 /// Channels: own hole cards, board, then broadcast scalars — pot, amount to call, own stack
 /// (all normalized by the table's total chips or the starting stack), the street one-hot (4),
 /// raise count / 4, relative button position — per OPPONENT in clockwise order from the
 /// seat an in-hand flag and a normalized stack — and the public betting history, two planes
 /// per street (who acted, what they did) laid out one action per grid slot in order. The
 /// history planes carry what the bookkeeping alone cannot: distinct betting sequences with
-/// identical commitments (who the aggressor was). Every seat sees only its own hole cards; the
-/// N-dependent tail keeps seat identity relative, so the same net serves every position.
+/// identical commitments (who the aggressor was). Two more planes single out the turn and
+/// river cards: the aggregate board plane is unordered, but reading an opponent's turn action
+/// requires knowing which board it was made on — reveal chronology is public information.
+/// Every seat sees only its own hole cards; the N-dependent tail keeps seat identity relative,
+/// so the same net serves every position.
 pub struct HoldemEgocentric {
     pub num_players: usize,
     pub stack: u32,
@@ -1104,7 +1107,7 @@ pub struct HoldemEgocentric {
 
 impl HoldemEgocentric {
     fn channels(&self) -> usize {
-        11 + 2 * (self.num_players - 1) + 8
+        11 + 2 * (self.num_players - 1) + 10
     }
 
     /// First of the eight history channels (two per betting street).
@@ -1175,6 +1178,14 @@ impl reinfors_core::StateEncoder for HoldemEgocentric {
                 obs[act_ch * PLANE + k] = (action + 1) as f32 / 3.0;
             }
         }
+        // Reveal chronology: the aggregate board plane is unordered, but which card came on the
+        // turn vs the river is public and changes what an opponent's street action meant.
+        if let Some(&turn) = s.board.get(3) {
+            set_card(&mut obs, self.history_base() + 8, turn);
+        }
+        if let Some(&river) = s.board.get(4) {
+            set_card(&mut obs, self.history_base() + 9, river);
+        }
         obs
     }
 
@@ -1192,6 +1203,10 @@ impl reinfors_core::StateEncoder for HoldemEgocentric {
 mod encoder_tests {
     use super::*;
     use reinfors_core::StateEncoder;
+
+    fn card(rank: u8, suit: u8) -> Card {
+        rank * 4 + suit
+    }
 
     #[test]
     fn each_seat_sees_only_its_own_holes() {
@@ -1218,7 +1233,7 @@ mod encoder_tests {
         };
         for agent in 0..3 {
             let obs = enc.encode(&s, agent);
-            assert_eq!(obs.len(), (11 + 4 + 8) * PLANE);
+            assert_eq!(obs.len(), (11 + 4 + 10) * PLANE);
             let holes: f32 = obs[..PLANE].iter().sum();
             assert_eq!(holes, 2.0, "exactly the agent's two cards");
             let own = &s.hole[agent];
@@ -1334,5 +1349,45 @@ mod encoder_tests {
             ob[..base * PLANE],
             "identical commitments outside the history"
         );
+    }
+
+    #[test]
+    fn reveal_chronology_planes_distinguish_swapped_turn_and_river() {
+        // Same five board cards, same actions on every street — only WHICH card came on the
+        // turn differs. The aggregate board plane cannot tell them apart; the chronology
+        // planes must.
+        let mk = |board: Vec<Card>| HoldemState {
+            hole: vec![[card(0, 0), card(1, 1)], [card(0, 2), card(1, 3)]],
+            board,
+            button: 0,
+            street: Street::River,
+            to_act: 1,
+            stacks: vec![190, 190],
+            street_committed: vec![0, 0],
+            total_committed: vec![10, 10],
+            folded: vec![false, false],
+            needs_action: vec![false, true],
+            raises: 0,
+            history: vec![Vec::new(); 4],
+        };
+        let (x, y) = (card(7, 0), card(11, 2));
+        let flop = [card(2, 1), card(4, 3), card(9, 0)];
+        let a = mk(vec![flop[0], flop[1], flop[2], x, y]);
+        let b = mk(vec![flop[0], flop[1], flop[2], y, x]);
+        let enc = HoldemEgocentric {
+            num_players: 2,
+            stack: 200,
+        };
+        let (oa, ob) = (enc.encode(&a, 1), enc.encode(&b, 1));
+        assert_ne!(oa, ob, "reveal order is public information");
+        assert_eq!(
+            oa[PLANE..2 * PLANE],
+            ob[PLANE..2 * PLANE],
+            "aggregate board plane matches"
+        );
+        let turn_ch = enc.history_base() + 8;
+        let idx = |c: Card| card_suit(c) as usize * 13 + card_rank(c) as usize;
+        assert_eq!(oa[turn_ch * PLANE + idx(x)], 1.0);
+        assert_eq!(ob[turn_ch * PLANE + idx(y)], 1.0);
     }
 }

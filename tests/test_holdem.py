@@ -81,7 +81,7 @@ def test_observation_hides_other_holes() -> None:
     env.reset()
     st = env.state()
     obs = env.observe(0)
-    assert obs.shape == (11 + 2 * 2 + 8, 4, 13)
+    assert obs.shape == (11 + 2 * 2 + 10, 4, 13)
     hole_plane = obs[0]
     assert hole_plane.sum() == 2.0
     for c in st["hole"][0]:
