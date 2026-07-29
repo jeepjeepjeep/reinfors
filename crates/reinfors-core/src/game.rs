@@ -190,7 +190,7 @@ pub trait Game {
     }
 
     /// Whether this game provides information-set keys (below). Deliberate claim, default
-    /// false; `true` obliges `information_state_key` to answer at every state.
+    /// false; `true` obliges `information_state_key` to answer at every REALIZED state.
     fn information_states(&self) -> bool {
         false
     }
@@ -203,9 +203,10 @@ pub trait Game {
     ///
     /// Contract: keys are equal iff the agent cannot distinguish the states. Regret-table
     /// correctness rests on what that implies, so it is worth spelling out — equal keys must
-    /// have: the same agent to act, the same legal-action set for the keyed agent (the CFR
-    /// solver debug-asserts this on every table revisit), and — because the key carries the
-    /// full history — perfect-recall equivalence. The encoder's observation carries the same
+    /// have: the same agent to act, the same ORDERED legal-action list for the keyed agent —
+    /// regrets and probabilities align by vector index, so equal sets in different orders are
+    /// insufficient (the CFR solver debug-asserts list equality on every table revisit) — and,
+    /// because the key carries the full history, perfect-recall equivalence. The encoder's observation carries the same
     /// information content (pinned by test), but the key is exact compact bytes where the
     /// observation is a lossy-by-design float tensor. Solvers index their tables by this key —
     /// which is what forces learned strategies to be measurable with respect to the player's
