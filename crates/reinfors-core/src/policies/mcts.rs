@@ -1274,6 +1274,15 @@ where
         game.num_agents() >= 1,
         "a game must have at least one agent"
     );
+    assert!(
+        game.perfect_information(),
+        "tree search on a hidden-information game is clairvoyant: its values condition on state \
+         the agents cannot observe; use an observation-only policy family"
+    );
+    assert!(
+        !game.chance_nodes(),
+        "tree search does not realize chance-node states (outcome-dependent payouts)"
+    );
     let a = game.action_count();
     let mut trees: Vec<Tree<G::State>> = requests
         .into_iter()

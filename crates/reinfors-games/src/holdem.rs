@@ -13,12 +13,12 @@
 //! total commitment always belongs to a LIVE player, the invariant the side-pot sweep relies on.
 //!
 //! **Chance**: hole cards and the button are dealt by `initial_state` from the env's seeded rng;
-//! street reveals are the transition's *declared* chance — `ChanceDist::Uniform(C(remaining, k))`
-//! with the unordered combination decoded from the index by `apply_chance` (the compact
-//! declaration exists for exactly this shape). Per the chance contract, outcomes never carry
-//! reward: when everyone is all-in the remaining streets are stepped through FORCED CHECKS (a
-//! single live seat holds one legal action), so each reveal is a zero-reward chance transition
-//! and the showdown resolves deterministically from already-dealt cards.
+//! every street reveal is a chance NODE — closing a street leaves a state with no actor
+//! (`Actor::Chance`), whose `chance_node` declares `ChanceDist::Uniform(C(remaining, k))` and
+//! whose `apply_chance_node` decodes the unordered combination and reopens betting. When fewer
+//! than two seats can still bet (ACPC: only players neither folded nor all-in act), betting is
+//! moot and the reveals CHAIN — the framework realizes them in one tick, and the final reveal
+//! settles the showdown, so no seat ever takes an artificial runout action.
 //!
 //! Hand strength comes from `rs_poker`'s 7-card ranking (the cozy-chess pattern: the crate owns
 //! the pure, battle-tested evaluation; reinfors owns the betting machine, which the pyspiel
@@ -65,6 +65,17 @@ impl Street {
         }
     }
 
+    /// Index into per-street tables (betting streets only; never called once done).
+    fn index(self) -> usize {
+        match self {
+            Street::Preflop => 0,
+            Street::Flop => 1,
+            Street::Turn => 2,
+            Street::River => 3,
+            Street::Done => unreachable!("no betting happens on a finished hand"),
+        }
+    }
+
     fn next(self) -> Street {
         match self {
             Street::Preflop => Street::Flop,
@@ -96,6 +107,10 @@ pub struct HoldemState {
     pub needs_action: Vec<bool>,
     /// Bets + raises this street (the preflop big blind counts as the first bet).
     pub raises: u8,
+    /// Public betting history, one `(seat, action)` list per betting street. Distinct betting
+    /// sequences can otherwise collapse to identical bookkeeping once a street's counters reset,
+    /// so without this record a pure encoder could not tell them apart.
+    pub history: Vec<Vec<(u8, u8)>>,
 }
 
 impl HoldemState {
@@ -160,6 +175,11 @@ impl TexasHoldem {
         if self.stack < self.big_blind {
             return Err("stack must cover the big blind".to_string());
         }
+        if self.stack <= self.small_blind {
+            // The first seat to act preflop is the small blind heads-up; with no chips behind
+            // the blind there would be no first decision at all.
+            return Err("stack must exceed the small blind".to_string());
+        }
         // Chip arithmetic runs in u32 with i64 deltas; bound the totals far below overflow.
         if self.stack > 1 << 24 {
             return Err("stack must fit 2^24 chips".to_string());
@@ -190,32 +210,30 @@ impl TexasHoldem {
         state.total_committed[i] += paid;
     }
 
-    /// Open a street: reset the per-street bookkeeping and seat the first actor. When fewer than
-    /// two seats can still bet, betting is moot — a single live seat is given ONE forced check
-    /// per street so every reveal stays an action-driven, zero-reward chance transition.
-    fn open_street(&self, state: &mut HoldemState) {
+    /// Close a street: advance the marker and reset the per-street bookkeeping. Nobody owes an
+    /// action on the result — it is a chance node until the reveal reopens betting.
+    fn close_street(&self, state: &mut HoldemState) {
+        state.street = state.street.next();
         state.street_committed.iter_mut().for_each(|c| *c = 0);
         state.raises = 0;
+        state.needs_action.iter_mut().for_each(|b| *b = false);
+    }
+
+    /// Reopen betting after a reveal: every live seat with chips behind owes an action — unless
+    /// fewer than two can bet (ACPC: only players neither folded nor all-in act), in which case
+    /// betting is moot and the state stays actor-less so the reveals chain.
+    fn open_betting(&self, state: &mut HoldemState) {
         let can_bet: Vec<usize> = (0..self.num_players)
             .filter(|&i| state.live(i) && state.stacks[i] > 0)
             .collect();
-        for i in 0..self.num_players {
-            state.needs_action[i] = false;
-        }
         if can_bet.len() >= 2 {
             for &i in &can_bet {
                 state.needs_action[i] = true;
             }
-        } else {
-            // Runout: exactly one forced check from the first live seat.
-            let first_live = self
-                .next_seat(state.button, |i| state.live(i))
-                .expect("a hand always has a live seat");
-            state.needs_action[first_live] = true;
+            state.to_act = self
+                .next_seat(state.button, |i| state.needs_action[i])
+                .expect("betting reopened with someone to act");
         }
-        state.to_act = self
-            .next_seat(state.button, |i| state.needs_action[i])
-            .expect("street opened with someone to act");
     }
 
     /// Terminal resolution: per-agent chip deltas. Fold-out pays the last live seat; otherwise
@@ -357,21 +375,22 @@ impl Game for TexasHoldem {
     }
 
     fn actor(&self, state: &HoldemState) -> Actor {
+        if !state.is_done() && !state.needs_action.iter().any(|&b| b) {
+            return Actor::Chance; // a street reveal is pending (runouts chain several)
+        }
         Actor::Agent(state.to_act)
     }
 
     fn legal_actions(&self, state: &HoldemState, agent: usize) -> Vec<usize> {
-        if state.is_done() || agent != state.to_act || state.board.len() < state.street.board_len()
-        {
-            return Vec::new(); // no actor mid-reveal (the env applies chance within the step)
+        if state.is_done() || agent != state.to_act || !state.needs_action.iter().any(|&b| b) {
+            return Vec::new(); // terminal, not this seat's turn, or a chance node (reveal pending)
         }
         let mut out = Vec::with_capacity(3);
         if state.to_call(agent) > 0 {
             out.push(FOLD); // folding with a free check available is illegal (ACPC convention)
         }
         out.push(CHECK_CALL);
-        // A raise must add chips beyond the call, and the street must be under its bet cap. A
-        // runout forced-check seat has an empty stack, so it never sees this arm.
+        // A raise must add chips beyond the call, and the street must be under its bet cap.
         if state.raises < 4 && state.stacks[agent] > state.to_call(agent) {
             out.push(BET_RAISE);
         }
@@ -391,6 +410,7 @@ impl Game for TexasHoldem {
         } else {
             CHECK_CALL
         };
+        next.history[state.street.index()].push((me as u8, action as u8));
 
         match action {
             FOLD => {
@@ -445,10 +465,10 @@ impl Game for TexasHoldem {
                 terminal: true,
             };
         }
-        next.street = next.street.next();
-        self.open_street(&mut next);
-        // The board is now SHORT for the new street: the reveal is this transition's declared
-        // chance, decoded by `apply_chance` before any actor sees the state.
+        // The next state is a chance node (board short, nobody to act): the framework draws the
+        // reveal(s) from `chance_node` — several chained when everyone is all-in — before any
+        // agent sees the state.
+        self.close_street(&mut next);
         Transition {
             next_state: next,
             events: vec![0.0; self.num_players],
@@ -456,35 +476,51 @@ impl Game for TexasHoldem {
         }
     }
 
-    fn chance_outcomes(
-        &self,
-        _state: &HoldemState,
-        t: &Transition<HoldemState, f64>,
-    ) -> Option<ChanceDist> {
-        let next = &t.next_state;
-        let missing = next.street.board_len().saturating_sub(next.board.len());
-        if t.terminal || missing == 0 {
-            return None;
-        }
-        Some(ChanceDist::Uniform(binomial(
-            next.remaining_deck().len(),
-            missing,
-        )))
+    fn chance_nodes(&self) -> bool {
+        true // street reveals; a reveal that completes an all-in runout settles the showdown
     }
 
-    fn apply_chance(
+    fn chance_node(&self, state: &HoldemState) -> ChanceDist {
+        let missing = state.street.board_len() - state.board.len();
+        ChanceDist::Uniform(binomial(state.remaining_deck().len(), missing))
+    }
+
+    fn apply_chance_node(
         &self,
-        _state: &HoldemState,
-        t: &Transition<HoldemState, f64>,
+        state: &HoldemState,
         outcome: usize,
-    ) -> HoldemState {
-        let mut out = t.next_state.clone();
-        let deck = out.remaining_deck();
-        let missing = out.street.board_len() - out.board.len();
+    ) -> Transition<HoldemState, f64> {
+        let mut next = state.clone();
+        let deck = next.remaining_deck();
+        let missing = next.street.board_len() - next.board.len();
         for pos in unrank_combination(outcome, deck.len(), missing) {
-            out.board.push(deck[pos]);
+            next.board.push(deck[pos]);
         }
-        out
+        self.open_betting(&mut next);
+        if next.needs_action.iter().any(|&b| b) {
+            return Transition {
+                next_state: next,
+                events: vec![0.0; self.num_players],
+                terminal: false,
+            };
+        }
+        // Betting is moot (fewer than two seats can bet). River complete: showdown; otherwise
+        // the runout continues — the next street is itself a chance node.
+        if next.street == Street::River {
+            next.street = Street::Done;
+            let events = self.payouts(&next);
+            return Transition {
+                next_state: next,
+                events,
+                terminal: true,
+            };
+        }
+        next.street = next.street.next();
+        Transition {
+            next_state: next,
+            events: vec![0.0; self.num_players],
+            terminal: false,
+        }
     }
 
     fn initial_state(&self, rng: &mut dyn Rng) -> HoldemState {
@@ -508,6 +544,7 @@ impl Game for TexasHoldem {
             folded: vec![false; n],
             needs_action: vec![true; n],
             raises: 1, // the big blind is the street's first bet
+            history: vec![Vec::new(); 4],
         };
         // Blinds: heads-up the button IS the small blind and acts first preflop; otherwise the
         // two seats after the button post and the seat after the big blind opens.
@@ -518,7 +555,14 @@ impl Game for TexasHoldem {
         };
         Self::commit(&mut state, sb, self.small_blind);
         Self::commit(&mut state, bb, self.big_blind);
+        // A blind that put a seat all-in owes no action (ACPC: only players neither folded nor
+        // all-in act). `validate` guarantees chips behind the small blind, so the preflop opener
+        // below always exists.
+        for i in 0..n {
+            state.needs_action[i] = state.stacks[i] > 0;
+        }
         state.to_act = if n == 2 { button } else { (bb + 1) % n };
+        debug_assert!(state.needs_action[state.to_act]);
         state
     }
 
@@ -554,6 +598,26 @@ impl reinfors_core::StateCodec for TexasHoldem {
         }
         if state.to_act >= n || state.button >= n {
             return Err("seat index out of range".to_string());
+        }
+        if !state.is_done() && !state.needs_action[state.to_act] {
+            // Also rejects actor-less live states: chance nodes are transient inside a tick's
+            // realization and never a stopping point.
+            return Err("to_act owes no action".to_string());
+        }
+        if state.history.len() != 4 {
+            return Err("history must cover the four betting streets".to_string());
+        }
+        for street in &state.history {
+            // 52 slots is the encoder's history capacity; a real street never exceeds 45
+            // actions (<= 9 seats, each acting at most once per bet level).
+            if street.len() > 52 {
+                return Err("implausible street history length".to_string());
+            }
+            for &(seat, action) in street {
+                if seat as usize >= n || action as usize >= HOLDEM_ACTIONS {
+                    return Err("history entry out of range".to_string());
+                }
+            }
         }
         let mut seen = HashSet::new();
         for &c in state.hole.iter().flatten().chain(state.board.iter()) {
@@ -644,6 +708,11 @@ mod tests {
         g = game(3);
         g.stack = 1 << 25;
         assert!(g.validate().is_err(), "stack over the chip bound");
+        g = game(3);
+        g.small_blind = 10;
+        g.big_blind = 10;
+        g.stack = 10;
+        assert!(g.validate().is_err(), "no chips behind the small blind");
     }
 
     #[test]
@@ -806,6 +875,7 @@ mod tests {
             folded: vec![false, false, false],
             needs_action: vec![false, false, false],
             raises: 0,
+            history: vec![Vec::new(); 4],
         };
         let deltas = g.payouts(&state);
         assert_eq!(deltas[0], 100.0, "main pot 150 minus 50 in");
@@ -841,6 +911,7 @@ mod tests {
             folded: vec![false, false, true],
             needs_action: vec![false, false, false],
             raises: 0,
+            history: vec![Vec::new(); 4],
         };
         let deltas = g.payouts(&state);
         // Pot 21: winners split 10 each, odd chip to seat 0 (first after button 2).
@@ -861,13 +932,21 @@ mod tests {
         joint[s.to_act] = CHECK_CALL;
         let t = g.step(&s, &joint);
         assert!(!t.terminal);
-        assert_eq!(t.next_state.street, Street::Flop);
-        assert_eq!(t.next_state.board.len(), 0, "the reveal is the chance");
-        let dist = g.chance_outcomes(&s, &t).expect("flop declares chance");
-        assert_eq!(dist.count(), binomial(48, 3));
-        let dealt = g.apply_chance(&s, &t, 17_000);
+        let node = &t.next_state;
+        assert_eq!(node.street, Street::Flop);
+        assert_eq!(node.board.len(), 0, "the reveal is the chance");
+        assert!(matches!(g.actor(node), Actor::Chance));
+        assert!(g.legal_actions(node, node.to_act).is_empty());
+        assert_eq!(g.chance_node(node).count(), binomial(48, 3));
+        let rt = g.apply_chance_node(node, 17_000);
+        assert!(!rt.terminal);
+        let dealt = rt.next_state;
         assert_eq!(dealt.board.len(), 3);
         assert!(dealt.board.windows(2).all(|w| w[0] < w[1]));
+        assert!(
+            matches!(g.actor(&dealt), Actor::Agent(_)),
+            "betting reopens"
+        );
         g.validate_decoded_state(&dealt, false).unwrap();
     }
 
@@ -903,9 +982,10 @@ mod tests {
     }
 
     #[test]
-    fn all_in_runout_steps_through_forced_checks() {
-        // Heads-up with stacks equal to the big blind: both all-in preflop; the remaining
-        // streets must run out via single forced checks, then showdown.
+    fn all_in_runout_chains_the_reveals_without_actions() {
+        // Heads-up with stacks equal to the big blind: both all-in preflop. The single call
+        // must settle the whole hand in ONE realized transition — the board runs out as a
+        // chained sequence of chance nodes, with no seat taking an artificial action.
         let g = TexasHoldem {
             num_players: 2,
             stack: 10,
@@ -913,28 +993,49 @@ mod tests {
             big_blind: 10,
         };
         let mut rng = TestRng(11);
-        let mut s = g.initial_state(&mut rng);
+        let s = g.initial_state(&mut rng);
+        assert!(
+            !s.needs_action[(s.button + 1) % 2],
+            "the all-in big blind owes no action"
+        );
         // Button (SB, 5 behind) calls all-in; BB already all-in from the blind.
         let mut joint = vec![0; 2];
         joint[s.to_act] = CHECK_CALL;
-        let mut t = step_env(&g, &s, &joint, &mut rng);
-        let mut forced = 0;
-        while !t.terminal {
-            s = t.next_state;
-            let legal = g.legal_actions(&s, s.to_act);
-            assert_eq!(
-                legal,
-                vec![CHECK_CALL],
-                "runout offers only the forced check"
-            );
-            let mut joint = vec![0; 2];
-            joint[s.to_act] = CHECK_CALL;
-            t = step_env(&g, &s, &joint, &mut rng);
-            forced += 1;
-            assert!(forced <= 4);
-        }
+        let t = step_env(&g, &s, &joint, &mut rng);
+        assert!(t.terminal, "the call settles the hand in one transition");
         assert_eq!(t.next_state.board.len(), 5, "full board dealt");
         assert_eq!(t.events.iter().sum::<f64>(), 0.0);
+        // History records the one real decision and nothing else.
+        let all: Vec<_> = t.next_state.history.concat();
+        assert_eq!(all, vec![(s.to_act as u8, CHECK_CALL as u8)]);
+    }
+
+    #[test]
+    fn history_records_the_betting_sequence() {
+        // Two sequences with identical commitments must now differ in state: heads-up 20 each
+        // preflop via raise-call vs call-raise-call.
+        let g = game(2);
+        let s = g.initial_state(&mut TestRng(12));
+        let play = |actions: &[usize]| {
+            let mut cur = s.clone();
+            for &a in actions {
+                let mut joint = vec![0; 2];
+                joint[cur.to_act] = a;
+                cur = g.step(&cur, &joint).next_state;
+            }
+            cur
+        };
+        let a = play(&[BET_RAISE, CHECK_CALL]);
+        let b = play(&[CHECK_CALL, BET_RAISE, CHECK_CALL]);
+        assert_eq!(a.total_committed, b.total_committed);
+        assert_eq!(a.street, b.street);
+        assert_ne!(a.history, b.history, "the sequences stay distinguishable");
+        let sb = s.to_act as u8;
+        let bb = 1 - sb;
+        assert_eq!(
+            a.history[0],
+            vec![(sb, BET_RAISE as u8), (bb, CHECK_CALL as u8)]
+        );
     }
 
     #[test]
@@ -970,5 +1071,17 @@ mod tests {
             .validate_decoded_state(&s, true)
             .unwrap_err()
             .contains("disagrees"));
+        let mut idle = s.clone();
+        idle.needs_action.iter_mut().for_each(|b| *b = false);
+        assert!(g
+            .validate_decoded_state(&idle, false)
+            .unwrap_err()
+            .contains("owes no action"));
+        let mut hist = s.clone();
+        hist.history[0].push((7, 1));
+        assert!(g
+            .validate_decoded_state(&hist, false)
+            .unwrap_err()
+            .contains("history entry"));
     }
 }

@@ -303,6 +303,15 @@ where
         game.num_agents() >= 1,
         "a game must have at least one agent"
     );
+    assert!(
+        game.perfect_information(),
+        "tree search on a hidden-information game is clairvoyant: its values condition on state \
+         the agents cannot observe; use an observation-only policy family"
+    );
+    assert!(
+        !game.chance_nodes(),
+        "tree search does not realize chance-node states (outcome-dependent payouts)"
+    );
     let a = game.action_count();
     // Each search gets its own chance-sampling stream, seeded deterministically from the request
     // index, so results are reproducible and independent of the parallel-vs-serial expansion schedule.

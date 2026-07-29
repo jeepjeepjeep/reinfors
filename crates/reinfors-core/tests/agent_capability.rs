@@ -759,6 +759,143 @@ fn uniform_draws_cover_the_index_space() {
     assert!(hits.iter().all(|&h| h < 300), "roughly uniform: {hits:?}");
 }
 
+/// `TwoRobin` with hidden information declared — the search entries must reject it directly,
+/// not only via engine construction (a direct caller would otherwise get clairvoyant values).
+struct HiddenTwo;
+
+impl Game for HiddenTwo {
+    type State = St;
+    type Event = ();
+    fn num_agents(&self) -> usize {
+        2
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn perfect_information(&self) -> bool {
+        false
+    }
+    fn actor(&self, s: &St) -> Actor {
+        Actor::Agent(s.tick % 2)
+    }
+    fn legal_actions(&self, s: &St, agent: usize) -> Vec<usize> {
+        if agent == s.tick % 2 && s.tick < 4 {
+            vec![0, 1]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
+        Transition {
+            next_state: St { tick: s.tick + 1 },
+            events: vec![(); 2],
+            terminal: s.tick + 1 >= 4,
+        }
+    }
+    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+        St { tick: 0 }
+    }
+}
+
+/// `TwoRobin` declaring chance NODES — outcome-dependent payouts the searches cannot score.
+struct NodeyTwo;
+
+impl Game for NodeyTwo {
+    type State = St;
+    type Event = ();
+    fn num_agents(&self) -> usize {
+        2
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn chance_nodes(&self) -> bool {
+        true
+    }
+    fn actor(&self, s: &St) -> Actor {
+        Actor::Agent(s.tick % 2)
+    }
+    fn legal_actions(&self, s: &St, agent: usize) -> Vec<usize> {
+        if agent == s.tick % 2 && s.tick < 4 {
+            vec![0, 1]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
+        Transition {
+            next_state: St { tick: s.tick + 1 },
+            events: vec![(); 2],
+            terminal: s.tick + 1 >= 4,
+        }
+    }
+    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+        St { tick: 0 }
+    }
+}
+
+#[test]
+#[should_panic(expected = "clairvoyant")]
+fn direct_mcts_rejects_hidden_information() {
+    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+    let mut eval = Evaluator::new(&mut infer, None);
+    let _ = mcts_many(
+        &HiddenTwo,
+        &Enc,
+        &Zero,
+        &mcts_cfg(),
+        vec![(St { tick: 0 }, 0)],
+        0,
+        &mut eval,
+    );
+}
+
+#[test]
+#[should_panic(expected = "clairvoyant")]
+fn direct_expectimax_rejects_hidden_information() {
+    let _ = search_many(
+        &HiddenTwo,
+        &Enc,
+        &Zero,
+        &search_cfg(),
+        vec![(St { tick: 0 }, 0)],
+        false,
+        0,
+        |_obs: Vec<f32>, n: usize| vec![0.0; n * 2],
+    );
+}
+
+#[test]
+#[should_panic(expected = "chance-node")]
+fn direct_mcts_rejects_chance_node_games() {
+    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+    let mut eval = Evaluator::new(&mut infer, None);
+    let _ = mcts_many(
+        &NodeyTwo,
+        &Enc,
+        &Zero,
+        &mcts_cfg(),
+        vec![(St { tick: 0 }, 0)],
+        0,
+        &mut eval,
+    );
+}
+
+#[test]
+#[should_panic(expected = "chance-node")]
+fn direct_expectimax_rejects_chance_node_games() {
+    let _ = search_many(
+        &NodeyTwo,
+        &Enc,
+        &Zero,
+        &search_cfg(),
+        vec![(St { tick: 0 }, 0)],
+        false,
+        0,
+        |_obs: Vec<f32>, n: usize| vec![0.0; n * 2],
+    );
+}
+
 /// Two agents taking turns; terminal after four plies with payoffs [1, 2].
 struct TwoRobin;
 

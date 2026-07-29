@@ -132,8 +132,9 @@ pub trait Game {
     /// outcome-invariant**. Searches score the action edge once from the pre-chance transition and
     /// share that reward across every outcome (snake: the eat reward is the same wherever the food
     /// respawns). A game whose chance element changes the reward — a stochastic payout — does not
-    /// fit this seam; that is chance-as-a-player (`Actor::Chance`) territory, currently out of
-    /// scope. The default declares every transition deterministic.
+    /// fit this seam; that is a chance NODE (`Actor::Chance` + [`chance_node`](Self::chance_node)),
+    /// realized by rollout consumers and rejected by tree search. The default declares every
+    /// transition deterministic.
     fn chance_outcomes(
         &self,
         state: &Self::State,
@@ -154,6 +155,42 @@ pub trait Game {
     ) -> Self::State {
         let _ = (state, transition, outcome);
         unreachable!("apply_chance called on a game that declares no chance_outcomes")
+    }
+
+    /// Whether the game presents chance NODES: states whose `actor` is [`Actor::Chance`], where
+    /// no agent decides and the framework must draw from [`chance_node`](Self::chance_node) to
+    /// continue. Unlike transition-attached `chance_outcomes`, a chance node's realization MAY
+    /// determine events and terminal status (poker's all-in runout: the river decides the
+    /// showdown). Rollout consumers (`Env`, `Engine`) realize chains of them automatically inside
+    /// one tick; tree searches reject such games at entry — scoring an outcome-dependent payout
+    /// needs an explicit chance ply the searches do not implement. Declared, like every
+    /// capability: `true` obliges `chance_node`/`apply_chance_node` to answer at every
+    /// `Actor::Chance` state.
+    fn chance_nodes(&self) -> bool {
+        false
+    }
+
+    /// The distribution at a chance-node state (`actor` returned [`Actor::Chance`]): over the
+    /// outcome indices [`apply_chance_node`](Self::apply_chance_node) accepts. Same declaration
+    /// contract as [`chance_outcomes`](Self::chance_outcomes) (positive weights, `Uniform` counts
+    /// in `1..=2^53`).
+    fn chance_node(&self, state: &Self::State) -> ChanceDist {
+        let _ = state;
+        unreachable!("chance_node called on a game that declares no chance nodes")
+    }
+
+    /// Realize outcome `outcome` at a chance-node state, completing (part of) the transition:
+    /// the result may carry events and end the game. Within one tick the framework chains these
+    /// until a decision state or terminal; the FINAL transition of the chain owns the tick's
+    /// events — a transition INTO a chance node must therefore carry no outcome of its own
+    /// (neutral events), and intermediate chain steps likewise.
+    fn apply_chance_node(
+        &self,
+        state: &Self::State,
+        outcome: usize,
+    ) -> Transition<Self::State, Self::Event> {
+        let _ = (state, outcome);
+        unreachable!("apply_chance_node called on a game that declares no chance nodes")
     }
 
     /// Whether every agent could reconstruct the full state from its own observations (perfect
@@ -199,7 +236,7 @@ pub fn step_env<G: Game>(
     rng: &mut dyn Rng,
 ) -> Transition<G::State, G::Event> {
     let t = game.step(state, actions);
-    match game.chance_outcomes(state, &t) {
+    let mut t = match game.chance_outcomes(state, &t) {
         None => t,
         Some(dist) => {
             let outcome = dist.draw(rng);
@@ -209,12 +246,101 @@ pub fn step_env<G: Game>(
                 terminal: t.terminal,
             }
         }
+    };
+    // Chance-node chain: while the state belongs to no agent, draw and realize (see
+    // `Game::chance_nodes`). Runs to a decision state or terminal within this tick, so
+    // chain-interior states are never observable outside realization; the chain's final
+    // transition owns the tick's events.
+    while !t.terminal && matches!(game.actor(&t.next_state), Actor::Chance) {
+        let outcome = game.chance_node(&t.next_state).draw(rng);
+        t = game.apply_chance_node(&t.next_state, outcome);
     }
+    t
 }
 
 #[cfg(test)]
 mod step_env_tests {
     use super::*;
+
+    /// Action at tick 0, then a two-node chance chain (ticks 1, 2), terminal at 3 with the
+    /// payout decided by the FINAL chain step — the outcome-dependent shape transition chance
+    /// cannot express.
+    struct Chainy;
+    impl Game for Chainy {
+        type State = i32;
+        type Event = f64;
+        fn num_agents(&self) -> usize {
+            1
+        }
+        fn action_count(&self) -> usize {
+            1
+        }
+        fn actor(&self, s: &i32) -> Actor {
+            if (1..=2).contains(s) {
+                Actor::Chance
+            } else {
+                Actor::Agent(0)
+            }
+        }
+        fn legal_actions(&self, s: &i32, _agent: usize) -> Vec<usize> {
+            if *s == 0 {
+                vec![0]
+            } else {
+                Vec::new()
+            }
+        }
+        fn step(&self, s: &i32, _actions: &[usize]) -> Transition<i32, f64> {
+            assert_eq!(*s, 0, "only the root offers a decision");
+            Transition {
+                next_state: 1,
+                events: vec![0.0],
+                terminal: false,
+            }
+        }
+        fn chance_nodes(&self) -> bool {
+            true
+        }
+        fn chance_node(&self, _s: &i32) -> ChanceDist {
+            ChanceDist::Uniform(2)
+        }
+        fn apply_chance_node(&self, s: &i32, outcome: usize) -> Transition<i32, f64> {
+            let terminal = *s == 2;
+            Transition {
+                next_state: s + 1,
+                // Only the final chain step carries the tick's outcome.
+                events: vec![if terminal { 10.0 + outcome as f64 } else { 0.0 }],
+                terminal,
+            }
+        }
+        fn initial_state(&self, _rng: &mut dyn Rng) -> i32 {
+            0
+        }
+    }
+
+    #[test]
+    fn chance_node_chains_realize_within_one_step() {
+        struct Half(u32);
+        impl Rng for Half {
+            fn below(&mut self, _n: usize) -> usize {
+                0
+            }
+            fn unit(&mut self) -> f64 {
+                self.0 += 1;
+                if self.0.is_multiple_of(2) {
+                    0.75
+                } else {
+                    0.25
+                }
+            }
+        }
+        let mut rng = Half(0);
+        let t = step_env(&Chainy, &0, &[0], &mut rng);
+        assert!(t.terminal, "the chain runs to terminal inside the tick");
+        assert_eq!(t.next_state, 3);
+        // Two chained draws consumed (0.25 -> outcome 0, 0.75 -> outcome 1); the final
+        // realization owns the events.
+        assert_eq!(t.events, vec![11.0]);
+    }
 
     /// One action; chance outcomes {0: +10, 1: +20} at p = [0.25, 0.75] on every step.
     struct Chancy;
