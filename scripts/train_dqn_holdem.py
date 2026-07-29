@@ -12,11 +12,11 @@ blinds; one episode = one hand, so gamma multiplies across the streets of a sing
 The eval probe seats the GREEDY policy head at a rotating position against scripted opponents
 (uniform-random or always-call) and reports mean big blinds per hand — the standard sanity that
 self-play DQN learned to fold junk and bet made hands. The default epsilon is deliberately high
-(0.5): independent Q-learning in an imperfect-info game chases a best response to itself and
+(0.6): independent Q-learning in an imperfect-info game chases a best response to itself and
 cycles (aggro -> fold-to-aggro -> exploit-folders), collapsing to fold-heavy play at low
 exploration; heavy mixing keeps the learned policy a best response to mixed opponents, which is
-what the probes measure (measured: eps 0.1-0.3 drift to ~0 bb/hand vs random, eps 0.5 holds
-~+5.7 across seeds). Principled self-play convergence for poker (NFSP/CFR-style) is out of scope
+what the probes measure (measured: eps 0.1-0.3 drift to ~0 bb/hand vs random, eps 0.6 holds
+~+5.8 across seeds). Principled self-play convergence for poker (NFSP/CFR-style) is out of scope
 for this example.
 
     uv run --with torch python scripts/train_dqn_holdem.py --iterations 60
@@ -177,7 +177,8 @@ def main() -> None:
     parser.add_argument("--collect-size", type=int, default=512)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--heads", type=int, default=4)
-    parser.add_argument("--epsilon", type=float, default=0.5)
+    parser.add_argument("--width", type=int, default=256)
+    parser.add_argument("--epsilon", type=float, default=0.6)
     parser.add_argument("--gamma", type=float, default=1.0)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--target-sync", type=int, default=10, help="iterations between target-net syncs")
@@ -198,8 +199,8 @@ def main() -> None:
     )
     c, h, w = game.observation_space().shape
     dim = c * h * w
-    net = QNet(dim, args.heads, 3).to(args.device)
-    target = QNet(dim, args.heads, 3).to(args.device)
+    net = QNet(dim, args.heads, 3, args.width).to(args.device)
+    target = QNet(dim, args.heads, 3, args.width).to(args.device)
     target.load_state_dict(net.state_dict())
     optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
     replay = Replay(args.replay_capacity)
