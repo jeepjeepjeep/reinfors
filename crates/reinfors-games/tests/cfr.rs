@@ -198,6 +198,78 @@ fn the_solver_rejects_games_without_information_states() {
 }
 
 #[test]
+#[should_panic(expected = "sequential 2-player only")]
+fn chance_root_simultaneous_games_fail_at_construction() {
+    // The stub lives in deep_cfr.rs; a minimal inline twin here keeps the two solver gates
+    // independently pinned. Chance root -> simultaneous decisions: the raw-root probe used
+    // to pass this and panic mid-solve.
+    struct Sim;
+    #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct St {
+        tick: u8,
+    }
+    impl reinfors_core::Game for Sim {
+        type State = St;
+        type Event = f64;
+        fn num_agents(&self) -> usize {
+            2
+        }
+        fn action_count(&self) -> usize {
+            2
+        }
+        fn all_chance_declared(&self) -> bool {
+            true
+        }
+        fn information_states(&self) -> bool {
+            true
+        }
+        fn information_state_key(&self, s: &St, agent: usize) -> Vec<u8> {
+            vec![agent as u8, s.tick]
+        }
+        fn actor(&self, s: &St) -> reinfors_core::Actor {
+            if s.tick == 0 {
+                reinfors_core::Actor::Chance
+            } else {
+                reinfors_core::Actor::Simultaneous
+            }
+        }
+        fn chance_node(&self, _s: &St) -> reinfors_core::ChanceDist {
+            reinfors_core::ChanceDist::Uniform(2)
+        }
+        fn apply_chance_node(&self, s: &St, _outcome: usize) -> reinfors_core::Transition<St, f64> {
+            reinfors_core::Transition {
+                next_state: St { tick: s.tick + 1 },
+                events: vec![0.0; 2],
+                terminal: false,
+            }
+        }
+        fn legal_actions(&self, s: &St, _agent: usize) -> Vec<usize> {
+            if s.tick == 1 {
+                vec![0, 1]
+            } else {
+                Vec::new()
+            }
+        }
+        fn step(&self, _s: &St, _a: &[usize]) -> reinfors_core::Transition<St, f64> {
+            reinfors_core::Transition {
+                next_state: St { tick: 2 },
+                events: vec![0.0; 2],
+                terminal: true,
+            }
+        }
+        fn initial_state(&self, _rng: &mut dyn reinfors_core::Rng) -> St {
+            St { tick: 0 }
+        }
+    }
+    let _ = CfrSolver::new(
+        Sim,
+        Box::new(HoldemReward { scale: 1.0 }),
+        CfrVariant::Vanilla,
+        0,
+    );
+}
+
+#[test]
 fn mccfr_runs_on_heads_up_holdem() {
     // Full hold'em is far beyond exact solving, but the sampled traversal must run: tables
     // grow with visited infosets, chance is drawn rather than enumerated.

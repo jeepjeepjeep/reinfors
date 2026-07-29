@@ -3661,6 +3661,57 @@ impl GameHandle {
     }
 }
 
+/// Type-erased Deep CFR data generator — one concrete `DeepCfrSolver<G>` per solvable game.
+trait ErasedDeepCfr: Send + Sync {
+    fn next_iteration(&mut self);
+    fn iteration(&self) -> u64;
+    #[allow(clippy::type_complexity)]
+    fn collect(
+        &mut self,
+        player: usize,
+        traversals: usize,
+        infer: &mut dyn FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+    ) -> (
+        Vec<reinfors_core::AdvantageSample>,
+        Vec<reinfors_core::StrategySample>,
+        reinfors_core::DeepCfrStats,
+    );
+    #[allow(clippy::type_complexity)]
+    fn infoset_features(&self) -> Vec<(Vec<u8>, Vec<f32>, Vec<usize>)>;
+    fn exploitability_of(&self, probs: &HashMap<Vec<u8>, Vec<f64>>) -> f64;
+    fn rollback_collect(&mut self);
+}
+
+impl<G: Game + Send + Sync> ErasedDeepCfr for reinfors_core::DeepCfrSolver<G> {
+    fn next_iteration(&mut self) {
+        reinfors_core::DeepCfrSolver::next_iteration(self)
+    }
+    fn iteration(&self) -> u64 {
+        reinfors_core::DeepCfrSolver::iteration(self)
+    }
+    fn collect(
+        &mut self,
+        player: usize,
+        traversals: usize,
+        infer: &mut dyn FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+    ) -> (
+        Vec<reinfors_core::AdvantageSample>,
+        Vec<reinfors_core::StrategySample>,
+        reinfors_core::DeepCfrStats,
+    ) {
+        reinfors_core::DeepCfrSolver::collect(self, player, traversals, infer)
+    }
+    fn infoset_features(&self) -> Vec<(Vec<u8>, Vec<f32>, Vec<usize>)> {
+        reinfors_core::DeepCfrSolver::infoset_features(self)
+    }
+    fn exploitability_of(&self, probs: &HashMap<Vec<u8>, Vec<f64>>) -> f64 {
+        reinfors_core::DeepCfrSolver::exploitability_of(self, probs)
+    }
+    fn rollback_collect(&mut self) {
+        reinfors_core::DeepCfrSolver::rollback_collect(self)
+    }
+}
+
 /// Type-erased CFR solver — one concrete `CfrSolver<G>` per solvable game behind a uniform
 /// surface (the solver is generic; Python is not).
 trait ErasedCfr: Send + Sync {
@@ -3855,6 +3906,351 @@ impl PyCfr {
         self.inner
             .load(&bytes[69..])
             .map_err(pyo3::exceptions::PyValueError::new_err)
+    }
+}
+
+/// One `DeepCfr.collect` result: the two training streams in named numpy arrays (the engine
+/// batch idiom). Legality rides in `DqnBatch`'s CSR convention; `advantage_targets` and
+/// `strategy_probs` are FLAT, aligned entry-for-entry with the corresponding `legal_ids`.
+/// Densify per minibatch exactly like the DQN recipe:
+///   `counts = np.diff(offsets); rows = np.repeat(np.arange(M), counts)`
+///   `dense[rows, ids] = flat_values; mask[rows, ids] = True`
+#[pyclass(name = "DeepCfrBatch")]
+struct DeepCfrBatch {
+    #[pyo3(get)]
+    advantage_obs: Py<PyArray2<f32>>, // (M, dim)
+    #[pyo3(get)]
+    advantage_iterations: Py<PyArray1<i64>>, // (M,) — the loss weights (linear CFR)
+    #[pyo3(get)]
+    advantage_legal_offsets: Py<PyArray1<i64>>, // (M+1,)
+    #[pyo3(get)]
+    advantage_legal_ids: Py<PyArray1<i64>>, // (nnz,)
+    #[pyo3(get)]
+    advantage_targets: Py<PyArray1<f64>>, // (nnz,) aligned with advantage_legal_ids
+    #[pyo3(get)]
+    strategy_obs: Py<PyArray2<f32>>, // (N, dim)
+    #[pyo3(get)]
+    strategy_iterations: Py<PyArray1<i64>>, // (N,)
+    #[pyo3(get)]
+    strategy_players: Py<PyArray1<i64>>, // (N,) — the acting seat each σ belongs to
+    #[pyo3(get)]
+    strategy_legal_offsets: Py<PyArray1<i64>>, // (N+1,)
+    #[pyo3(get)]
+    strategy_legal_ids: Py<PyArray1<i64>>, // (nnz,)
+    #[pyo3(get)]
+    strategy_probs: Py<PyArray1<f64>>, // (nnz,) aligned with strategy_legal_ids
+    #[pyo3(get)]
+    telemetry: Py<PyDict>,
+}
+
+/// `rf.solvers.DeepCfr` — the Deep CFR data generator (Brown et al. 2019, external
+/// sampling): traversals query the CURRENT advantage networks through `infer` and emit the
+/// two training streams; buffers, iteration-weighted losses, and training are the caller's
+/// (see `scripts/train_deep_cfr.py`). `infer` is a single callable (shared network) or a
+/// per-player sequence, each `f(obs (M, dim) f32) -> (M, action_count) f64` advantages.
+#[pyclass(name = "DeepCfr")]
+struct PyDeepCfr {
+    inner: Box<dyn ErasedDeepCfr>,
+    obs_dim: usize,
+    action_count: usize,
+    config: Value,
+}
+
+/// Resolve the polymorphic `infer` argument: a bare callable serves every player; a sequence
+/// must have one callable per player.
+fn deep_cfr_callbacks(infer: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
+    if infer.is_callable() {
+        return Ok(vec![infer.clone().unbind()]);
+    }
+    let callbacks: Vec<Py<PyAny>> = infer.extract().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(
+            "infer must be a callable or a sequence of per-player callables",
+        )
+    })?;
+    if callbacks.len() != 2 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "expected 2 per-player infer callables, got {}",
+            callbacks.len()
+        )));
+    }
+    Ok(callbacks)
+}
+
+#[pymethods]
+impl PyDeepCfr {
+    #[new]
+    #[pyo3(signature = (game, seed=0))]
+    fn new(game: &GameHandle, seed: u64) -> PyResult<Self> {
+        use reinfors_core::DeepCfrSolver;
+        let reward = HoldemReward { scale: 1.0 }; // solver utilities are raw chip deltas
+        let (inner, obs_dim, action_count): (Box<dyn ErasedDeepCfr>, usize, usize) = match game.spec
+        {
+            GameSpec::KuhnPoker => (
+                Box::new(DeepCfrSolver::new(
+                    KuhnPoker,
+                    Box::new(KuhnEncoder),
+                    Box::new(reward),
+                    seed,
+                )),
+                6,
+                2,
+            ),
+            GameSpec::LeducPoker => (
+                Box::new(DeepCfrSolver::new(
+                    LeducPoker,
+                    Box::new(LeducEncoder),
+                    Box::new(reward),
+                    seed,
+                )),
+                21,
+                3,
+            ),
+            GameSpec::TexasHoldem {
+                num_players,
+                stack,
+                small_blind,
+                big_blind,
+            } => {
+                if num_players != 2 {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "Deep CFR solves 2-player games only; construct \
+                             TexasHoldem(num_players=2)",
+                    ));
+                }
+                let enc = HoldemEgocentric { num_players, stack };
+                let (c, h, w) = enc.obs_shape();
+                (
+                    Box::new(DeepCfrSolver::new(
+                        TexasHoldem {
+                            num_players,
+                            stack,
+                            small_blind,
+                            big_blind,
+                        },
+                        Box::new(enc),
+                        Box::new(reward),
+                        seed,
+                    )),
+                    c * h * w,
+                    3,
+                )
+            }
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "Deep CFR requires a 2-player game with declared chance and \
+                         information-state keys (KuhnPoker, LeducPoker, heads-up TexasHoldem)",
+                ))
+            }
+        };
+        let config = json!({
+            "schema": CONFIG_SCHEMA_VERSION,
+            "solver": {"name": "deep_cfr", "seed": seed},
+            "game": game_cfg(&game.spec),
+            "reward": {"scale": 1.0},
+        });
+        Ok(PyDeepCfr {
+            inner,
+            obs_dim,
+            action_count,
+            config,
+        })
+    }
+
+    /// Advance to the next CFR iteration (the weight stamped on emitted samples). Call once
+    /// per iteration, before that iteration's per-player `collect` calls.
+    fn next_iteration(&mut self) {
+        self.inner.next_iteration();
+    }
+
+    #[getter]
+    fn iteration(&self) -> u64 {
+        self.inner.iteration()
+    }
+
+    /// The composition (game, reward, solver) as a plain dict — the engine idiom.
+    fn resolved_config<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        value_to_py(py, &self.config)
+    }
+
+    /// Run `traversals` external-sampling traversals with `player` as the traverser.
+    /// Networks must be frozen for the duration of the call; retrain BETWEEN calls.
+    #[pyo3(signature = (player, traversals, infer))]
+    fn collect<'py>(
+        &mut self,
+        py: Python<'py>,
+        player: usize,
+        traversals: usize,
+        infer: &Bound<'py, PyAny>,
+    ) -> PyResult<DeepCfrBatch> {
+        if player >= 2 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "player must be 0 or 1",
+            ));
+        }
+        if self.inner.iteration() == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "call next_iteration() before collecting (samples are weighted by the iteration)",
+            ));
+        }
+        let callbacks = deep_cfr_callbacks(infer)?;
+        let (dim, a) = (self.obs_dim, self.action_count);
+        let mut callback_err: Option<PyErr> = None;
+        let mut rust_infer = |who: usize, obs_flat: Vec<f32>, rows: usize| -> Vec<f64> {
+            if callback_err.is_some() {
+                return vec![0.0; rows * a]; // argmax fallback keeps the unwind cheap
+            }
+            let target = &callbacks[who.min(callbacks.len() - 1)];
+            let arr = Array2::from_shape_vec((rows, dim), obs_flat)
+                .expect("obs batch shape")
+                .into_pyarray(py);
+            match target
+                .bind(py)
+                .call1((arr,))
+                .and_then(|r| r.extract::<numpy::PyReadonlyArray2<f64>>())
+            {
+                Ok(out) => {
+                    // Exact shape, not just element count: a transposed (A, rows) return has
+                    // the right length and would be flattened into garbage advantages.
+                    if out.as_array().shape() != [rows, a] {
+                        callback_err.get_or_insert_with(|| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "infer returned shape {:?} for {rows} rows; expected \
+                                 ({rows}, {a}) — one row of {a} advantages per query",
+                                out.as_array().shape()
+                            ))
+                        });
+                        return vec![0.0; rows * a];
+                    }
+                    out.as_array().iter().copied().collect()
+                }
+                Err(e) => {
+                    callback_err = Some(e);
+                    vec![0.0; rows * a]
+                }
+            }
+        };
+        let (advantage, strategy, stats) = self.inner.collect(player, traversals, &mut rust_infer);
+        if let Some(e) = callback_err {
+            // Transactional determinism: the discarded call must not consume the sampling
+            // sequence — a retry draws the same worlds a fresh solver would.
+            self.inner.rollback_collect();
+            return Err(e);
+        }
+
+        fn csr(items: &[(Vec<usize>, Vec<f64>)]) -> (Vec<i64>, Vec<i64>, Vec<f64>) {
+            let mut offsets = Vec::with_capacity(items.len() + 1);
+            let mut ids = Vec::new();
+            let mut values = Vec::new();
+            offsets.push(0i64);
+            for (legal, vals) in items {
+                ids.extend(legal.iter().map(|&x| x as i64));
+                values.extend_from_slice(vals);
+                offsets.push(ids.len() as i64);
+            }
+            (offsets, ids, values)
+        }
+        let adv_rows: Vec<(Vec<usize>, Vec<f64>)> = advantage
+            .iter()
+            .map(|s| (s.legal.clone(), s.targets.clone()))
+            .collect();
+        let (a_off, a_ids, a_vals) = csr(&adv_rows);
+        let strat_rows: Vec<(Vec<usize>, Vec<f64>)> = strategy
+            .iter()
+            .map(|s| (s.legal.clone(), s.probs.clone()))
+            .collect();
+        let (s_off, s_ids, s_vals) = csr(&strat_rows);
+
+        let flat2 = |rows: usize, data: Vec<f32>| -> Py<PyArray2<f32>> {
+            Array2::from_shape_vec((rows, dim), data)
+                .expect("obs shape")
+                .into_pyarray(py)
+                .unbind()
+        };
+        let adv_obs: Vec<f32> = advantage
+            .iter()
+            .flat_map(|s| s.obs.iter().copied())
+            .collect();
+        let strat_obs: Vec<f32> = strategy
+            .iter()
+            .flat_map(|s| s.obs.iter().copied())
+            .collect();
+
+        let telemetry = PyDict::new(py);
+        telemetry.set_item("player", player)?;
+        telemetry.set_item("traversals", stats.traversals)?;
+        telemetry.set_item("advantage_samples", stats.advantage_samples)?;
+        telemetry.set_item("strategy_samples", stats.strategy_samples)?;
+        telemetry.set_item("infer_calls", stats.infer_calls)?;
+        telemetry.set_item("infer_rows", stats.infer_rows)?;
+        telemetry.set_item("infer_seconds", stats.infer_seconds)?;
+        telemetry.set_item("collect_seconds", stats.collect_seconds)?;
+        telemetry.set_item("cache_lookups", stats.cache_lookups)?;
+        telemetry.set_item("cache_hits", stats.cache_hits)?;
+
+        Ok(DeepCfrBatch {
+            advantage_obs: flat2(advantage.len(), adv_obs),
+            advantage_iterations: PyArray1::from_iter(
+                py,
+                advantage.iter().map(|s| s.iteration as i64),
+            )
+            .unbind(),
+            advantage_legal_offsets: PyArray1::from_vec(py, a_off).unbind(),
+            advantage_legal_ids: PyArray1::from_vec(py, a_ids).unbind(),
+            advantage_targets: PyArray1::from_vec(py, a_vals).unbind(),
+            strategy_obs: flat2(strategy.len(), strat_obs),
+            strategy_iterations: PyArray1::from_iter(
+                py,
+                strategy.iter().map(|s| s.iteration as i64),
+            )
+            .unbind(),
+            strategy_players: PyArray1::from_iter(py, strategy.iter().map(|s| s.player as i64))
+                .unbind(),
+            strategy_legal_offsets: PyArray1::from_vec(py, s_off).unbind(),
+            strategy_legal_ids: PyArray1::from_vec(py, s_ids).unbind(),
+            strategy_probs: PyArray1::from_vec(py, s_vals).unbind(),
+            telemetry: telemetry.unbind(),
+        })
+    }
+
+    /// Exact exploitability of the AVERAGE-POLICY network (NashConv / 2, zero at Nash) —
+    /// enumerable games only (Kuhn/Leduc, not full hold'em). `policy_infer(obs) -> (M,
+    /// action_count)` scores every reachable infoset in ONE batched call; rows are clamped
+    /// non-negative and renormalized over the legal actions (uniform when degenerate).
+    fn exploitability(&self, py: Python<'_>, policy_infer: &Bound<'_, PyAny>) -> PyResult<f64> {
+        let features = self.inner.infoset_features();
+        let (dim, a) = (self.obs_dim, self.action_count);
+        let mut obs_flat: Vec<f32> = Vec::with_capacity(features.len() * dim);
+        for (_, obs, _) in &features {
+            obs_flat.extend_from_slice(obs);
+        }
+        let arr = Array2::from_shape_vec((features.len(), dim), obs_flat)
+            .expect("obs shape")
+            .into_pyarray(py);
+        let out = policy_infer
+            .call1((arr,))?
+            .extract::<numpy::PyReadonlyArray2<f64>>()?;
+        if out.as_array().shape() != [features.len(), a] {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "policy_infer returned shape {:?} for {} infosets; expected ({}, {a})",
+                out.as_array().shape(),
+                features.len(),
+                features.len()
+            )));
+        }
+        let flat: Vec<f64> = out.as_array().iter().copied().collect();
+        let mut probs: HashMap<Vec<u8>, Vec<f64>> = HashMap::with_capacity(features.len());
+        for (i, (key, _, legal)) in features.iter().enumerate() {
+            let row = &flat[i * a..(i + 1) * a];
+            let clamped: Vec<f64> = legal.iter().map(|&x| row[x].max(0.0)).collect();
+            let total: f64 = clamped.iter().sum();
+            let sigma = if total > 0.0 {
+                clamped.iter().map(|c| c / total).collect()
+            } else {
+                vec![1.0 / legal.len() as f64; legal.len()]
+            };
+            probs.insert(key.clone(), sigma);
+        }
+        Ok(py.allow_threads(|| self.inner.exploitability_of(&probs)))
     }
 }
 
@@ -4337,6 +4733,8 @@ fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyEngine>()?;
     m.add_class::<PyEnv>()?;
     m.add_class::<PyCfr>()?;
+    m.add_class::<PyDeepCfr>()?;
+    m.add_class::<DeepCfrBatch>()?;
     m.add_class::<GameHandle>()?;
     m.add_class::<PolicyHandle>()?;
     m.add_class::<LearnerHandle>()?;
