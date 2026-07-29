@@ -779,7 +779,8 @@ impl PyEngine {
                 }
             }
             Some(p) => {
-                if p + 1 >= self.weights_generations.len() {
+                // `>= len - 1`, not `p + 1 >= len`: p = usize::MAX must not wrap past the check.
+                if p >= self.weights_generations.len() - 1 {
                     return Err(pyo3::exceptions::PyValueError::new_err(format!(
                         "player {p} out of range (this game has {} players)",
                         self.weights_generations.len() - 1
@@ -1581,6 +1582,13 @@ fn engine_callbacks(
             "expected {num_agents} per-player infer callables (one per player), got {}",
             callbacks.len()
         )));
+    }
+    for (player, cb) in callbacks.iter().enumerate() {
+        if !cb.bind(infer.py()).is_callable() {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "per-player infer element {player} is not callable"
+            )));
+        }
     }
     Ok((callbacks, InferMode::PerPlayer))
 }

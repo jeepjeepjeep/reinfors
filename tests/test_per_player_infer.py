@@ -65,6 +65,8 @@ def test_infer_argument_validation() -> None:
         collect_dqn(engine, 8, [q_net(0, 2)])
     with pytest.raises(TypeError, match="callable or a sequence"):
         engine.collect(8, 42)
+    with pytest.raises(TypeError, match="element 1 is not callable"):
+        engine.collect(8, [q_net(0, 2), 42])
 
 
 def test_search_families_reject_the_sequence_form() -> None:
@@ -98,6 +100,8 @@ def test_weights_updated_accepts_a_player() -> None:
     engine.weights_updated(player=1)
     with pytest.raises(ValueError, match="out of range"):
         engine.weights_updated(2)
+    with pytest.raises(ValueError, match="out of range"):
+        engine.weights_updated(2**64 - 1)  # p + 1 must not wrap past the range check
 
 
 def test_engine_infer_shapes_are_validated_exactly() -> None:
@@ -119,7 +123,9 @@ def test_stream_validation_errors_do_not_forfeit_the_engine() -> None:
     engine = kuhn_engine()
     with pytest.raises(ValueError, match="expected 2 per-player"):
         engine.collect_stream(8, [q_net(0, 2)], depth=1)
-    batch = collect_dqn(engine, 8, q_net(0, 2))  # the engine survives the rejection
+    with pytest.raises(TypeError, match="element 1 is not callable"):
+        engine.collect_stream(8, [q_net(0, 2), 42], depth=1)
+    batch = collect_dqn(engine, 8, q_net(0, 2))  # the engine survives both rejections
     assert batch.obs.shape[0] >= 8
 
 

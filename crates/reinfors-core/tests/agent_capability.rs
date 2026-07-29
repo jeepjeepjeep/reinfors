@@ -446,11 +446,12 @@ fn learn_players_filters_value_only_perspectives() {
     let value_only = records.iter().filter(|r| r.3 == 0.0).count();
     assert!(movers >= 2);
     assert_eq!(movers + value_only, records.len());
-    assert_eq!(
-        value_only,
-        movers * 2,
-        "frozen players leave no value-only rows"
-    );
+    assert_eq!(value_only, movers * 2);
+    // Enc writes the encoded-for agent into obs[1]: the unfiltered output would also have a 2:1
+    // value-only ratio, but its records would carry all three perspectives, not only player 0's.
+    for r in &records {
+        assert_eq!(r.0[1], 0.0, "every record is player 0's perspective");
+    }
 }
 
 /// RoundRobin with a terminal payoff vector [1, 2, 3]: with gamma 1, EVERY record's z for agent
