@@ -296,7 +296,7 @@ where
     // (moved in, so the binding hands it to numpy with no copy); values come back as one contiguous
     // row-major `[n_rows, K, A]` buffer (K inferred from its length). Flat on both sides avoids the
     // per-row obs clones and the per-leaf nested-`Vec` allocations the boundary would otherwise incur.
-    F: FnMut(Vec<f32>, usize) -> Vec<f64>,
+    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     G::State: Send,
 {
     assert!(
@@ -370,7 +370,9 @@ where
             span_by_idx[si] = Some((row_start, s.opp_obs.len()));
         }
         if n_rows > 0 {
-            let q = infer(obs_flat, n_rows); // serial: the (GPU/Python) network forward, flat in/out
+            // Row player 0 (untagged): pooled search rows run Shared-mode only until the
+            // follow-up threads per-player perspectives through this gather.
+            let q = infer(0, obs_flat, n_rows); // serial: the (GPU/Python) network forward, flat in/out
             let n_heads = q.len() / (n_rows * a);
             // Evaluate phase: each active search resolves its own row span of the batch.
             for_each_search(&mut searches, parallel, |si, s| {
@@ -1111,8 +1113,8 @@ mod tests {
     }
 
     // Two-head infer, deterministic in the position; counts its calls so pooling can be observed.
-    fn counting_infer(calls: &Cell<usize>) -> impl FnMut(Vec<f32>, usize) -> Vec<f64> + '_ {
-        move |obs: Vec<f32>, n: usize| {
+    fn counting_infer(calls: &Cell<usize>) -> impl FnMut(usize, Vec<f32>, usize) -> Vec<f64> + '_ {
+        move |_p: usize, obs: Vec<f32>, n: usize| {
             calls.set(calls.get() + 1);
             let dim = obs.len() / n;
             let mut out = Vec::with_capacity(n * 2 * 2);
@@ -1186,7 +1188,7 @@ mod tests {
         //   action 0 -> child pos 0, reward 0;  action 1 -> child pos 1, reward 1.
         //   Q(pos) = [pos*10, pos*10 + 1]  ->  max Q(0) = 1, max Q(1) = 11.
         //   root[0][0] = 0 + 0.9*1 = 0.9;   root[0][1] = 1 + 0.9*11 = 10.9.
-        let infer = |obs: Vec<f32>, n: usize| {
+        let infer = |_p: usize, obs: Vec<f32>, n: usize| {
             let dim = obs.len() / n;
             let mut out = Vec::with_capacity(n * 2);
             for i in 0..n {
@@ -1314,7 +1316,7 @@ mod chance_mode_tests {
             chance,
             opponent: Opponent::Uniform,
         };
-        let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2]; // K=1 zeros
+        let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2]; // K=1 zeros
         search_many(
             &Risky,
             &Enc,
@@ -1486,7 +1488,7 @@ mod frame_tests {
             },
         };
         let run = |swapped: bool| {
-            let infer = move |obs: Vec<f32>, n: usize| -> Vec<f64> {
+            let infer = move |_p: usize, obs: Vec<f32>, n: usize| -> Vec<f64> {
                 (0..n)
                     .flat_map(|i| {
                         let id = f64::from(obs[i * 2]);
@@ -1610,7 +1612,7 @@ mod n_player_tests {
             vec![(SimSt(false), 0)],
             false,
             0,
-            |_obs: Vec<f32>, n: usize| vec![0.0; n * 2],
+            |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2],
         );
         let values = &results[0].0;
         for head in values {
@@ -1717,7 +1719,7 @@ mod n_player_tests {
             vec![(ChainSt { phase: 0, a1: 0 }, 0)],
             false,
             0,
-            |_obs: Vec<f32>, n: usize| vec![0.0; n * 2],
+            |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2],
         );
         let values = &results[0].0;
         for head in values {
@@ -1744,7 +1746,7 @@ mod n_player_tests {
             vec![(ChainSt { phase: 0, a1: 0 }, 0)],
             false,
             0,
-            |obs: Vec<f32>, n: usize| {
+            |_p: usize, obs: Vec<f32>, n: usize| {
                 let mut out = Vec::with_capacity(n * 2);
                 for r in 0..n {
                     let agent = obs[r * 3 + 1];
@@ -1854,7 +1856,7 @@ mod joint_fan_bound_tests {
             vec![(WSt(false), 0)],
             false,
             0,
-            |_obs: Vec<f32>, n: usize| vec![0.0; n * 2],
+            |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2],
         );
     }
 }

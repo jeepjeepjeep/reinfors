@@ -338,7 +338,7 @@ mod tests {
     }
 
     // K=2 heads, A=7, zero leaf values — so the only signal is the terminal win/loss reward.
-    fn zero_infer(_obs: Vec<f32>, n: usize) -> Vec<f64> {
+    fn zero_infer(_p: usize, _obs: Vec<f32>, n: usize) -> Vec<f64> {
         vec![0.0; n * 2 * 7]
     }
 
@@ -379,7 +379,7 @@ mod tests {
                 opponent,
             };
             let run = |phantom: f64| {
-                let mut infer = move |_obs: Vec<f32>, n: usize| -> Vec<f64> {
+                let mut infer = move |_p: usize, _obs: Vec<f32>, n: usize| -> Vec<f64> {
                     let mut out = Vec::with_capacity(n * 7);
                     for _ in 0..n {
                         out.push(phantom); // column 0 is full (illegal) throughout this subtree
@@ -540,7 +540,7 @@ mod tests {
             learner,
             params,
         );
-        let (records, stats) = engine.collect(60, zero_infer);
+        let (records, stats) = engine.collect(60, |o, n| zero_infer(0, o, n));
         assert!(records.len() >= 60);
         for (obs, tgt, mask) in &records {
             assert_eq!(obs.len(), 2 * ROWS * COLS);

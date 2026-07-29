@@ -361,8 +361,12 @@ mod dispatch_tests {
     fn identity_path_pays_one_table_build_not_per_scalar_dispatch() {
         let enc = CountingEnc(AtomicUsize::new(0));
         let policy = EpsilonGreedyQ::new(2, 0.0); // K = 2
-        let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2 * 3];
-        let mut eval = Evaluator::new(&mut infer, None);
+        let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2 * 3];
+        let mut eval = Evaluator::new(
+            &mut infer,
+            crate::rollout::evaluator::InferMode::Shared,
+            None,
+        );
         let requests = vec![(St, 0), (St, 0), (St, 0), (St, 0)]; // n = 4
         let evals = policy.evaluate(&SparseShot, &enc, &NoReward, requests, 0, false, &mut eval);
         assert_eq!(evals.len(), 4);

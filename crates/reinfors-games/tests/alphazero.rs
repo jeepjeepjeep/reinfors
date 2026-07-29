@@ -43,13 +43,13 @@ fn reward() -> Connect4Reward {
 
 /// Uniform-logits, zero-value evaluator: rows of `A` equal logits + value 0 — PUCT's analogue of the
 /// UCT suite's zeros net (all signal from terminals).
-fn uniform_infer(_obs: Vec<f32>, n: usize) -> Vec<f64> {
+fn uniform_infer(_p: usize, _obs: Vec<f32>, n: usize) -> Vec<f64> {
     vec![0.0; n * 8] // A+1 = 8
 }
 
 /// An evaluator whose logits heavily favor one column, value 0 — for prior-steering checks.
-fn sharp_infer(col: usize) -> impl FnMut(Vec<f32>, usize) -> Vec<f64> {
-    move |_obs, n| {
+fn sharp_infer(col: usize) -> impl FnMut(usize, Vec<f32>, usize) -> Vec<f64> {
+    move |_p, _obs, n| {
         let mut out = vec![0.0; n * 8];
         for row in 0..n {
             out[row * 8 + col] = 6.0; // softmax -> ~0.87 on `col`
@@ -87,7 +87,7 @@ fn finds_the_forced_connect4_win() {
         &cfg(96, 0.0),
         vec![(forced_win_state(), 0)],
         7,
-        &mut Evaluator::new(&mut uniform_infer, None),
+        &mut Evaluator::new(&mut uniform_infer, reinfors_core::InferMode::Shared, None),
     );
     assert_eq!(
         argmax(&evals[0].visits),
@@ -110,7 +110,11 @@ fn priors_steer_visits() {
             &cfg(32, 0.0),
             vec![(state.clone(), 0)],
             7,
-            &mut Evaluator::new(&mut sharp_infer(col), None),
+            &mut Evaluator::new(
+                &mut sharp_infer(col),
+                reinfors_core::InferMode::Shared,
+                None,
+            ),
         );
         assert_eq!(
             argmax(&evals[0].visits),
@@ -132,7 +136,7 @@ fn search_is_deterministic_per_seed_and_noise_diversifies_across_seeds() {
             &cfg(48, eps),
             vec![(state.clone(), 0)],
             seed,
-            &mut Evaluator::new(&mut uniform_infer, None),
+            &mut Evaluator::new(&mut uniform_infer, reinfors_core::InferMode::Shared, None),
         )
         .remove(0)
         .visits
@@ -161,7 +165,7 @@ fn pooled_trees_draw_independent_noise() {
         &cfg(48, 0.9),
         vec![(state.clone(), 0), (state, 0)],
         11,
-        &mut Evaluator::new(&mut uniform_infer, None),
+        &mut Evaluator::new(&mut uniform_infer, reinfors_core::InferMode::Shared, None),
     );
     assert_ne!(
         evals[0].visits, evals[1].visits,
@@ -194,7 +198,7 @@ fn searches_simultaneous_stochastic_snake() {
         survival: 0.0,
     };
     let run = |seed: u64| {
-        let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 4]; // A=3 logits + value
+        let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 4]; // A=3 logits + value
         alphazero_many(
             &snake,
             &EgocentricSnake { grid_size: 8 },
@@ -214,7 +218,7 @@ fn searches_simultaneous_stochastic_snake() {
             },
             vec![(state.clone(), 0), (state.clone(), 1)],
             seed,
-            &mut Evaluator::new(&mut infer, None),
+            &mut Evaluator::new(&mut infer, reinfors_core::InferMode::Shared, None),
         )
     };
     let evals = run(7);
@@ -242,7 +246,7 @@ fn infer_cache_is_behavior_identical_and_hits() {
     let state = game.initial_state(&mut NoRng);
     // Repeated identical requests in one pool: heavy transposition + within-batch dedup territory.
     let requests: Vec<_> = (0..4).map(|_| (state.clone(), 0)).collect();
-    let run = |cache: Option<&mut InferCache>| {
+    let run = |cache: Option<&mut [InferCache]>| {
         alphazero_many(
             &game,
             &Connect4Planes,
@@ -250,13 +254,13 @@ fn infer_cache_is_behavior_identical_and_hits() {
             &cfg(48, 0.5),
             requests.clone(),
             9,
-            &mut Evaluator::new(&mut uniform_infer, cache),
+            &mut Evaluator::new(&mut uniform_infer, reinfors_core::InferMode::Shared, cache),
         )
     };
     let plain = run(None);
     let generation = Arc::new(AtomicU64::new(0));
     let mut cache = InferCache::new(1 << 16, generation);
-    let cached = run(Some(&mut cache));
+    let cached = run(Some(std::slice::from_mut(&mut cache)));
     for (p, c) in plain.iter().zip(&cached) {
         assert_eq!(p.visits, c.visits, "cache changed search behavior (visits)");
         assert_eq!(p.values, c.values, "cache changed search behavior (values)");
@@ -267,7 +271,7 @@ fn infer_cache_is_behavior_identical_and_hits() {
     );
     // Second search over the same position reuses across calls too.
     let before = cache.hits;
-    let again = run(Some(&mut cache));
+    let again = run(Some(std::slice::from_mut(&mut cache)));
     for (p, c) in plain.iter().zip(&again) {
         assert_eq!(p.visits, c.visits);
     }
@@ -284,7 +288,7 @@ fn searches_backgammon_dice_chance() {
     let state = g.initial_state(&mut NoRng);
     let reward = BackgammonReward::default();
     let run = |seed: u64| {
-        let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 1353]; // A logits + value
+        let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 1353]; // A logits + value
         alphazero_many(
             &g,
             &BackgammonTesauro,
@@ -304,7 +308,7 @@ fn searches_backgammon_dice_chance() {
             },
             vec![(state.clone(), 0)],
             seed,
-            &mut Evaluator::new(&mut infer, None),
+            &mut Evaluator::new(&mut infer, reinfors_core::InferMode::Shared, None),
         )
         .remove(0)
     };

@@ -13,6 +13,10 @@ use crate::policies::modelfree::epsilon_greedy_q::QEvaluation;
 /// emits raw transitions rather than precomputed targets. `terminal` is true only at a real terminal
 /// (a horizon truncation keeps it false, so the learner bootstraps from `next_obs`).
 pub struct DqnRecord {
+    /// The player whose decision this transition is — per-player training routes each
+    /// player's records to its own network's buffer (a record is off-policy data OF the
+    /// network that generated it).
+    pub player: usize,
     pub obs: Vec<f32>,
     pub action: usize,
     pub reward: f64,
@@ -90,6 +94,7 @@ impl Learner<QEvaluation> for Dqn {
                     None => (s.next_obs.clone(), to_head(&s.next_legal)),
                 };
                 DqnRecord {
+                    player: agent,
                     obs: s.obs.clone(),
                     action: view.head_index(s.action, agent),
                     reward: s.reward,

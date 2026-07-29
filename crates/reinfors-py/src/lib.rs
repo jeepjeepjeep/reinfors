@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use reinfors_core::{
     ActBy, AlphaZero, AlphaZeroConfig, AlphaZeroLearner, AlphaZeroRecord, AlwaysInitialState,
     ChanceMode, Dqn, DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game, InferCache,
-    Learner, Mcts, MctsConfig, NoiseScope, Opponent, Policy, ReachedStateBuffer, Reward,
+    InferMode, Learner, Mcts, MctsConfig, NoiseScope, Opponent, Policy, ReachedStateBuffer, Reward,
     SearchConfig, SelectiveExpectimax, Space, StartDistribution, StateCodec, StateEncoder,
     TreeStrap, TreeStrapRecord,
 };
@@ -87,13 +87,16 @@ fn validate_search_params(
 /// wrong-K output from this very fallback.
 fn infer_closure<'a, 'py>(
     py: Python<'py>,
-    infer: &'a Bound<'py, PyAny>,
+    callbacks: &'a [Py<PyAny>],
     dim: usize,
     action_count: usize,
     expected_heads: Option<usize>,
     callback_err: &'a mut Option<PyErr>,
-) -> impl FnMut(Vec<f32>, usize) -> Vec<f64> + 'a {
-    move |obs_flat: Vec<f32>, n: usize| -> Vec<f64> {
+) -> impl FnMut(usize, Vec<f32>, usize) -> Vec<f64> + 'a
+where
+    'py: 'a,
+{
+    move |player: usize, obs_flat: Vec<f32>, n: usize| -> Vec<f64> {
         // Fallback rows keep the configured head count: a mid-collect error/drain must not mix
         // K-shaped and K=1 evaluations in one trajectory (the episode blend indexes per head).
         let fallback = n * expected_heads.unwrap_or(1) * action_count;
@@ -103,26 +106,30 @@ fn infer_closure<'a, 'py>(
         let arr = Array2::from_shape_vec((n, dim), obs_flat)
             .expect("obs batch shape")
             .into_pyarray(py);
+        // Shared form = one callback for every player; per-player form = one per player.
+        let infer = callbacks[player.min(callbacks.len() - 1)].bind(py);
         match infer
             .call1((arr,))
             .and_then(|r| r.extract::<PyReadonlyArray3<f64>>())
         {
             Ok(out) => {
-                let flat: Vec<f64> = out.as_array().iter().copied().collect(); // flat [n, K, A]
-                if let Some(k) = expected_heads {
-                    if n > 0 && flat.len() != n * k * action_count {
-                        callback_err.get_or_insert_with(|| {
-                            pyo3::exceptions::PyValueError::new_err(format!(
-                                "infer returned {} values for {n} rows; expected n_heads ({k}) x \
-                                 {action_count} actions per row — the network's head count must \
-                                 equal n_heads",
-                                flat.len()
-                            ))
-                        });
-                        return vec![0.0; fallback];
-                    }
+                // EXACT shape, not just element count: a transposed return has the right
+                // length and would be flattened into garbage evaluations.
+                let shape = out.as_array().shape().to_vec();
+                let bad = shape[0] != n
+                    || shape[2] != action_count
+                    || expected_heads.is_some_and(|k| shape[1] != k);
+                if n > 0 && bad {
+                    callback_err.get_or_insert_with(|| {
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "infer returned shape {shape:?} for {n} rows; expected ({n}, \
+                             n_heads{}, {action_count})",
+                            expected_heads.map_or(String::new(), |k| format!(" = {k}"))
+                        ))
+                    });
+                    return vec![0.0; fallback];
                 }
-                flat
+                out.as_array().iter().copied().collect() // flat [n, K, A]
             }
             Err(e) => {
                 *callback_err = Some(e);
@@ -139,12 +146,15 @@ fn infer_closure<'a, 'py>(
 /// latched and neutral rows (uniform logits, value 0) unwind the in-flight search cheaply.
 fn az_infer_closure<'a, 'py>(
     py: Python<'py>,
-    infer: &'a Bound<'py, PyAny>,
+    callbacks: &'a [Py<PyAny>],
     dim: usize,
     action_count: usize,
     callback_err: &'a mut Option<PyErr>,
-) -> impl FnMut(Vec<f32>, usize) -> Vec<f64> + 'a {
-    move |obs_flat: Vec<f32>, n: usize| -> Vec<f64> {
+) -> impl FnMut(usize, Vec<f32>, usize) -> Vec<f64> + 'a
+where
+    'py: 'a,
+{
+    move |player: usize, obs_flat: Vec<f32>, n: usize| -> Vec<f64> {
         let stride = action_count + 1;
         if callback_err.is_some() {
             return vec![0.0; n * stride];
@@ -152,6 +162,7 @@ fn az_infer_closure<'a, 'py>(
         let arr = Array2::from_shape_vec((n, dim), obs_flat)
             .expect("obs batch shape")
             .into_pyarray(py);
+        let infer = callbacks[player.min(callbacks.len() - 1)].bind(py);
         let extracted = infer.call1((arr,)).and_then(|r| {
             let (logits, values) =
                 r.extract::<(numpy::PyReadonlyArray2<f64>, numpy::PyReadonlyArray1<f64>)>()?;
@@ -190,15 +201,15 @@ fn az_infer_closure<'a, 'py>(
 /// callback itself. A raised `stop` flag short-circuits to neutral rows *without* touching Python, so
 /// a stopping stream drains its in-flight collect GIL-free.
 fn infer_closure_gil<'a>(
-    infer: &'a Py<PyAny>,
+    callbacks: &'a [Py<PyAny>],
     dim: usize,
     action_count: usize,
     expected_heads: usize,
     layout: InferLayout,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     callback_err: std::sync::Arc<std::sync::Mutex<Option<PyErr>>>,
-) -> impl FnMut(Vec<f32>, usize) -> Vec<f64> + 'a {
-    move |obs_flat: Vec<f32>, n: usize| -> Vec<f64> {
+) -> impl FnMut(usize, Vec<f32>, usize) -> Vec<f64> + 'a {
+    move |player: usize, obs_flat: Vec<f32>, n: usize| -> Vec<f64> {
         let fallback_len = match layout {
             InferLayout::ValueHeads => n * expected_heads * action_count,
             InferLayout::PolicyValue => n * (action_count + 1),
@@ -210,22 +221,21 @@ fn infer_closure_gil<'a>(
         Python::with_gil(|py| {
             let mut err = callback_err.lock().unwrap().take();
             let out = {
-                let bound = infer.bind(py);
                 match layout {
                     InferLayout::ValueHeads => {
                         let mut f = infer_closure(
                             py,
-                            bound,
+                            callbacks,
                             dim,
                             action_count,
                             Some(expected_heads),
                             &mut err,
                         );
-                        f(obs_flat, n)
+                        f(player, obs_flat, n)
                     }
                     InferLayout::PolicyValue => {
-                        let mut f = az_infer_closure(py, bound, dim, action_count, &mut err);
-                        f(obs_flat, n)
+                        let mut f = az_infer_closure(py, callbacks, dim, action_count, &mut err);
+                        f(player, obs_flat, n)
                     }
                 }
             };
@@ -634,13 +644,16 @@ struct PyEngine {
     // Weights-version counter shared with the infer cache (if enabled). Held here — OUTSIDE the
     // movable engine — so `weights_updated()` works from the consumer thread while a stream's
     // worker owns the engine.
-    weights_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    weights_generations: Vec<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    /// The USER-FACING weights version: +1 per `weights_updated` call of any form (the slot
+    /// generations above are cache plumbing — one per network — and bump differently).
+    weights_version: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[pymethods]
 impl PyEngine {
     #[new]
-    #[pyo3(signature = (game, reward, policy, learner, n_games, seed=0, start_buffer=false, start_buffer_capacity=1000, p_fresh=0.05, infer_cache=0))]
+    #[pyo3(signature = (game, reward, policy, learner, n_games, seed=0, start_buffer=false, start_buffer_capacity=1000, p_fresh=0.05, infer_cache=0, learn_players=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         game: GameHandle,
@@ -653,6 +666,7 @@ impl PyEngine {
         start_buffer_capacity: usize,
         p_fresh: f64,
         infer_cache: usize,
+        learn_players: Option<Vec<usize>>,
     ) -> PyResult<Self> {
         if n_games < 1 {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -707,12 +721,23 @@ impl PyEngine {
                     "p_fresh": sb.p_fresh,
                 })),
                 "infer_cache": infer_cache,
+                "learn_players": learn_players,
             },
         });
         let engine_params = EngineParams { n_games, seed };
-        let weights_generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let cache =
-            (infer_cache > 0).then(|| InferCache::new(infer_cache, weights_generation.clone()));
+        // One weights generation per cache slot: slot 0 = the shared network, slots 1..=N the
+        // per-player networks (weights_updated(player) bumps one; the plain call bumps all).
+        let num_agents = game.spec.num_agents();
+        let weights_generations: Vec<std::sync::Arc<std::sync::atomic::AtomicU64>> = (0
+            ..=num_agents)
+            .map(|_| std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)))
+            .collect();
+        let caches = (infer_cache > 0).then(|| {
+            weights_generations
+                .iter()
+                .map(|generation| InferCache::new(infer_cache, generation.clone()))
+                .collect::<Vec<_>>()
+        });
         let snapshot_fp = {
             let mut stripped = config.clone();
             stripped
@@ -730,10 +755,12 @@ impl PyEngine {
                 learner.spec,
                 engine_params,
                 start_buffer,
-                cache,
+                caches,
+                learn_players,
             )?),
             config,
-            weights_generation,
+            weights_generations,
+            weights_version: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -743,9 +770,28 @@ impl PyEngine {
     /// a `collect_stream` worker holds the engine. A no-op when the cache is disabled. Never calling
     /// it asserts the weights never changed — correct, not stale. Future weight-dependent features
     /// hang off the same signal.
-    fn weights_updated(&self) {
-        self.weights_generation
+    #[pyo3(signature = (player=None))]
+    fn weights_updated(&self, player: Option<usize>) -> PyResult<()> {
+        match player {
+            None => {
+                for generation in &self.weights_generations {
+                    generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            Some(p) => {
+                // `>= len - 1`, not `p + 1 >= len`: p = usize::MAX must not wrap past the check.
+                if p >= self.weights_generations.len() - 1 {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "player {p} out of range (this game has {} players)",
+                        self.weights_generations.len() - 1
+                    )));
+                }
+                self.weights_generations[p + 1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        self.weights_version
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 
     /// The engine's immutable composition, fully resolved (defaults included) as a
@@ -774,7 +820,7 @@ impl PyEngine {
             schema: ENGINE_SNAPSHOT_SCHEMA,
             fingerprint: self.snapshot_fp.clone(),
             weights_generation: self
-                .weights_generation
+                .weights_version
                 .load(std::sync::atomic::Ordering::Relaxed),
             policy_version,
             payload: engine.snapshot_payload()?,
@@ -813,10 +859,15 @@ impl PyEngine {
         }
         let engine = self.inner.as_mut().ok_or_else(stream_active_err)?;
         engine.restore_payload(&snapshot.payload)?;
-        self.weights_generation.store(
+        self.weights_version.store(
             snapshot.weights_generation,
             std::sync::atomic::Ordering::Relaxed,
         );
+        // Cache-slot generations only need to CHANGE (the payload restore force-clears the
+        // caches; monotonicity keeps future bumps effective).
+        for generation in &self.weights_generations {
+            generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         Ok(())
     }
 
@@ -859,6 +910,17 @@ impl PyEngine {
                 "depth must be >= 1, or None for unbounded",
             ));
         }
+        // Validate the callback form BEFORE taking the engine: a rejected input must leave the
+        // engine in place, not permanently forfeit it.
+        let (infer, mode) = {
+            let borrow = slf.borrow();
+            let (num_agents, per_player_ok) = borrow
+                .inner
+                .as_ref()
+                .ok_or_else(stream_active_err)?
+                .routing();
+            Python::with_gil(|py| engine_callbacks(infer.bind(py), num_agents, per_player_ok))?
+        };
         let mut engine = slf
             .borrow_mut()
             .inner
@@ -881,7 +943,7 @@ impl PyEngine {
                     {
                         break;
                     }
-                    let result = engine.collect_thunk(collect_size, &infer, stop.clone());
+                    let result = engine.collect_thunk(collect_size, &infer, mode, stop.clone());
                     let fatal = result.is_err();
                     if tx.send(result).is_err() {
                         break; // consumer dropped the receiver (stop) — engine returns via join
@@ -1159,9 +1221,14 @@ trait ErasedEngine: Send + Sync {
     fn collect_thunk(
         &mut self,
         n_records: usize,
-        infer: &Py<PyAny>,
+        infer: &[Py<PyAny>],
+        mode: InferMode,
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> PyResult<BatchThunk>;
+
+    /// Routing metadata for `collect_stream` (which parses the polymorphic `infer` argument
+    /// before handing the callbacks to the worker thread).
+    fn routing(&self) -> (usize, bool); // (num_agents, per_player_ok)
 }
 
 /// Marshal a learner's records (with the rollout telemetry) into the Python record batch. One impl per
@@ -1196,6 +1263,10 @@ struct TreeStrapBatch {
 struct DqnBatch {
     #[pyo3(get)]
     obs: Py<PyArray2<f32>>, // (M, dim)
+    /// The player whose decision each transition is — per-player training routes each
+    /// player's records to its own network's buffer.
+    #[pyo3(get)]
+    players: Py<PyArray1<i64>>, // (M,)
     #[pyo3(get)]
     actions: Py<PyArray1<i64>>, // (M,)
     #[pyo3(get)]
@@ -1420,6 +1491,7 @@ impl RecordBatch for DqnRecord {
         let mut next_flat: Vec<f32> = Vec::with_capacity(m * dim);
         let mut mask_flat: Vec<f32> = Vec::with_capacity(m * k);
         let mut actions: Vec<i64> = Vec::with_capacity(m);
+        let mut players: Vec<i64> = Vec::with_capacity(m);
         let mut rewards: Vec<f64> = Vec::with_capacity(m);
         let mut dones: Vec<bool> = Vec::with_capacity(m);
         let mut legal_ids: Vec<i64> = Vec::new();
@@ -1437,6 +1509,7 @@ impl RecordBatch for DqnRecord {
             next_legal_ids.extend(t.next_legal.iter().map(|&a| a as i64));
             next_legal_offsets.push(next_legal_ids.len() as i64);
             actions.push(t.action as i64);
+            players.push(t.player as i64);
             rewards.push(t.reward);
             dones.push(t.terminal);
         }
@@ -1453,6 +1526,7 @@ impl RecordBatch for DqnRecord {
             py,
             DqnBatch {
                 obs: obs_arr.unbind(),
+                players: players.into_pyarray(py).unbind(),
                 actions: actions.into_pyarray(py).unbind(),
                 rewards: rewards.into_pyarray(py).unbind(),
                 next_obs: next_arr.unbind(),
@@ -1481,6 +1555,45 @@ enum InferLayout {
 /// Shared rollout: drive any `Engine<G, P, L>` for `n_records`, returning the records and the (uniform)
 /// telemetry dict. Search aggregates are zero for a search-less policy (its `fold_telemetry` is a no-op).
 #[allow(clippy::too_many_arguments)]
+/// Resolve the polymorphic `infer` argument: a bare callable serves every player (the shared
+/// network — today's behavior); a sequence supplies one callable per player. Families that
+/// have not grown per-player routing yet reject the sequence form with a typed error.
+fn engine_callbacks(
+    infer: &Bound<'_, PyAny>,
+    num_agents: usize,
+    per_player_ok: bool,
+) -> PyResult<(Vec<Py<PyAny>>, InferMode)> {
+    if infer.is_callable() {
+        return Ok((vec![infer.clone().unbind()], InferMode::Shared));
+    }
+    let callbacks: Vec<Py<PyAny>> = infer.extract().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(
+            "infer must be a callable or a sequence of per-player callables",
+        )
+    })?;
+    if !per_player_ok {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "per-player infer is supported by the DQN family; the search families' pooled \
+             paths land in a follow-up",
+        ));
+    }
+    if callbacks.len() != num_agents {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "expected {num_agents} per-player infer callables (one per player), got {}",
+            callbacks.len()
+        )));
+    }
+    for (player, cb) in callbacks.iter().enumerate() {
+        if !cb.bind(infer.py()).is_callable() {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "per-player infer element {player} is not callable"
+            )));
+        }
+    }
+    Ok((callbacks, InferMode::PerPlayer))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_collect<'py, G, P, L>(
     inner: &mut Engine<G, P, L>,
     py: Python<'py>,
@@ -1490,6 +1603,8 @@ fn run_collect<'py, G, P, L>(
     action_count: usize,
     n_heads: usize,
     layout: InferLayout,
+    num_agents: usize,
+    per_player_ok: bool,
 ) -> PyResult<(Vec<L::Record>, Bound<'py, PyDict>)>
 where
     G: Game + Sync,
@@ -1497,22 +1612,24 @@ where
     P: Policy,
     L: Learner<P::Evaluation>,
 {
+    let (callbacks, mode) = engine_callbacks(infer, num_agents, per_player_ok)?;
     let mut callback_err: Option<PyErr> = None;
     let (records, stats) = match layout {
         InferLayout::ValueHeads => {
             let mut infer_fn = infer_closure(
                 py,
-                infer,
+                &callbacks,
                 dim,
                 action_count,
                 Some(n_heads),
                 &mut callback_err,
             );
-            inner.collect(n_records, &mut infer_fn)
+            inner.collect_routed(n_records, mode, &mut infer_fn)
         }
         InferLayout::PolicyValue => {
-            let mut infer_fn = az_infer_closure(py, infer, dim, action_count, &mut callback_err);
-            inner.collect(n_records, &mut infer_fn)
+            let mut infer_fn =
+                az_infer_closure(py, &callbacks, dim, action_count, &mut callback_err);
+            inner.collect_routed(n_records, mode, &mut infer_fn)
         }
     };
     if let Some(e) = callback_err {
@@ -1579,6 +1696,10 @@ struct EngineImpl<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     action_count: usize,
     n_heads: usize,
     layout: InferLayout,
+    num_agents: usize,
+    /// Whether this family's evaluation paths route per player (the DQN family in v1; the
+    /// search families' pooled rows are the follow-up).
+    per_player_ok: bool,
 }
 
 impl<G, P, L> ErasedEngine for EngineImpl<G, P, L>
@@ -1612,7 +1733,8 @@ where
     fn collect_thunk(
         &mut self,
         n_records: usize,
-        infer: &Py<PyAny>,
+        infer: &[Py<PyAny>],
+        mode: InferMode,
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> PyResult<BatchThunk> {
         let callback_err = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -1625,7 +1747,7 @@ where
             stop,
             callback_err.clone(),
         );
-        let (records, stats) = self.inner.collect(n_records, &mut infer_fn);
+        let (records, stats) = self.inner.collect_routed(n_records, mode, &mut infer_fn);
         if let Some(e) = callback_err.lock().unwrap().take() {
             return Err(e);
         }
@@ -1651,8 +1773,14 @@ where
             self.action_count,
             self.n_heads,
             self.layout,
+            self.num_agents,
+            self.per_player_ok,
         )?;
         L::Record::into_py_batch(records, py, self.dim, self.n_heads, telemetry)
+    }
+
+    fn routing(&self) -> (usize, bool) {
+        (self.num_agents, self.per_player_ok)
     }
 }
 
@@ -1693,6 +1821,20 @@ enum GameSpec {
 }
 
 impl GameSpec {
+    /// The game's player count — cache-slot and per-player-callback sizing at construction.
+    fn num_agents(&self) -> usize {
+        match *self {
+            GameSpec::Snake { num_snakes, .. } => num_snakes,
+            GameSpec::TexasHoldem { num_players, .. } => num_players,
+            GameSpec::Connect4
+            | GameSpec::Chess { .. }
+            | GameSpec::Backgammon { .. }
+            | GameSpec::KuhnPoker
+            | GameSpec::LeducPoker => 2,
+            GameSpec::GridWorld { .. } => 1,
+        }
+    }
+
     /// The game's `(observation, action)` spaces — builds the concrete game and reads the trait
     /// defaults. Lets a caller size a network from a handle (`game.observation_space()`) without
     /// hard-coding any game's dimensions.
@@ -2052,7 +2194,8 @@ fn build_for_game<G: Game + Send + Sync + 'static>(
     policy: PolicySpec,
     learner: LearnerSpec,
     engine_params: EngineParams,
-    infer_cache: Option<InferCache>,
+    infer_caches: Option<Vec<InferCache>>,
+    learn_players: Option<Vec<usize>>,
 ) -> PyResult<Box<dyn ErasedEngine>>
 where
     G::State: Send + Sync,
@@ -2060,6 +2203,19 @@ where
     let (c, h, w) = enc.obs_shape();
     let dim = c * h * w;
     let action_count = game.action_count();
+    let num_agents = game.num_agents();
+    if let Some(lp) = &learn_players {
+        if lp.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "learn_players must name at least one player",
+            ));
+        }
+        if let Some(&bad) = lp.iter().find(|&&p| p >= num_agents) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "learn player {bad} out of range (this game has {num_agents} players)"
+            )));
+        }
+    }
     match (policy, learner) {
         (
             PolicySpec::SelectiveExpectimax {
@@ -2105,8 +2261,11 @@ where
                 inner: {
                     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
                         .with_start_distribution(start_dist);
-                    if let Some(c) = infer_cache {
-                        e = e.with_infer_cache(c);
+                    if let Some(c) = infer_caches {
+                        e = e.with_infer_caches(c);
+                    }
+                    if let Some(lp) = learn_players {
+                        e = e.with_learn_players(&lp);
                     }
                     e
                 },
@@ -2114,6 +2273,8 @@ where
                 action_count,
                 n_heads,
                 layout: InferLayout::ValueHeads,
+                num_agents,
+                per_player_ok: false,
             }))
         }
         (
@@ -2173,8 +2334,11 @@ where
                 inner: {
                     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
                         .with_start_distribution(start_dist);
-                    if let Some(c) = infer_cache {
-                        e = e.with_infer_cache(c);
+                    if let Some(c) = infer_caches {
+                        e = e.with_infer_caches(c);
+                    }
+                    if let Some(lp) = learn_players {
+                        e = e.with_learn_players(&lp);
                     }
                     e
                 },
@@ -2182,6 +2346,8 @@ where
                 action_count,
                 n_heads: 1,
                 layout: InferLayout::ValueHeads,
+                num_agents,
+                per_player_ok: false,
             }))
         }
         (
@@ -2244,8 +2410,11 @@ where
                 inner: {
                     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
                         .with_start_distribution(start_dist);
-                    if let Some(c) = infer_cache {
-                        e = e.with_infer_cache(c);
+                    if let Some(c) = infer_caches {
+                        e = e.with_infer_caches(c);
+                    }
+                    if let Some(lp) = learn_players {
+                        e = e.with_learn_players(&lp);
                     }
                     e
                 },
@@ -2253,6 +2422,8 @@ where
                 action_count,
                 n_heads: 1, // single value head; π targets are (M, A), no bootstrap masks
                 layout: InferLayout::PolicyValue,
+                num_agents,
+                per_player_ok: false,
             }))
         }
         (PolicySpec::EpsilonGreedyQ { n_heads, epsilon }, LearnerSpec::Dqn { bootstrap_p }) => {
@@ -2269,8 +2440,11 @@ where
                 inner: {
                     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
                         .with_start_distribution(start_dist);
-                    if let Some(c) = infer_cache {
-                        e = e.with_infer_cache(c);
+                    if let Some(c) = infer_caches {
+                        e = e.with_infer_caches(c);
+                    }
+                    if let Some(lp) = learn_players {
+                        e = e.with_learn_players(&lp);
                     }
                     e
                 },
@@ -2278,6 +2452,8 @@ where
                 action_count,
                 n_heads,
                 layout: InferLayout::ValueHeads,
+                num_agents,
+                per_player_ok: true, // the model-free family routes per player
             }))
         }
         _ => Err(pyo3::exceptions::PyValueError::new_err(
@@ -2297,6 +2473,7 @@ struct StartBufferConfig {
 /// Game axis: pick the concrete game from `GameSpec`, then dispatch to `build_for_game`. One arm per
 /// game; each instantly works with every family. The start distribution is wired here too, since only
 /// the snake arm has a cell key for the reached-state buffer (other games use `AlwaysInitialState`).
+#[allow(clippy::too_many_arguments)]
 fn build_engine(
     game: GameSpec,
     reward: Option<PyReward>,
@@ -2304,7 +2481,8 @@ fn build_engine(
     learner: LearnerSpec,
     engine_params: EngineParams,
     start_buffer: Option<StartBufferConfig>,
-    infer_cache: Option<InferCache>,
+    infer_caches: Option<Vec<InferCache>>,
+    learn_players: Option<Vec<usize>>,
 ) -> PyResult<Box<dyn ErasedEngine>> {
     let reward = build_reward(&game, reward)?;
     // The reached-state buffer needs a game-specific cell key; only snake supplies one in v1.
@@ -2359,7 +2537,8 @@ fn build_engine(
                 policy,
                 learner,
                 engine_params,
-                infer_cache,
+                infer_caches,
+                learn_players,
             )
         }
         (GameSpec::Connect4, RewardBox::Connect4(reward)) => build_for_game(
@@ -2371,7 +2550,8 @@ fn build_engine(
             policy,
             learner,
             engine_params,
-            infer_cache,
+            infer_caches,
+            learn_players,
         ),
         (GameSpec::Chess { max_ticks, encoder }, RewardBox::Chess(reward)) => {
             let (game, enc) = chess_parts(max_ticks, encoder);
@@ -2384,7 +2564,8 @@ fn build_engine(
                 policy,
                 learner,
                 engine_params,
-                infer_cache,
+                infer_caches,
+                learn_players,
             )
         }
         (GameSpec::Backgammon { max_ticks }, RewardBox::Backgammon(reward)) => build_for_game(
@@ -2396,7 +2577,8 @@ fn build_engine(
             policy,
             learner,
             engine_params,
-            infer_cache,
+            infer_caches,
+            learn_players,
         ),
         (
             GameSpec::TexasHoldem {
@@ -2425,7 +2607,8 @@ fn build_engine(
             policy,
             learner,
             engine_params,
-            infer_cache,
+            infer_caches,
+            learn_players,
         ),
         (GameSpec::KuhnPoker, RewardBox::Holdem(reward)) => build_for_game(
             KuhnPoker,
@@ -2436,7 +2619,8 @@ fn build_engine(
             policy,
             learner,
             engine_params,
-            infer_cache,
+            infer_caches,
+            learn_players,
         ),
         (GameSpec::LeducPoker, RewardBox::Holdem(reward)) => build_for_game(
             LeducPoker,
@@ -2447,7 +2631,8 @@ fn build_engine(
             policy,
             learner,
             engine_params,
-            infer_cache,
+            infer_caches,
+            learn_players,
         ),
         (
             GameSpec::GridWorld {
@@ -2473,7 +2658,8 @@ fn build_engine(
             policy,
             learner,
             engine_params,
-            infer_cache,
+            infer_caches,
+            learn_players,
         ),
         // `build_reward` returns the matching `RewardBox` arm for each game, so other pairings are unreachable.
         _ => unreachable!("build_reward returns the reward variant matching the game"),

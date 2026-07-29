@@ -291,6 +291,7 @@ class DqnBatch:
     `obs, actions, rewards, next_obs, dones, masks, telemetry = batch`."""
 
     obs: NDArray[np.float32]
+    players: NDArray[np.int64]
     actions: NDArray[np.int64]
     rewards: NDArray[np.float64]
     next_obs: NDArray[np.float32]
@@ -333,11 +334,14 @@ class Engine:
         # search, cleared when weights_updated() is called. Raises effective throughput in
         # transposition-rich games; behavior-identical given fixed weights.
         infer_cache: int = ...,
+        # Restrict training-record emission to these players (frozen opponents keep acting but
+        # leave no records). Default: all players learn; records carry their player either way.
+        learn_players: list[int] | None = ...,
     ) -> None: ...
     # Tell the engine the net's weights changed (call after every weight sync — e.g. right after
     # load_state_dict onto the collector net). Clears the infer cache at the next round boundary;
     # thread-safe, callable while a collect_stream is active; no-op when the cache is off.
-    def weights_updated(self) -> None: ...
+    def weights_updated(self, player: int | None = ...) -> None: ...
     # The fully resolved immutable composition (defaults included), JSON-compatible;
     # rf.engine_from_config(engine.resolved_config()) reconstructs an equivalent engine.
     def resolved_config(self) -> dict[str, Any]: ...

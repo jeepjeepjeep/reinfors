@@ -74,7 +74,7 @@ pub fn alphazero_many<G, F>(
 where
     G: Game + Sync,
     G::State: Send,
-    F: FnMut(Vec<f32>, usize) -> Vec<f64>,
+    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
 {
     let guidance = Guidance::Puct {
         c: cfg.c_puct,
@@ -155,7 +155,7 @@ impl Policy for AlphaZero {
     where
         G: Game + Sync,
         G::State: Send,
-        F: FnMut(Vec<f32>, usize) -> Vec<f64>,
+        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
         alphazero_many(game, enc, reward, &self.cfg, requests, seed, eval)
     }

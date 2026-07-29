@@ -256,7 +256,7 @@ mod tests {
     }
 
     // K=2 heads, A=4, leaf value 0 — so the only signal is the terminal goal reward.
-    fn zero_infer(_obs: Vec<f32>, n: usize) -> Vec<f64> {
+    fn zero_infer(_p: usize, _obs: Vec<f32>, n: usize) -> Vec<f64> {
         vec![0.0; n * 2 * 4]
     }
 
@@ -387,7 +387,7 @@ mod tests {
             learner,
             params,
         );
-        let (records, stats) = engine.collect(50, zero_infer);
+        let (records, stats) = engine.collect(50, |o, n| zero_infer(0, o, n));
         assert!(records.len() >= 50);
         for (obs, tgt, mask) in &records {
             assert_eq!(obs.len(), N_CHANNELS * 25);
@@ -420,7 +420,7 @@ mod tests {
             params,
         );
         let dim = N_CHANNELS * 25;
-        let (records, stats) = engine.collect(120, zero_infer);
+        let (records, stats) = engine.collect(120, |o, n| zero_infer(0, o, n));
         assert!(records.len() >= 120);
         for t in &records {
             assert_eq!(t.obs.len(), dim);

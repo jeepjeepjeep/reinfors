@@ -126,7 +126,7 @@ impl Policy for SelectiveExpectimax {
     where
         G: Game + Sync,
         G::State: Send,
-        F: FnMut(Vec<f32>, usize) -> Vec<f64>,
+        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
         // Root legal sets for acting (the search densifies its values over the full space).
         let legal: Vec<Vec<usize>> = requests
@@ -143,7 +143,9 @@ impl Policy for SelectiveExpectimax {
             requests,
             collect_interior,
             seed,
-            &mut |obs, n| eval.forward(obs, n),
+            // Row players are untagged (zeros): the search families run Shared-mode only —
+            // per-player routing for pooled search rows is the follow-up's work.
+            &mut |_p, obs, n: usize| eval.forward(&vec![0; n], obs, n),
         )
         .into_iter()
         .zip(legal)

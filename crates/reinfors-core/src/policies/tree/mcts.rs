@@ -1227,7 +1227,7 @@ pub fn mcts_many<G, F>(
 where
     G: Game + Sync,
     G::State: Send,
-    F: FnMut(Vec<f32>, usize) -> Vec<f64>,
+    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
 {
     let guidance = Guidance::Uct { c: cfg.uct_c };
     search_many(
@@ -1269,7 +1269,7 @@ pub(crate) fn search_many<G, F>(
 where
     G: Game + Sync,
     G::State: Send,
-    F: FnMut(Vec<f32>, usize) -> Vec<f64>,
+    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
 {
     assert!(
         game.num_agents() >= 1,
@@ -1347,7 +1347,7 @@ where
                                     }
                                     _ => std::mem::take(&mut tree.arena[leaf].obs_all[ag]),
                                 };
-                                match batch.resolve_or_stage(&obs) {
+                                match batch.resolve_or_stage(ag, &obs) {
                                     Resolve::Resolved(row) => {
                                         tree.hit_rows += 1;
                                         consume_row(
@@ -1363,7 +1363,9 @@ where
                                 break; // one or more rows await the pooled forward
                             }
                         } else {
-                            match batch.resolve_or_stage(&tree.arena[leaf].obs) {
+                            // Untagged (0): negamax rows run Shared-mode only until the
+                            // follow-up threads per-player routing through the search pools.
+                            match batch.resolve_or_stage(0, &tree.arena[leaf].obs) {
                                 Resolve::Resolved(row) => {
                                     tree.hit_rows += 1;
                                     consume_row(tree, leaf, 0, &row, guidance, gamma, a, ti, enc);
@@ -1405,7 +1407,7 @@ where
                                     }
                                     _ => std::mem::take(&mut tree.arena[child].obs),
                                 };
-                                match batch.resolve_or_stage(&obs) {
+                                match batch.resolve_or_stage(ag, &obs) {
                                     Resolve::Resolved(row) => {
                                         tree.hit_rows += 1;
                                         consume_row(
@@ -1676,7 +1678,7 @@ impl Policy for Mcts {
     where
         G: Game + Sync,
         G::State: Send,
-        F: FnMut(Vec<f32>, usize) -> Vec<f64>,
+        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
         mcts_many(game, enc, reward, &self.cfg, requests, seed, eval)
     }
@@ -1974,14 +1976,18 @@ mod masking_tests {
     }
 
     fn run(guidance_puct: bool, noise_eps: f64) -> SearchEvaluation {
-        let mut infer = |_obs: Vec<f32>, n: usize| -> Vec<f64> {
+        let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| -> Vec<f64> {
             if guidance_puct {
                 vec![0.0; n * 11] // A logits + value
             } else {
                 vec![0.0; n * 10] // K=1 Q rows
             }
         };
-        let mut eval = Evaluator::new(&mut infer, None);
+        let mut eval = Evaluator::new(
+            &mut infer,
+            crate::rollout::evaluator::InferMode::Shared,
+            None,
+        );
         let evals = if guidance_puct {
             let cfg = AlphaZeroConfig {
                 num_simulations: 40,
@@ -2161,8 +2167,12 @@ mod chance_tests {
     }
 
     fn run_uct(sims: usize, chance: ChanceMode, seed: u64) -> SearchEvaluation {
-        let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2]; // K=1 zeros net
-        let mut eval = Evaluator::new(&mut infer, None);
+        let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2]; // K=1 zeros net
+        let mut eval = Evaluator::new(
+            &mut infer,
+            crate::rollout::evaluator::InferMode::Shared,
+            None,
+        );
         mcts_many(
             &RiskyGame,
             &Enc,
@@ -2242,10 +2252,14 @@ mod chance_tests {
     fn expand_all_seeds_the_exact_expectation_immediately() {
         // A value-bearing net (Q = state total) makes the fan's first backup exact: after the two
         // sims that expand safe then risky, Q(risky) is 0.5·0 + 0.5·3 = 1.5 with no sampling.
-        let mut infer = |obs: Vec<f32>, n: usize| -> Vec<f64> {
+        let mut infer = |_p: usize, obs: Vec<f32>, n: usize| -> Vec<f64> {
             (0..n).flat_map(|i| [f64::from(obs[i * 2]); 2]).collect()
         };
-        let mut eval = Evaluator::new(&mut infer, None);
+        let mut eval = Evaluator::new(
+            &mut infer,
+            crate::rollout::evaluator::InferMode::Shared,
+            None,
+        );
         let out = mcts_many(
             &RiskyGame,
             &Enc,
@@ -2274,8 +2288,12 @@ mod chance_tests {
     fn puct_searches_chance_games() {
         // AlphaZero guidance over the same game: stride A+1 rows, uniform prior, zeros value —
         // the visit distribution must still find the risky action's expectation edge.
-        let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 3];
-        let mut eval = Evaluator::new(&mut infer, None);
+        let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 3];
+        let mut eval = Evaluator::new(
+            &mut infer,
+            crate::rollout::evaluator::InferMode::Shared,
+            None,
+        );
         let cfg = AlphaZeroConfig {
             num_simulations: 300,
             c_puct: 2.0,
@@ -2393,8 +2411,12 @@ mod duct_tests {
 
     #[test]
     fn uct_finds_each_requesters_dominant_action() {
-        let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
-        let mut eval = Evaluator::new(&mut infer, None);
+        let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+        let mut eval = Evaluator::new(
+            &mut infer,
+            crate::rollout::evaluator::InferMode::Shared,
+            None,
+        );
         let cfg = MctsConfig {
             num_simulations: 60,
             uct_c: 2.0,
@@ -2426,8 +2448,12 @@ mod duct_tests {
     #[test]
     fn puct_finds_the_dominant_action_and_is_deterministic() {
         let run = |seed: u64| {
-            let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 3];
-            let mut eval = Evaluator::new(&mut infer, None);
+            let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 3];
+            let mut eval = Evaluator::new(
+                &mut infer,
+                crate::rollout::evaluator::InferMode::Shared,
+                None,
+            );
             alphazero_many(
                 &MatrixGame,
                 &Enc,
@@ -2451,13 +2477,17 @@ mod duct_tests {
         // With noise on, Requester vs Both must differ (the opponent's prior is perturbed under
         // Both), while noise-off searches are scope-independent.
         let run = |eps: f64, scope: NoiseScope| {
-            let mut infer = |obs: Vec<f32>, n: usize| -> Vec<f64> {
+            let mut infer = |_p: usize, obs: Vec<f32>, n: usize| -> Vec<f64> {
                 // mildly obs-dependent logits so priors are not uniform
                 (0..n)
                     .flat_map(|i| [f64::from(obs[i * 2 + 1]), 0.5, 0.0])
                     .collect()
             };
-            let mut eval = Evaluator::new(&mut infer, None);
+            let mut eval = Evaluator::new(
+                &mut infer,
+                crate::rollout::evaluator::InferMode::Shared,
+                None,
+            );
             alphazero_many(
                 &MatrixGame,
                 &Enc,
@@ -2483,8 +2513,12 @@ mod duct_tests {
 
     #[test]
     fn simultaneous_eval_rows_close_the_identity() {
-        let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 3];
-        let mut eval = Evaluator::new(&mut infer, None);
+        let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 3];
+        let mut eval = Evaluator::new(
+            &mut infer,
+            crate::rollout::evaluator::InferMode::Shared,
+            None,
+        );
         let out = alphazero_many(
             &MatrixGame,
             &Enc,
@@ -2548,7 +2582,7 @@ mod duct_tests {
         };
         let states = || vec![(St { done: false }, 0), (St { done: false }, 1)];
         let run = |swapped: bool| {
-            let mut infer = move |obs: Vec<f32>, n: usize| -> Vec<f64> {
+            let mut infer = move |_p: usize, obs: Vec<f32>, n: usize| -> Vec<f64> {
                 (0..n)
                     .flat_map(|i| {
                         let seat = obs[i * 2 + 1] as usize;
@@ -2562,7 +2596,11 @@ mod duct_tests {
                     })
                     .collect()
             };
-            let mut eval = Evaluator::new(&mut infer, None);
+            let mut eval = Evaluator::new(
+                &mut infer,
+                crate::rollout::evaluator::InferMode::Shared,
+                None,
+            );
             let cfg = az_cfg(40, 0.0, NoiseScope::Requester);
             if swapped {
                 alphazero_many(
@@ -2696,7 +2734,7 @@ mod frame_tests {
             chance: ChanceMode::AlwaysResample,
         };
         let run = |use_rot: bool| {
-            let mut infer = move |obs: Vec<f32>, n: usize| -> Vec<f64> {
+            let mut infer = move |_p: usize, obs: Vec<f32>, n: usize| -> Vec<f64> {
                 (0..n)
                     .flat_map(|i| {
                         let s = f64::from(obs[i]);
@@ -2709,7 +2747,11 @@ mod frame_tests {
                     })
                     .collect() // K=1 Q rows
             };
-            let mut eval = Evaluator::new(&mut infer, None);
+            let mut eval = Evaluator::new(
+                &mut infer,
+                crate::rollout::evaluator::InferMode::Shared,
+                None,
+            );
             let requests = vec![(St(0), 0)];
             if use_rot {
                 mcts_many(&Sparse, &RotEnc, &Zero, &cfg, requests, 3, &mut eval).remove(0)
@@ -2739,7 +2781,7 @@ mod frame_tests {
             sequential_backup: Default::default(),
         };
         let run = |use_rot: bool| {
-            let mut infer = move |obs: Vec<f32>, n: usize| -> Vec<f64> {
+            let mut infer = move |_p: usize, obs: Vec<f32>, n: usize| -> Vec<f64> {
                 (0..n)
                     .flat_map(|i| {
                         let s = f64::from(obs[i]);
@@ -2754,7 +2796,11 @@ mod frame_tests {
                     })
                     .collect()
             };
-            let mut eval = Evaluator::new(&mut infer, None);
+            let mut eval = Evaluator::new(
+                &mut infer,
+                crate::rollout::evaluator::InferMode::Shared,
+                None,
+            );
             let requests = vec![(St(0), 0)];
             if use_rot {
                 alphazero_many(&Sparse, &RotEnc, &Zero, &cfg, requests, 3, &mut eval).remove(0)
@@ -2888,8 +2934,12 @@ mod maxn_tests {
             sequential_backup: Default::default(),
         };
         // Uniform logits, zero value: the terminal payoffs are the only signal.
-        let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 3];
-        let mut eval = Evaluator::new(&mut infer, None);
+        let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 3];
+        let mut eval = Evaluator::new(
+            &mut infer,
+            crate::rollout::evaluator::InferMode::Shared,
+            None,
+        );
         let e = alphazero_many(
             &Discriminator,
             &LrEnc,
@@ -2976,8 +3026,12 @@ mod maxn_tests {
             chance: ChanceMode::Committed { samples: 1 },
         };
         for requester in 0..3 {
-            let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
-            let mut eval = Evaluator::new(&mut infer, None);
+            let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+            let mut eval = Evaluator::new(
+                &mut infer,
+                crate::rollout::evaluator::InferMode::Shared,
+                None,
+            );
             let e = mcts_many(
                 &Dominant,
                 &DEnc,
@@ -3112,8 +3166,12 @@ mod forced_maxn_tests {
                 noise_scope: NoiseScope::Requester,
                 sequential_backup: backup,
             };
-            let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 3];
-            let mut eval = Evaluator::new(&mut infer, None);
+            let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 3];
+            let mut eval = Evaluator::new(
+                &mut infer,
+                crate::rollout::evaluator::InferMode::Shared,
+                None,
+            );
             alphazero_many(
                 &Discriminator2,
                 &LrEnc,

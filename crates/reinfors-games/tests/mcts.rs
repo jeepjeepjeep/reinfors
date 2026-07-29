@@ -36,7 +36,7 @@ fn reward() -> Connect4Reward {
 
 // A trivial zeros evaluator (K=1): leaf values are 0, so all signal comes from terminal win/loss —
 // enough for MCTS to solve tactics, exactly like a random-rollout MCTS.
-fn zeros_infer(_obs: Vec<f32>, n: usize) -> Vec<f64> {
+fn zeros_infer(_p: usize, _obs: Vec<f32>, n: usize) -> Vec<f64> {
     vec![0.0; n * 7] // K=1, A=7
 }
 
@@ -69,7 +69,7 @@ fn mcts_finds_a_forced_connect4_win() {
         &cfg(128),
         vec![(forced_win_state(), 0)],
         0,
-        &mut Evaluator::new(&mut zeros_infer, None),
+        &mut Evaluator::new(&mut zeros_infer, reinfors_core::InferMode::Shared, None),
     );
     let values = &evals[0].values[0];
     assert_eq!(
@@ -111,7 +111,7 @@ fn mcts_blocks_opponent_win() {
         &cfg(400),
         vec![(opponent_threat_state(), 0)],
         0,
-        &mut Evaluator::new(&mut zeros_infer, None),
+        &mut Evaluator::new(&mut zeros_infer, reinfors_core::InferMode::Shared, None),
     );
     let values = &evals[0].values[0];
     assert_eq!(
@@ -135,7 +135,7 @@ fn mcts_is_deterministic() {
             &cfg(64),
             vec![(forced_win_state(), 0)],
             0,
-            &mut Evaluator::new(&mut zeros_infer, None),
+            &mut Evaluator::new(&mut zeros_infer, reinfors_core::InferMode::Shared, None),
         )[0]
         .values[0]
             .clone()
@@ -153,7 +153,7 @@ fn mcts_pools_multiple_requests() {
         &cfg(128),
         vec![(forced_win_state(), 0), (forced_win_state(), 0)],
         0,
-        &mut Evaluator::new(&mut zeros_infer, None),
+        &mut Evaluator::new(&mut zeros_infer, reinfors_core::InferMode::Shared, None),
     );
     assert_eq!(evals.len(), 2);
     assert_eq!(argmax(&evals[0].values[0]), 3);
@@ -181,7 +181,7 @@ fn mcts_searches_simultaneous_snake() {
         win: 0.0,
         survival: 0.0,
     };
-    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 3];
+    let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 3];
     let evals = mcts_many(
         &snake,
         &EgocentricSnake { grid_size: 8 },
@@ -189,7 +189,7 @@ fn mcts_searches_simultaneous_snake() {
         &cfg(16),
         vec![(state, 0)],
         0,
-        &mut Evaluator::new(&mut infer, None),
+        &mut Evaluator::new(&mut infer, reinfors_core::InferMode::Shared, None),
     );
     assert_eq!(evals[0].visits.len(), 3);
     assert!(evals[0].visits.iter().sum::<f64>() > 0.0);

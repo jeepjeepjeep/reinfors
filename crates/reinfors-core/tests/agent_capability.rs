@@ -200,7 +200,7 @@ impl Policy for CappedStub {
     where
         G: Game + Sync,
         G::State: Send,
-        F: FnMut(Vec<f32>, usize) -> Vec<f64>,
+        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
         unimplemented!("construction panics before any evaluation")
     }
@@ -274,7 +274,7 @@ fn expectimax_engine_collects_on_a_three_agent_simultaneous_game() {
 
 #[test]
 fn expectimax_searches_a_three_agent_game() {
-    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 4]; // K=2 heads x A=2
+    let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 4]; // K=2 heads x A=2
     let results = search_many(
         &ThreeWay,
         &Enc,
@@ -308,8 +308,8 @@ fn mcts_cfg() -> MctsConfig {
 fn uct_rejects_sequential_three_agent_games() {
     // Q-derived (UCT) leaf values exist only at the evaluated agent's own decision points, which
     // a sequential game gives non-movers none of — N>2 sequential search needs PUCT.
-    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
-    let mut eval = Evaluator::new(&mut infer, None);
+    let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+    let mut eval = Evaluator::new(&mut infer, reinfors_core::InferMode::Shared, None);
     let _ = mcts_many(
         &RoundRobin,
         &Enc,
@@ -324,8 +324,8 @@ fn uct_rejects_sequential_three_agent_games() {
 #[test]
 fn uct_searches_a_simultaneous_three_agent_game() {
     // DUCT-N: every agent owns a decoupled table, so simultaneous games search at any N.
-    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
-    let mut eval = Evaluator::new(&mut infer, None);
+    let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+    let mut eval = Evaluator::new(&mut infer, reinfors_core::InferMode::Shared, None);
     let evals = mcts_many(
         &ThreeWay,
         &Enc,
@@ -409,6 +409,49 @@ fn alphazero_engine_collects_on_a_three_agent_sequential_game() {
         }
     }
     assert!(stats.decisions > 0 && !stats.episodes.is_empty());
+}
+
+#[test]
+fn learn_players_filters_value_only_perspectives() {
+    // Frozen players must not leak through the sequential-Max^N value-only path either: with
+    // only player 0 learning, each RoundRobin episode leaves its mover record (ply 0) plus its
+    // two value-only perspectives (plies 1 and 2) — nothing from players 1 and 2.
+    let az_cfg = AlphaZeroConfig {
+        num_simulations: 8,
+        c_puct: 1.5,
+        gamma: 0.99,
+        max_depth: 6,
+        noise_epsilon: 0.0,
+        noise_alpha: 0.3,
+        temperature: 0.0,
+        temperature_drop: 0,
+        chance: ChanceMode::Committed { samples: 1 },
+        noise_scope: reinfors_core::NoiseScope::Requester,
+        sequential_backup: Default::default(),
+    };
+    let mut engine = Engine::new(
+        RoundRobin,
+        Box::new(Enc),
+        Box::new(Zero),
+        AlphaZero::new(az_cfg),
+        reinfors_core::AlphaZeroLearner::new(0.99),
+        EngineParams {
+            n_games: 2,
+            seed: 5,
+        },
+    )
+    .with_learn_players(&[0]);
+    let (records, _) = engine.collect(6, |_obs: Vec<f32>, n: usize| vec![0.0; n * 3]);
+    let movers = records.iter().filter(|r| r.3 == 1.0).count();
+    let value_only = records.iter().filter(|r| r.3 == 0.0).count();
+    assert!(movers >= 2);
+    assert_eq!(movers + value_only, records.len());
+    assert_eq!(value_only, movers * 2);
+    // Enc writes the encoded-for agent into obs[1]: the unfiltered output would also have a 2:1
+    // value-only ratio, but its records would carry all three perspectives, not only player 0's.
+    for r in &records {
+        assert_eq!(r.0[1], 0.0, "every record is player 0's perspective");
+    }
 }
 
 /// RoundRobin with a terminal payoff vector [1, 2, 3]: with gamma 1, EVERY record's z for agent
@@ -685,8 +728,8 @@ fn sampling_modes_traverse_combinatorial_uniform_chance() {
             temperature_drop: 0,
             chance,
         };
-        let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
-        let mut eval = Evaluator::new(&mut infer, None);
+        let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+        let mut eval = Evaluator::new(&mut infer, reinfors_core::InferMode::Shared, None);
         let evals = mcts_many(
             &WideChance,
             &WEnc,
@@ -720,8 +763,8 @@ fn expand_all_rejects_combinatorial_outcome_spaces() {
         temperature_drop: 0,
         chance: ChanceMode::ExpandAll,
     };
-    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
-    let mut eval = Evaluator::new(&mut infer, None);
+    let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+    let mut eval = Evaluator::new(&mut infer, reinfors_core::InferMode::Shared, None);
     let _ = mcts_many(
         &WideChance,
         &WEnc,
@@ -841,8 +884,8 @@ impl Game for NodeyTwo {
 #[test]
 #[should_panic(expected = "clairvoyant")]
 fn direct_mcts_rejects_hidden_information() {
-    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
-    let mut eval = Evaluator::new(&mut infer, None);
+    let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+    let mut eval = Evaluator::new(&mut infer, reinfors_core::InferMode::Shared, None);
     let _ = mcts_many(
         &HiddenTwo,
         &Enc,
@@ -865,15 +908,15 @@ fn direct_expectimax_rejects_hidden_information() {
         vec![(St { tick: 0 }, 0)],
         false,
         0,
-        |_obs: Vec<f32>, n: usize| vec![0.0; n * 2],
+        |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2],
     );
 }
 
 #[test]
 #[should_panic(expected = "chance-node")]
 fn direct_mcts_rejects_chance_node_games() {
-    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
-    let mut eval = Evaluator::new(&mut infer, None);
+    let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+    let mut eval = Evaluator::new(&mut infer, reinfors_core::InferMode::Shared, None);
     let _ = mcts_many(
         &NodeyTwo,
         &Enc,
@@ -896,7 +939,7 @@ fn direct_expectimax_rejects_chance_node_games() {
         vec![(St { tick: 0 }, 0)],
         false,
         0,
-        |_obs: Vec<f32>, n: usize| vec![0.0; n * 2],
+        |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2],
     );
 }
 
