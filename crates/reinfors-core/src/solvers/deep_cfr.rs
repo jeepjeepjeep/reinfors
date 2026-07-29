@@ -74,7 +74,10 @@ pub struct DeepCfrStats {
     pub strategy_samples: usize,
     pub infer_calls: usize,
     pub infer_rows: usize,
+    /// Time inside the `infer` callback only (the net's share of the wall clock).
     pub infer_seconds: f64,
+    /// The whole `collect` call (traversal, chance sampling, caching, sample construction).
+    pub collect_seconds: f64,
     pub cache_lookups: usize,
     pub cache_hits: usize,
 }
@@ -225,6 +228,13 @@ impl<G: Game> DeepCfrSolver<G> {
         self.iteration += 1;
     }
 
+    /// Roll back the per-call rng salt after a FAILED collect (e.g. the caller's net raised
+    /// mid-call and the returned samples were discarded): a retry then draws the same worlds
+    /// a fresh solver would, keeping error paths transactional with respect to determinism.
+    pub fn rollback_collect(&mut self) {
+        self.collects = self.collects.saturating_sub(1);
+    }
+
     /// Run `traversals` external-sampling traversals with `player` as the traverser, emitting
     /// advantage samples for `player` and strategy samples at opponent infosets.
     ///
@@ -328,7 +338,9 @@ impl<G: Game> DeepCfrSolver<G> {
                     }
                 }
                 let rows = order.len();
+                let infer_started = std::time::Instant::now();
                 let out = infer(who, obs_flat, rows);
+                stats.infer_seconds += infer_started.elapsed().as_secs_f64();
                 assert_eq!(
                     out.len(),
                     rows * action_count,
@@ -345,7 +357,7 @@ impl<G: Game> DeepCfrSolver<G> {
         }
         stats.advantage_samples = advantage.len();
         stats.strategy_samples = strategy.len();
-        stats.infer_seconds = started.elapsed().as_secs_f64();
+        stats.collect_seconds = started.elapsed().as_secs_f64();
         (advantage, strategy, stats)
     }
 

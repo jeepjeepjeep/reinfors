@@ -3679,6 +3679,7 @@ trait ErasedDeepCfr: Send + Sync {
     #[allow(clippy::type_complexity)]
     fn infoset_features(&self) -> Vec<(Vec<u8>, Vec<f32>, Vec<usize>)>;
     fn exploitability_of(&self, probs: &HashMap<Vec<u8>, Vec<f64>>) -> f64;
+    fn rollback_collect(&mut self);
 }
 
 impl<G: Game + Send + Sync> ErasedDeepCfr for reinfors_core::DeepCfrSolver<G> {
@@ -3705,6 +3706,9 @@ impl<G: Game + Send + Sync> ErasedDeepCfr for reinfors_core::DeepCfrSolver<G> {
     }
     fn exploitability_of(&self, probs: &HashMap<Vec<u8>, Vec<f64>>) -> f64 {
         reinfors_core::DeepCfrSolver::exploitability_of(self, probs)
+    }
+    fn rollback_collect(&mut self) {
+        reinfors_core::DeepCfrSolver::rollback_collect(self)
     }
 }
 
@@ -4105,18 +4109,19 @@ impl PyDeepCfr {
                 .and_then(|r| r.extract::<numpy::PyReadonlyArray2<f64>>())
             {
                 Ok(out) => {
-                    let flat: Vec<f64> = out.as_array().iter().copied().collect();
-                    if flat.len() != rows * a {
+                    // Exact shape, not just element count: a transposed (A, rows) return has
+                    // the right length and would be flattened into garbage advantages.
+                    if out.as_array().shape() != [rows, a] {
                         callback_err.get_or_insert_with(|| {
                             pyo3::exceptions::PyValueError::new_err(format!(
-                                "infer returned {} values for {rows} rows; expected \
-                                 {a} advantages per row",
-                                flat.len()
+                                "infer returned shape {:?} for {rows} rows; expected \
+                                 ({rows}, {a}) — one row of {a} advantages per query",
+                                out.as_array().shape()
                             ))
                         });
                         return vec![0.0; rows * a];
                     }
-                    flat
+                    out.as_array().iter().copied().collect()
                 }
                 Err(e) => {
                     callback_err = Some(e);
@@ -4126,6 +4131,9 @@ impl PyDeepCfr {
         };
         let (advantage, strategy, stats) = self.inner.collect(player, traversals, &mut rust_infer);
         if let Some(e) = callback_err {
+            // Transactional determinism: the discarded call must not consume the sampling
+            // sequence — a retry draws the same worlds a fresh solver would.
+            self.inner.rollback_collect();
             return Err(e);
         }
 
@@ -4175,6 +4183,7 @@ impl PyDeepCfr {
         telemetry.set_item("infer_calls", stats.infer_calls)?;
         telemetry.set_item("infer_rows", stats.infer_rows)?;
         telemetry.set_item("infer_seconds", stats.infer_seconds)?;
+        telemetry.set_item("collect_seconds", stats.collect_seconds)?;
         telemetry.set_item("cache_lookups", stats.cache_lookups)?;
         telemetry.set_item("cache_hits", stats.cache_hits)?;
 
@@ -4220,14 +4229,15 @@ impl PyDeepCfr {
         let out = policy_infer
             .call1((arr,))?
             .extract::<numpy::PyReadonlyArray2<f64>>()?;
-        let flat: Vec<f64> = out.as_array().iter().copied().collect();
-        if flat.len() != features.len() * a {
+        if out.as_array().shape() != [features.len(), a] {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "policy_infer returned {} values for {} infosets; expected {a} per row",
-                flat.len(),
+                "policy_infer returned shape {:?} for {} infosets; expected ({}, {a})",
+                out.as_array().shape(),
+                features.len(),
                 features.len()
             )));
         }
+        let flat: Vec<f64> = out.as_array().iter().copied().collect();
         let mut probs: HashMap<Vec<u8>, Vec<f64>> = HashMap::with_capacity(features.len());
         for (i, (key, _, legal)) in features.iter().enumerate() {
             let row = &flat[i * a..(i + 1) * a];

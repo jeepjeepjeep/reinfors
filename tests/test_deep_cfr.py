@@ -71,13 +71,46 @@ def test_callback_errors_and_bad_shapes_propagate() -> None:
 
     with pytest.raises(RuntimeError, match="net exploded"):
         solver.collect(player=0, traversals=4, infer=boom)
-    with pytest.raises(ValueError, match="advantages per row"):
+    with pytest.raises(ValueError, match="one row of 2 advantages"):
         solver.collect(player=0, traversals=4, infer=lambda obs: np.zeros((obs.shape[0], 5)))
     with pytest.raises(ValueError, match="player must be 0 or 1"):
         solver.collect(player=2, traversals=1, infer=zeros2)
     fresh = rf.solvers.DeepCfr(rf.games.KuhnPoker(), seed=0)
     with pytest.raises(ValueError, match="next_iteration"):
         fresh.collect(player=0, traversals=1, infer=zeros2)
+
+
+def test_transposed_infer_shapes_are_rejected() -> None:
+    # Kuhn's action count is 2, so a transposed (2, rows) return has the RIGHT element count
+    # and would silently be flattened into garbage without the exact-shape check.
+    solver = rf.solvers.DeepCfr(rf.games.KuhnPoker(), seed=0)
+    solver.next_iteration()
+    with pytest.raises(ValueError, match=r"expected .* one row"):
+        solver.collect(player=0, traversals=8, infer=lambda obs: np.zeros((2, obs.shape[0])))
+    with pytest.raises(ValueError, match="policy_infer returned shape"):
+        solver.exploitability(lambda obs: np.full((2, obs.shape[0]), 0.5))
+
+
+def test_failed_collects_are_transactional() -> None:
+    # A raised callback must not consume the sampling sequence: retrying after the error
+    # yields exactly what a fresh solver produces from the same seed and iteration.
+    def run(fail_first: bool) -> np.ndarray:
+        solver = rf.solvers.DeepCfr(rf.games.KuhnPoker(), seed=21)
+        solver.next_iteration()
+        if fail_first:
+            calls = {"n": 0}
+
+            def boom(obs: np.ndarray) -> np.ndarray:
+                calls["n"] += 1
+                if calls["n"] >= 2:
+                    raise RuntimeError("mid-call failure")
+                return np.zeros((obs.shape[0], 2))
+
+            with pytest.raises(RuntimeError):
+                solver.collect(player=0, traversals=16, infer=boom)
+        return solver.collect(player=0, traversals=16, infer=zeros2).advantage_obs
+
+    assert np.array_equal(run(False), run(True))
 
 
 def test_construction_gates() -> None:
