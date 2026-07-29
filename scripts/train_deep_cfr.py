@@ -124,19 +124,20 @@ def make_policy_infer(net: Mlp, device: str) -> InferFn:
 
 def train_regression(
     net: Mlp,
+    optimizer: torch.optim.Optimizer,
     buffer: Reservoir,
     steps: int,
     batch_size: int,
-    lr: float,
     rng: np.random.Generator,
     device: str,
     cross_entropy: bool,
 ) -> float:
     """T-weighted regression on reservoir rows: MSE to advantage targets over the legality
-    mask (advantage nets), or CE to the strategy probabilities (the policy net)."""
+    mask (advantage nets), or CE to the strategy probabilities (the policy net). The
+    optimizer persists with its network across calls (true continual training — Adam's
+    moments carry over); --from-scratch-advantage-nets replaces both together."""
     if buffer.size == 0:
         return 0.0
-    optimizer = torch.optim.Adam(net.parameters(), lr=lr)
     total = 0.0
     for _ in range(steps):
         obs, values, mask, iterations = buffer.sample(batch_size, rng)
@@ -174,7 +175,7 @@ def kuhn_strategy_report(policy_infer: InferFn) -> str:
     probes = [
         ("P0 bets with J (the bluff, Nash: alpha in [0, 1/3])", obs(0, []), 1),
         ("P0 bets with K (Nash: 3*alpha)", obs(2, []), 1),
-        ("P1 bets Q after a check (Nash: 1/3)", obs(1, [0]), 1),
+        ("P1 bets J after a check (the bluff, Nash: 1/3)", obs(0, [0]), 1),
         ("P0 calls a bet with Q (Nash: alpha + 1/3)", obs(1, [0, 1]), 1),
     ]
     rows = np.stack([p[1] for p in probes])
@@ -219,15 +220,28 @@ def holdem_eval(policy_infer: InferFn, hands: int, seed: int) -> dict[str, float
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+
+    def positive_int(value: str) -> int:
+        out = int(value)
+        if out <= 0:
+            raise argparse.ArgumentTypeError(f"{value} is not a positive integer")
+        return out
+
+    def positive_float(value: str) -> float:
+        out = float(value)
+        if out <= 0:
+            raise argparse.ArgumentTypeError(f"{value} is not a positive number")
+        return out
+
     parser.add_argument("--game", choices=["kuhn_poker", "leduc_poker", "texas_holdem"], default="kuhn_poker")
-    parser.add_argument("--iterations", type=int, default=60)
-    parser.add_argument("--traversals", type=int, default=256, help="per player per iteration")
-    parser.add_argument("--train-steps", type=int, default=1000, help="sgd steps per advantage retrain")
-    parser.add_argument("--policy-train-steps", type=int, default=600)
-    parser.add_argument("--batch-size", type=int, default=512)
-    parser.add_argument("--buffer-capacity", type=int, default=200_000)
-    parser.add_argument("--width", type=int, default=128)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--iterations", type=positive_int, default=60)
+    parser.add_argument("--traversals", type=positive_int, default=256, help="per player per iteration")
+    parser.add_argument("--train-steps", type=positive_int, default=1000, help="sgd steps per advantage retrain")
+    parser.add_argument("--policy-train-steps", type=positive_int, default=600)
+    parser.add_argument("--batch-size", type=positive_int, default=512)
+    parser.add_argument("--buffer-capacity", type=positive_int, default=200_000)
+    parser.add_argument("--width", type=positive_int, default=128)
+    parser.add_argument("--lr", type=positive_float, default=1e-3)
     parser.add_argument(
         "--from-scratch-advantage-nets",
         action="store_true",
@@ -254,7 +268,9 @@ def main() -> None:
     enumerable = args.game in ("kuhn_poker", "leduc_poker")
 
     advantage_nets = [Mlp(dim, n_actions, args.width).to(args.device) for _ in range(2)]
+    advantage_optimizers = [torch.optim.Adam(net.parameters(), lr=args.lr) for net in advantage_nets]
     policy_net = Mlp(dim, n_actions, args.width).to(args.device)
+    policy_optimizer = torch.optim.Adam(policy_net.parameters(), lr=args.lr)
     advantage_buffers = [Reservoir(args.buffer_capacity, dim, n_actions, seed=args.seed + p) for p in range(2)]
     strategy_buffer = Reservoir(args.buffer_capacity, dim, n_actions, seed=args.seed + 7)
 
@@ -286,12 +302,13 @@ def main() -> None:
             infer_share += batch.telemetry["infer_seconds"] / max(batch.telemetry["collect_seconds"], 1e-9)
             if args.from_scratch_advantage_nets:
                 advantage_nets[player] = Mlp(dim, n_actions, args.width).to(args.device)
+                advantage_optimizers[player] = torch.optim.Adam(advantage_nets[player].parameters(), lr=args.lr)
             train_regression(
                 advantage_nets[player],
+                advantage_optimizers[player],
                 advantage_buffers[player],
                 args.train_steps,
                 args.batch_size,
-                args.lr,
                 rng,
                 args.device,
                 cross_entropy=False,
@@ -299,10 +316,10 @@ def main() -> None:
         if args.eval_every and it % args.eval_every == 0:
             train_regression(
                 policy_net,
+                policy_optimizer,
                 strategy_buffer,
                 args.policy_train_steps,
                 args.batch_size,
-                args.lr,
                 rng,
                 args.device,
                 cross_entropy=True,
@@ -321,10 +338,10 @@ def main() -> None:
     # The final playable product: the average-policy net, trained on the full strategy stream.
     train_regression(
         policy_net,
+        policy_optimizer,
         strategy_buffer,
         args.policy_train_steps,
         args.batch_size,
-        args.lr,
         rng,
         args.device,
         cross_entropy=True,
