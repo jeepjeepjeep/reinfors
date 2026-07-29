@@ -42,6 +42,14 @@ impl Policy for EpsilonGreedyQ {
         None // each agent acts greedily on its own Q row; no cross-agent structure
     }
 
+    fn supports_chance_nodes(&self) -> bool {
+        true // observation-only: chance realization is the env's business
+    }
+
+    fn supports_imperfect_information(&self) -> bool {
+        true // evaluates only the acting agent's own observation — never the true state
+    }
+
     fn begin_episode(&self, rng: &mut dyn Rng) -> usize {
         rng.below(self.n_heads)
     }

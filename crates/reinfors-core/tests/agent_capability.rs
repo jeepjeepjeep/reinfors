@@ -165,6 +165,13 @@ impl Policy for CappedStub {
     fn max_agents(&self, _sequential: bool) -> Option<usize> {
         Some(2)
     }
+    fn supports_chance_nodes(&self) -> bool {
+        true
+    }
+
+    fn supports_imperfect_information(&self) -> bool {
+        false
+    }
     fn begin_episode(&self, _rng: &mut dyn Rng) {}
     fn encode_eval(&self, _eval: &(), _out: &mut Vec<u8>) {}
     fn decode_eval(
@@ -754,6 +761,285 @@ fn uniform_draws_cover_the_index_space() {
     );
     // Loose uniformity: no bucket more than 3x the mean.
     assert!(hits.iter().all(|&h| h < 300), "roughly uniform: {hits:?}");
+}
+
+/// `TwoRobin` with hidden information declared — the search entries must reject it directly,
+/// not only via engine construction (a direct caller would otherwise get clairvoyant values).
+struct HiddenTwo;
+
+impl Game for HiddenTwo {
+    type State = St;
+    type Event = ();
+    fn num_agents(&self) -> usize {
+        2
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn perfect_information(&self) -> bool {
+        false
+    }
+    fn actor(&self, s: &St) -> Actor {
+        Actor::Agent(s.tick % 2)
+    }
+    fn legal_actions(&self, s: &St, agent: usize) -> Vec<usize> {
+        if agent == s.tick % 2 && s.tick < 4 {
+            vec![0, 1]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
+        Transition {
+            next_state: St { tick: s.tick + 1 },
+            events: vec![(); 2],
+            terminal: s.tick + 1 >= 4,
+        }
+    }
+    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+        St { tick: 0 }
+    }
+}
+
+/// `TwoRobin` declaring chance NODES — outcome-dependent payouts the searches cannot score.
+struct NodeyTwo;
+
+impl Game for NodeyTwo {
+    type State = St;
+    type Event = ();
+    fn num_agents(&self) -> usize {
+        2
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn chance_nodes(&self) -> bool {
+        true
+    }
+    fn actor(&self, s: &St) -> Actor {
+        Actor::Agent(s.tick % 2)
+    }
+    fn legal_actions(&self, s: &St, agent: usize) -> Vec<usize> {
+        if agent == s.tick % 2 && s.tick < 4 {
+            vec![0, 1]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
+        Transition {
+            next_state: St { tick: s.tick + 1 },
+            events: vec![(); 2],
+            terminal: s.tick + 1 >= 4,
+        }
+    }
+    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+        St { tick: 0 }
+    }
+}
+
+#[test]
+#[should_panic(expected = "clairvoyant")]
+fn direct_mcts_rejects_hidden_information() {
+    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+    let mut eval = Evaluator::new(&mut infer, None);
+    let _ = mcts_many(
+        &HiddenTwo,
+        &Enc,
+        &Zero,
+        &mcts_cfg(),
+        vec![(St { tick: 0 }, 0)],
+        0,
+        &mut eval,
+    );
+}
+
+#[test]
+#[should_panic(expected = "clairvoyant")]
+fn direct_expectimax_rejects_hidden_information() {
+    let _ = search_many(
+        &HiddenTwo,
+        &Enc,
+        &Zero,
+        &search_cfg(),
+        vec![(St { tick: 0 }, 0)],
+        false,
+        0,
+        |_obs: Vec<f32>, n: usize| vec![0.0; n * 2],
+    );
+}
+
+#[test]
+#[should_panic(expected = "chance-node")]
+fn direct_mcts_rejects_chance_node_games() {
+    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+    let mut eval = Evaluator::new(&mut infer, None);
+    let _ = mcts_many(
+        &NodeyTwo,
+        &Enc,
+        &Zero,
+        &mcts_cfg(),
+        vec![(St { tick: 0 }, 0)],
+        0,
+        &mut eval,
+    );
+}
+
+#[test]
+#[should_panic(expected = "chance-node")]
+fn direct_expectimax_rejects_chance_node_games() {
+    let _ = search_many(
+        &NodeyTwo,
+        &Enc,
+        &Zero,
+        &search_cfg(),
+        vec![(St { tick: 0 }, 0)],
+        false,
+        0,
+        |_obs: Vec<f32>, n: usize| vec![0.0; n * 2],
+    );
+}
+
+#[test]
+#[should_panic(expected = "chance-node")]
+fn engine_rejects_search_policies_on_chance_node_games() {
+    let _ = Engine::new(
+        NodeyTwo,
+        Box::new(Enc),
+        Box::new(Zero),
+        Mcts::new(mcts_cfg(), ActBy::Value),
+        TreeStrap::new(0.99, 0.3, 1.0, false),
+        EngineParams {
+            n_games: 1,
+            seed: 0,
+        },
+    );
+}
+
+/// `NodeyTwo` whose root IS the chance node — episode birth must reject it (a root node would
+/// leave every consumer actor-less rather than fail loudly).
+struct RootNodey;
+
+impl Game for RootNodey {
+    type State = St;
+    type Event = ();
+    fn num_agents(&self) -> usize {
+        2
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn chance_nodes(&self) -> bool {
+        true
+    }
+    fn actor(&self, s: &St) -> Actor {
+        if s.tick == 0 {
+            Actor::Chance
+        } else {
+            Actor::Agent(s.tick % 2)
+        }
+    }
+    fn legal_actions(&self, s: &St, agent: usize) -> Vec<usize> {
+        if s.tick > 0 && agent == s.tick % 2 && s.tick < 4 {
+            vec![0, 1]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
+        Transition {
+            next_state: St { tick: s.tick + 1 },
+            events: vec![(); 2],
+            terminal: s.tick + 1 >= 4,
+        }
+    }
+    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+        St { tick: 0 }
+    }
+}
+
+#[test]
+#[should_panic(expected = "chance nodes are interior")]
+fn episode_birth_rejects_root_chance_nodes() {
+    let _ = Engine::new(
+        RootNodey,
+        Box::new(Enc),
+        Box::new(Zero),
+        EpsilonGreedyQ::new(2, 0.1),
+        Dqn::new(2, 1.0),
+        EngineParams {
+            n_games: 1,
+            seed: 0,
+        },
+    );
+}
+
+#[test]
+#[should_panic(expected = "cannot start at a chance node")]
+fn start_distribution_restores_must_be_decision_states() {
+    // A game with an INTERIOR chance node (tick 5, unreachable in play): construction passes on
+    // the tick-0 decision state, then a hostile start distribution restores the chance node —
+    // the restore path must hold the same decision-state start contract as `initial_state`.
+    struct MidNodey;
+    impl Game for MidNodey {
+        type State = St;
+        type Event = ();
+        fn num_agents(&self) -> usize {
+            2
+        }
+        fn action_count(&self) -> usize {
+            2
+        }
+        fn chance_nodes(&self) -> bool {
+            true
+        }
+        fn actor(&self, s: &St) -> Actor {
+            if s.tick >= 5 {
+                Actor::Chance
+            } else {
+                Actor::Agent(s.tick % 2)
+            }
+        }
+        fn legal_actions(&self, s: &St, agent: usize) -> Vec<usize> {
+            if s.tick < 4 && agent == s.tick % 2 {
+                vec![0, 1]
+            } else {
+                Vec::new()
+            }
+        }
+        fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
+            Transition {
+                next_state: St { tick: s.tick + 1 },
+                events: vec![(); 2],
+                terminal: s.tick + 1 >= 4,
+            }
+        }
+        fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+            St { tick: 0 }
+        }
+    }
+    struct ChanceRestore;
+    impl reinfors_core::StartDistribution<St> for ChanceRestore {
+        fn choose(&mut self, _rng: &mut dyn Rng) -> reinfors_core::Start<St> {
+            reinfors_core::Start::Restore(St { tick: 5 })
+        }
+    }
+    let mut engine = Engine::new(
+        MidNodey,
+        Box::new(Enc),
+        Box::new(Zero),
+        EpsilonGreedyQ::new(2, 0.1),
+        Dqn::new(2, 1.0),
+        EngineParams {
+            n_games: 1,
+            seed: 0,
+        },
+    )
+    .with_start_distribution(Box::new(ChanceRestore));
+    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2 * 2];
+    for _ in 0..8 {
+        let _ = engine.collect(64, &mut infer);
+    }
 }
 
 /// Two agents taking turns; terminal after four plies with payoffs [1, 2].

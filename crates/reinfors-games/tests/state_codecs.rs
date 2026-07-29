@@ -7,7 +7,7 @@
 //! meaningful gameplay semantics).
 
 use reinfors_core::{Game, Rng, StateCodec};
-use reinfors_games::{Backgammon, Chess, Connect4, GridWorld, Snake};
+use reinfors_games::{Backgammon, Chess, Connect4, GridWorld, Snake, TexasHoldem};
 
 struct Lcg(u64);
 impl Rng for Lcg {
@@ -108,6 +108,15 @@ fn every_game_round_trips_reachable_states() {
         200,
     );
     reachable_states_round_trip(Backgammon { max_ticks: None }, 300);
+    reachable_states_round_trip(
+        TexasHoldem {
+            num_players: 4,
+            stack: 100,
+            small_blind: 5,
+            big_blind: 10,
+        },
+        300,
+    );
     reachable_states_round_trip(
         Chess {
             max_ticks: None,

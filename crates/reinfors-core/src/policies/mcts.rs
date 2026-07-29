@@ -1274,6 +1274,15 @@ where
         game.num_agents() >= 1,
         "a game must have at least one agent"
     );
+    assert!(
+        game.perfect_information(),
+        "tree search on a hidden-information game is clairvoyant: its values condition on state \
+         the agents cannot observe; use an observation-only policy family"
+    );
+    assert!(
+        !game.chance_nodes(),
+        "tree search does not realize chance-node states (outcome-dependent payouts)"
+    );
     let a = game.action_count();
     let mut trees: Vec<Tree<G::State>> = requests
         .into_iter()
@@ -1610,6 +1619,14 @@ pub(crate) fn sample_visits(visits: &[f64], temperature: f64, rng: &mut dyn Rng)
 impl Policy for Mcts {
     type Evaluation = SearchEvaluation;
     type PolicyState = u32; // moves acted this episode — drives the temperature_drop cutoff
+
+    fn supports_chance_nodes(&self) -> bool {
+        false // no chance ply: an outcome-dependent payout is unscorable in this tree
+    }
+
+    fn supports_imperfect_information(&self) -> bool {
+        false // the tree branches on the true state (clairvoyant past hidden information)
+    }
 
     fn max_agents(&self, sequential: bool) -> Option<usize> {
         // Simultaneous games: any N (decoupled per-agent tables). UCT over a SEQUENTIAL game
