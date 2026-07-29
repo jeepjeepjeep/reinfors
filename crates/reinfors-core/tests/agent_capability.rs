@@ -274,7 +274,7 @@ fn expectimax_engine_collects_on_a_three_agent_simultaneous_game() {
 
 #[test]
 fn expectimax_searches_a_three_agent_game() {
-    let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 4]; // K=2 heads x A=2
+    let mut infer = |_players: &[usize], _obs: Vec<f32>, n: usize| vec![0.0; n * 4]; // K=2 heads x A=2
     let results = search_many(
         &ThreeWay,
         &Enc,
@@ -399,7 +399,7 @@ fn alphazero_engine_collects_on_a_three_agent_sequential_game() {
     let value_only = records.iter().filter(|r| r.3 == 0.0).count();
     assert_eq!(movers + value_only, records.len());
     assert_eq!(value_only, 2 * movers);
-    for (obs, pi, _z, w) in &records {
+    for (obs, pi, _z, w, _player) in &records {
         assert_eq!(obs.len(), 2);
         let pi_sum: f64 = pi.iter().sum();
         if *w == 1.0 {
@@ -531,7 +531,7 @@ fn value_only_rows_carry_each_agents_own_return() {
     );
     let (records, _) = engine.collect(9, |_obs: Vec<f32>, n: usize| vec![0.0; n * 3]);
     assert!(records.len() >= 9);
-    for (obs, _pi, z, _w) in &records {
+    for (obs, _pi, z, _w, _player) in &records {
         let agent = obs[1] as f64; // Enc encodes [tick, agent]
         assert!(
             (z - (agent + 1.0)).abs() < 1e-12,
@@ -643,7 +643,7 @@ fn truncation_bootstraps_every_perspectives_own_tail() {
         stats.episodes[0].length, 2,
         "the horizon truncates at tick 2"
     );
-    for (obs, _pi, z, _w) in &records {
+    for (obs, _pi, z, _w, _player) in &records {
         let expect = (f64::from(obs[1]) + 1.0) / 10.0;
         assert!(
             (z - expect).abs() < 1e-12,
@@ -908,7 +908,7 @@ fn direct_expectimax_rejects_hidden_information() {
         vec![(St { tick: 0 }, 0)],
         false,
         0,
-        |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2],
+        |_players: &[usize], _obs: Vec<f32>, n: usize| vec![0.0; n * 2],
     );
 }
 
@@ -939,7 +939,7 @@ fn direct_expectimax_rejects_chance_node_games() {
         vec![(St { tick: 0 }, 0)],
         false,
         0,
-        |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2],
+        |_players: &[usize], _obs: Vec<f32>, n: usize| vec![0.0; n * 2],
     );
 }
 
@@ -1208,7 +1208,7 @@ fn forced_maxn_supervises_both_perspectives_at_two_agents() {
     let movers = maxn.iter().filter(|r| r.3 == 1.0).count();
     assert_eq!(value_only, movers, "one non-mover row per decision at N=2");
     // gamma 1, rewards only at the end: every row's z is its own agent's payoff.
-    for (obs, _pi, z, _w) in &maxn {
+    for (obs, _pi, z, _w, _player) in &maxn {
         let expect = f64::from(obs[1]) + 1.0;
         assert!(
             (z - expect).abs() < 1e-12,
@@ -1303,7 +1303,7 @@ fn forced_maxn_truncation_bootstraps_both_perspectives() {
         records.iter().any(|r| r.3 == 0.0),
         "value-only rows present"
     );
-    for (obs, _pi, z, _w) in &records {
+    for (obs, _pi, z, _w, _player) in &records {
         let expect = (f64::from(obs[1]) + 1.0) / 10.0;
         assert!(
             (z - expect).abs() < 1e-12,

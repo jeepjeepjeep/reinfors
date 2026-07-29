@@ -266,6 +266,7 @@ class AlphaZeroBatch:
     head. 2p and simultaneous compositions emit all-ones weights."""
 
     obs: NDArray[np.float32]
+    players: NDArray[np.int64]
     policy_targets: NDArray[np.float64]
     value_targets: NDArray[np.float64]
     policy_weights: NDArray[np.float64]
@@ -279,6 +280,7 @@ class TreeStrapBatch:
     `obs, targets, masks, telemetry = batch`."""
 
     obs: NDArray[np.float32]
+    players: NDArray[np.int64]
     targets: NDArray[np.float64]
     masks: NDArray[np.float32]
     telemetry: dict[str, Any]

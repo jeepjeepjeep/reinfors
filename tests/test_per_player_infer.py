@@ -69,17 +69,38 @@ def test_infer_argument_validation() -> None:
         engine.collect(8, [q_net(0, 2), 42])
 
 
-def test_search_families_reject_the_sequence_form() -> None:
+def test_search_families_accept_the_sequence_form() -> None:
+    # AlphaZero with per-player networks: leaf rows route per perspective, records carry
+    # their player. The nets here are (logits, values) tuples per the AZ infer contract.
+    def az_net(bias: float) -> Any:
+        def f(obs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            return np.zeros((obs.shape[0], 7)), np.full(obs.shape[0], bias)
+
+        return f
+
     engine = rf.Engine(
         rf.games.Connect4(),
         rf.Reward(),
         rf.policies.AlphaZero(num_simulations=4),
         rf.learners.AlphaZero(),
-        n_games=1,
+        n_games=2,
         seed=0,
     )
-    with pytest.raises(ValueError, match="follow-up"):
-        collect_dqn(engine, 4, [q_net(0, 7), q_net(1, 7)])
+    batch = engine.collect(8, [az_net(0.1), az_net(-0.1)])
+    assert set(batch.players.tolist()) <= {0, 1}
+    assert batch.players.shape[0] == batch.obs.shape[0]
+
+    frozen = rf.Engine(
+        rf.games.Connect4(),
+        rf.Reward(),
+        rf.policies.AlphaZero(num_simulations=4),
+        rf.learners.AlphaZero(),
+        n_games=2,
+        seed=1,
+        learn_players=[0],
+    )
+    fbatch = frozen.collect(8, [az_net(0.1), az_net(-0.1)])
+    assert (fbatch.players == 0).all(), "the frozen player leaves no records"
 
 
 def test_learn_players_filters_records_at_source() -> None:

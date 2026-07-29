@@ -914,12 +914,12 @@ impl PyEngine {
         // engine in place, not permanently forfeit it.
         let (infer, mode) = {
             let borrow = slf.borrow();
-            let (num_agents, per_player_ok) = borrow
+            let num_agents = borrow
                 .inner
                 .as_ref()
                 .ok_or_else(stream_active_err)?
                 .routing();
-            Python::with_gil(|py| engine_callbacks(infer.bind(py), num_agents, per_player_ok))?
+            Python::with_gil(|py| engine_callbacks(infer.bind(py), num_agents))?
         };
         let mut engine = slf
             .borrow_mut()
@@ -1226,9 +1226,8 @@ trait ErasedEngine: Send + Sync {
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> PyResult<BatchThunk>;
 
-    /// Routing metadata for `collect_stream` (which parses the polymorphic `infer` argument
-    /// before handing the callbacks to the worker thread).
-    fn routing(&self) -> (usize, bool); // (num_agents, per_player_ok)
+    /// The player count, for `collect_stream`'s parse of the polymorphic `infer` argument.
+    fn routing(&self) -> usize;
 }
 
 /// Marshal a learner's records (with the rollout telemetry) into the Python record batch. One impl per
@@ -1250,6 +1249,10 @@ trait RecordBatch: Sized {
 struct TreeStrapBatch {
     #[pyo3(get)]
     obs: Py<PyArray2<f32>>, // (M, C*H*W)
+    /// The player whose decision produced each record (attribute-only: the positional unpack
+    /// protocol is unchanged for back-compat).
+    #[pyo3(get)]
+    players: Py<PyArray1<i64>>, // (M,)
     #[pyo3(get)]
     targets: Py<PyArray3<f64>>, // (M, K, A)
     #[pyo3(get)]
@@ -1356,6 +1359,9 @@ impl DqnBatch {
 struct AlphaZeroBatch {
     #[pyo3(get)]
     obs: Py<PyArray2<f32>>, // (M, C*H*W)
+    /// The player whose perspective each record supervises (attribute-only).
+    #[pyo3(get)]
+    players: Py<PyArray1<i64>>, // (M,)
     #[pyo3(get)]
     policy_targets: Py<PyArray2<f64>>, // (M, A) — π, τ=1 normalized root visit counts
     #[pyo3(get)]
@@ -1403,11 +1409,13 @@ impl RecordBatch for AlphaZeroRecord {
         let mut pi_flat: Vec<f64> = Vec::with_capacity(m * a);
         let mut z: Vec<f64> = Vec::with_capacity(m);
         let mut weights: Vec<f64> = Vec::with_capacity(m);
-        for (obs, pi, zi, w) in records {
+        let mut players: Vec<i64> = Vec::with_capacity(m);
+        for (obs, pi, zi, w, player) in records {
             obs_flat.extend(obs);
             pi_flat.extend(pi);
             z.push(zi);
             weights.push(w);
+            players.push(player as i64);
         }
         let obs_arr = Array2::from_shape_vec((m, dim), obs_flat)
             .expect("obs shape")
@@ -1419,6 +1427,7 @@ impl RecordBatch for AlphaZeroRecord {
             py,
             AlphaZeroBatch {
                 obs: obs_arr.unbind(),
+                players: players.into_pyarray(py).unbind(),
                 policy_targets: pi_arr.unbind(),
                 value_targets: z.into_pyarray(py).unbind(),
                 policy_weights: weights.into_pyarray(py).unbind(),
@@ -1446,10 +1455,12 @@ impl RecordBatch for TreeStrapRecord {
         let mut obs_flat: Vec<f32> = Vec::with_capacity(m * dim);
         let mut tgt_flat: Vec<f64> = Vec::with_capacity(m * k * a);
         let mut mask_flat: Vec<f32> = Vec::with_capacity(m * k);
-        for (obs, tgt, mask) in records {
+        let mut players: Vec<i64> = Vec::with_capacity(m);
+        for (obs, tgt, mask, player) in records {
             obs_flat.extend(obs);
             tgt_flat.extend(tgt.into_iter().flatten());
             mask_flat.extend(mask);
+            players.push(player as i64);
         }
         let obs_arr = Array2::from_shape_vec((m, dim), obs_flat)
             .expect("obs shape")
@@ -1464,6 +1475,7 @@ impl RecordBatch for TreeStrapRecord {
             py,
             TreeStrapBatch {
                 obs: obs_arr.unbind(),
+                players: players.into_pyarray(py).unbind(),
                 targets: tgt_arr.unbind(),
                 masks: mask_arr.unbind(),
                 telemetry: telemetry.unbind(),
@@ -1557,11 +1569,10 @@ enum InferLayout {
 #[allow(clippy::too_many_arguments)]
 /// Resolve the polymorphic `infer` argument: a bare callable serves every player (the shared
 /// network — today's behavior); a sequence supplies one callable per player. Families that
-/// have not grown per-player routing yet reject the sequence form with a typed error.
+/// supplies each player's evaluations — search leaf rows route per perspective.
 fn engine_callbacks(
     infer: &Bound<'_, PyAny>,
     num_agents: usize,
-    per_player_ok: bool,
 ) -> PyResult<(Vec<Py<PyAny>>, InferMode)> {
     if infer.is_callable() {
         return Ok((vec![infer.clone().unbind()], InferMode::Shared));
@@ -1571,12 +1582,6 @@ fn engine_callbacks(
             "infer must be a callable or a sequence of per-player callables",
         )
     })?;
-    if !per_player_ok {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "per-player infer is supported by the DQN family; the search families' pooled \
-             paths land in a follow-up",
-        ));
-    }
     if callbacks.len() != num_agents {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "expected {num_agents} per-player infer callables (one per player), got {}",
@@ -1604,7 +1609,6 @@ fn run_collect<'py, G, P, L>(
     n_heads: usize,
     layout: InferLayout,
     num_agents: usize,
-    per_player_ok: bool,
 ) -> PyResult<(Vec<L::Record>, Bound<'py, PyDict>)>
 where
     G: Game + Sync,
@@ -1612,7 +1616,7 @@ where
     P: Policy,
     L: Learner<P::Evaluation>,
 {
-    let (callbacks, mode) = engine_callbacks(infer, num_agents, per_player_ok)?;
+    let (callbacks, mode) = engine_callbacks(infer, num_agents)?;
     let mut callback_err: Option<PyErr> = None;
     let (records, stats) = match layout {
         InferLayout::ValueHeads => {
@@ -1697,9 +1701,6 @@ struct EngineImpl<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     n_heads: usize,
     layout: InferLayout,
     num_agents: usize,
-    /// Whether this family's evaluation paths route per player (the DQN family in v1; the
-    /// search families' pooled rows are the follow-up).
-    per_player_ok: bool,
 }
 
 impl<G, P, L> ErasedEngine for EngineImpl<G, P, L>
@@ -1774,13 +1775,12 @@ where
             self.n_heads,
             self.layout,
             self.num_agents,
-            self.per_player_ok,
         )?;
         L::Record::into_py_batch(records, py, self.dim, self.n_heads, telemetry)
     }
 
-    fn routing(&self) -> (usize, bool) {
-        (self.num_agents, self.per_player_ok)
+    fn routing(&self) -> usize {
+        self.num_agents
     }
 }
 
@@ -2274,7 +2274,6 @@ where
                 n_heads,
                 layout: InferLayout::ValueHeads,
                 num_agents,
-                per_player_ok: false,
             }))
         }
         (
@@ -2347,7 +2346,6 @@ where
                 n_heads: 1,
                 layout: InferLayout::ValueHeads,
                 num_agents,
-                per_player_ok: false,
             }))
         }
         (
@@ -2423,7 +2421,6 @@ where
                 n_heads: 1, // single value head; π targets are (M, A), no bootstrap masks
                 layout: InferLayout::PolicyValue,
                 num_agents,
-                per_player_ok: false,
             }))
         }
         (PolicySpec::EpsilonGreedyQ { n_heads, epsilon }, LearnerSpec::Dqn { bootstrap_p }) => {
@@ -2453,7 +2450,6 @@ where
                 n_heads,
                 layout: InferLayout::ValueHeads,
                 num_agents,
-                per_player_ok: true, // the model-free family routes per player
             }))
         }
         _ => Err(pyo3::exceptions::PyValueError::new_err(

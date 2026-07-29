@@ -143,7 +143,7 @@ fn collect_returns_well_formed_records() {
     let mut e = engine(4, 2, 0);
     let (records, _stats) = e.collect(50, infer);
     assert!(records.len() >= 50);
-    for (obs, tgt, mask) in &records {
+    for (obs, tgt, mask, _player) in &records {
         assert_eq!(obs.len(), 5 * 12 * 12); // flat observation
         assert_eq!(tgt.len(), 2); // K heads
         assert!(tgt.iter().all(|row| row.len() == 3)); // A actions
@@ -193,7 +193,7 @@ fn bootstrap_p_extremes_set_all_or_no_heads() {
     let s = search();
     // bootstrap_p now lives on the learner. n_heads (2) matches `infer`'s 2 heads.
     let all = TreeStrap::new(0.99, 0.5, 1.0, true);
-    for (_, _, mask) in Engine::new(
+    for (_, _, mask, _player) in Engine::new(
         game(&s, 3),
         enc(&s),
         reward(&s),
@@ -210,7 +210,7 @@ fn bootstrap_p_extremes_set_all_or_no_heads() {
         );
     }
     let none = TreeStrap::new(0.99, 0.5, 0.0, true);
-    for (_, _, mask) in Engine::new(
+    for (_, _, mask, _player) in Engine::new(
         game(&s, 3),
         enc(&s),
         reward(&s),
@@ -251,7 +251,10 @@ fn zero_outcome_weight_leaves_targets_unblended() {
     )
     .collect(60, infer)
     .0;
-    let targets_differ = r0.iter().zip(&r1).any(|((_, t0, _), (_, t1, _))| t0 != t1);
+    let targets_differ = r0
+        .iter()
+        .zip(&r1)
+        .any(|((_, t0, _, _), (_, t1, _, _))| t0 != t1);
     assert!(
         targets_differ,
         "outcome_weight should change executed-action targets"
@@ -284,7 +287,7 @@ fn survival_bonus_propagates_through_z_mixing_on_truncation() {
     let surv = mk(bonus).collect(4, infer).0;
     assert_eq!(base.len(), surv.len());
     assert!(!base.is_empty());
-    for ((_, tb, _), (_, ts, _)) in base.iter().zip(surv.iter()) {
+    for ((_, tb, _, _), (_, ts, _, _)) in base.iter().zip(surv.iter()) {
         for (rb, rs) in tb.iter().zip(ts.iter()) {
             let changed: Vec<usize> = (0..rb.len())
                 .filter(|&a| (rs[a] - rb[a]).abs() > 1e-9)
@@ -401,7 +404,7 @@ fn collected_targets_equal_a_direct_search() {
         vec![(state.clone(), 0), (state, 1)],
         false,
         0,
-        |_p, o, n| infer(o, n),
+        |_players: &[usize], o, n| infer(o, n),
     );
 
     assert_eq!(records.len(), 2);

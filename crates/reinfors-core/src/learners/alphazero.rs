@@ -18,7 +18,8 @@ use crate::policies::tree::expectimax::SearchEvaluation;
 /// policy term: `(w * cross_entropy(logits, π)).sum() / w.sum()` — every row trains the value
 /// head, only weight-1 rows train the policy head. 2p-sequential and simultaneous games emit
 /// weight-1 rows only (supervised perspectives ≡ the perspectives their searches consume).
-pub type AlphaZeroRecord = (Vec<f32>, Vec<f64>, f64, f64);
+/// `(obs, π, z, policy_weight, player)` — the player whose perspective the record supervises.
+pub type AlphaZeroRecord = (Vec<f32>, Vec<f64>, f64, f64, usize);
 
 /// The AlphaZero learner. Pairs with the `AlphaZero` (PUCT) policy: it reads the search's root visit
 /// counts as `π`, so the policy must produce visit-bearing evaluations.
@@ -122,7 +123,7 @@ impl Learner<SearchEvaluation> for AlphaZeroLearner {
                 }
                 pi
             };
-            out.push((step.obs.clone(), pi, z, weight));
+            out.push((step.obs.clone(), pi, z, weight, agent));
         }
         out.reverse();
         out
