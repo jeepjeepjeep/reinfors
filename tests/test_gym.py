@@ -67,8 +67,10 @@ def test_pettingzoo_parallel_infos_carry_the_action_mask() -> None:
         (lambda: rf.games.Connect4(), 60),
         (lambda: rf.games.Chess(max_ticks=80), 120),  # short horizon: exercises the truncation dance
         (lambda: rf.games.Backgammon(max_ticks=200), 250),
+        (lambda: rf.games.KuhnPoker(), 40),
+        (lambda: rf.games.LeducPoker(), 60),
     ],
-    ids=["connect4", "chess", "backgammon"],
+    ids=["connect4", "chess", "backgammon", "kuhn", "leduc"],
 )
 def test_pettingzoo_aec_env_conforms_to_the_api(game: object, num_cycles: int) -> None:
     pytest.importorskip("pettingzoo")

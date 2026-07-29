@@ -916,8 +916,8 @@ fn engine_rejects_search_policies_on_chance_node_games() {
     );
 }
 
-/// `NodeyTwo` whose root IS the chance node — episode birth must reject it (a root node would
-/// leave every consumer actor-less rather than fail loudly).
+/// `NodeyTwo` whose root IS the chance node — a declared deal, realized at episode birth by
+/// the chain machinery (root chance is first-class; see `Game::all_chance_declared`).
 struct RootNodey;
 
 impl Game for RootNodey {
@@ -929,14 +929,24 @@ impl Game for RootNodey {
     fn action_count(&self) -> usize {
         2
     }
-    fn chance_nodes(&self) -> bool {
-        true
+    fn all_chance_declared(&self) -> bool {
+        true // the root draw below is this game's only randomness
     }
     fn actor(&self, s: &St) -> Actor {
         if s.tick == 0 {
             Actor::Chance
         } else {
             Actor::Agent(s.tick % 2)
+        }
+    }
+    fn chance_node(&self, _s: &St) -> reinfors_core::ChanceDist {
+        reinfors_core::ChanceDist::Uniform(2)
+    }
+    fn apply_chance_node(&self, s: &St, _outcome: usize) -> Transition<St, ()> {
+        Transition {
+            next_state: St { tick: s.tick + 1 },
+            events: vec![(); 2],
+            terminal: false,
         }
     }
     fn legal_actions(&self, s: &St, agent: usize) -> Vec<usize> {
@@ -959,19 +969,26 @@ impl Game for RootNodey {
 }
 
 #[test]
-#[should_panic(expected = "chance nodes are interior")]
-fn episode_birth_rejects_root_chance_nodes() {
-    let _ = Engine::new(
+fn episode_birth_realizes_root_chance_chains() {
+    // The root chance node (a declared deal) is realized at birth: construction succeeds,
+    // every episode starts at the post-deal decision state, and collect proceeds normally.
+    // Note RootNodey::chance_nodes() stays FALSE — the capability describes POST-birth
+    // states, so a root-only-chance game keeps its tree-search compatibility.
+    assert!(!Game::chance_nodes(&RootNodey));
+    let mut engine = Engine::new(
         RootNodey,
         Box::new(Enc),
         Box::new(Zero),
         EpsilonGreedyQ::new(2, 0.1),
         Dqn::new(2, 1.0),
         EngineParams {
-            n_games: 1,
+            n_games: 2,
             seed: 0,
         },
     );
+    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2 * 2];
+    let (records, _stats) = engine.collect(32, &mut infer);
+    assert!(!records.is_empty(), "root-chance games collect normally");
 }
 
 #[test]

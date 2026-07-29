@@ -45,6 +45,10 @@ impl<G: Game> Env<G> {
         &self.episode.state
     }
 
+    pub fn game(&self) -> &G {
+        &self.game
+    }
+
     pub fn done(&self) -> bool {
         self.done
     }

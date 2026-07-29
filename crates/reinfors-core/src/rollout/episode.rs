@@ -17,25 +17,40 @@ impl<G: Game> Episode<G> {
     pub(crate) fn new(game: &G, seed: u64) -> Self {
         let mut rng = SplitMix64::new(seed);
         let state = game.initial_state(&mut rng);
-        Self::assert_decision_state(game, &state);
+        let state = Self::realize_birth(game, state, &mut rng);
         Episode { state, rng }
     }
 
     pub(crate) fn reset(&mut self, game: &G) {
-        self.state = game.initial_state(&mut self.rng);
-        Self::assert_decision_state(game, &self.state);
+        let state = game.initial_state(&mut self.rng);
+        self.state = Self::realize_birth(game, state, &mut self.rng);
     }
 
-    /// Chance nodes are interior (see [`Game::chance_nodes`]): an episode starts at a decision
-    /// state, wherever the start comes from — `initial_state` or a restored start-distribution
-    /// state. A real assert — a chance-node start would leave every consumer actor-less (empty
-    /// active set, a collect that gathers nothing) rather than fail loudly.
+    /// Realize a birth chain: `initial_state` may return a chance node (a declared deal — see
+    /// [`Game::all_chance_declared`]); draw and apply until a decision state. Birth-chain
+    /// events are contractually neutral (there is no tick to deliver them into) and the chain
+    /// may not end the episode — an episode over before any decision is inexpressible.
+    fn realize_birth(game: &G, mut state: G::State, rng: &mut SplitMix64) -> G::State {
+        while matches!(game.actor(&state), Actor::Chance) {
+            let outcome = game.chance_node(&state).draw(rng);
+            let t = game.apply_chance_node(&state, outcome);
+            assert!(
+                !t.terminal,
+                "an episode cannot end during its birth chain — the deal may not decide the game"
+            );
+            state = t.next_state;
+        }
+        state
+    }
+
+    /// Restored start-distribution states must be realized DECISION states — a chance-node
+    /// start from a custom distribution would leave every consumer actor-less (empty active
+    /// set, a collect that gathers nothing) rather than fail loudly.
     pub(crate) fn assert_decision_state(game: &G, state: &G::State) {
         assert!(
             !matches!(game.actor(state), Actor::Chance),
-            "an episode cannot start at a chance node; chance nodes are interior — initial \
-             randomness draws from the rng inside initial_state, and start distributions must \
-             restore realized decision states"
+            "an episode cannot start at a chance node; start distributions must restore \
+             realized decision states"
         );
     }
 

@@ -7,7 +7,9 @@
 //! meaningful gameplay semantics).
 
 use reinfors_core::{Game, Rng, StateCodec};
-use reinfors_games::{Backgammon, Chess, Connect4, GridWorld, Snake, TexasHoldem};
+use reinfors_games::{
+    Backgammon, Chess, Connect4, GridWorld, KuhnPoker, LeducPoker, Snake, TexasHoldem,
+};
 
 struct Lcg(u64);
 impl Rng for Lcg {
@@ -23,13 +25,25 @@ impl Rng for Lcg {
     }
 }
 
+/// Episode birth the way the rollout runtime does it: realize any root chance chain (a
+/// declared deal) down to the first decision state — mid-chain states are transient and are
+/// exactly what `validate_decoded_state` rejects.
+fn birth<G: Game>(game: &G, rng: &mut dyn reinfors_core::Rng) -> <G as Game>::State {
+    let mut s = game.initial_state(rng);
+    while matches!(game.actor(&s), reinfors_core::Actor::Chance) {
+        let o = game.chance_node(&s).draw(rng);
+        s = game.apply_chance_node(&s, o).next_state;
+    }
+    s
+}
+
 fn reachable_states_round_trip<G>(game: G, plies: usize)
 where
     G: Game + StateCodec<State = <G as Game>::State>,
     <G as Game>::State: Clone,
 {
     let mut rng = Lcg(7);
-    let mut state = game.initial_state(&mut rng);
+    let mut state = birth(&game, &mut rng);
     for _ in 0..plies {
         let bytes = game.encode(&state);
         let back = game
@@ -65,7 +79,7 @@ where
             assert_eq!(game.encode(&back), bytes);
             game.validate_decoded_state(&back, true)
                 .unwrap_or_else(|e| panic!("reachable terminal state failed validation: {e}"));
-            state = game.initial_state(&mut rng);
+            state = birth(&game, &mut rng);
         } else {
             state = t.next_state;
         }
@@ -108,6 +122,8 @@ fn every_game_round_trips_reachable_states() {
         200,
     );
     reachable_states_round_trip(Backgammon { max_ticks: None }, 300);
+    reachable_states_round_trip(KuhnPoker, 200);
+    reachable_states_round_trip(LeducPoker, 300);
     reachable_states_round_trip(
         TexasHoldem {
             num_players: 4,
