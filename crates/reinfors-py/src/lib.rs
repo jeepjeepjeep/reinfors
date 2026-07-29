@@ -772,8 +772,6 @@ impl PyEngine {
     /// hang off the same signal.
     #[pyo3(signature = (player=None))]
     fn weights_updated(&self, player: Option<usize>) -> PyResult<()> {
-        self.weights_version
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match player {
             None => {
                 for generation in &self.weights_generations {
@@ -790,6 +788,8 @@ impl PyEngine {
                 self.weights_generations[p + 1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
+        self.weights_version
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -909,15 +909,22 @@ impl PyEngine {
                 "depth must be >= 1, or None for unbounded",
             ));
         }
+        // Validate the callback form BEFORE taking the engine: a rejected input must leave the
+        // engine in place, not permanently forfeit it.
+        let (infer, mode) = {
+            let borrow = slf.borrow();
+            let (num_agents, per_player_ok) = borrow
+                .inner
+                .as_ref()
+                .ok_or_else(stream_active_err)?
+                .routing();
+            Python::with_gil(|py| engine_callbacks(infer.bind(py), num_agents, per_player_ok))?
+        };
         let mut engine = slf
             .borrow_mut()
             .inner
             .take()
             .ok_or_else(stream_active_err)?;
-        let (infer, mode) = {
-            let (num_agents, per_player_ok) = engine.routing();
-            Python::with_gil(|py| engine_callbacks(infer.bind(py), num_agents, per_player_ok))?
-        };
 
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let pause = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

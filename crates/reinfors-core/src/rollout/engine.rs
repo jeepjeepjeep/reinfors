@@ -383,7 +383,7 @@ where
                         continue; // no decision this tick
                     }
                     for (si, slot) in agents.iter().enumerate() {
-                        if slot.is_none() {
+                        if slot.is_none() && self.learn_mask[si] {
                             if let Some(evaluation) =
                                 self.learner.value_only_evaluation(action_count)
                             {

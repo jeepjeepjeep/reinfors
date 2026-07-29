@@ -411,6 +411,48 @@ fn alphazero_engine_collects_on_a_three_agent_sequential_game() {
     assert!(stats.decisions > 0 && !stats.episodes.is_empty());
 }
 
+#[test]
+fn learn_players_filters_value_only_perspectives() {
+    // Frozen players must not leak through the sequential-Max^N value-only path either: with
+    // only player 0 learning, each RoundRobin episode leaves its mover record (ply 0) plus its
+    // two value-only perspectives (plies 1 and 2) — nothing from players 1 and 2.
+    let az_cfg = AlphaZeroConfig {
+        num_simulations: 8,
+        c_puct: 1.5,
+        gamma: 0.99,
+        max_depth: 6,
+        noise_epsilon: 0.0,
+        noise_alpha: 0.3,
+        temperature: 0.0,
+        temperature_drop: 0,
+        chance: ChanceMode::Committed { samples: 1 },
+        noise_scope: reinfors_core::NoiseScope::Requester,
+        sequential_backup: Default::default(),
+    };
+    let mut engine = Engine::new(
+        RoundRobin,
+        Box::new(Enc),
+        Box::new(Zero),
+        AlphaZero::new(az_cfg),
+        reinfors_core::AlphaZeroLearner::new(0.99),
+        EngineParams {
+            n_games: 2,
+            seed: 5,
+        },
+    )
+    .with_learn_players(&[0]);
+    let (records, _) = engine.collect(6, |_obs: Vec<f32>, n: usize| vec![0.0; n * 3]);
+    let movers = records.iter().filter(|r| r.3 == 1.0).count();
+    let value_only = records.iter().filter(|r| r.3 == 0.0).count();
+    assert!(movers >= 2);
+    assert_eq!(movers + value_only, records.len());
+    assert_eq!(
+        value_only,
+        movers * 2,
+        "frozen players leave no value-only rows"
+    );
+}
+
 /// RoundRobin with a terminal payoff vector [1, 2, 3]: with gamma 1, EVERY record's z for agent
 /// i is exactly i+1 — per-perspective returns from each agent's own reward stream, value-only
 /// rows included (their rewards land on the correct tick, not the previous decision).

@@ -115,6 +115,24 @@ def test_engine_infer_shapes_are_validated_exactly() -> None:
         collect_dqn(engine, 8, lambda obs: np.zeros((obs.shape[0], 3, 2)))
 
 
+def test_stream_validation_errors_do_not_forfeit_the_engine() -> None:
+    engine = kuhn_engine()
+    with pytest.raises(ValueError, match="expected 2 per-player"):
+        engine.collect_stream(8, [q_net(0, 2)], depth=1)
+    batch = collect_dqn(engine, 8, q_net(0, 2))  # the engine survives the rejection
+    assert batch.obs.shape[0] >= 8
+
+
+def test_rejected_weights_updated_mutates_nothing() -> None:
+    engine = kuhn_engine()
+    before = engine.snapshot().weights_generation
+    with pytest.raises(ValueError, match="out of range"):
+        engine.weights_updated(2)
+    assert engine.snapshot().weights_generation == before
+    engine.weights_updated(1)
+    assert engine.snapshot().weights_generation == before + 1
+
+
 def test_collect_stream_accepts_the_sequence_form() -> None:
     engine = kuhn_engine()
     stream = engine.collect_stream(20, [q_net(0, 2), q_net(1, 2)], depth=1)

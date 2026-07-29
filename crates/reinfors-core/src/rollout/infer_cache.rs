@@ -85,7 +85,9 @@ impl InferCache {
     pub fn new(capacity: usize, generation: Arc<AtomicU64>) -> Self {
         let half = (capacity / 2).max(1);
         InferCache {
-            current: HashMap::with_capacity(half),
+            // Maps allocate on first insert, so constructed-but-unused caches (the engine's
+            // inactive routing-mode slots) cost nothing.
+            current: HashMap::new(),
             prev: HashMap::new(),
             half_capacity: half,
             seen_generation: generation.load(Ordering::Relaxed),

@@ -237,6 +237,7 @@ where
                 let dim = self.dim;
                 let mut out: Vec<f64> = Vec::new();
                 let mut scattered: Vec<(usize, Vec<f64>)> = Vec::with_capacity(self.n);
+                let mut group_stride: Option<usize> = None;
                 for player in order {
                     let tickets = &groups[&player];
                     let mut obs: Vec<f32> = Vec::with_capacity(tickets.len() * dim);
@@ -248,7 +249,22 @@ where
                     self.eval.seconds += started.elapsed().as_secs_f64();
                     self.eval.calls += 1;
                     self.eval.rows += tickets.len();
+                    // Every player's rows are flattened under ONE stride below; a diverging or
+                    // non-divisible return would silently interleave rows and poison the caches.
+                    assert!(
+                        rows.len().is_multiple_of(tickets.len()),
+                        "player {player} infer returned {} values for {} rows (not divisible)",
+                        rows.len(),
+                        tickets.len()
+                    );
                     let stride = rows.len() / tickets.len();
+                    if let Some(expected) = group_stride {
+                        assert_eq!(
+                            stride, expected,
+                            "player {player} infer row width differs from another player's"
+                        );
+                    }
+                    group_stride = Some(stride);
                     for (i, &t) in tickets.iter().enumerate() {
                         scattered.push((t, rows[i * stride..(i + 1) * stride].to_vec()));
                     }

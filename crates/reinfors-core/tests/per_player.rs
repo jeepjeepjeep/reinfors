@@ -158,6 +158,65 @@ fn per_player_caches_never_cross_contaminate() {
     }
 }
 
+/// Both players decide every tick (three ticks), so one pooled forward carries BOTH players'
+/// rows — the cross-player row-width check has two groups to compare.
+struct Simul;
+
+impl Game for Simul {
+    type State = St;
+    type Event = ();
+    fn num_agents(&self) -> usize {
+        2
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn actor(&self, _s: &St) -> Actor {
+        Actor::Simultaneous
+    }
+    fn legal_actions(&self, s: &St, _agent: usize) -> Vec<usize> {
+        if s.tick < 3 {
+            vec![0, 1]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
+        Transition {
+            next_state: St { tick: s.tick + 1 },
+            events: vec![(); 2],
+            terminal: s.tick + 1 >= 3,
+        }
+    }
+    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+        St { tick: 0 }
+    }
+}
+
+#[test]
+#[should_panic(expected = "not divisible")]
+fn per_player_rows_must_divide_evenly() {
+    let mut e = engine();
+    let _ = e.collect_routed(4, InferMode::PerPlayer, |_p, _obs, n| vec![0.0; n * 2 + 1]);
+}
+
+#[test]
+#[should_panic(expected = "row width")]
+fn per_player_row_widths_must_agree_across_players() {
+    let mut e = Engine::new(
+        Simul,
+        Box::new(Enc),
+        Box::new(Zero),
+        EpsilonGreedyQ::new(1, 0.0),
+        Dqn::new(1, 1.0),
+        EngineParams {
+            n_games: 1,
+            seed: 3,
+        },
+    );
+    let _ = e.collect_routed(4, InferMode::PerPlayer, |p, _obs, n| vec![0.0; n * (2 + p)]);
+}
+
 #[test]
 #[should_panic(expected = "out of range")]
 fn learn_players_validates_indices() {
