@@ -100,18 +100,19 @@ impl<G: Game> Env<G> {
     }
 
     /// Apply a joint action (one index per agent; entries for inactive agents are ignored), advancing
-    /// the episode through the env transition. Returns this tick's per-agent events — what happened to
-    /// each agent (`Env` holds no reward; a game-aware caller reads the outcome from these or `state()`).
-    pub fn step(&mut self, actions: &[usize]) -> Vec<G::Event> {
+    /// the episode through the env tick. Returns the tick's ordered `(agent, event)` trace — every
+    /// emission across the tick's edges (`Env` holds no reward; a game-aware caller reads the
+    /// outcome from these or `state()`).
+    pub fn step(&mut self, actions: &[usize]) -> Vec<(usize, G::Event)> {
         debug_assert!(!self.done, "step() after done — call reset() first");
         debug_assert_eq!(
             actions.len(),
             self.game.num_agents(),
             "step() expects one action per agent"
         );
-        let (events, terminal) = self.episode.advance(&self.game, actions);
+        let (trace, terminal) = self.episode.advance(&self.game, actions);
         self.done = terminal;
-        events
+        trace
     }
 }
 
@@ -149,7 +150,7 @@ mod tests {
             let terminal = next >= self.goal;
             Transition {
                 next_state: next,
-                events: vec![if terminal { 1.0 } else { 0.0 }],
+                events: vec![if terminal { Some(1.0) } else { None }],
                 terminal,
             }
         }
@@ -179,9 +180,9 @@ mod tests {
         let mut e = env();
         assert!(!e.done() && e.active_agents() == vec![0]);
         assert_eq!(e.observe(0), vec![0.0]);
-        assert_eq!(e.step(&[1]), vec![0.0]); // 0 -> 1
-        assert_eq!(e.step(&[1]), vec![0.0]); // 1 -> 2
-        assert_eq!(e.step(&[1]), vec![1.0]); // 2 -> 3: goal
+        assert_eq!(e.step(&[1]), vec![]); // 0 -> 1: nothing settled
+        assert_eq!(e.step(&[1]), vec![]); // 1 -> 2
+        assert_eq!(e.step(&[1]), vec![(0, 1.0)]); // 2 -> 3: goal emits
         assert!(e.done());
         assert!(e.active_agents().is_empty()); // no legal actions once finished
         assert_eq!(*e.state(), 3);

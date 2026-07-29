@@ -125,7 +125,7 @@ impl Game for KuhnPoker {
         next.cards.push(self.remaining(state)[outcome]);
         Transition {
             next_state: next,
-            events: vec![0.0; 2],
+            events: vec![None; 2],
             terminal: false,
         }
     }
@@ -144,9 +144,9 @@ impl Game for KuhnPoker {
         next.history.push(actions[me].min(BET) as u8);
         let terminal = next.is_terminal();
         let events = if terminal {
-            self.payouts(&next)
+            self.payouts(&next).into_iter().map(Some).collect()
         } else {
-            vec![0.0; 2]
+            vec![None; 2]
         };
         Transition {
             next_state: next,
@@ -252,23 +252,23 @@ mod tests {
         // bet-fold: p0 wins the ante (+1/-1) — pinned against pyspiel.
         let t = g.step(&dealt(0, 2, &[BET as u8]), &[PASS, PASS]);
         assert!(t.terminal);
-        assert_eq!(t.events, vec![1.0, -1.0]);
+        assert_eq!(t.events, vec![Some(1.0), Some(-1.0)]);
         // pass-pass: showdown for the antes; K beats J.
         let t = g.step(&dealt(0, 2, &[PASS as u8]), &[0, PASS]);
         assert!(t.terminal);
-        assert_eq!(t.events, vec![-1.0, 1.0]);
+        assert_eq!(t.events, vec![Some(-1.0), Some(1.0)]);
         // bet-call: showdown for 2 each.
         let t = g.step(&dealt(2, 1, &[BET as u8]), &[0, BET]);
         assert!(t.terminal);
-        assert_eq!(t.events, vec![2.0, -2.0]);
+        assert_eq!(t.events, vec![Some(2.0), Some(-2.0)]);
         // pass-bet-pass: p0 folds, p1 wins the ante.
         let t = g.step(&dealt(2, 0, &[PASS as u8, BET as u8]), &[PASS, 0]);
         assert!(t.terminal);
-        assert_eq!(t.events, vec![-1.0, 1.0]);
+        assert_eq!(t.events, vec![Some(-1.0), Some(1.0)]);
         // pass-bet-bet: showdown for 2 each.
         let t = g.step(&dealt(2, 0, &[PASS as u8, BET as u8]), &[BET, 0]);
         assert!(t.terminal);
-        assert_eq!(t.events, vec![2.0, -2.0]);
+        assert_eq!(t.events, vec![Some(2.0), Some(-2.0)]);
     }
 
     #[test]

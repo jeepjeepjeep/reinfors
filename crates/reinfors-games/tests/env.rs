@@ -15,13 +15,13 @@ fn connect4_played_to_a_vertical_win() {
         assert_eq!(env.active_agents(), vec![agent]); // sequential: one mover per tick
         let mut joint = vec![0usize; env.num_agents()];
         joint[agent] = col;
-        last = env.step(&joint); // per-agent events
+        last = env.step(&joint); // the tick's (agent, event) trace
     }
     assert!(env.done());
-    // The terminal events carry the outcome (Env holds no reward); P0 wins, P1 loses.
+    // The terminal trace carries the outcome (Env holds no reward); P0 wins, P1 loses.
     assert_eq!(
         last,
-        vec![Connect4Event::Win, Connect4Event::Loss],
+        vec![(0, Connect4Event::Win), (1, Connect4Event::Loss)],
         "{last:?}"
     );
     assert!(env.active_agents().is_empty());

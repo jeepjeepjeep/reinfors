@@ -239,7 +239,7 @@ fn chance_root_simultaneous_games_fail_at_construction() {
         fn apply_chance_node(&self, s: &St, _outcome: usize) -> reinfors_core::Transition<St, f64> {
             reinfors_core::Transition {
                 next_state: St { tick: s.tick + 1 },
-                events: vec![0.0; 2],
+                events: vec![None; 2],
                 terminal: false,
             }
         }
@@ -253,7 +253,7 @@ fn chance_root_simultaneous_games_fail_at_construction() {
         fn step(&self, _s: &St, _a: &[usize]) -> reinfors_core::Transition<St, f64> {
             reinfors_core::Transition {
                 next_state: St { tick: 2 },
-                events: vec![0.0; 2],
+                events: vec![None; 2],
                 terminal: true,
             }
         }

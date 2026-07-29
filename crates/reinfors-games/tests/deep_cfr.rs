@@ -298,7 +298,7 @@ impl reinfors_core::Game for ChanceRootSim {
     ) -> reinfors_core::Transition<SimState, f64> {
         reinfors_core::Transition {
             next_state: SimState { tick: s.tick + 1 },
-            events: vec![0.0; 2],
+            events: vec![None; 2],
             terminal: false,
         }
     }
@@ -312,7 +312,7 @@ impl reinfors_core::Game for ChanceRootSim {
     fn step(&self, _s: &SimState, _actions: &[usize]) -> reinfors_core::Transition<SimState, f64> {
         reinfors_core::Transition {
             next_state: SimState { tick: 2 },
-            events: vec![0.0; 2],
+            events: vec![None; 2],
             terminal: true,
         }
     }

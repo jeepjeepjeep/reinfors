@@ -229,9 +229,9 @@ impl Game for Connect4 {
             }
         };
         let events = if terminal {
-            Self::outcome_events(winner)
+            Self::outcome_events(winner).into_iter().map(Some).collect()
         } else {
-            vec![Connect4Event::Ongoing; 2]
+            vec![None; 2]
         };
         Transition {
             next_state: Connect4State {
@@ -423,7 +423,7 @@ mod tests {
         let t = g.step(&empty, &[0]);
         assert_eq!(t.next_state.cells[0], 1); // player 0 at (0,0)
         assert_eq!(t.next_state.turn, 1);
-        assert!(!t.terminal && t.events == vec![Connect4Event::Ongoing; 2]);
+        assert!(!t.terminal && t.events == vec![None, None]);
         // Completing four-in-a-row wins (player 0 has 3 across the bottom; col 3 finishes it).
         let mut cells = [0u8; 42];
         for c in 0..3 {
@@ -437,7 +437,9 @@ mod tests {
             },
             &[3],
         );
-        assert!(t.terminal && t.events == vec![Connect4Event::Win, Connect4Event::Loss]);
+        assert!(
+            t.terminal && t.events == vec![Some(Connect4Event::Win), Some(Connect4Event::Loss)]
+        );
         // Standard rules: a full column is ILLEGAL — legal_actions excludes it, and stepping it
         // anyway (unreachable via legal play) hits the losing backstop rather than corrupting.
         let mut full = [0u8; 42];
@@ -462,7 +464,9 @@ mod tests {
             },
             &[0],
         );
-        assert!(t.terminal && t.events == vec![Connect4Event::Loss, Connect4Event::Win]);
+        assert!(
+            t.terminal && t.events == vec![Some(Connect4Event::Loss), Some(Connect4Event::Win)]
+        );
     }
 
     #[test]

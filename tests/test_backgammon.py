@@ -45,8 +45,8 @@ def test_env_steps_and_exposes_state() -> None:
     mover = env.active_agents()[0]
     legal = env.legal_actions(mover)
     assert legal, "a fresh position has legal actions"
-    events = env.step({mover: legal[0]})
-    assert events[mover]["result"] in ("ongoing", "win", "loss")
+    trace = env.step({mover: legal[0]})
+    assert trace == [], "an opening move settles nothing"
     s2 = env.state()
     assert sum(s2["board"][0]) + s2["bar"][0] + s2["scores"][0] == 15
 

@@ -122,7 +122,7 @@ impl Game for GridWorld {
         let done = pos == self.goal;
         Transition {
             next_state: GridState { pos, done },
-            events: vec![GridEvent { reached_goal: done }],
+            events: vec![Some(GridEvent { reached_goal: done })],
             terminal: done,
         }
     }
@@ -278,7 +278,7 @@ mod tests {
                 done: true
             }
         );
-        assert!(t.terminal && t.events[0].reached_goal);
+        assert!(t.terminal && t.events[0].unwrap().reached_goal);
         // Up from the top row is a wall: stay, non-terminal, no goal reached.
         let t = w.step(
             &GridState {
@@ -288,7 +288,7 @@ mod tests {
             &[0],
         );
         assert_eq!(t.next_state.pos, (0, 0));
-        assert!(!t.terminal && !t.events[0].reached_goal);
+        assert!(!t.terminal && !t.events[0].unwrap().reached_goal);
     }
 
     #[test]

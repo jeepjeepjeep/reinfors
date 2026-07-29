@@ -793,7 +793,9 @@ impl Game for Snake {
         let (events, done) = self.advance(&mut snakes, &mut food, &moves, || None);
         Transition {
             next_state: SnakeState { snakes, food },
-            events,
+            // Every tick settles each snake's outcome on the action edge; the respawn draw
+            // that may follow settles nothing.
+            events: events.into_iter().map(Some).collect(),
             terminal: done,
         }
     }
@@ -873,9 +875,9 @@ impl Game for Snake {
     }
 
     /// Flag each still-alive snake as having survived to the truncation, so its reward pays `survival`.
-    fn mark_truncation(&self, state: &SnakeState, events: &mut [StepEvent]) {
-        for (event, snake) in events.iter_mut().zip(state.snakes.iter()) {
-            event.survived_to_max_ticks = snake.alive;
+    fn mark_truncation(&self, state: &SnakeState, trace: &mut Vec<(usize, StepEvent)>) {
+        for (agent, event) in trace.iter_mut() {
+            event.survived_to_max_ticks = state.snakes[*agent].alive;
         }
     }
 }
@@ -997,7 +999,12 @@ mod game_tests {
             .chance_outcomes(&st, &t)
             .expect("an eaten apple declares chance");
         let realized = reinfors_core::game::step_env(&g, &st, &actions, &mut TestRng(42));
-        assert_eq!(realized.events, t.events);
+        let trace_events: Vec<Option<StepEvent>> = realized
+            .trace
+            .iter()
+            .map(|(_, e)| Some(e.clone()))
+            .collect();
+        assert_eq!(trace_events, t.events);
         assert_eq!(realized.terminal, t.terminal);
         assert!(
             (0..dist.count()).any(|d| realized.next_state == g.apply_chance(&st, &t, d)),
@@ -1009,7 +1016,7 @@ mod game_tests {
             "same seed, same realization"
         );
         assert!(
-            (reward().step_reward(&realized.events[0], 0) - 1.0).abs() < 1e-12,
+            (reward().step_reward(&realized.trace[0].1, 0) - 1.0).abs() < 1e-12,
             "A ate one apple"
         );
         assert_eq!(
@@ -1030,7 +1037,12 @@ mod game_tests {
             // ...so the realized env step is exactly the deterministic step.
             let realized = reinfors_core::game::step_env(&g, &st, &actions, &mut TestRng(1));
             assert_eq!(realized.next_state, t.next_state, "actions {actions:?}");
-            assert_eq!(realized.events, t.events);
+            let trace_events: Vec<Option<StepEvent>> = realized
+                .trace
+                .iter()
+                .map(|(_, e)| Some(e.clone()))
+                .collect();
+            assert_eq!(trace_events, t.events);
             assert_eq!(realized.terminal, t.terminal);
         }
     }
@@ -1152,7 +1164,7 @@ mod game_tests {
         let st = initial_state(&[(4, 3)]);
         let t = reinfors_core::game::step_env(&g, &st, &[0, 0], &mut TestRng(1));
         assert!(
-            (r.step_reward(&t.events[0], 0) - 1.0).abs() < 1e-12,
+            (r.step_reward(&t.trace[0].1, 0) - 1.0).abs() < 1e-12,
             "A ate -> food reward"
         );
         assert!(!t.terminal);
@@ -1166,8 +1178,8 @@ mod game_tests {
         let t2 = reinfors_core::game::step_env(&g, &empty, &[0, 0], &mut TestRng(1));
         assert_eq!(
             [
-                r.step_reward(&t2.events[0], 0),
-                r.step_reward(&t2.events[1], 1)
+                r.step_reward(&t2.trace[0].1, 0),
+                r.step_reward(&t2.trace[1].1, 1)
             ],
             [0.0, 0.0]
         );
@@ -1183,11 +1195,11 @@ mod game_tests {
         };
         let mut st = initial_state(&[]);
         st.snakes[1].alive = false; // A alive, B dead
-        let mut events = [StepEvent::default(), StepEvent::default()];
-        game().mark_truncation(&st, &mut events);
-        assert!(events[0].survived_to_max_ticks && !events[1].survived_to_max_ticks);
-        assert!((r.step_reward(&events[0], 0) - 0.25).abs() < 1e-12); // A: survival
-        assert_eq!(r.step_reward(&events[1], 1), 0.0); // B (dead): none
+        let mut trace = vec![(0, StepEvent::default()), (1, StepEvent::default())];
+        game().mark_truncation(&st, &mut trace);
+        assert!(trace[0].1.survived_to_max_ticks && !trace[1].1.survived_to_max_ticks);
+        assert!((r.step_reward(&trace[0].1, 0) - 0.25).abs() < 1e-12); // A: survival
+        assert_eq!(r.step_reward(&trace[1].1, 1), 0.0); // B (dead): none
     }
 
     #[test]

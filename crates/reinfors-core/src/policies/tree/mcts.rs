@@ -725,19 +725,19 @@ impl<S: Clone> Tree<S> {
             NodeKind::Simultaneous(sim) => {
                 let n = sim.tables.len();
                 for ag in 0..n {
-                    sim.reward[ai * n + ag] = reward.step_reward(&t.events[ag], ag);
+                    sim.reward[ai * n + ag] = crate::reward::edge_reward(reward, &t.events, ag);
                 }
             }
             _ => {
                 let mover = self.arena[ni].actor;
-                self.arena[ni].reward[ai] = reward.step_reward(&t.events[mover], mover);
+                self.arena[ni].reward[ai] = crate::reward::edge_reward(reward, &t.events, mover);
                 if self.mode == TreeMode::SeqMaxN {
                     // General-sum: a mover's edge can pay every agent (Max^N backs the full
                     // vector up); the mover-own copy above still drives selection.
                     let n = self.n_agents;
                     for ag in 0..n {
                         self.arena[ni].rewards_all[ai * n + ag] =
-                            reward.step_reward(&t.events[ag], ag);
+                            crate::reward::edge_reward(reward, &t.events, ag);
                     }
                 }
             }
@@ -1954,7 +1954,7 @@ mod masking_tests {
             let total = s.0 + a;
             Transition {
                 next_state: St(total),
-                events: vec![if total >= 8 { 1.0 } else { 0.0 }],
+                events: vec![Some(if total >= 8 { 1.0 } else { 0.0 })],
                 terminal: total >= 8,
             }
         }
@@ -2114,13 +2114,13 @@ mod chance_tests {
                 };
                 Transition {
                     next_state: St { total, ply: 1 },
-                    events: vec![0.0],
+                    events: vec![Some(0.0)],
                     terminal: false,
                 }
             } else {
                 Transition {
                     next_state: St { ..*s },
-                    events: vec![f64::from(s.total)],
+                    events: vec![Some(f64::from(s.total))],
                     terminal: true,
                 }
             }
@@ -2372,7 +2372,7 @@ mod duct_tests {
             let coord = f64::from(u8::from(actions[0] == actions[1]));
             Transition {
                 next_state: St { done: true },
-                events: vec![[coord, 0.0], [f64::from(actions[1] as u8), 0.0]],
+                events: vec![Some([coord, 0.0]), Some([f64::from(actions[1] as u8), 0.0])],
                 terminal: true,
             }
         }
@@ -2677,7 +2677,7 @@ mod frame_tests {
             let next = s.0 * 3 + actions[0] as i32 + 1;
             Transition {
                 next_state: St(next),
-                events: vec![0.0],
+                events: vec![Some(0.0)],
                 terminal: next > 40,
             }
         }
@@ -2875,22 +2875,22 @@ mod maxn_tests {
             match s {
                 Lr::Root if actions[0] == 0 => Transition {
                     next_state: Lr::AfterL,
-                    events: vec![0.0; 3],
+                    events: vec![Some(0.0); 3],
                     terminal: false,
                 },
                 Lr::Root => Transition {
                     next_state: Lr::Done,
-                    events: vec![3.0, 0.0, 0.0],
+                    events: vec![Some(3.0), Some(0.0), Some(0.0)],
                     terminal: true,
                 },
                 Lr::AfterL if actions[1] == 0 => Transition {
                     next_state: Lr::Done,
-                    events: vec![5.0, 10.0, 0.0],
+                    events: vec![Some(5.0), Some(10.0), Some(0.0)],
                     terminal: true,
                 },
                 Lr::AfterL => Transition {
                     next_state: Lr::Done,
-                    events: vec![0.0; 3],
+                    events: vec![Some(0.0); 3],
                     terminal: true,
                 },
                 Lr::Done => unreachable!("stepping a terminal state"),
@@ -3001,7 +3001,7 @@ mod maxn_tests {
         fn step(&self, _s: &DSt, actions: &[usize]) -> Transition<DSt, f64> {
             Transition {
                 next_state: DSt(true),
-                events: actions.iter().map(|&a| a as f64).collect(),
+                events: actions.iter().map(|&a| Some(a as f64)).collect(),
                 terminal: true,
             }
         }
@@ -3107,22 +3107,22 @@ mod forced_maxn_tests {
             match s {
                 Lr::Root if actions[0] == 0 => Transition {
                     next_state: Lr::AfterL,
-                    events: vec![0.0; 2],
+                    events: vec![Some(0.0); 2],
                     terminal: false,
                 },
                 Lr::Root => Transition {
                     next_state: Lr::Done,
-                    events: vec![3.0, 0.0],
+                    events: vec![Some(3.0), Some(0.0)],
                     terminal: true,
                 },
                 Lr::AfterL if actions[1] == 0 => Transition {
                     next_state: Lr::Done,
-                    events: vec![5.0, 10.0],
+                    events: vec![Some(5.0), Some(10.0)],
                     terminal: true,
                 },
                 Lr::AfterL => Transition {
                     next_state: Lr::Done,
-                    events: vec![0.0; 2],
+                    events: vec![Some(0.0); 2],
                     terminal: true,
                 },
                 Lr::Done => unreachable!("stepping a terminal state"),

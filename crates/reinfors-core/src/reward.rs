@@ -19,6 +19,17 @@
 pub trait Reward: Send + Sync {
     type Event;
 
-    /// The scalar reward `agent` earns from its per-agent `event` this tick.
+    /// The scalar reward `agent` earns from one emitted `event`. Events are per-EDGE and
+    /// incremental (see [`Transition`](crate::Transition)); a tick's reward is the sum over its
+    /// emitted events.
     fn step_reward(&self, event: &Self::Event, agent: usize) -> f64;
+}
+
+/// One edge's reward for `agent`: 0.0 where the edge emitted nothing for it. The uniform read
+/// used by every consumer that scores a single [`Transition`](crate::Transition) edge (searches,
+/// solvers) — rollout consumers fold the whole tick trace instead.
+pub fn edge_reward<E>(reward: &dyn Reward<Event = E>, events: &[Option<E>], agent: usize) -> f64 {
+    events[agent]
+        .as_ref()
+        .map_or(0.0, |e| reward.step_reward(e, agent))
 }

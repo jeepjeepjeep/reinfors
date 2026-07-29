@@ -438,12 +438,12 @@ impl Game for Backgammon {
             extra_turn = true;
         }
         let terminal = next.scores[player] == NUM_CHECKERS;
-        let mut events = [BackgammonEvent::Ongoing; 2];
+        let mut events = [None, None];
         if terminal {
             let loser = BackgammonState::opponent(player);
             let margin = next.loss_margin(loser);
-            events[player] = BackgammonEvent::Win(margin);
-            events[loser] = BackgammonEvent::Loss(margin);
+            events[player] = Some(BackgammonEvent::Win(margin));
+            events[loser] = Some(BackgammonEvent::Loss(margin));
         }
         if extra_turn {
             next.double_turn = true;
@@ -721,15 +721,15 @@ mod tests {
                 if t.terminal {
                     finished += 1;
                     let (w, l);
-                    if t.events[0] != BackgammonEvent::Ongoing {
-                        match t.events[0] {
+                    if t.events[0].is_some() {
+                        match t.events[0].unwrap() {
                             BackgammonEvent::Win(m) => {
                                 (w, l) = (BackgammonEvent::Win(m), BackgammonEvent::Loss(m));
-                                assert_eq!(t.events[1], l);
-                                assert_eq!(t.events[0], w);
+                                assert_eq!(t.events[1], Some(l));
+                                assert_eq!(t.events[0], Some(w));
                             }
                             BackgammonEvent::Loss(m) => {
-                                assert_eq!(t.events[1], BackgammonEvent::Win(m));
+                                assert_eq!(t.events[1], Some(BackgammonEvent::Win(m)));
                             }
                             BackgammonEvent::Ongoing => unreachable!(),
                         }
@@ -903,19 +903,19 @@ mod tests {
         let s = state(&[(23, 1)], &[(20, 15)], [0, 0], [1, 2], 0);
         let t = g.step(&s, &[s.legal_action_ids(0)[0], 0]);
         assert!(t.terminal);
-        assert_eq!(t.events[0], BackgammonEvent::Win(3));
-        assert_eq!(t.events[1], BackgammonEvent::Loss(3));
+        assert_eq!(t.events[0], Some(BackgammonEvent::Win(3)));
+        assert_eq!(t.events[1], Some(BackgammonEvent::Loss(3)));
         // O out of X's home with nothing borne off -> gammon.
         let s2 = state(&[(23, 1)], &[(10, 15)], [0, 0], [1, 2], 0);
         let t2 = g.step(&s2, &[s2.legal_action_ids(0)[0], 0]);
-        assert_eq!(t2.events[0], BackgammonEvent::Win(2));
+        assert_eq!(t2.events[0], Some(BackgammonEvent::Win(2)));
         // O has borne off one -> plain win.
         let s3 = state(&[(23, 1)], &[(10, 14)], [0, 0], [1, 2], 0);
         let t3 = g.step(&s3, &[s3.legal_action_ids(0)[0], 0]);
-        assert_eq!(t3.events[0], BackgammonEvent::Win(1));
+        assert_eq!(t3.events[0], Some(BackgammonEvent::Win(1)));
         let r = BackgammonReward::default();
-        assert_eq!(r.step_reward(&t.events[0], 0), 3.0);
-        assert_eq!(r.step_reward(&t.events[1], 1), -3.0);
+        assert_eq!(r.step_reward(t.events[0].as_ref().unwrap(), 0), 3.0);
+        assert_eq!(r.step_reward(t.events[1].as_ref().unwrap(), 1), -3.0);
     }
 
     #[test]

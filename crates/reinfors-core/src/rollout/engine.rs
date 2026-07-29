@@ -411,16 +411,22 @@ where
             let mut finished: Vec<(usize, bool)> = Vec::new(); // (game index, terminal?)
             for (gi, agents) in acted.into_iter().enumerate() {
                 let joint: Vec<usize> = agents.iter().map(|a| a.unwrap_or(0)).collect();
-                let (mut events, terminal) = self.episodes[gi].advance(&self.game, &joint);
+                let (mut trace, terminal) = self.episodes[gi].advance(&self.game, &joint);
                 self.ticks[gi] += 1;
                 let truncated = horizon.is_some_and(|h| self.ticks[gi] >= h) && !terminal;
                 if truncated {
                     self.game
-                        .mark_truncation(&self.episodes[gi].state, &mut events);
+                        .mark_truncation(&self.episodes[gi].state, &mut trace);
+                }
+                // Fold the tick's trace into per-agent rewards once: events are per-edge and
+                // incremental, so the tick's reward is the sum over its emissions.
+                let mut tick_rewards = vec![0.0; num_agents];
+                for (agent, e) in &trace {
+                    tick_rewards[*agent] += self.reward.step_reward(e, *agent);
                 }
                 let needs_next_obs = self.learner.needs_next_obs();
                 for (si, action) in agents.iter().enumerate() {
-                    let reward = self.reward.step_reward(&events[si], si);
+                    let reward = tick_rewards[si];
                     self.episode_returns[gi][si] += reward;
                     if action.is_some() {
                         let (next_obs, next_legal) = if needs_next_obs {

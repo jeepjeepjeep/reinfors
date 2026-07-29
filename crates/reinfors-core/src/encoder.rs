@@ -141,7 +141,7 @@ mod tests {
         fn step(&self, s: &St, _: &[usize]) -> Transition<St, ()> {
             Transition {
                 next_state: St(s.0 + 1),
-                events: vec![()],
+                events: vec![None],
                 terminal: true,
             }
         }
@@ -282,7 +282,7 @@ mod dispatch_tests {
         fn step(&self, _: &St, _: &[usize]) -> Transition<St, ()> {
             Transition {
                 next_state: St,
-                events: vec![()],
+                events: vec![None],
                 terminal: true,
             }
         }
