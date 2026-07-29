@@ -113,6 +113,43 @@ fn tables_round_trip_through_save_load() {
 }
 
 #[test]
+fn mccfr_checkpoints_are_exact() {
+    // The payload carries the sampling rng: a restored MCCFR solve continues bit-identically
+    // with the original — the checkpoint property the deterministic variants get for free.
+    let mut solver = kuhn_solver(CfrVariant::ExternalMccfr);
+    solver.iterate(50);
+    let mut restored = kuhn_solver(CfrVariant::ExternalMccfr);
+    restored.load(&solver.save()).unwrap();
+    solver.iterate(25);
+    restored.iterate(25);
+    assert_eq!(restored.save(), solver.save());
+}
+
+#[test]
+fn payloads_refuse_incompatible_solvers() {
+    let mut plus = kuhn_solver(CfrVariant::Plus);
+    plus.iterate(10);
+    let payload = plus.save();
+    // A different variant must refuse the payload...
+    let mut vanilla = kuhn_solver(CfrVariant::Vanilla);
+    assert!(vanilla
+        .load(&payload)
+        .unwrap_err()
+        .contains("different CFR variant"));
+    // ...and so must a game with a different action space (Kuhn: 2, Leduc: 3).
+    let mut leduc = CfrSolver::new(
+        LeducPoker,
+        Box::new(HoldemReward { scale: 1.0 }),
+        CfrVariant::Plus,
+        3,
+    );
+    assert!(leduc
+        .load(&payload)
+        .unwrap_err()
+        .contains("different action space"));
+}
+
+#[test]
 fn best_response_exploits_a_uniform_profile() {
     // Uniform play is far from equilibrium; the exact best response must find real value, and
     // exploitability must be symmetric-positive.

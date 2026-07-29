@@ -63,6 +63,36 @@ def test_solves_round_trip_through_save_load() -> None:
         restored.load(b"junk")
 
 
+def test_mccfr_checkpoints_continue_bit_identically() -> None:
+    solver = rf.solvers.Cfr(rf.games.KuhnPoker(), variant="external_mccfr", seed=5)
+    solver.iterate(200)
+    restored = rf.solvers.Cfr(rf.games.KuhnPoker(), variant="external_mccfr", seed=99)
+    restored.load(solver.save())
+    solver.iterate(100)
+    restored.iterate(100)
+    assert restored.save() == solver.save(), "the sampling rng rides in the checkpoint"
+
+
+def test_snapshots_refuse_a_different_composition() -> None:
+    solver = rf.solvers.Cfr(rf.games.KuhnPoker(), variant="plus", seed=0)
+    solver.iterate(10)
+    payload = solver.save()
+    other_variant = rf.solvers.Cfr(rf.games.KuhnPoker(), variant="vanilla", seed=0)
+    with pytest.raises(ValueError, match="different composition"):
+        other_variant.load(payload)
+    other_game = rf.solvers.Cfr(rf.games.LeducPoker(), variant="plus", seed=0)
+    with pytest.raises(ValueError, match="different composition"):
+        other_game.load(payload)
+
+
+def test_expected_value_validates_the_player() -> None:
+    solver = rf.solvers.Cfr(rf.games.KuhnPoker(), variant="plus", seed=0)
+    solver.iterate(10)
+    assert abs(solver.expected_value(0) + solver.expected_value(1)) < 1e-12, "zero-sum"
+    with pytest.raises(ValueError, match="player must be 0 or 1"):
+        solver.expected_value(2)
+
+
 def test_mccfr_runs_on_heads_up_holdem() -> None:
     solver = rf.solvers.Cfr(rf.games.TexasHoldem(num_players=2, stack=20), variant="external_mccfr", seed=1)
     solver.iterate(100)

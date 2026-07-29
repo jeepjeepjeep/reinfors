@@ -3709,7 +3709,14 @@ impl<G: Game + Send + Sync> ErasedCfr for reinfors_core::CfrSolver<G> {
 #[pyclass(name = "Cfr")]
 struct PyCfr {
     inner: Box<dyn ErasedCfr>,
+    /// SHA-256 over the canonical composition JSON (game + reward + variant), embedded in
+    /// `save` payloads and checked by `load` — the engine/env-snapshot pattern: a checkpoint
+    /// silently loaded into a different composition would corrupt the tables.
+    fingerprint: String,
 }
+
+const CFR_SNAPSHOT_MAGIC: &[u8; 4] = b"RFCF";
+const CFR_SNAPSHOT_SCHEMA: u8 = 1;
 
 #[pymethods]
 impl PyCfr {
@@ -3717,6 +3724,7 @@ impl PyCfr {
     #[pyo3(signature = (game, variant="plus", seed=0))]
     fn new(game: &GameHandle, variant: &str, seed: u64) -> PyResult<Self> {
         use reinfors_core::{CfrSolver, CfrVariant};
+        let variant_name = variant;
         let variant = match variant {
             "vanilla" => CfrVariant::Vanilla,
             "plus" => CfrVariant::Plus,
@@ -3770,7 +3778,13 @@ impl PyCfr {
                 ))
             }
         };
-        Ok(PyCfr { inner })
+        let composition = json!({
+            "solver": {"name": "cfr", "variant": variant_name},
+            "game": game_cfg(&game.spec),
+            "reward": {"scale": 1.0},
+        });
+        let fingerprint = fingerprint_hex(&canonical_config_bytes(&composition));
+        Ok(PyCfr { inner, fingerprint })
     }
 
     /// Run `n` iterations (one regret/strategy pass per player each).
@@ -3795,8 +3809,13 @@ impl PyCfr {
     }
 
     /// Expected value for `player` when both play the average profile.
-    fn expected_value(&self, py: Python<'_>, player: usize) -> f64 {
-        py.allow_threads(|| self.inner.expected_value(player))
+    fn expected_value(&self, py: Python<'_>, player: usize) -> PyResult<f64> {
+        if player >= 2 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "player must be 0 or 1",
+            ));
+        }
+        Ok(py.allow_threads(|| self.inner.expected_value(player)))
     }
 
     /// The average strategy at an `env.information_state_key(...)` key:
@@ -3805,14 +3824,36 @@ impl PyCfr {
         self.inner.average_strategy(key)
     }
 
-    /// Serialize the solve (tables + iteration counter) for `load`.
+    /// Serialize the solve — tables, iteration counter, and the sampling rng: an exact
+    /// checkpoint (a restored MCCFR solve continues bit-identically). The payload carries a
+    /// fingerprint of the composition (game, reward, variant); `load` refuses a payload saved
+    /// from a different one.
     fn save<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
-        pyo3::types::PyBytes::new(py, &self.inner.save())
+        let mut out = Vec::new();
+        out.extend_from_slice(CFR_SNAPSHOT_MAGIC);
+        out.push(CFR_SNAPSHOT_SCHEMA);
+        out.extend_from_slice(self.fingerprint.as_bytes()); // fixed 64 hex bytes
+        out.extend_from_slice(&self.inner.save());
+        pyo3::types::PyBytes::new(py, &out)
     }
 
     fn load(&mut self, bytes: &[u8]) -> PyResult<()> {
+        let err = pyo3::exceptions::PyValueError::new_err;
+        if bytes.len() < 4 + 1 + 64 || &bytes[..4] != CFR_SNAPSHOT_MAGIC {
+            return Err(err("not a CFR snapshot payload"));
+        }
+        if bytes[4] != CFR_SNAPSHOT_SCHEMA {
+            return Err(err("unknown CFR snapshot schema version"));
+        }
+        let fingerprint = &bytes[5..69];
+        if fingerprint != self.fingerprint.as_bytes() {
+            return Err(err(
+                "this snapshot was saved from a different composition (game parameters, \
+                 reward, or CFR variant)",
+            ));
+        }
         self.inner
-            .load(bytes)
+            .load(&bytes[69..])
             .map_err(pyo3::exceptions::PyValueError::new_err)
     }
 }

@@ -42,6 +42,17 @@ pub enum CfrVariant {
     ExternalMccfr,
 }
 
+impl CfrVariant {
+    /// Stable payload identity (part of the serialized checkpoint).
+    fn id(self) -> u8 {
+        match self {
+            CfrVariant::Vanilla => 0,
+            CfrVariant::Plus => 1,
+            CfrVariant::ExternalMccfr => 2,
+        }
+    }
+}
+
 struct Node {
     /// Legal action ids at this information set (identical for every member state, by the
     /// definition of an information set — debug-asserted on revisit).
@@ -204,20 +215,30 @@ impl<G: Game> CfrSolver<G> {
         self.profile_value(&root)[player]
     }
 
-    /// Serialize the solve state (tables + iteration counter) for reuse.
+    /// Serialize the solve state — tables, iteration counter, AND the sampling rng — for
+    /// `load`: an exact checkpoint (a restored MCCFR solve continues bit-identically). The
+    /// payload identifies the CFR variant and the game's action-space width so it cannot be
+    /// silently loaded into an incompatible solver; full composition identity (game
+    /// parameters, reward) is the binding's job, mirroring engine/env snapshots.
     pub fn save(&self) -> Vec<u8> {
+        let width = |x: usize, what: &str| -> u32 {
+            u32::try_from(x).unwrap_or_else(|_| panic!("{what} exceeds the u32 payload bound"))
+        };
         let mut out = vec![1u8]; // layout version
+        out.push(self.variant.id());
+        out.extend_from_slice(&width(self.game.action_count(), "action_count").to_le_bytes());
+        out.extend_from_slice(&self.rng.state().to_le_bytes());
         out.extend_from_slice(&self.iterations.to_le_bytes());
         out.extend_from_slice(&(self.nodes.len() as u64).to_le_bytes());
         let mut keys: Vec<&Vec<u8>> = self.nodes.keys().collect();
         keys.sort(); // canonical order: equal solves serialize identically
         for key in keys {
             let node = &self.nodes[key];
-            out.extend_from_slice(&(key.len() as u32).to_le_bytes());
+            out.extend_from_slice(&width(key.len(), "an information-set key").to_le_bytes());
             out.extend_from_slice(key);
-            out.push(node.actions.len() as u8);
+            out.extend_from_slice(&width(node.actions.len(), "a legal-action count").to_le_bytes());
             for (i, &a) in node.actions.iter().enumerate() {
-                out.push(a as u8);
+                out.extend_from_slice(&width(a, "an action id").to_le_bytes());
                 out.extend_from_slice(&node.regrets[i].to_le_bytes());
                 out.extend_from_slice(&node.cumulative[i].to_le_bytes());
                 out.extend_from_slice(&node.current[i].to_le_bytes());
@@ -231,6 +252,13 @@ impl<G: Game> CfrSolver<G> {
         if r.u8()? != 1 {
             return Err("unknown CFR payload version".to_string());
         }
+        if r.u8()? != self.variant.id() {
+            return Err("payload was saved by a different CFR variant".to_string());
+        }
+        if r.u32()? as usize != self.game.action_count() {
+            return Err("payload was saved for a different action space".to_string());
+        }
+        let rng_state = r.u64()?;
         let iterations = r.u64()?;
         let n_nodes = r.u64()? as usize;
         if n_nodes > 1 << 32 {
@@ -240,7 +268,7 @@ impl<G: Game> CfrSolver<G> {
         for _ in 0..n_nodes {
             let key_len = r.u32()? as usize;
             let key = r.take(key_len)?.to_vec();
-            let n_actions = r.u8()? as usize;
+            let n_actions = r.u32()? as usize;
             if n_actions == 0 || n_actions > self.game.action_count() {
                 return Err("implausible action count".to_string());
             }
@@ -249,7 +277,7 @@ impl<G: Game> CfrSolver<G> {
             let mut cumulative = Vec::with_capacity(n_actions);
             let mut current = Vec::with_capacity(n_actions);
             for _ in 0..n_actions {
-                let a = r.u8()? as usize;
+                let a = r.u32()? as usize;
                 if a >= self.game.action_count() {
                     return Err("action id out of range".to_string());
                 }
@@ -269,6 +297,7 @@ impl<G: Game> CfrSolver<G> {
             );
         }
         r.done()?;
+        self.rng = SplitMix64::from_state(rng_state);
         self.iterations = iterations;
         self.nodes = nodes;
         Ok(())
