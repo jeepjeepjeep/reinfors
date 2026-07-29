@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import _reinfors, chance_modes, encoders, games, gym, learners, noise, policies, spaces
+from . import _reinfors, chance_modes, encoders, games, gym, learners, noise, policies, solvers, spaces
 from ._reinfors import (
     Engine,
     EngineSnapshot,
@@ -153,6 +153,7 @@ __all__ = [
     "registered_games",
     "registered_learners",
     "registered_policies",
+    "solvers",
     "spaces",
 ]
 __version__ = "0.0.0"
