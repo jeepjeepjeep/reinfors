@@ -17,7 +17,7 @@ pub mod space;
 
 pub use codec::StateCodec;
 pub use encoder::{check_action_view, ActionView, IdentityView, StateEncoder};
-pub use game::{Actor, ChanceDist, Game, Rng, Transition};
+pub use game::{realize_initial_state, Actor, ChanceDist, Game, Rng, Transition};
 pub use learner::{Learner, Step};
 pub use learners::alphazero::{AlphaZeroLearner, AlphaZeroRecord};
 pub use learners::dqn::{Dqn, DqnRecord};

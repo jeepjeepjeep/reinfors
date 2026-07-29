@@ -7,6 +7,8 @@ pub mod chess;
 pub mod connect4;
 pub mod gridworld;
 pub mod holdem;
+pub mod kuhn;
+pub mod leduc;
 pub mod snake;
 
 pub use backgammon::{
@@ -21,6 +23,8 @@ pub use connect4::{Connect4, Connect4Event, Connect4Planes, Connect4Reward, Conn
 pub use holdem::{
     HoldemEgocentric, HoldemReward, HoldemState, Street, TexasHoldem, HOLDEM_ACTIONS,
 };
+pub use kuhn::{KuhnEncoder, KuhnPoker, KuhnState};
+pub use leduc::{LeducEncoder, LeducPoker, LeducState, LEDUC_DECK};
 pub(crate) mod codec_util;
 
 pub use cozy_chess::Board as ChessBoard;

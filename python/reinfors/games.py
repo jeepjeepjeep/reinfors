@@ -14,6 +14,8 @@ from . import _reinfors
 
 Snake = _reinfors.GameHandle.Snake
 TexasHoldem = _reinfors.GameHandle.TexasHoldem
+KuhnPoker = _reinfors.GameHandle.KuhnPoker
+LeducPoker = _reinfors.GameHandle.LeducPoker
 Chess = _reinfors.GameHandle.Chess
 Backgammon = _reinfors.GameHandle.Backgammon
 Connect4 = _reinfors.GameHandle.Connect4
@@ -22,6 +24,8 @@ GridWorld = _reinfors.GameHandle.GridWorld
 _REGISTRY: dict[str, Callable[..., Any]] = {
     "snake": Snake,
     "texas_holdem": TexasHoldem,
+    "kuhn_poker": KuhnPoker,
+    "leduc_poker": LeducPoker,
     "chess": Chess,
     "backgammon": Backgammon,
     "connect4": Connect4,

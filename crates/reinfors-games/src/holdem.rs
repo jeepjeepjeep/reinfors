@@ -12,8 +12,11 @@
 //! button. Folding is illegal when checking is free — which also guarantees the largest
 //! total commitment always belongs to a LIVE player, the invariant the side-pot sweep relies on.
 //!
-//! **Chance**: hole cards and the button are dealt by `initial_state` from the env's seeded rng;
-//! every street reveal is a chance NODE — closing a street leaves a state with no actor
+//! **Chance**: FULLY DECLARED (`all_chance_declared`): `initial_state` draws nothing — the
+//! button and the per-seat hole deals are a chain of root chance nodes realized at episode
+//! birth (button `Uniform(N)`, then one `Uniform(C(remaining, 2))` node per seat; the last
+//! deal posts the blinds), so solvers can enumerate the deal the rollout samples. Every
+//! street reveal is a chance NODE — closing a street leaves a state with no actor
 //! (`Actor::Chance`), whose `chance_node` declares `ChanceDist::Uniform(C(remaining, k))` and
 //! whose `apply_chance_node` decodes the unordered combination and reopens betting. When fewer
 //! than two seats can still bet (ACPC: only players neither folded nor all-in act), betting is
@@ -76,6 +79,13 @@ impl Street {
         }
     }
 
+    fn index_or_done(self) -> usize {
+        match self {
+            Street::Done => 4,
+            s => s.index(),
+        }
+    }
+
     fn next(self) -> Street {
         match self {
             Street::Preflop => Street::Flop,
@@ -127,14 +137,17 @@ impl HoldemState {
     }
 
     /// Cards not yet dealt, ascending — the canonical enumeration the chance indices decode
-    /// against.
+    /// against. Bitmask scan: this runs once per chance-node link (deals + reveals), so it is
+    /// on the reset path's hot loop.
     fn remaining_deck(&self) -> Vec<Card> {
-        let mut used: HashSet<Card> = self.board.iter().copied().collect();
+        let mut used = 0u64;
         for h in &self.hole {
-            used.insert(h[0]);
-            used.insert(h[1]);
+            used |= (1 << h[0]) | (1 << h[1]);
         }
-        (0..DECK).filter(|c| !used.contains(c)).collect()
+        for &c in &self.board {
+            used |= 1 << c;
+        }
+        (0..DECK).filter(|&c| used & (1 << c) == 0).collect()
     }
 }
 
@@ -480,7 +493,50 @@ impl Game for TexasHoldem {
         true // street reveals; a reveal that completes an all-in runout settles the showdown
     }
 
+    fn all_chance_declared(&self) -> bool {
+        true // the deal is a root chance chain; initial_state draws nothing
+    }
+
+    fn information_states(&self) -> bool {
+        true
+    }
+
+    /// Everything seat `agent` knows: its own holes plus the entire public state — the ordered
+    /// board, positions, chips, and the full betting history (perfect recall). Exactly the
+    /// observation's information content (pinned by test) as exact compact bytes.
+    fn information_state_key(&self, state: &HoldemState, agent: usize) -> Vec<u8> {
+        let mut k = Vec::with_capacity(64);
+        k.push(agent as u8);
+        k.extend_from_slice(&state.hole[agent]);
+        k.push(state.board.len() as u8);
+        k.extend_from_slice(&state.board);
+        k.push(state.button as u8);
+        k.push(state.street.index_or_done() as u8);
+        k.push(state.to_act as u8);
+        k.push(state.raises);
+        for i in 0..self.num_players {
+            k.extend_from_slice(&state.stacks[i].to_le_bytes());
+            k.extend_from_slice(&state.street_committed[i].to_le_bytes());
+            k.push(u8::from(state.folded[i]) | (u8::from(state.needs_action[i]) << 1));
+        }
+        for street in &state.history {
+            k.push(street.len() as u8);
+            for &(seat, action) in street {
+                k.push(seat);
+                k.push(action);
+            }
+        }
+        k
+    }
+
     fn chance_node(&self, state: &HoldemState) -> ChanceDist {
+        if state.button == self.num_players {
+            return ChanceDist::Uniform(self.num_players); // birth: the button draw
+        }
+        if state.hole.len() < self.num_players {
+            // Birth: the next seat's two hole cards, an unordered pair from the remainder.
+            return ChanceDist::Uniform(binomial(state.remaining_deck().len(), 2));
+        }
         let missing = state.street.board_len() - state.board.len();
         ChanceDist::Uniform(binomial(state.remaining_deck().len(), missing))
     }
@@ -490,7 +546,46 @@ impl Game for TexasHoldem {
         state: &HoldemState,
         outcome: usize,
     ) -> Transition<HoldemState, f64> {
+        let n = self.num_players;
         let mut next = state.clone();
+        if next.button == n {
+            next.button = outcome;
+            return Transition {
+                next_state: next,
+                events: vec![0.0; n],
+                terminal: false,
+            };
+        }
+        if next.hole.len() < n {
+            let deck = next.remaining_deck();
+            let pair = unrank_combination(outcome, deck.len(), 2);
+            next.hole.push([deck[pair[0]], deck[pair[1]]]);
+            if next.hole.len() == n {
+                // The deal is complete: post the blinds and open preflop betting. Heads-up the
+                // button IS the small blind and acts first; otherwise the two seats after the
+                // button post and the seat after the big blind opens. A blind that put a seat
+                // all-in owes no action; `validate` guarantees chips behind the small blind,
+                // so the preflop opener always exists.
+                let (sb, bb) = if n == 2 {
+                    (next.button, (next.button + 1) % n)
+                } else {
+                    ((next.button + 1) % n, (next.button + 2) % n)
+                };
+                Self::commit(&mut next, sb, self.small_blind);
+                Self::commit(&mut next, bb, self.big_blind);
+                next.raises = 1; // the big blind is the street's first bet
+                for i in 0..n {
+                    next.needs_action[i] = next.stacks[i] > 0;
+                }
+                next.to_act = if n == 2 { next.button } else { (bb + 1) % n };
+                debug_assert!(next.needs_action[next.to_act]);
+            }
+            return Transition {
+                next_state: next,
+                events: vec![0.0; n],
+                terminal: false,
+            };
+        }
         let deck = next.remaining_deck();
         let missing = next.street.board_len() - next.board.len();
         for pos in unrank_combination(outcome, deck.len(), missing) {
@@ -523,47 +618,26 @@ impl Game for TexasHoldem {
         }
     }
 
-    fn initial_state(&self, rng: &mut dyn Rng) -> HoldemState {
+    fn initial_state(&self, _rng: &mut dyn Rng) -> HoldemState {
+        // Draws NOTHING (`all_chance_declared`): the state below is the root of the birth
+        // chance chain — button sentinel `num_players` marks the button draw as pending, the
+        // empty hole vector marks the seats still to be dealt. With nobody owing an action and
+        // the hand live, `actor` reports `Actor::Chance` until the last deal posts the blinds.
         let n = self.num_players;
-        let button = rng.below(n);
-        let mut deck: Vec<Card> = (0..DECK).collect();
-        let mut draw = |deck: &mut Vec<Card>| {
-            let i = rng.below(deck.len());
-            deck.swap_remove(i)
-        };
-        let hole: Vec<[Card; 2]> = (0..n).map(|_| [draw(&mut deck), draw(&mut deck)]).collect();
-        let mut state = HoldemState {
-            hole,
+        HoldemState {
+            hole: Vec::new(),
             board: Vec::new(),
-            button,
+            button: n, // sentinel: not yet drawn
             street: Street::Preflop,
             to_act: 0,
             stacks: vec![self.stack; n],
             street_committed: vec![0; n],
             total_committed: vec![0; n],
             folded: vec![false; n],
-            needs_action: vec![true; n],
-            raises: 1, // the big blind is the street's first bet
+            needs_action: vec![false; n],
+            raises: 0,
             history: vec![Vec::new(); 4],
-        };
-        // Blinds: heads-up the button IS the small blind and acts first preflop; otherwise the
-        // two seats after the button post and the seat after the big blind opens.
-        let (sb, bb) = if n == 2 {
-            (button, (button + 1) % n)
-        } else {
-            ((button + 1) % n, (button + 2) % n)
-        };
-        Self::commit(&mut state, sb, self.small_blind);
-        Self::commit(&mut state, bb, self.big_blind);
-        // A blind that put a seat all-in owes no action (ACPC: only players neither folded nor
-        // all-in act). `validate` guarantees chips behind the small blind, so the preflop opener
-        // below always exists.
-        for i in 0..n {
-            state.needs_action[i] = state.stacks[i] > 0;
         }
-        state.to_act = if n == 2 { button } else { (bb + 1) % n };
-        debug_assert!(state.needs_action[state.to_act]);
-        state
     }
 
     fn truncation_horizon(&self) -> Option<usize> {
@@ -693,6 +767,69 @@ mod tests {
         rank * 4 + suit
     }
 
+    /// Realize the birth chance chain (button + deals) the way episode birth does.
+    pub(super) fn deal(g: &TexasHoldem, rng: &mut dyn Rng) -> HoldemState {
+        let mut s = g.initial_state(rng);
+        while matches!(g.actor(&s), Actor::Chance) {
+            let outcome = g.chance_node(&s).draw(rng);
+            let t = g.apply_chance_node(&s, outcome);
+            assert!(!t.terminal, "the deal may not decide the game");
+            assert_eq!(
+                t.events,
+                vec![0.0; g.num_players],
+                "birth events are neutral"
+            );
+            s = t.next_state;
+        }
+        s
+    }
+
+    #[test]
+    fn the_deal_is_a_declared_root_chain() {
+        // initial_state draws nothing (all_chance_declared): poisoned rng proves it.
+        struct Poisoned;
+        impl Rng for Poisoned {
+            fn below(&mut self, _n: usize) -> usize {
+                panic!("initial_state drew from the rng despite all_chance_declared")
+            }
+            fn unit(&mut self) -> f64 {
+                panic!("initial_state drew from the rng despite all_chance_declared")
+            }
+        }
+        let g = game(3);
+        assert!(g.all_chance_declared());
+        let root = g.initial_state(&mut Poisoned);
+        assert!(matches!(g.actor(&root), Actor::Chance));
+        assert_eq!(g.chance_node(&root).count(), 3, "button draw first");
+        // Chain: button, then one pair per seat; the last deal posts blinds and opens betting.
+        let s = deal(&g, &mut TestRng(41));
+        assert_eq!(s.hole.len(), 3);
+        assert!(s.button < 3);
+        assert_eq!(s.raises, 1);
+        assert!(matches!(g.actor(&s), Actor::Agent(_)));
+        g.validate_decoded_state(&s, false).unwrap();
+    }
+
+    #[test]
+    fn information_keys_hide_exactly_the_opponents_holes() {
+        let g = game(3);
+        let s = deal(&g, &mut TestRng(42));
+        assert!(g.information_states());
+        let k0 = g.information_state_key(&s, 0);
+        // Swapping the OTHER seats' holes leaves seat 0's key unchanged...
+        let mut swapped = s.clone();
+        swapped.hole.swap(1, 2);
+        assert_eq!(k0, g.information_state_key(&swapped, 0));
+        // ...but changes theirs; and seat 0's own cards are in seat 0's key.
+        assert_ne!(
+            g.information_state_key(&s, 1),
+            g.information_state_key(&swapped, 1)
+        );
+        let mut own = s.clone();
+        own.hole[0] = [51, 50];
+        assert_ne!(k0, g.information_state_key(&own, 0));
+    }
+
     #[test]
     fn validation_bounds_the_config() {
         assert!(game(2).validate().is_ok());
@@ -785,7 +922,7 @@ mod tests {
         // 3-handed: SB = button+1, BB = button+2, UTG (= button) opens.
         let g = game(3);
         let mut rng = TestRng(1);
-        let s = g.initial_state(&mut rng);
+        let s = deal(&g, &mut rng);
         let (sb, bb) = ((s.button + 1) % 3, (s.button + 2) % 3);
         assert_eq!(s.total_committed[sb], 5);
         assert_eq!(s.total_committed[bb], 10);
@@ -793,7 +930,7 @@ mod tests {
         assert_eq!(s.raises, 1, "the big blind is the first bet");
         // Heads-up: the button posts the SMALL blind and acts first.
         let g2 = game(2);
-        let s2 = g2.initial_state(&mut TestRng(2));
+        let s2 = deal(&g2, &mut TestRng(2));
         assert_eq!(s2.total_committed[s2.button], 5);
         assert_eq!(s2.total_committed[1 - s2.button], 10);
         assert_eq!(s2.to_act, s2.button);
@@ -802,7 +939,7 @@ mod tests {
     #[test]
     fn fold_requires_a_bet_and_the_cap_stops_raises() {
         let g = game(3);
-        let s = g.initial_state(&mut TestRng(3));
+        let s = deal(&g, &mut TestRng(3));
         // UTG faces the blind: all three actions.
         assert_eq!(
             g.legal_actions(&s, s.to_act),
@@ -823,7 +960,7 @@ mod tests {
         assert_eq!(legal, vec![FOLD, CHECK_CALL]);
         // A seat with no bet to call may not fold.
         let g2 = game(2);
-        let mut hu = g2.initial_state(&mut TestRng(4));
+        let mut hu = deal(&g2, &mut TestRng(4));
         let mut joint = vec![0; 2];
         joint[hu.to_act] = CHECK_CALL; // button completes the small blind
         hu = g2.step(&hu, &joint).next_state;
@@ -837,7 +974,7 @@ mod tests {
     #[test]
     fn fold_out_pays_the_pot_without_showdown() {
         let g = game(3);
-        let s = g.initial_state(&mut TestRng(5));
+        let s = deal(&g, &mut TestRng(5));
         let (sb, bb) = ((s.button + 1) % 3, (s.button + 2) % 3);
         // UTG folds, SB folds -> BB wins the blinds; nobody's cards matter.
         let mut joint = vec![0; 3];
@@ -923,7 +1060,7 @@ mod tests {
     #[test]
     fn street_reveals_declare_the_combination_space() {
         let g = game(2);
-        let mut s = g.initial_state(&mut TestRng(6));
+        let mut s = deal(&g, &mut TestRng(6));
         // Button calls, BB checks -> the flop transition declares C(48, 3).
         let mut joint = vec![0; 2];
         joint[s.to_act] = CHECK_CALL;
@@ -956,7 +1093,7 @@ mod tests {
             let g = game(n);
             let mut rng = TestRng(7 + n as u64);
             for _ in 0..40 {
-                let mut s = g.initial_state(&mut rng);
+                let mut s = deal(&g, &mut rng);
                 let mut guard = 0;
                 loop {
                     let legal = g.legal_actions(&s, s.to_act);
@@ -993,7 +1130,7 @@ mod tests {
             big_blind: 10,
         };
         let mut rng = TestRng(11);
-        let s = g.initial_state(&mut rng);
+        let s = deal(&g, &mut rng);
         assert!(
             !s.needs_action[(s.button + 1) % 2],
             "the all-in big blind owes no action"
@@ -1015,7 +1152,7 @@ mod tests {
         // Two sequences with identical commitments must now differ in state: heads-up 20 each
         // preflop via raise-call vs call-raise-call.
         let g = game(2);
-        let s = g.initial_state(&mut TestRng(12));
+        let s = deal(&g, &mut TestRng(12));
         let play = |actions: &[usize]| {
             let mut cur = s.clone();
             for &a in actions {
@@ -1042,7 +1179,7 @@ mod tests {
     fn codec_round_trips_and_rejects_unsafe_states() {
         let g = game(3);
         let mut rng = TestRng(9);
-        let s = g.initial_state(&mut rng);
+        let s = deal(&g, &mut rng);
         let bytes = g.encode(&s);
         let back = g.decode(&bytes).unwrap();
         assert_eq!(g.encode(&back), bytes);
@@ -1226,7 +1363,7 @@ mod encoder_tests {
                 0.5
             }
         }
-        let s = g.initial_state(&mut R(4));
+        let s = super::tests::deal(&g, &mut R(4));
         let enc = HoldemEgocentric {
             num_players: 3,
             stack: 200,
@@ -1273,7 +1410,7 @@ mod encoder_tests {
                 0.5
             }
         }
-        let s = g.initial_state(&mut R);
+        let s = super::tests::deal(&g, &mut R);
         let enc = HoldemEgocentric {
             num_players: 3,
             stack: 200,
@@ -1308,7 +1445,7 @@ mod encoder_tests {
                 0.5
             }
         }
-        let s = g.initial_state(&mut R);
+        let s = super::tests::deal(&g, &mut R);
         let play = |actions: &[usize]| {
             let mut cur = s.clone();
             for &a in actions {

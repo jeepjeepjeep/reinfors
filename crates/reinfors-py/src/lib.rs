@@ -33,8 +33,9 @@ use reinfors_games::{
     BackgammonTesauro, Chess, ChessEvent, ChessPlanesAz119, ChessPlanesMinimal,
     ChessPlanesOpenSpiel, ChessPlanesRelative, ChessReward, ChessState, Connect4, Connect4Event,
     Connect4Planes, Connect4Reward, Connect4State, EgocentricSnake, GridEvent, GridState,
-    GridWorld, GridWorldPlanes, GridWorldReward, HoldemEgocentric, HoldemReward, Snake,
-    SnakeReward, SnakeState, StepEvent, TexasHoldem, CHESS_ACTIONS,
+    GridWorld, GridWorldPlanes, GridWorldReward, HoldemEgocentric, HoldemReward, KuhnEncoder,
+    KuhnPoker, LeducEncoder, LeducPoker, Snake, SnakeReward, SnakeState, StepEvent, TexasHoldem,
+    CHESS_ACTIONS,
 };
 
 /// Absolute `Action` -> its `u8` code (Up/Down/Left/Right = 0/1/2/3), for native-state marshalling.
@@ -344,6 +345,8 @@ fn game_cfg(spec: &GameSpec) -> Value {
             "small_blind": small_blind,
             "big_blind": big_blind,
         }),
+        GameSpec::KuhnPoker => json!({"name": "kuhn_poker"}),
+        GameSpec::LeducPoker => json!({"name": "leduc_poker"}),
         GameSpec::Chess { max_ticks, encoder } => {
             let enc = match encoder {
                 ChessEncoderSpec::Minimal => json!({"name": "minimal_chess"}),
@@ -1680,6 +1683,8 @@ enum GameSpec {
         small_blind: u32,
         big_blind: u32,
     },
+    KuhnPoker,
+    LeducPoker,
     GridWorld {
         size: i32,
         goal: (i32, i32),
@@ -1738,6 +1743,8 @@ impl GameSpec {
                 },
                 &HoldemEgocentric { num_players, stack },
             ),
+            GameSpec::KuhnPoker => of(KuhnPoker, &KuhnEncoder),
+            GameSpec::LeducPoker => of(LeducPoker, &LeducEncoder),
             GameSpec::GridWorld {
                 size,
                 goal,
@@ -1777,6 +1784,7 @@ fn reward_schema(game: &GameSpec) -> &'static [(&'static str, f64)] {
         // The chip deltas ARE the reward (already zero-sum); `scale` converts chips into the
         // training unit (e.g. 1/big_blind for rewards in blinds).
         GameSpec::TexasHoldem { .. } => &[("scale", 1.0)],
+        GameSpec::KuhnPoker | GameSpec::LeducPoker => &[("scale", 1.0)],
     }
 }
 
@@ -1826,7 +1834,7 @@ fn build_reward(game: &GameSpec, reward: Option<PyReward>) -> PyResult<RewardBox
                 goal: r[1],
             })
         }
-        GameSpec::TexasHoldem { .. } => {
+        GameSpec::TexasHoldem { .. } | GameSpec::KuhnPoker | GameSpec::LeducPoker => {
             let r = resolve_reward(reward, reward_schema(game))?;
             RewardBox::Holdem(HoldemReward { scale: r[0] })
         }
@@ -1952,11 +1960,16 @@ impl reinfors_core::Rng for ProbeRng {
     }
 }
 
-/// The game's decision dynamics, probed from the initial state (games are uniformly one
-/// dynamics; the searches assert against mixing).
+/// The game's decision dynamics, probed from the REALIZED initial state (games are uniformly
+/// one dynamics; the searches assert against mixing). Realization matters: a declared-deal
+/// game's raw root is `Actor::Chance`, which says nothing about turn-taking — probing it
+/// directly would misclassify every root-chance game as simultaneous.
 fn game_is_sequential<G: Game>(game: &G) -> bool {
     matches!(
-        game.actor(&game.initial_state(&mut ProbeRng(7))),
+        game.actor(&reinfors_core::game::realize_initial_state(
+            game,
+            &mut ProbeRng(7)
+        )),
         reinfors_core::Actor::Agent(_)
     )
 }
@@ -2414,6 +2427,28 @@ fn build_engine(
             engine_params,
             infer_cache,
         ),
+        (GameSpec::KuhnPoker, RewardBox::Holdem(reward)) => build_for_game(
+            KuhnPoker,
+            Box::new(KuhnEncoder),
+            Box::new(reward),
+            Box::new(AlwaysInitialState),
+            Some(Box::new(KuhnPoker)),
+            policy,
+            learner,
+            engine_params,
+            infer_cache,
+        ),
+        (GameSpec::LeducPoker, RewardBox::Holdem(reward)) => build_for_game(
+            LeducPoker,
+            Box::new(LeducEncoder),
+            Box::new(reward),
+            Box::new(AlwaysInitialState),
+            Some(Box::new(LeducPoker)),
+            policy,
+            learner,
+            engine_params,
+            infer_cache,
+        ),
         (
             GameSpec::GridWorld {
                 size,
@@ -2719,6 +2754,21 @@ impl PyEnv {
         self.inner.state(py)
     }
 
+    /// The canonical byte key of `agent`'s INFORMATION SET at the current state — everything
+    /// the agent knows and nothing it doesn't (equal keys ⇔ the agent cannot distinguish the
+    /// states). Only for games declaring information states (the poker family); solvers index
+    /// their strategy tables by exactly these bytes.
+    fn information_state_key<'py>(
+        &self,
+        py: Python<'py>,
+        agent: usize,
+    ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        Ok(pyo3::types::PyBytes::new(
+            py,
+            &self.inner.information_state_key(agent)?,
+        ))
+    }
+
     /// Advance one tick with `actions`, a `{agent: action}` map naming exactly the agents that act
     /// this tick (see `active_agents()`). Returns this tick's per-agent events (game-specific objects);
     /// a game-aware caller reads the outcome from them (`Env` holds no reward).
@@ -2869,6 +2919,30 @@ impl NativeState for reinfors_games::HoldemState {
     }
 }
 
+impl NativeState for reinfors_games::KuhnState {
+    // The TRUE state, hidden cards included (like hold'em): `env.state()` is the trusted
+    // inspection surface; per-agent hiding lives in the encoder and the information keys.
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("cards", self.cards.clone())?;
+        d.set_item("history", self.history.clone())?;
+        d.set_item("done", self.is_terminal_pub())?;
+        Ok(d)
+    }
+}
+
+impl NativeState for reinfors_games::LeducState {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("cards", self.cards.clone())?;
+        d.set_item("public", self.public)?;
+        d.set_item("round", self.round_pub())?;
+        d.set_item("history", self.history.to_vec())?;
+        d.set_item("done", self.is_terminal_pub())?;
+        Ok(d)
+    }
+}
+
 impl NativeState for GridState {
     fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
@@ -2976,6 +3050,7 @@ trait ErasedEnv: Send + Sync {
     fn observe<'py>(&self, py: Python<'py>, agent: usize) -> Bound<'py, PyArray3<f32>>;
     fn observation_space<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>>;
     fn state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>>;
+    fn information_state_key(&self, agent: usize) -> PyResult<Vec<u8>>;
     /// Advance one tick; returns this tick's per-agent events as a Python list (game-specific objects).
     fn step<'py>(
         &mut self,
@@ -3056,6 +3131,20 @@ where
     }
     fn state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         Ok(self.inner.state().to_py(py)?.into_any())
+    }
+    fn information_state_key(&self, agent: usize) -> PyResult<Vec<u8>> {
+        let game = self.inner.game();
+        if !game.information_states() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "this game does not declare information states",
+            ));
+        }
+        if agent >= game.num_agents() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "agent {agent} out of range"
+            )));
+        }
+        Ok(game.information_state_key(self.inner.state(), agent))
     }
     fn step<'py>(
         &mut self,
@@ -3194,6 +3283,32 @@ fn build_env(game: GameSpec, reward: Option<PyReward>, seed: u64) -> PyResult<Bo
                     small_blind,
                     big_blind,
                 })),
+                reward: reward.map(|rb| match rb {
+                    RewardBox::Holdem(r) => Box::new(r) as Box<dyn Reward<Event = f64>>,
+                    _ => unreachable!("build_reward returns the reward variant matching the game"),
+                }),
+                last_rewards: None,
+            })
+        }
+        GameSpec::KuhnPoker => {
+            let obs_shape = KuhnEncoder.obs_shape();
+            Box::new(EnvImpl {
+                inner: Env::new(KuhnPoker, Box::new(KuhnEncoder), seed),
+                obs_shape,
+                codec: Some(Box::new(KuhnPoker)),
+                reward: reward.map(|rb| match rb {
+                    RewardBox::Holdem(r) => Box::new(r) as Box<dyn Reward<Event = f64>>,
+                    _ => unreachable!("build_reward returns the reward variant matching the game"),
+                }),
+                last_rewards: None,
+            })
+        }
+        GameSpec::LeducPoker => {
+            let obs_shape = LeducEncoder.obs_shape();
+            Box::new(EnvImpl {
+                inner: Env::new(LeducPoker, Box::new(LeducEncoder), seed),
+                obs_shape,
+                codec: Some(Box::new(LeducPoker)),
                 reward: reward.map(|rb| match rb {
                     RewardBox::Holdem(r) => Box::new(r) as Box<dyn Reward<Event = f64>>,
                     _ => unreachable!("build_reward returns the reward variant matching the game"),
@@ -3428,6 +3543,28 @@ impl GameHandle {
     }
 
     #[staticmethod]
+    // The 3-card analytic testbed for imperfect-information algorithms (12 information sets,
+    // known Nash family). Hidden information: search families reject it; solve with
+    // rf.solvers or train with the DQN family.
+    #[pyo3(name = "KuhnPoker")]
+    fn kuhn_poker() -> Self {
+        GameHandle {
+            spec: GameSpec::KuhnPoker,
+        }
+    }
+
+    #[staticmethod]
+    // The standard small imperfect-information benchmark: 6 cards, two betting rounds, a
+    // public card between them. Hidden information: search families reject it; solve with
+    // rf.solvers or train with the DQN family.
+    #[pyo3(name = "LeducPoker")]
+    fn leduc_poker() -> Self {
+        GameHandle {
+            spec: GameSpec::LeducPoker,
+        }
+    }
+
+    #[staticmethod]
     #[pyo3(name = "Connect4")]
     fn connect4() -> Self {
         GameHandle {
@@ -3516,7 +3653,10 @@ impl GameHandle {
             | GameSpec::Chess { max_ticks, .. }
             | GameSpec::Backgammon { max_ticks }
             | GameSpec::GridWorld { max_ticks, .. } => max_ticks,
-            GameSpec::Connect4 | GameSpec::TexasHoldem { .. } => None,
+            GameSpec::Connect4
+            | GameSpec::TexasHoldem { .. }
+            | GameSpec::KuhnPoker
+            | GameSpec::LeducPoker => None,
         }
     }
 }

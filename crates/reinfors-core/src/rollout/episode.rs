@@ -5,7 +5,7 @@
 //! many episodes (the `Engine` keeps one of each; an `Env` owns its own).
 
 use crate::encoder::StateEncoder;
-use crate::game::{step_env, Actor, Game};
+use crate::game::{realize_initial_state, step_env, Actor, Game};
 use crate::rng::SplitMix64;
 
 pub(crate) struct Episode<G: Game> {
@@ -16,26 +16,22 @@ pub(crate) struct Episode<G: Game> {
 impl<G: Game> Episode<G> {
     pub(crate) fn new(game: &G, seed: u64) -> Self {
         let mut rng = SplitMix64::new(seed);
-        let state = game.initial_state(&mut rng);
-        Self::assert_decision_state(game, &state);
+        let state = realize_initial_state(game, &mut rng);
         Episode { state, rng }
     }
 
     pub(crate) fn reset(&mut self, game: &G) {
-        self.state = game.initial_state(&mut self.rng);
-        Self::assert_decision_state(game, &self.state);
+        self.state = realize_initial_state(game, &mut self.rng);
     }
 
-    /// Chance nodes are interior (see [`Game::chance_nodes`]): an episode starts at a decision
-    /// state, wherever the start comes from — `initial_state` or a restored start-distribution
-    /// state. A real assert — a chance-node start would leave every consumer actor-less (empty
-    /// active set, a collect that gathers nothing) rather than fail loudly.
+    /// Restored start-distribution states must be realized DECISION states — a chance-node
+    /// start from a custom distribution would leave every consumer actor-less (empty active
+    /// set, a collect that gathers nothing) rather than fail loudly.
     pub(crate) fn assert_decision_state(game: &G, state: &G::State) {
         assert!(
             !matches!(game.actor(state), Actor::Chance),
-            "an episode cannot start at a chance node; chance nodes are interior — initial \
-             randomness draws from the rng inside initial_state, and start distributions must \
-             restore realized decision states"
+            "an episode cannot start at a chance node; start distributions must restore \
+             realized decision states"
         );
     }
 

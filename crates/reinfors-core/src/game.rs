@@ -158,21 +158,62 @@ pub trait Game {
         unreachable!("apply_chance called on a game that declares no chance_outcomes")
     }
 
-    /// Whether the game presents chance NODES: states whose `actor` is [`Actor::Chance`], where
-    /// no agent decides and the framework must draw from [`chance_node`](Self::chance_node) to
-    /// continue. Unlike transition-attached `chance_outcomes`, a chance node's realization MAY
-    /// determine events and terminal status (poker's all-in runout: the river decides the
-    /// showdown). Rollout consumers (`Env`, `Engine`) realize chains of them automatically inside
-    /// one tick; tree searches reject such games at entry — scoring an outcome-dependent payout
-    /// needs an explicit chance ply the searches do not implement. Chance nodes are INTERIOR:
-    /// they arise only from transitions, so `initial_state` must return a decision state
-    /// (asserted where episodes are born) — initial randomness draws from the rng inside
-    /// `initial_state` instead. A root chance node would let a reset chain reach terminal, an
-    /// episode over before any decision; forbidding the root keeps that inexpressible. Declared,
-    /// like every capability: `true` obliges `chance_node`/`apply_chance_node` to answer at
-    /// every `Actor::Chance` state.
+    /// Whether chance-node states — states whose `actor` is [`Actor::Chance`], where no agent
+    /// decides and the framework must draw from [`chance_node`](Self::chance_node) to continue —
+    /// occur AFTER episode birth. Unlike transition-attached `chance_outcomes`, a chance node's
+    /// realization MAY determine events and terminal status (poker's all-in runout: the river
+    /// decides the showdown). Rollout consumers (`Env`, `Engine`) realize chains of them
+    /// automatically inside one tick; tree searches reject games where they occur post-birth —
+    /// scoring an outcome-dependent payout needs an explicit chance ply the searches do not
+    /// implement.
+    ///
+    /// The ROOT is separate: `initial_state` may itself return a chance node (a declared deal —
+    /// see [`all_chance_declared`](Self::all_chance_declared)), realized at episode birth by the
+    /// same chain machinery; birth chains must reach a NON-terminal decision state (asserted —
+    /// an episode over before any decision stays inexpressible), and any events they emit are
+    /// contractually neutral (there is no tick to deliver them into). A game whose ONLY chance
+    /// nodes are at the root returns `false` here — searches receive post-birth states and
+    /// never meet them. `true` obliges `chance_node`/`apply_chance_node` to answer at every
+    /// `Actor::Chance` state.
     fn chance_nodes(&self) -> bool {
         false
+    }
+
+    /// Whether EVERY random element of the game is declared through the chance seams (root
+    /// chance nodes for the deal, `chance_outcomes`/chance nodes thereafter) — i.e.
+    /// `initial_state` draws NOTHING from its rng. Solvers that enumerate chance (CFR) require
+    /// this and verify the root claim by calling `initial_state` with an rng that panics on any
+    /// draw; a game that samples privately would otherwise be solved against the wrong tree.
+    /// Deliberate claim, default false.
+    fn all_chance_declared(&self) -> bool {
+        false
+    }
+
+    /// Whether this game provides information-set keys (below). Deliberate claim, default
+    /// false; `true` obliges `information_state_key` to answer at every REALIZED state.
+    fn information_states(&self) -> bool {
+        false
+    }
+
+    /// A canonical byte key for agent `agent`'s INFORMATION SET at `state`: everything the
+    /// agent knows — own private information, all public state, and the full action/reveal
+    /// history (perfect recall) — and nothing it doesn't. Defined at every REALIZED state
+    /// (decision and terminal, any agent); never queried at chance-node states, which are
+    /// transient inside realization — implementations may panic on a partial deal.
+    ///
+    /// Contract: keys are equal iff the agent cannot distinguish the states. Regret-table
+    /// correctness rests on what that implies, so it is worth spelling out — equal keys must
+    /// have: the same agent to act, the same ORDERED legal-action list for the keyed agent —
+    /// regrets and probabilities align by vector index, so equal sets in different orders are
+    /// insufficient (the CFR solver debug-asserts list equality on every table revisit) — and,
+    /// because the key carries the full history, perfect-recall equivalence. The encoder's observation carries the same
+    /// information content (pinned by test), but the key is exact compact bytes where the
+    /// observation is a lossy-by-design float tensor. Solvers index their tables by this key —
+    /// which is what forces learned strategies to be measurable with respect to the player's
+    /// information.
+    fn information_state_key(&self, state: &Self::State, agent: usize) -> Vec<u8> {
+        let _ = (state, agent);
+        unreachable!("information_state_key called on a game that declares no information states")
     }
 
     /// The distribution at a chance-node state (`actor` returned [`Actor::Chance`]): over the
@@ -261,6 +302,27 @@ pub fn step_env<G: Game>(
         t = game.apply_chance_node(&t.next_state, outcome);
     }
     t
+}
+
+/// Realize an episode's birth: `initial_state` may return a chance node (a declared deal —
+/// see [`Game::all_chance_declared`]), possibly chaining; draw until the first decision
+/// state. The single realization path for episode starts — used by the rollout runtime
+/// (`Episode::new`/`reset`) and by any consumer that must probe POST-birth properties (the
+/// binding's decision-dynamics probe: `actor` on an unrealized root is `Actor::Chance`, which
+/// says nothing about how the game's agents take turns). Birth chains may not end the episode
+/// (asserted) and their events are contractually neutral.
+pub fn realize_initial_state<G: Game>(game: &G, rng: &mut dyn Rng) -> G::State {
+    let mut state = game.initial_state(rng);
+    while matches!(game.actor(&state), Actor::Chance) {
+        let outcome = game.chance_node(&state).draw(rng);
+        let t = game.apply_chance_node(&state, outcome);
+        assert!(
+            !t.terminal,
+            "an episode cannot end during its birth chain — the deal may not decide the game"
+        );
+        state = t.next_state;
+    }
+    state
 }
 
 #[cfg(test)]
