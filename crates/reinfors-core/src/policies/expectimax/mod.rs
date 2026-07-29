@@ -68,6 +68,10 @@ impl Policy for SelectiveExpectimax {
     type Evaluation = SearchEvaluation;
     type PolicyState = usize; // the Thompson head for the current episode
 
+    fn supports_imperfect_information(&self) -> bool {
+        false // the search branches on the true state (clairvoyant past hidden information)
+    }
+
     fn max_agents(&self, _sequential: bool) -> Option<usize> {
         // Single-perspective search at any N under either dynamics: each other agent is modeled
         // chance (sequential — a node per foreign turn; simultaneous — a factored co-mover

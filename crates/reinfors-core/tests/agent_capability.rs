@@ -165,6 +165,9 @@ impl Policy for CappedStub {
     fn max_agents(&self, _sequential: bool) -> Option<usize> {
         Some(2)
     }
+    fn supports_imperfect_information(&self) -> bool {
+        false
+    }
     fn begin_episode(&self, _rng: &mut dyn Rng) {}
     fn encode_eval(&self, _eval: &(), _out: &mut Vec<u8>) {}
     fn decode_eval(

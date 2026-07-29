@@ -10,6 +10,7 @@ serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
 cozy-chess = "0.3.4"
 reinfors-core = { path = "../reinfors-core" }
+rs_poker = "5"
 
 [dev-dependencies]
 rayon = "1"

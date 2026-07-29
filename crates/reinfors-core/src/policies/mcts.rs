@@ -1611,6 +1611,10 @@ impl Policy for Mcts {
     type Evaluation = SearchEvaluation;
     type PolicyState = u32; // moves acted this episode — drives the temperature_drop cutoff
 
+    fn supports_imperfect_information(&self) -> bool {
+        false // the tree branches on the true state (clairvoyant past hidden information)
+    }
+
     fn max_agents(&self, sequential: bool) -> Option<usize> {
         // Simultaneous games: any N (decoupled per-agent tables). UCT over a SEQUENTIAL game
         // caps at 2 agents — Q-derived leaf values exist only at the evaluated agent's own

@@ -156,6 +156,16 @@ pub trait Game {
         unreachable!("apply_chance called on a game that declares no chance_outcomes")
     }
 
+    /// Whether every agent could reconstruct the full state from its own observations (perfect
+    /// information). Games with HIDDEN state (poker's hole cards) return false: the tree
+    /// searches branch on the true state, so their backed-up values are clairvoyant about
+    /// information the nets never see — search policies reject such games at construction
+    /// (sound imperfect-information search is a different algorithm family). Observation-only
+    /// policies (the DQN family) are unaffected.
+    fn perfect_information(&self) -> bool {
+        true
+    }
+
     fn initial_state(&self, rng: &mut dyn Rng) -> Self::State;
 
     /// The episode-length cap after which the rollout truncates a still-running game, or `None` for a

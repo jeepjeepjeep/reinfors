@@ -49,6 +49,13 @@ pub trait Policy {
         false
     }
 
+    /// Whether this policy is sound on games with HIDDEN state (`Game::perfect_information()`
+    /// = false). True only for policies that consume nothing beyond each agent's own
+    /// observation (the DQN family); tree searches branch on the true state and are clairvoyant
+    /// there, so they must say false. Required rather than defaulted: a soundness claim must be
+    /// deliberate. Checked at construction — never mid-collect.
+    fn supports_imperfect_information(&self) -> bool;
+
     fn begin_episode(&self, rng: &mut dyn Rng) -> Self::PolicyState;
 
     /// Pooled evaluation of a batch of active `(state, agent)` requests against the engine's

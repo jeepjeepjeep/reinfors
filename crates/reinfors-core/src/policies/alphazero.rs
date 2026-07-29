@@ -98,6 +98,10 @@ impl Policy for AlphaZero {
     type Evaluation = SearchEvaluation;
     type PolicyState = u32; // plies acted this episode — drives the temperature_drop cutoff
 
+    fn supports_imperfect_information(&self) -> bool {
+        false // rides the MCTS tree: branches on the true state
+    }
+
     fn max_agents(&self, _sequential: bool) -> Option<usize> {
         None // rides the MCTS tree: negamax at ≤2 sequential, Max^N past that, DUCT-N for sim
     }
