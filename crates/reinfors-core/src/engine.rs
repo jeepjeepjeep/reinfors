@@ -99,11 +99,11 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     // `Evaluator` — the single path every consumer's forwards take. Lifetime spans collects;
     // cleared when the shared weights generation is bumped (`weights_updated` at the binding).
     infer_cache: Option<crate::infer_cache::InferCache>,
-    // Rewards earned by agents with NO buffered step to attach them to (an agent can be scored
-    // without ever acting — poker's big blind wins a fold-out before its first decision). They
-    // fold into the episode-summary reward at flush; there is no decision to credit, so they
-    // never enter training records.
-    orphan_rewards: Vec<Vec<f64>>,
+    // Per-agent running return for the current episode, accumulated on every reward event
+    // independently of step attribution. The episode summary cannot be derived from buffered
+    // steps: an agent can be scored without ever acting (poker's big blind wins a fold-out
+    // before its first decision). Step rewards are purely a training-data concern.
+    episode_returns: Vec<Vec<f64>>,
     // The game's decision dynamics (probed once from the initial state): sequential games with
     // N>2 agents buffer value-only steps for non-mover perspectives (see `collect`).
     sequential: bool,
@@ -178,7 +178,7 @@ where
             search_rng,
             start_dist: Box::new(AlwaysInitialState),
             infer_cache: None,
-            orphan_rewards: vec![vec![0.0; num_agents]; params.n_games],
+            episode_returns: vec![vec![0.0; num_agents]; params.n_games],
             sequential,
             buffer_rng,
             seeded,
@@ -344,6 +344,7 @@ where
                 let needs_next_obs = self.learner.needs_next_obs();
                 for (si, action) in agents.iter().enumerate() {
                     let reward = self.reward.step_reward(&events[si], si);
+                    self.episode_returns[gi][si] += reward;
                     if action.is_some() {
                         let (next_obs, next_legal) = if needs_next_obs {
                             (
@@ -367,11 +368,6 @@ where
                         // exact) and mark it terminal so the outcome reaches their trajectory.
                         step.reward += reward;
                         step.terminal |= terminal;
-                    } else if reward != 0.0 {
-                        // No step at all: the agent was scored before its first decision (poker's
-                        // blinds on a fold-out). Track it so the episode summary stays honest —
-                        // with no decision to credit, it never becomes a training record.
-                        self.orphan_rewards[gi][si] += reward;
                     }
                 }
                 // Buffer the reached state for start-state coverage — non-terminal states only (you
@@ -414,11 +410,10 @@ where
             let mut ep_reward = vec![0.0; num_agents];
             for (si, ep_slot) in ep_reward.iter_mut().enumerate() {
                 let steps = std::mem::take(&mut self.traj[gi][si]);
-                *ep_slot = std::mem::take(&mut self.orphan_rewards[gi][si]);
+                *ep_slot = std::mem::take(&mut self.episode_returns[gi][si]);
                 if steps.is_empty() {
                     continue;
                 }
-                *ep_slot += steps.iter().map(|s| s.reward).sum::<f64>();
                 let tail = tails.get(&(gi, si)).cloned().unwrap_or_default();
                 out.extend(self.learner.episode_records(
                     &steps,
@@ -537,7 +532,7 @@ where
         codec: &dyn crate::StateCodec<State = G::State>,
     ) -> Result<Vec<u8>, String> {
         use crate::codec::bytes::*;
-        let mut out = vec![2u8]; // engine payload layout version (2: + per-agent orphan rewards)
+        let mut out = vec![2u8]; // engine payload layout version (2: + per-agent episode returns)
         let n_games = self.episodes.len();
         let num_agents = self.game.num_agents();
         put_u32(&mut out, n_games as u32);
@@ -549,7 +544,7 @@ where
             put_u64(&mut out, self.episodes[gi].rng.state());
             put_u64(&mut out, self.ticks[gi] as u64);
             put_u8(&mut out, u8::from(self.seeded[gi]));
-            put_f64s(&mut out, &self.orphan_rewards[gi]);
+            put_f64s(&mut out, &self.episode_returns[gi]);
             put_u64(
                 &mut out,
                 self.policy.policy_state_to_u64(&self.policy_states[gi]),
@@ -612,7 +607,7 @@ where
             rng: u64,
             tick: usize,
             seeded: bool,
-            orphans: Vec<f64>,
+            returns: Vec<f64>,
             policy_state: PS,
             traj: Vec<Vec<Step<E>>>,
         }
@@ -631,9 +626,9 @@ where
                 return Err(format!("implausible tick count {tick}"));
             }
             let seeded = bool_byte(r.u8()?)?;
-            let orphans = f64s(&mut r)?;
-            if orphans.len() != num_agents || orphans.iter().any(|v| !v.is_finite()) {
-                return Err("malformed orphan-reward vector".into());
+            let returns = f64s(&mut r)?;
+            if returns.len() != num_agents || returns.iter().any(|v| !v.is_finite()) {
+                return Err("malformed episode-return vector".into());
             }
             let policy_state = self.policy.policy_state_from_u64(r.u64()?)?;
             let mut traj = Vec::with_capacity(num_agents);
@@ -694,7 +689,7 @@ where
                 rng,
                 tick,
                 seeded,
-                orphans,
+                returns,
                 policy_state,
                 traj,
             });
@@ -716,7 +711,7 @@ where
             self.episodes[gi].rng = SplitMix64::from_state(slice.rng);
             self.ticks[gi] = slice.tick;
             self.seeded[gi] = slice.seeded;
-            self.orphan_rewards[gi] = slice.orphans;
+            self.episode_returns[gi] = slice.returns;
             self.policy_states[gi] = slice.policy_state;
             self.traj[gi] = slice.traj;
         }
