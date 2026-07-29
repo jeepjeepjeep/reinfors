@@ -17,11 +17,24 @@ impl<G: Game> Episode<G> {
     pub(crate) fn new(game: &G, seed: u64) -> Self {
         let mut rng = SplitMix64::new(seed);
         let state = game.initial_state(&mut rng);
+        Self::assert_decision_state(game, &state);
         Episode { state, rng }
     }
 
     pub(crate) fn reset(&mut self, game: &G) {
         self.state = game.initial_state(&mut self.rng);
+        Self::assert_decision_state(game, &self.state);
+    }
+
+    /// Chance nodes are interior (see [`Game::chance_nodes`]): an episode is born at a decision
+    /// state. A real assert — a root chance node would leave every consumer actor-less (empty
+    /// active set, a collect that gathers nothing) rather than fail loudly.
+    fn assert_decision_state(game: &G, state: &G::State) {
+        assert!(
+            !matches!(game.actor(state), crate::game::Actor::Chance),
+            "initial_state returned a chance node; chance nodes are interior — draw initial \
+             randomness from the rng inside initial_state"
+        );
     }
 
     pub(crate) fn agent_active(&self, game: &G, agent: usize) -> bool {

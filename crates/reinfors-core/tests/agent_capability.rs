@@ -165,6 +165,10 @@ impl Policy for CappedStub {
     fn max_agents(&self, _sequential: bool) -> Option<usize> {
         Some(2)
     }
+    fn supports_chance_nodes(&self) -> bool {
+        true
+    }
+
     fn supports_imperfect_information(&self) -> bool {
         false
     }
@@ -893,6 +897,80 @@ fn direct_expectimax_rejects_chance_node_games() {
         false,
         0,
         |_obs: Vec<f32>, n: usize| vec![0.0; n * 2],
+    );
+}
+
+#[test]
+#[should_panic(expected = "chance-node")]
+fn engine_rejects_search_policies_on_chance_node_games() {
+    let _ = Engine::new(
+        NodeyTwo,
+        Box::new(Enc),
+        Box::new(Zero),
+        Mcts::new(mcts_cfg(), ActBy::Value),
+        TreeStrap::new(0.99, 0.3, 1.0, false),
+        EngineParams {
+            n_games: 1,
+            seed: 0,
+        },
+    );
+}
+
+/// `NodeyTwo` whose root IS the chance node — episode birth must reject it (a root node would
+/// leave every consumer actor-less rather than fail loudly).
+struct RootNodey;
+
+impl Game for RootNodey {
+    type State = St;
+    type Event = ();
+    fn num_agents(&self) -> usize {
+        2
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn chance_nodes(&self) -> bool {
+        true
+    }
+    fn actor(&self, s: &St) -> Actor {
+        if s.tick == 0 {
+            Actor::Chance
+        } else {
+            Actor::Agent(s.tick % 2)
+        }
+    }
+    fn legal_actions(&self, s: &St, agent: usize) -> Vec<usize> {
+        if s.tick > 0 && agent == s.tick % 2 && s.tick < 4 {
+            vec![0, 1]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
+        Transition {
+            next_state: St { tick: s.tick + 1 },
+            events: vec![(); 2],
+            terminal: s.tick + 1 >= 4,
+        }
+    }
+    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+        St { tick: 0 }
+    }
+}
+
+#[test]
+#[should_panic(expected = "chance nodes are interior")]
+fn episode_birth_rejects_root_chance_nodes() {
+    let _ = Engine::new(
+        RootNodey,
+        Box::new(Enc),
+        Box::new(Zero),
+        EpsilonGreedyQ::new(2, 0.1),
+        Dqn::new(2, 1.0),
+        EngineParams {
+            n_games: 1,
+            seed: 0,
+        },
     );
 }
 

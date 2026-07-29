@@ -150,6 +150,11 @@ where
             "this policy searches the true state and would be clairvoyant on a \
              hidden-information game; use an observation-only (DQN-family) policy"
         );
+        assert!(
+            !game.chance_nodes() || policy.supports_chance_nodes(),
+            "this policy plans over transitions and cannot score chance-node realizations \
+             (outcome-dependent payouts); use an observation-only (DQN-family) policy"
+        );
         if let Some(cap) = policy.max_agents(sequential) {
             assert!(
                 n <= cap,

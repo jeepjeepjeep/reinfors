@@ -1620,6 +1620,10 @@ impl Policy for Mcts {
     type Evaluation = SearchEvaluation;
     type PolicyState = u32; // moves acted this episode — drives the temperature_drop cutoff
 
+    fn supports_chance_nodes(&self) -> bool {
+        false // no chance ply: an outcome-dependent payout is unscorable in this tree
+    }
+
     fn supports_imperfect_information(&self) -> bool {
         false // the tree branches on the true state (clairvoyant past hidden information)
     }

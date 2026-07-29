@@ -68,6 +68,10 @@ impl Policy for SelectiveExpectimax {
     type Evaluation = SearchEvaluation;
     type PolicyState = usize; // the Thompson head for the current episode
 
+    fn supports_chance_nodes(&self) -> bool {
+        false // no chance ply: an outcome-dependent payout is unscorable in this search
+    }
+
     fn supports_imperfect_information(&self) -> bool {
         false // the search branches on the true state (clairvoyant past hidden information)
     }

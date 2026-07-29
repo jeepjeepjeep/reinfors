@@ -98,6 +98,10 @@ impl Policy for AlphaZero {
     type Evaluation = SearchEvaluation;
     type PolicyState = u32; // plies acted this episode — drives the temperature_drop cutoff
 
+    fn supports_chance_nodes(&self) -> bool {
+        false // no chance ply: an outcome-dependent payout is unscorable in this tree
+    }
+
     fn supports_imperfect_information(&self) -> bool {
         false // rides the MCTS tree: branches on the true state
     }

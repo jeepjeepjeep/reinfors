@@ -163,9 +163,13 @@ pub trait Game {
     /// determine events and terminal status (poker's all-in runout: the river decides the
     /// showdown). Rollout consumers (`Env`, `Engine`) realize chains of them automatically inside
     /// one tick; tree searches reject such games at entry — scoring an outcome-dependent payout
-    /// needs an explicit chance ply the searches do not implement. Declared, like every
-    /// capability: `true` obliges `chance_node`/`apply_chance_node` to answer at every
-    /// `Actor::Chance` state.
+    /// needs an explicit chance ply the searches do not implement. Chance nodes are INTERIOR:
+    /// they arise only from transitions, so `initial_state` must return a decision state
+    /// (asserted where episodes are born) — initial randomness draws from the rng inside
+    /// `initial_state` instead. A root chance node would let a reset chain reach terminal, an
+    /// episode over before any decision; forbidding the root keeps that inexpressible. Declared,
+    /// like every capability: `true` obliges `chance_node`/`apply_chance_node` to answer at
+    /// every `Actor::Chance` state.
     fn chance_nodes(&self) -> bool {
         false
     }

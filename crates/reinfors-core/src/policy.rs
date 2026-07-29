@@ -56,6 +56,14 @@ pub trait Policy {
     /// deliberate. Checked at construction — never mid-collect.
     fn supports_imperfect_information(&self) -> bool;
 
+    /// Whether this policy is sound on games that present chance NODES
+    /// (`Game::chance_nodes()` = true), whose realization may decide events and terminal
+    /// status. True only for policies that never plan over transitions (the DQN family); tree
+    /// searches cannot score an outcome-dependent payout without an explicit chance ply, so
+    /// they must say false. Required rather than defaulted: a soundness claim must be
+    /// deliberate. Checked at construction — never mid-collect.
+    fn supports_chance_nodes(&self) -> bool;
+
     fn begin_episode(&self, rng: &mut dyn Rng) -> Self::PolicyState;
 
     /// Pooled evaluation of a batch of active `(state, agent)` requests against the engine's
