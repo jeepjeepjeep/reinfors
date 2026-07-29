@@ -1,8 +1,8 @@
 """Per-player infer on the engine: the polymorphic `infer` argument (bare callable = shared
-network, sequence = one per player), the `players` column on DQN batches (the primary routing
-mechanism for heterogeneous training), `learn_players` (the frozen-opponent source filter),
-per-player `weights_updated`, and the family gate (search families reject the sequence form
-until their pooled paths land).
+network, sequence = one per player), the `players` column on record batches (the primary
+routing mechanism for heterogeneous training), `learn_players` (the frozen-opponent source
+filter), per-player `weights_updated`, and per-row routing through the search families'
+pooled forwards.
 """
 
 from collections.abc import Callable
@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 import pytest
 import reinfors as rf
-from reinfors._reinfors import DqnBatch
+from reinfors._reinfors import AlphaZeroBatch, DqnBatch
 
 
 def collect_dqn(engine: rf.Engine, n: int, infer: Any) -> DqnBatch:
@@ -69,37 +69,46 @@ def test_infer_argument_validation() -> None:
         engine.collect(8, [q_net(0, 2), 42])
 
 
-def test_search_families_accept_the_sequence_form() -> None:
-    # AlphaZero with per-player networks: leaf rows route per perspective, records carry
-    # their player. The nets here are (logits, values) tuples per the AZ infer contract.
-    def az_net(bias: float) -> Any:
+def test_search_families_route_each_players_network() -> None:
+    # Behavioral routing check: each player's net puts all prior mass on its OWN column and
+    # root noise is off, so PUCT visits concentrate there — every record's pi must peak at
+    # the column ITS player's net prefers. Misrouting all rows to one net would peak both
+    # players' pi at the same column.
+    def az_net(col: int) -> Any:
         def f(obs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-            return np.zeros((obs.shape[0], 7)), np.full(obs.shape[0], bias)
+            logits = np.full((obs.shape[0], 7), -30.0)
+            logits[:, col] = 30.0
+            return logits, np.zeros(obs.shape[0])
 
         return f
 
+    prefer = {0: 2, 1: 4}
     engine = rf.Engine(
         rf.games.Connect4(),
         rf.Reward(),
-        rf.policies.AlphaZero(num_simulations=4),
+        rf.policies.AlphaZero(num_simulations=8, noise=None),
         rf.learners.AlphaZero(),
         n_games=2,
         seed=0,
     )
-    batch = engine.collect(8, [az_net(0.1), az_net(-0.1)])
-    assert set(batch.players.tolist()) <= {0, 1}
-    assert batch.players.shape[0] == batch.obs.shape[0]
+    batch = engine.collect(12, [az_net(prefer[0]), az_net(prefer[1])])
+    assert isinstance(batch, AlphaZeroBatch)
+    assert set(batch.players.tolist()) == {0, 1}, "records carry both players"
+    for player, pi in zip(batch.players, batch.policy_targets, strict=True):
+        assert int(np.argmax(pi)) == prefer[int(player)], (
+            "each mover's visit distribution follows its own network's priors"
+        )
 
     frozen = rf.Engine(
         rf.games.Connect4(),
         rf.Reward(),
-        rf.policies.AlphaZero(num_simulations=4),
+        rf.policies.AlphaZero(num_simulations=8, noise=None),
         rf.learners.AlphaZero(),
         n_games=2,
         seed=1,
         learn_players=[0],
     )
-    fbatch = frozen.collect(8, [az_net(0.1), az_net(-0.1)])
+    fbatch = frozen.collect(8, [az_net(prefer[0]), az_net(prefer[1])])
     assert (fbatch.players == 0).all(), "the frozen player leaves no records"
 
 
