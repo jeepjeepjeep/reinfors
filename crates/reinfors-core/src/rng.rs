@@ -3,6 +3,8 @@
 //! every stochastic draw in the system comes from the same generator — keeping runs reproducible from
 //! a seed without pulling in an RNG dependency.
 
+use crate::game::Rng;
+
 /// Tiny deterministic PRNG (splitmix64).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct SplitMix64 {
@@ -35,7 +37,7 @@ impl SplitMix64 {
 
 /// Draw an index proportional to `probs` (one `unit()` draw; numeric fallback lands on the last
 /// positive-mass entry). Shared by every search's chance-outcome sampling.
-pub(crate) fn weighted_index(rng: &mut dyn crate::game::Rng, probs: &[f64]) -> usize {
+pub(crate) fn weighted_index(rng: &mut dyn Rng, probs: &[f64]) -> usize {
     let total: f64 = probs.iter().sum();
     let mut r = rng.unit() * total;
     let mut last = 0;
@@ -51,7 +53,7 @@ pub(crate) fn weighted_index(rng: &mut dyn crate::game::Rng, probs: &[f64]) -> u
     last
 }
 
-impl crate::game::Rng for SplitMix64 {
+impl Rng for SplitMix64 {
     fn below(&mut self, n: usize) -> usize {
         (self.next_u64() % n as u64) as usize
     }
@@ -61,14 +63,14 @@ impl crate::game::Rng for SplitMix64 {
 }
 
 /// Standard normal via Box–Muller over `unit()` draws (the trait's only continuous primitive).
-fn normal(rng: &mut dyn crate::game::Rng) -> f64 {
+fn normal(rng: &mut dyn Rng) -> f64 {
     let u1 = rng.unit().max(f64::MIN_POSITIVE); // unit() ∈ [0,1); keep ln finite
     let u2 = rng.unit();
     (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
 }
 
 /// Gamma(alpha, 1) via Marsaglia–Tsang, with the alpha<1 boost `Gamma(a) = Gamma(a+1)·U^(1/a)`.
-fn gamma_sample(rng: &mut dyn crate::game::Rng, alpha: f64) -> f64 {
+fn gamma_sample(rng: &mut dyn Rng, alpha: f64) -> f64 {
     if alpha < 1.0 {
         let u = rng.unit().max(f64::MIN_POSITIVE);
         return gamma_sample(rng, alpha + 1.0) * u.powf(1.0 / alpha);
@@ -90,7 +92,7 @@ fn gamma_sample(rng: &mut dyn crate::game::Rng, alpha: f64) -> f64 {
 
 /// A symmetric Dirichlet(alpha) draw of dimension `k` — normalized Gamma(alpha) draws. AlphaZero's
 /// root-noise distribution.
-pub(crate) fn dirichlet(rng: &mut dyn crate::game::Rng, alpha: f64, k: usize) -> Vec<f64> {
+pub(crate) fn dirichlet(rng: &mut dyn Rng, alpha: f64, k: usize) -> Vec<f64> {
     let draws: Vec<f64> = (0..k).map(|_| gamma_sample(rng, alpha)).collect();
     let total: f64 = draws.iter().sum();
     if total <= 0.0 {

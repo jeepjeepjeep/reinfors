@@ -21,14 +21,17 @@
 
 use std::collections::HashMap;
 
+use crate::codec::StateCodec;
 use crate::encoder::StateEncoder;
-use crate::episode::Episode;
-use crate::game::Game;
+use crate::game::{Actor, Game};
 use crate::learner::{Learner, Step};
 use crate::policy::Policy;
 use crate::reward::Reward;
 use crate::rng::SplitMix64;
-use crate::start::{AlwaysInitialState, Start, StartDistribution};
+use crate::rollout::episode::Episode;
+use crate::rollout::evaluator::Evaluator;
+use crate::rollout::infer_cache::InferCache;
+use crate::rollout::start::{AlwaysInitialState, Start, StartDistribution};
 
 /// One finished episode's outcome, for logging: per-agent total realized reward (one entry per
 /// agent), the episode length in ticks, and whether it was seeded from the start-state buffer (a
@@ -98,7 +101,7 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     // Optional net-evaluation cache (see `infer_cache`), applied inside the per-collect
     // `Evaluator` — the single path every consumer's forwards take. Lifetime spans collects;
     // cleared when the shared weights generation is bumped (`weights_updated` at the binding).
-    infer_cache: Option<crate::infer_cache::InferCache>,
+    infer_cache: Option<InferCache>,
     // Per-agent running return for the current episode, accumulated on every reward event
     // independently of step attribution. The episode summary cannot be derived from buffered
     // steps: an agent can be scored without ever acting (poker's big blind wins a fold-out
@@ -144,7 +147,7 @@ where
         // the initial state (games are uniformly one dynamics; the searches assert mixing).
         let sequential = episodes
             .first()
-            .is_some_and(|ep| matches!(game.actor(&ep.state), crate::game::Actor::Agent(_)));
+            .is_some_and(|ep| matches!(game.actor(&ep.state), Actor::Agent(_)));
         assert!(
             game.perfect_information() || policy.supports_imperfect_information(),
             "this policy searches the true state and would be clairvoyant on a \
@@ -206,7 +209,7 @@ where
     }
 
     /// Enable the net-evaluation cache (consuming builder, like `with_start_distribution`).
-    pub fn with_infer_cache(mut self, cache: crate::infer_cache::InferCache) -> Self {
+    pub fn with_infer_cache(mut self, cache: InferCache) -> Self {
         self.infer_cache = Some(cache);
         self
     }
@@ -232,7 +235,7 @@ where
         // The single evaluation service for this collect: every consumer's forwards (search
         // leaves, episode-tail bootstraps, plain policy forwards) route through it, picking up
         // caching, within-batch dedup, and throughput telemetry uniformly.
-        let mut evaluator = crate::evaluator::Evaluator::new(&mut infer, cache.as_mut());
+        let mut evaluator = Evaluator::new(&mut infer, cache.as_mut());
 
         while out.len() < n_records {
             // 1. Gather one search request per active agent across all games.
@@ -404,7 +407,7 @@ where
         finished: &[(usize, bool)],
         out: &mut Vec<L::Record>,
         stats: &mut CollectStats,
-        evaluator: &mut crate::evaluator::Evaluator<'_, F>,
+        evaluator: &mut Evaluator<'_, F>,
     ) where
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
     {
@@ -442,7 +445,7 @@ where
                 Start::Restore(state) => {
                     // A public injection seam: hold a custom distribution to the same
                     // decision-state start contract as `initial_state`.
-                    crate::episode::Episode::assert_decision_state(&self.game, &state);
+                    Episode::assert_decision_state(&self.game, &state);
                     self.episodes[gi].state = state;
                     self.seeded[gi] = true;
                 }
@@ -459,12 +462,12 @@ where
     /// Per-(game, agent) z-tail: the net's per-head value `max_a Q(final_obs)` for agents still active
     /// at a truncation (terminal episodes and inactive agents seed with 0, so they are absent here).
     /// Empty when `outcome_weight == 0`, where the tail never enters the (no-op) blend.
-    /// An ordinary [`Evaluator`](crate::evaluator::Evaluator) consumer: the final state was almost
+    /// An ordinary [`Evaluator`](Evaluator) consumer: the final state was almost
     /// always just evaluated by the last search, so with the cache on this is typically hit-served.
     fn tail_values<F>(
         &mut self,
         finished: &[(usize, bool)],
-        evaluator: &mut crate::evaluator::Evaluator<'_, F>,
+        evaluator: &mut Evaluator<'_, F>,
     ) -> HashMap<(usize, usize), Vec<f64>>
     where
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
@@ -509,9 +512,9 @@ where
                 // on a sparse-action game cannot bootstrap a phantom illegal Q).
                 let state = &self.episodes[gi].state;
                 let legal = match self.game.actor(state) {
-                    crate::game::Actor::Agent(mover) => self.game.legal_actions(state, mover),
-                    crate::game::Actor::Simultaneous => self.game.legal_actions(state, si),
-                    crate::game::Actor::Chance => unreachable!("chance actors are not searched"),
+                    Actor::Agent(mover) => self.game.legal_actions(state, mover),
+                    Actor::Simultaneous => self.game.legal_actions(state, si),
+                    Actor::Chance => unreachable!("chance actors are not searched"),
                 };
                 // The row was encoded for `si`, so the gather maps game ids through si's frame.
                 tails.insert(
@@ -537,7 +540,7 @@ where
 {
     pub fn snapshot_bytes(
         &self,
-        codec: &dyn crate::StateCodec<State = G::State>,
+        codec: &dyn StateCodec<State = G::State>,
     ) -> Result<Vec<u8>, String> {
         use crate::codec::bytes::*;
         let mut out = vec![2u8]; // engine payload layout version (2: + per-agent episode returns)
@@ -580,7 +583,7 @@ where
 
     pub fn restore_bytes(
         &mut self,
-        codec: &dyn crate::StateCodec<State = G::State>,
+        codec: &dyn StateCodec<State = G::State>,
         bytes: &[u8],
     ) -> Result<(), String> {
         use crate::codec::bytes::*;

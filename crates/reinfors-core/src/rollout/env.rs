@@ -5,8 +5,9 @@
 //! `Env` drives one game move-by-move for play, evaluation, and debugging.
 
 use crate::encoder::StateEncoder;
-use crate::episode::Episode;
 use crate::game::Game;
+use crate::rng::SplitMix64;
+use crate::rollout::episode::Episode;
 use crate::space::Space;
 
 pub struct Env<G: Game> {
@@ -64,7 +65,7 @@ impl<G: Game> Env<G> {
     /// outputs (events/rewards) belong to the step that produced them and are not part of state.
     pub fn set_parts(&mut self, state: G::State, rng_state: u64, done: bool) {
         self.episode.state = state;
-        self.episode.rng = crate::rng::SplitMix64::from_state(rng_state);
+        self.episode.rng = SplitMix64::from_state(rng_state);
         self.done = done;
     }
 

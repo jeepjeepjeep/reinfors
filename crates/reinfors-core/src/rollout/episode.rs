@@ -5,7 +5,7 @@
 //! many episodes (the `Engine` keeps one of each; an `Env` owns its own).
 
 use crate::encoder::StateEncoder;
-use crate::game::Game;
+use crate::game::{step_env, Actor, Game};
 use crate::rng::SplitMix64;
 
 pub(crate) struct Episode<G: Game> {
@@ -32,7 +32,7 @@ impl<G: Game> Episode<G> {
     /// active set, a collect that gathers nothing) rather than fail loudly.
     pub(crate) fn assert_decision_state(game: &G, state: &G::State) {
         assert!(
-            !matches!(game.actor(state), crate::game::Actor::Chance),
+            !matches!(game.actor(state), Actor::Chance),
             "an episode cannot start at a chance node; chance nodes are interior — initial \
              randomness draws from the rng inside initial_state, and start distributions must \
              restore realized decision states"
@@ -61,7 +61,7 @@ impl<G: Game> Episode<G> {
     /// terminal)`. A [`Reward`](crate::Reward) (held by the caller, not the `Episode`) maps the events
     /// to scalar rewards.
     pub(crate) fn advance(&mut self, game: &G, actions: &[usize]) -> (Vec<G::Event>, bool) {
-        let t = crate::game::step_env(game, &self.state, actions, &mut self.rng);
+        let t = step_env(game, &self.state, actions, &mut self.rng);
         self.state = t.next_state;
         (t.events, t.terminal)
     }

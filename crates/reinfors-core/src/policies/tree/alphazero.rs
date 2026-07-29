@@ -11,14 +11,17 @@
 //! a backstop. The produced [`SearchEvaluation`] carries the root's per-action mean values and visit
 //! counts; the AlphaZero learner reads the visits as its policy target `π`.
 
+use crate::codec::bytes::Reader;
 use crate::encoder::StateEncoder;
-use crate::engine::CollectStats;
-use crate::evaluator::Evaluator;
 use crate::game::{Game, Rng};
-use crate::policies::expectimax::SearchEvaluation;
-use crate::policies::mcts::{sample_visits, search_many, Guidance, NoiseScope, SequentialBackup};
+use crate::policies::tree::expectimax::{decode_search_eval, encode_search_eval, SearchEvaluation};
+use crate::policies::tree::mcts::{
+    sample_visits, search_many, Guidance, NoiseScope, SequentialBackup,
+};
 use crate::policy::{argmax, ChanceMode, Policy, SearchPolicy};
 use crate::reward::Reward;
+use crate::rollout::engine::CollectStats;
+use crate::rollout::evaluator::Evaluator;
 
 #[derive(Clone, Copy, Debug)]
 pub struct AlphaZeroConfig {
@@ -37,7 +40,7 @@ pub struct AlphaZeroConfig {
     pub temperature_drop: u32,
     /// How the search consumes stochastic transitions' declared chance (see
     /// [`ChanceMode`](crate::ChanceMode)). Inert for games that declare no `chance_outcomes`.
-    pub chance: crate::policy::ChanceMode,
+    pub chance: ChanceMode,
     /// Simultaneous games: which root priors the Dirichlet noise perturbs — the requester's
     /// only, or every agent's. Irrelevant for sequential games (one root table).
     pub noise_scope: NoiseScope,
@@ -119,16 +122,12 @@ impl Policy for AlphaZero {
     }
 
     fn encode_eval(&self, eval: &SearchEvaluation, out: &mut Vec<u8>) {
-        crate::policies::expectimax::encode_search_eval(eval, out);
+        encode_search_eval(eval, out);
     }
 
-    fn decode_eval(
-        &self,
-        r: &mut crate::codec::bytes::Reader,
-        action_count: usize,
-    ) -> Result<SearchEvaluation, String> {
+    fn decode_eval(&self, r: &mut Reader, action_count: usize) -> Result<SearchEvaluation, String> {
         // one value row plus full-width visits (the π source the AZ learner requires)
-        crate::policies::expectimax::decode_search_eval(r, action_count, 1, true)
+        decode_search_eval(r, action_count, 1, true)
     }
 
     fn policy_state_to_u64(&self, s: &u32) -> u64 {

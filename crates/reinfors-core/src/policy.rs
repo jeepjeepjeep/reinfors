@@ -2,11 +2,13 @@
 //! then *selects* an action from it. Concrete policies live in `crate::policies`; the `Engine` drives
 //! any of them, and a `Learner` consuming the matching `Evaluation` produces the training records.
 
+use crate::codec::bytes::Reader;
 use crate::encoder::StateEncoder;
-use crate::engine::CollectStats;
-use crate::evaluator::Evaluator;
 use crate::game::{Game, Rng};
+use crate::policies::tree::expectimax::SearchEvaluation;
 use crate::reward::Reward;
+use crate::rollout::engine::CollectStats;
+use crate::rollout::evaluator::Evaluator;
 
 /// Upper bound on one node's simultaneous joint fan — MCTS/AZ's dense joint-slot arrays
 /// (`∏ per-agent legal widths`) and expectimax's per-edge co-mover branch product
@@ -75,11 +77,7 @@ pub trait Policy {
     /// Serialize/deserialize this policy's per-decision evaluation — buffered `Step`s carry them,
     /// so exact engine snapshots need them portable. Decode validates (untrusted-bytes boundary).
     fn encode_eval(&self, eval: &Self::Evaluation, out: &mut Vec<u8>);
-    fn decode_eval(
-        &self,
-        r: &mut crate::codec::bytes::Reader,
-        action_count: usize,
-    ) -> Result<Self::Evaluation, String>;
+    fn decode_eval(&self, r: &mut Reader, action_count: usize) -> Result<Self::Evaluation, String>;
 
     /// The per-episode acting state as a plain integer (Thompson head / temperature ply) — every
     /// current policy's state fits; a future richer state would widen this seam.
@@ -182,7 +180,7 @@ impl ChanceMode {
 /// compiler-checked contract that they produce [`SearchEvaluation`]s (root values, visits, search
 /// stats). Non-search policies (e.g. `EpsilonGreedyQ`) simply do not implement it — the absence of
 /// the capability IS the distinction; there is no `NonSearchPolicy`.
-pub trait SearchPolicy: Policy<Evaluation = crate::policies::expectimax::SearchEvaluation> {
+pub trait SearchPolicy: Policy<Evaluation = SearchEvaluation> {
     /// Whether this search paradigm can express `mode` (see
     /// [`ChanceMode::requires_repeated_traversal`]). Checked when a configuration is built — the
     /// binding turns a `false` into a construction error — never mid-collect.
@@ -190,10 +188,7 @@ pub trait SearchPolicy: Policy<Evaluation = crate::policies::expectimax::SearchE
 
     /// Fold the search diagnostics common to every search family into the collect telemetry;
     /// policies layer their extras on top in their `Policy::fold_telemetry`.
-    fn fold_search_stats(
-        eval: &crate::policies::expectimax::SearchEvaluation,
-        stats: &mut CollectStats,
-    ) {
+    fn fold_search_stats(eval: &SearchEvaluation, stats: &mut CollectStats) {
         let s = &eval.stats;
         stats.max_depth = stats.max_depth.max(s.max_depth);
         stats.sum_leaves += s.leaves as f64;

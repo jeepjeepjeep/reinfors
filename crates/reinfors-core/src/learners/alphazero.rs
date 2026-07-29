@@ -4,10 +4,10 @@
 //! Classic AlphaZero: no interior targets, no bootstrap masks (single head), pure-outcome values —
 //! γ=1 with win/loss rewards reproduces the paper's z ∈ {−1, 0, 1}.
 
-use crate::encoder::ActionView;
+use crate::encoder::{head_permutation, ActionView};
 use crate::game::Rng;
 use crate::learner::{Learner, Step};
-use crate::policies::expectimax::SearchEvaluation;
+use crate::policies::tree::expectimax::SearchEvaluation;
 
 /// One collected AlphaZero record: observation, policy target `π [A]`, value target `z`, and the
 /// policy weight (1.0 for the acting agent's row, 0.0 for a value-only row).
@@ -102,7 +102,7 @@ impl Learner<SearchEvaluation> for AlphaZeroLearner {
         // game-frame visit vector scatters through a permutation table computed once per episode
         // (no per-scalar dynamic dispatch; identity views skip the scatter entirely).
         let a = trajectory.first().map_or(0, |s| s.evaluation.visits.len());
-        let (perm, identity) = crate::encoder::head_permutation(view, a, agent);
+        let (perm, identity) = head_permutation(view, a, agent);
         let mut out: Vec<AlphaZeroRecord> = Vec::with_capacity(trajectory.len());
         for step in trajectory.iter().rev() {
             z = step.reward + self.gamma * z;
@@ -133,7 +133,7 @@ impl Learner<SearchEvaluation> for AlphaZeroLearner {
 pub(crate) mod tests {
     use super::*;
     use crate::encoder::IdentityView;
-    use crate::policies::expectimax::search::SearchStats;
+    use crate::policies::tree::expectimax::search::SearchStats;
     use crate::rng::SplitMix64;
 
     fn eval(visits: Vec<f64>) -> SearchEvaluation {

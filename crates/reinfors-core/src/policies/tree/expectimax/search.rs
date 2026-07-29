@@ -26,7 +26,7 @@ use rayon::prelude::*;
 
 use crate::encoder::{ActionView, StateEncoder};
 use crate::game::{Actor, Game, Rng};
-use crate::policy::ChanceMode;
+use crate::policy::{ChanceMode, MAX_ENUMERATED_OUTCOMES, MAX_JOINT_SLOTS};
 use crate::reward::Reward;
 use crate::rng::SplitMix64;
 
@@ -646,10 +646,10 @@ fn push_branches<G: Game>(
                 // error rather than an approximation — sample (Committed) instead.
                 let count = dist.count();
                 assert!(
-                    count <= crate::policy::MAX_ENUMERATED_OUTCOMES,
+                    count <= MAX_ENUMERATED_OUTCOMES,
                     "ExpandAll cannot enumerate {count} chance outcomes (bound {}); use a \
                      sampling chance mode for combinatorial outcome spaces",
-                    crate::policy::MAX_ENUMERATED_OUTCOMES
+                    MAX_ENUMERATED_OUTCOMES
                 );
                 dist.iter_probs()
                     .enumerate()
@@ -740,13 +740,12 @@ fn expand_node<G: Game>(
             let combos: usize = co_b
                 .iter()
                 .try_fold(1usize, |acc, b| {
-                    acc.checked_mul(b.len())
-                        .filter(|&c| c <= crate::policy::MAX_JOINT_SLOTS)
+                    acc.checked_mul(b.len()).filter(|&c| c <= MAX_JOINT_SLOTS)
                 })
                 .unwrap_or_else(|| {
                     panic!(
                         "simultaneous co-mover fan exceeds {} joint branches at one node",
-                        crate::policy::MAX_JOINT_SLOTS
+                        MAX_JOINT_SLOTS
                     )
                 });
             let agent_legal = game.legal_actions(&state, agent);
@@ -1222,7 +1221,8 @@ mod chance_mode_tests {
     //! certain +1, rewards landing on the NEXT ply so everything flows through chance branches.
     use super::*;
     use crate::encoder::StateEncoder;
-    use crate::game::{Actor, Game, Rng, Transition};
+    use crate::game::{Actor, ChanceDist, Game, Rng, Transition};
+    use crate::policies::tree::expectimax::SelectiveExpectimax;
     use crate::reward::Reward as RewardTrait;
 
     #[derive(Clone)]
@@ -1270,13 +1270,9 @@ mod chance_mode_tests {
                 }
             }
         }
-        fn chance_outcomes(
-            &self,
-            s: &St,
-            t: &Transition<St, f64>,
-        ) -> Option<crate::game::ChanceDist> {
+        fn chance_outcomes(&self, s: &St, t: &Transition<St, f64>) -> Option<ChanceDist> {
             (s.ply == 0 && t.next_state.total == s.total)
-                .then(|| crate::game::ChanceDist::Weighted(vec![0.5, 0.5]))
+                .then(|| ChanceDist::Weighted(vec![0.5, 0.5]))
         }
         fn apply_chance(&self, _s: &St, t: &Transition<St, f64>, outcome: usize) -> St {
             St {
@@ -1370,7 +1366,7 @@ mod chance_mode_tests {
             chance: ChanceMode::AlwaysResample,
             opponent: Opponent::Uniform,
         };
-        let _ = crate::policies::expectimax::SelectiveExpectimax::new(cfg, 1, 0.0);
+        let _ = SelectiveExpectimax::new(cfg, 1, 0.0);
     }
 }
 
