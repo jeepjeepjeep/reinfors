@@ -5,7 +5,7 @@
 //! many episodes (the `Engine` keeps one of each; an `Env` owns its own).
 
 use crate::encoder::StateEncoder;
-use crate::game::{step_env, Actor, Game};
+use crate::game::{realize_initial_state, step_env, Actor, Game};
 use crate::rng::SplitMix64;
 
 pub(crate) struct Episode<G: Game> {
@@ -16,31 +16,12 @@ pub(crate) struct Episode<G: Game> {
 impl<G: Game> Episode<G> {
     pub(crate) fn new(game: &G, seed: u64) -> Self {
         let mut rng = SplitMix64::new(seed);
-        let state = game.initial_state(&mut rng);
-        let state = Self::realize_birth(game, state, &mut rng);
+        let state = realize_initial_state(game, &mut rng);
         Episode { state, rng }
     }
 
     pub(crate) fn reset(&mut self, game: &G) {
-        let state = game.initial_state(&mut self.rng);
-        self.state = Self::realize_birth(game, state, &mut self.rng);
-    }
-
-    /// Realize a birth chain: `initial_state` may return a chance node (a declared deal — see
-    /// [`Game::all_chance_declared`]); draw and apply until a decision state. Birth-chain
-    /// events are contractually neutral (there is no tick to deliver them into) and the chain
-    /// may not end the episode — an episode over before any decision is inexpressible.
-    fn realize_birth(game: &G, mut state: G::State, rng: &mut SplitMix64) -> G::State {
-        while matches!(game.actor(&state), Actor::Chance) {
-            let outcome = game.chance_node(&state).draw(rng);
-            let t = game.apply_chance_node(&state, outcome);
-            assert!(
-                !t.terminal,
-                "an episode cannot end during its birth chain — the deal may not decide the game"
-            );
-            state = t.next_state;
-        }
-        state
+        self.state = realize_initial_state(game, &mut self.rng);
     }
 
     /// Restored start-distribution states must be realized DECISION states — a chance-node

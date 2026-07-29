@@ -1960,11 +1960,16 @@ impl reinfors_core::Rng for ProbeRng {
     }
 }
 
-/// The game's decision dynamics, probed from the initial state (games are uniformly one
-/// dynamics; the searches assert against mixing).
+/// The game's decision dynamics, probed from the REALIZED initial state (games are uniformly
+/// one dynamics; the searches assert against mixing). Realization matters: a declared-deal
+/// game's raw root is `Actor::Chance`, which says nothing about turn-taking — probing it
+/// directly would misclassify every root-chance game as simultaneous.
 fn game_is_sequential<G: Game>(game: &G) -> bool {
     matches!(
-        game.actor(&game.initial_state(&mut ProbeRng(7))),
+        game.actor(&reinfors_core::game::realize_initial_state(
+            game,
+            &mut ProbeRng(7)
+        )),
         reinfors_core::Actor::Agent(_)
     )
 }

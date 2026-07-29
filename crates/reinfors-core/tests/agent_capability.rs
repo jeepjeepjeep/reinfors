@@ -969,6 +969,32 @@ impl Game for RootNodey {
 }
 
 #[test]
+fn realized_roots_expose_the_true_decision_dynamics() {
+    // The raw root of a declared-deal game is Actor::Chance — probing it directly would
+    // misclassify the game as simultaneous. The canonical realization helper answers with the
+    // first DECISION state, where turn-taking is visible (RootNodey is sequential).
+    struct P(u64);
+    impl Rng for P {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 = self.0.wrapping_mul(48271) % 0x7FFF_FFFF;
+            self.0 as usize % n.max(1)
+        }
+        fn unit(&mut self) -> f64 {
+            self.below(1 << 20) as f64 / (1 << 20) as f64
+        }
+    }
+    assert!(matches!(
+        Game::actor(&RootNodey, &RootNodey.initial_state(&mut P(3))),
+        Actor::Chance
+    ));
+    let realized = reinfors_core::realize_initial_state(&RootNodey, &mut P(3));
+    assert!(matches!(
+        Game::actor(&RootNodey, &realized),
+        Actor::Agent(_)
+    ));
+}
+
+#[test]
 fn episode_birth_realizes_root_chance_chains() {
     // The root chance node (a declared deal) is realized at birth: construction succeeds,
     // every episode starts at the post-deal decision state, and collect proceeds normally.

@@ -197,8 +197,15 @@ pub trait Game {
 
     /// A canonical byte key for agent `agent`'s INFORMATION SET at `state`: everything the
     /// agent knows — own private information, all public state, and the full action/reveal
-    /// history (perfect recall) — and nothing it doesn't. Contract: keys are equal iff the
-    /// agent cannot distinguish the states; the encoder's observation carries the same
+    /// history (perfect recall) — and nothing it doesn't. Defined at every REALIZED state
+    /// (decision and terminal, any agent); never queried at chance-node states, which are
+    /// transient inside realization — implementations may panic on a partial deal.
+    ///
+    /// Contract: keys are equal iff the agent cannot distinguish the states. Regret-table
+    /// correctness rests on what that implies, so it is worth spelling out — equal keys must
+    /// have: the same agent to act, the same legal-action set for the keyed agent (the CFR
+    /// solver debug-asserts this on every table revisit), and — because the key carries the
+    /// full history — perfect-recall equivalence. The encoder's observation carries the same
     /// information content (pinned by test), but the key is exact compact bytes where the
     /// observation is a lossy-by-design float tensor. Solvers index their tables by this key —
     /// which is what forces learned strategies to be measurable with respect to the player's
@@ -294,6 +301,27 @@ pub fn step_env<G: Game>(
         t = game.apply_chance_node(&t.next_state, outcome);
     }
     t
+}
+
+/// Realize an episode's birth: `initial_state` may return a chance node (a declared deal —
+/// see [`Game::all_chance_declared`]), possibly chaining; draw until the first decision
+/// state. The single realization path for episode starts — used by the rollout runtime
+/// (`Episode::new`/`reset`) and by any consumer that must probe POST-birth properties (the
+/// binding's decision-dynamics probe: `actor` on an unrealized root is `Actor::Chance`, which
+/// says nothing about how the game's agents take turns). Birth chains may not end the episode
+/// (asserted) and their events are contractually neutral.
+pub fn realize_initial_state<G: Game>(game: &G, rng: &mut dyn Rng) -> G::State {
+    let mut state = game.initial_state(rng);
+    while matches!(game.actor(&state), Actor::Chance) {
+        let outcome = game.chance_node(&state).draw(rng);
+        let t = game.apply_chance_node(&state, outcome);
+        assert!(
+            !t.terminal,
+            "an episode cannot end during its birth chain — the deal may not decide the game"
+        );
+        state = t.next_state;
+    }
+    state
 }
 
 #[cfg(test)]
