@@ -33,8 +33,8 @@ use reinfors_games::{
     BackgammonTesauro, Chess, ChessEvent, ChessPlanesAz119, ChessPlanesMinimal,
     ChessPlanesOpenSpiel, ChessPlanesRelative, ChessReward, ChessState, Connect4, Connect4Event,
     Connect4Planes, Connect4Reward, Connect4State, EgocentricSnake, GridEvent, GridState,
-    GridWorld, GridWorldPlanes, GridWorldReward, Snake, SnakeReward, SnakeState, StepEvent,
-    CHESS_ACTIONS,
+    GridWorld, GridWorldPlanes, GridWorldReward, HoldemEgocentric, HoldemReward, Snake,
+    SnakeReward, SnakeState, StepEvent, TexasHoldem, CHESS_ACTIONS,
 };
 
 /// Absolute `Action` -> its `u8` code (Up/Down/Left/Right = 0/1/2/3), for native-state marshalling.
@@ -332,6 +332,18 @@ fn game_cfg(spec: &GameSpec) -> Value {
             "max_ticks": max_ticks,
         }),
         GameSpec::Connect4 => json!({"name": "connect4"}),
+        GameSpec::TexasHoldem {
+            num_players,
+            stack,
+            small_blind,
+            big_blind,
+        } => json!({
+            "name": "texas_holdem",
+            "num_players": num_players,
+            "stack": stack,
+            "small_blind": small_blind,
+            "big_blind": big_blind,
+        }),
         GameSpec::Chess { max_ticks, encoder } => {
             let enc = match encoder {
                 ChessEncoderSpec::Minimal => json!({"name": "minimal_chess"}),
@@ -1662,6 +1674,12 @@ enum GameSpec {
     Backgammon {
         max_ticks: Option<usize>,
     },
+    TexasHoldem {
+        num_players: usize,
+        stack: u32,
+        small_blind: u32,
+        big_blind: u32,
+    },
     GridWorld {
         size: i32,
         goal: (i32, i32),
@@ -1706,6 +1724,20 @@ impl GameSpec {
                 of(game, &*enc)
             }
             GameSpec::Backgammon { max_ticks } => of(Backgammon { max_ticks }, &BackgammonTesauro),
+            GameSpec::TexasHoldem {
+                num_players,
+                stack,
+                small_blind,
+                big_blind,
+            } => of(
+                TexasHoldem {
+                    num_players,
+                    stack,
+                    small_blind,
+                    big_blind,
+                },
+                &HoldemEgocentric { num_players, stack },
+            ),
             GameSpec::GridWorld {
                 size,
                 goal,
@@ -1742,6 +1774,9 @@ fn reward_schema(game: &GameSpec) -> &'static [(&'static str, f64)] {
         GameSpec::Chess { .. } => &[("win", 1.0), ("loss", -1.0), ("draw", 0.0)],
         GameSpec::Backgammon { .. } => &[("win", 1.0), ("gammon", 2.0), ("backgammon", 3.0)],
         GameSpec::GridWorld { .. } => &[("step", 0.0), ("goal", 1.0)],
+        // The chip deltas ARE the reward (already zero-sum); `scale` converts chips into the
+        // training unit (e.g. 1/big_blind for rewards in blinds).
+        GameSpec::TexasHoldem { .. } => &[("scale", 1.0)],
     }
 }
 
@@ -1791,6 +1826,10 @@ fn build_reward(game: &GameSpec, reward: Option<PyReward>) -> PyResult<RewardBox
                 goal: r[1],
             })
         }
+        GameSpec::TexasHoldem { .. } => {
+            let r = resolve_reward(reward, reward_schema(game))?;
+            RewardBox::Holdem(HoldemReward { scale: r[0] })
+        }
     })
 }
 
@@ -1798,6 +1837,7 @@ fn build_reward(game: &GameSpec, reward: Option<PyReward>) -> PyResult<RewardBox
 /// can pair it with the matching game type for `Engine::new`.
 enum RewardBox {
     Snake(SnakeReward),
+    Holdem(HoldemReward),
     Connect4(Connect4Reward),
     Chess(ChessReward),
     Backgammon(BackgammonReward),
@@ -1948,6 +1988,19 @@ fn check_max_agents<P: Policy, G: Game>(policy: &P, label: &str, game: &G) -> Py
 /// MCTS/AZ's dense joint tables, the co-movers only for expectimax (its product is per MAX edge,
 /// so the searcher's own width is not a factor). The searches still check the realized,
 /// state-dependent products as backstops.
+/// The hidden-information gate (no-panic contract): search policies branch on the true state
+/// and would be clairvoyant about hidden state (poker's hole cards) — a config error here,
+/// before `Engine::new`'s assert backstop. The DQN family is exempt (observation-only).
+fn check_information<G: Game>(label: &str, game: &G) -> PyResult<()> {
+    if !game.perfect_information() {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "the {label} policy searches the true state and would be clairvoyant on this \
+             hidden-information game; use the DQN family (EpsilonGreedyQ + Dqn)"
+        )));
+    }
+    Ok(())
+}
+
 fn check_joint_space<G: Game>(label: &str, game: &G, movers: usize) -> PyResult<()> {
     if !game_is_sequential(game) {
         let worst = (game.action_count() as u128).saturating_pow(movers as u32);
@@ -2030,6 +2083,7 @@ where
                 opponent,
             };
             let policy = SelectiveExpectimax::new(cfg, n_heads, epsilon);
+            check_information("SelectiveExpectimax", &game)?;
             check_max_agents(&policy, "SelectiveExpectimax", &game)?;
             check_joint_space("SelectiveExpectimax", &game, game.num_agents().saturating_sub(1))?;
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
@@ -2097,6 +2151,7 @@ where
                 },
                 act_by,
             );
+            check_information("Mcts", &game)?;
             check_max_agents(&policy, "Mcts", &game)?;
             check_joint_space("Mcts", &game, game.num_agents())?;
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, false);
@@ -2167,6 +2222,7 @@ where
                 noise_scope,
                 sequential_backup,
             });
+            check_information("AlphaZero", &game)?;
             check_max_agents(&policy, "AlphaZero", &game)?;
             check_joint_space("AlphaZero", &game, game.num_agents())?;
             let learner = AlphaZeroLearner::new(gamma);
@@ -2324,6 +2380,35 @@ fn build_engine(
             Box::new(reward),
             Box::new(AlwaysInitialState),
             Some(Box::new(Backgammon { max_ticks })),
+            policy,
+            learner,
+            engine_params,
+            infer_cache,
+        ),
+        (
+            GameSpec::TexasHoldem {
+                num_players,
+                stack,
+                small_blind,
+                big_blind,
+            },
+            RewardBox::Holdem(reward),
+        ) => build_for_game(
+            TexasHoldem {
+                num_players,
+                stack,
+                small_blind,
+                big_blind,
+            },
+            Box::new(HoldemEgocentric { num_players, stack }),
+            Box::new(reward),
+            Box::new(AlwaysInitialState),
+            Some(Box::new(TexasHoldem {
+                num_players,
+                stack,
+                small_blind,
+                big_blind,
+            })),
             policy,
             learner,
             engine_params,
@@ -2750,6 +2835,40 @@ impl NativeState for BackgammonState {
     }
 }
 
+impl NativeState for reinfors_games::HoldemState {
+    // The TRUE state, hidden cards included: `env.state()` is the trusted inspection surface
+    // (like snapshots) — per-agent information hiding lives in the encoder, not here.
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item(
+            "hole",
+            self.hole.iter().map(|h| h.to_vec()).collect::<Vec<_>>(),
+        )?;
+        d.set_item("board", self.board.clone())?;
+        d.set_item(
+            "street",
+            match self.street {
+                reinfors_games::Street::Preflop => "preflop",
+                reinfors_games::Street::Flop => "flop",
+                reinfors_games::Street::Turn => "turn",
+                reinfors_games::Street::River => "river",
+                reinfors_games::Street::Done => "done",
+            },
+        )?;
+        d.set_item("button", self.button)?;
+        d.set_item("to_act", self.to_act)?;
+        d.set_item("stacks", self.stacks.clone())?;
+        d.set_item("street_committed", self.street_committed.clone())?;
+        d.set_item("total_committed", self.total_committed.clone())?;
+        d.set_item("folded", self.folded.clone())?;
+        d.set_item("needs_action", self.needs_action.clone())?;
+        d.set_item("raises", self.raises)?;
+        d.set_item("history", self.history.clone())?;
+        d.set_item("done", self.is_done())?;
+        Ok(d)
+    }
+}
+
 impl NativeState for GridState {
     fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
@@ -2786,6 +2905,13 @@ impl NativeEvent for StepEvent {
         // Engine's `mark_truncation`), never by `Env`, which has no truncation horizon — so it is always
         // false here.
         Ok(d.into_any())
+    }
+}
+
+impl NativeEvent for f64 {
+    // Hold'em events are per-seat chip deltas — surfaced as plain floats.
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        Ok(pyo3::types::PyFloat::new(py, *self).into_any())
     }
 }
 
@@ -3042,6 +3168,39 @@ fn build_env(game: GameSpec, reward: Option<PyReward>, seed: u64) -> PyResult<Bo
                 last_rewards: None,
             })
         }
+        GameSpec::TexasHoldem {
+            num_players,
+            stack,
+            small_blind,
+            big_blind,
+        } => {
+            let enc = HoldemEgocentric { num_players, stack };
+            let obs_shape = enc.obs_shape();
+            Box::new(EnvImpl {
+                inner: Env::new(
+                    TexasHoldem {
+                        num_players,
+                        stack,
+                        small_blind,
+                        big_blind,
+                    },
+                    Box::new(enc),
+                    seed,
+                ),
+                obs_shape,
+                codec: Some(Box::new(TexasHoldem {
+                    num_players,
+                    stack,
+                    small_blind,
+                    big_blind,
+                })),
+                reward: reward.map(|rb| match rb {
+                    RewardBox::Holdem(r) => Box::new(r) as Box<dyn Reward<Event = f64>>,
+                    _ => unreachable!("build_reward returns the reward variant matching the game"),
+                }),
+                last_rewards: None,
+            })
+        }
         GameSpec::GridWorld {
             size,
             goal,
@@ -3239,6 +3398,36 @@ impl GameHandle {
     }
 
     #[staticmethod]
+    // One episode = one hand at fresh stacks (chip-delta rewards, zero-sum); the button is
+    // drawn per episode so seats rotate positions across self-play. Hidden information: the
+    // search families reject this game — train with the DQN family.
+    #[pyo3(signature = (num_players=6, stack=200, small_blind=5, big_blind=10))]
+    #[pyo3(name = "TexasHoldem")]
+    fn texas_holdem(
+        num_players: usize,
+        stack: u32,
+        small_blind: u32,
+        big_blind: u32,
+    ) -> PyResult<Self> {
+        TexasHoldem {
+            num_players,
+            stack,
+            small_blind,
+            big_blind,
+        }
+        .validate()
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        Ok(GameHandle {
+            spec: GameSpec::TexasHoldem {
+                num_players,
+                stack,
+                small_blind,
+                big_blind,
+            },
+        })
+    }
+
+    #[staticmethod]
     #[pyo3(name = "Connect4")]
     fn connect4() -> Self {
         GameHandle {
@@ -3327,7 +3516,7 @@ impl GameHandle {
             | GameSpec::Chess { max_ticks, .. }
             | GameSpec::Backgammon { max_ticks }
             | GameSpec::GridWorld { max_ticks, .. } => max_ticks,
-            GameSpec::Connect4 => None,
+            GameSpec::Connect4 | GameSpec::TexasHoldem { .. } => None,
         }
     }
 }

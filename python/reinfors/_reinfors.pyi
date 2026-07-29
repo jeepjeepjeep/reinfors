@@ -56,6 +56,15 @@ class Discrete:
 # Opaque composition handles, built via the staticmethod constructors and passed to `Engine`.
 class GameHandle:
     @staticmethod
+    def TexasHoldem(
+        num_players: int = ...,
+        stack: int = ...,
+        small_blind: int = ...,
+        big_blind: int = ...,
+    ) -> GameHandle: ...
+    # One episode = one hand at fresh stacks; chip-delta rewards (zero-sum), reward key: scale.
+    # Hidden information: search policies reject it; train with EpsilonGreedyQ + Dqn.
+    @staticmethod
     def Snake(
         grid_size: int = ...,
         initial_length: int = ...,

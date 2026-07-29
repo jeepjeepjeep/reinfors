@@ -18,7 +18,9 @@ pub use chess::{
     ChessPlanesOpenSpiel, ChessPlanesRelative, ChessReward, ChessState, CHESS_ACTIONS,
 };
 pub use connect4::{Connect4, Connect4Event, Connect4Planes, Connect4Reward, Connect4State};
-pub use holdem::{HoldemReward, HoldemState, Street, TexasHoldem, HOLDEM_ACTIONS};
+pub use holdem::{
+    HoldemEgocentric, HoldemReward, HoldemState, Street, TexasHoldem, HOLDEM_ACTIONS,
+};
 pub(crate) mod codec_util;
 
 pub use cozy_chess::Board as ChessBoard;
