@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use crate::game::{Actor, Game};
+use crate::game::{Actor, Game, Rng};
 use crate::policy::MAX_ENUMERATED_OUTCOMES;
 use crate::reward::Reward;
 
@@ -135,7 +135,7 @@ fn build_arena<G: Game>(game: &G, reward: &dyn Reward<Event = G::Event>) -> Aren
         nodes: Vec::new(),
     };
     struct Poisoned;
-    impl crate::game::Rng for Poisoned {
+    impl Rng for Poisoned {
         fn below(&mut self, _n: usize) -> usize {
             panic!("best response requires all_chance_declared (initial_state drew)")
         }
