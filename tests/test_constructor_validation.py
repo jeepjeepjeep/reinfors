@@ -33,6 +33,16 @@ SWEEP: list[tuple[Any, bool, dict[str, list[Any]]]] = [
         True,
         {"size": INT_EDGES, "goal_row": INT_EDGES, "goal_col": INT_EDGES, "max_ticks": INT_EDGES},
     ),
+    (
+        rf.games.TexasHoldem,
+        True,
+        {
+            "num_players": INT_EDGES,
+            "stack": INT_EDGES,
+            "small_blind": INT_EDGES,
+            "big_blind": INT_EDGES,
+        },
+    ),
     (rf.games.Chess, True, {"max_ticks": INT_EDGES}),
     (rf.games.Backgammon, True, {"max_ticks": INT_EDGES}),
     (rf.Reward, False, {"win": FLOAT_EDGES}),

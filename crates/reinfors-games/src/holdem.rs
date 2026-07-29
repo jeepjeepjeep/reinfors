@@ -1085,3 +1085,169 @@ mod tests {
             .contains("history entry"));
     }
 }
+
+// ===================== Egocentric observation =====================
+
+/// The per-seat observation: `(11 + 2·(N-1), 4, 13)` planes over a suit x rank card grid.
+/// Channels: own hole cards, board, then broadcast scalars — pot, amount to call, own stack
+/// (all normalized by the table's total chips or the starting stack), the street one-hot (4),
+/// raise count / 4, relative button position — and per OPPONENT in clockwise order from the
+/// seat: an in-hand flag and a normalized stack. Every seat sees only its own hole cards; the
+/// N-dependent tail keeps seat identity relative, so the same net serves every position.
+pub struct HoldemEgocentric {
+    pub num_players: usize,
+    pub stack: u32,
+}
+
+impl HoldemEgocentric {
+    fn channels(&self) -> usize {
+        11 + 2 * (self.num_players - 1)
+    }
+}
+
+const PLANE: usize = 4 * 13;
+
+fn set_card(obs: &mut [f32], ch: usize, c: Card) {
+    obs[ch * PLANE + card_suit(c) as usize * 13 + card_rank(c) as usize] = 1.0;
+}
+
+fn fill(obs: &mut [f32], ch: usize, v: f32) {
+    obs[ch * PLANE..(ch + 1) * PLANE].fill(v.clamp(0.0, 1.0));
+}
+
+impl reinfors_core::ActionView for HoldemEgocentric {} // absolute: identity action view
+
+impl reinfors_core::StateEncoder for HoldemEgocentric {
+    type State = HoldemState;
+
+    fn encode(&self, s: &HoldemState, agent: usize) -> Vec<f32> {
+        let n = self.num_players;
+        let total_chips = (self.stack as f32) * n as f32;
+        let mut obs = vec![0.0f32; self.channels() * PLANE];
+        set_card(&mut obs, 0, s.hole[agent][0]);
+        set_card(&mut obs, 0, s.hole[agent][1]);
+        for &c in &s.board {
+            set_card(&mut obs, 1, c);
+        }
+        let pot: u32 = s.total_committed.iter().sum();
+        fill(&mut obs, 2, pot as f32 / total_chips);
+        fill(&mut obs, 3, s.to_call(agent) as f32 / self.stack as f32);
+        fill(&mut obs, 4, s.stacks[agent] as f32 / self.stack as f32);
+        let street_ch = match s.street {
+            Street::Preflop => 5,
+            Street::Flop => 6,
+            Street::Turn => 7,
+            Street::River | Street::Done => 8,
+        };
+        fill(&mut obs, street_ch, 1.0);
+        fill(&mut obs, 9, f32::from(s.raises) / 4.0);
+        fill(&mut obs, 10, ((s.button + n - agent) % n) as f32 / n as f32);
+        for d in 1..n {
+            let seat = (agent + d) % n;
+            let base = 11 + 2 * (d - 1);
+            fill(&mut obs, base, if s.folded[seat] { 0.0 } else { 1.0 });
+            fill(
+                &mut obs,
+                base + 1,
+                s.stacks[seat] as f32 / self.stack as f32,
+            );
+        }
+        obs
+    }
+
+    fn obs_shape(&self) -> (usize, usize, usize) {
+        (self.channels(), 4, 13)
+    }
+
+    fn observation_space(&self) -> reinfors_core::Space {
+        let (c, h, w) = self.obs_shape();
+        reinfors_core::Space::unit_box(vec![c, h, w])
+    }
+}
+
+#[cfg(test)]
+mod encoder_tests {
+    use super::*;
+    use reinfors_core::StateEncoder;
+
+    #[test]
+    fn each_seat_sees_only_its_own_holes() {
+        let g = TexasHoldem {
+            num_players: 3,
+            stack: 200,
+            small_blind: 5,
+            big_blind: 10,
+        };
+        struct R(u64);
+        impl Rng for R {
+            fn below(&mut self, n: usize) -> usize {
+                self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+                (self.0 >> 33) as usize % n.max(1)
+            }
+            fn unit(&mut self) -> f64 {
+                0.5
+            }
+        }
+        let s = g.initial_state(&mut R(4));
+        let enc = HoldemEgocentric {
+            num_players: 3,
+            stack: 200,
+        };
+        for agent in 0..3 {
+            let obs = enc.encode(&s, agent);
+            assert_eq!(obs.len(), (11 + 4) * PLANE);
+            let holes: f32 = obs[..PLANE].iter().sum();
+            assert_eq!(holes, 2.0, "exactly the agent's two cards");
+            let own = &s.hole[agent];
+            for &c in own {
+                let idx = card_suit(c) as usize * 13 + card_rank(c) as usize;
+                assert_eq!(obs[idx], 1.0);
+            }
+            // No other seat's card appears anywhere in the hole plane.
+            for other in 0..3 {
+                if other == agent {
+                    continue;
+                }
+                for &c in &s.hole[other] {
+                    let idx = card_suit(c) as usize * 13 + card_rank(c) as usize;
+                    if !own.contains(&c) {
+                        assert_eq!(obs[idx], 0.0, "hidden card leaked");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scalars_and_relative_seats_populate() {
+        let g = TexasHoldem {
+            num_players: 3,
+            stack: 200,
+            small_blind: 5,
+            big_blind: 10,
+        };
+        struct R;
+        impl Rng for R {
+            fn below(&mut self, _n: usize) -> usize {
+                0
+            }
+            fn unit(&mut self) -> f64 {
+                0.5
+            }
+        }
+        let s = g.initial_state(&mut R);
+        let enc = HoldemEgocentric {
+            num_players: 3,
+            stack: 200,
+        };
+        let obs = enc.encode(&s, s.to_act);
+        assert!((obs[2 * PLANE] - 15.0 / 600.0).abs() < 1e-6, "pot = blinds");
+        assert_eq!(obs[5 * PLANE], 1.0, "preflop one-hot");
+        assert_eq!(obs[9 * PLANE], 0.25, "the blind counts as the first bet");
+        // Every opponent starts in hand with a (near-)full stack.
+        for d in 0..2 {
+            assert_eq!(obs[(11 + 2 * d) * PLANE], 1.0);
+            assert!(obs[(11 + 2 * d + 1) * PLANE] > 0.9);
+        }
+    }
+}
