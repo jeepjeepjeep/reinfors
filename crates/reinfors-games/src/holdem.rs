@@ -1088,11 +1088,14 @@ mod tests {
 
 // ===================== Egocentric observation =====================
 
-/// The per-seat observation: `(11 + 2·(N-1), 4, 13)` planes over a suit x rank card grid.
+/// The per-seat observation: `(11 + 2·(N-1) + 8, 4, 13)` planes over a suit x rank card grid.
 /// Channels: own hole cards, board, then broadcast scalars — pot, amount to call, own stack
 /// (all normalized by the table's total chips or the starting stack), the street one-hot (4),
-/// raise count / 4, relative button position — and per OPPONENT in clockwise order from the
-/// seat: an in-hand flag and a normalized stack. Every seat sees only its own hole cards; the
+/// raise count / 4, relative button position — per OPPONENT in clockwise order from the
+/// seat an in-hand flag and a normalized stack — and the public betting history, two planes
+/// per street (who acted, what they did) laid out one action per grid slot in order. The
+/// history planes carry what the bookkeeping alone cannot: distinct betting sequences with
+/// identical commitments (who the aggressor was). Every seat sees only its own hole cards; the
 /// N-dependent tail keeps seat identity relative, so the same net serves every position.
 pub struct HoldemEgocentric {
     pub num_players: usize,
@@ -1101,6 +1104,11 @@ pub struct HoldemEgocentric {
 
 impl HoldemEgocentric {
     fn channels(&self) -> usize {
+        11 + 2 * (self.num_players - 1) + 8
+    }
+
+    /// First of the eight history channels (two per betting street).
+    fn history_base(&self) -> usize {
         11 + 2 * (self.num_players - 1)
     }
 }
@@ -1152,6 +1160,21 @@ impl reinfors_core::StateEncoder for HoldemEgocentric {
                 s.stacks[seat] as f32 / self.stack as f32,
             );
         }
+        // Betting history: per street a (seat, action) plane pair, one action per slot. Seats
+        // observer-relative (0 excluded so "empty slot" is unambiguous); values scaled into
+        // (0, 1]. A street holds at most 45 actions (<= 9 seats, one per bet level) — under the
+        // 52-slot plane, which `validate_decoded_state` also enforces.
+        for (st, street) in s.history.iter().enumerate() {
+            let (seat_ch, act_ch) = (
+                self.history_base() + 2 * st,
+                self.history_base() + 2 * st + 1,
+            );
+            for (k, &(seat, action)) in street.iter().enumerate() {
+                let rel = (seat as usize + n - agent) % n;
+                obs[seat_ch * PLANE + k] = (rel + 1) as f32 / n as f32;
+                obs[act_ch * PLANE + k] = (action + 1) as f32 / 3.0;
+            }
+        }
         obs
     }
 
@@ -1195,7 +1218,7 @@ mod encoder_tests {
         };
         for agent in 0..3 {
             let obs = enc.encode(&s, agent);
-            assert_eq!(obs.len(), (11 + 4) * PLANE);
+            assert_eq!(obs.len(), (11 + 4 + 8) * PLANE);
             let holes: f32 = obs[..PLANE].iter().sum();
             assert_eq!(holes, 2.0, "exactly the agent's two cards");
             let own = &s.hole[agent];
@@ -1249,5 +1272,67 @@ mod encoder_tests {
             assert_eq!(obs[(11 + 2 * d) * PLANE], 1.0);
             assert!(obs[(11 + 2 * d + 1) * PLANE] > 0.9);
         }
+    }
+
+    #[test]
+    fn history_planes_distinguish_equal_commitment_sequences() {
+        // Heads-up, both 20 in preflop: raise-call vs call-raise-call. The bookkeeping matches;
+        // only the history planes tell the aggressor apart.
+        let g = TexasHoldem {
+            num_players: 2,
+            stack: 200,
+            small_blind: 5,
+            big_blind: 10,
+        };
+        struct R;
+        impl Rng for R {
+            fn below(&mut self, _n: usize) -> usize {
+                0
+            }
+            fn unit(&mut self) -> f64 {
+                0.5
+            }
+        }
+        let s = g.initial_state(&mut R);
+        let play = |actions: &[usize]| {
+            let mut cur = s.clone();
+            for &a in actions {
+                let mut joint = vec![0; 2];
+                joint[cur.to_act] = a;
+                cur = g.step(&cur, &joint).next_state;
+            }
+            cur
+        };
+        // Both lines put 20 in apiece and close preflop; realize the SAME flop for each so the
+        // resulting decision states differ in nothing but how the money went in.
+        let a = g
+            .apply_chance_node(&play(&[BET_RAISE, CHECK_CALL]), 1234)
+            .next_state;
+        let b = g
+            .apply_chance_node(&play(&[CHECK_CALL, BET_RAISE, CHECK_CALL]), 1234)
+            .next_state;
+        let enc = HoldemEgocentric {
+            num_players: 2,
+            stack: 200,
+        };
+        let viewer = a.to_act;
+        assert_eq!(b.to_act, viewer, "same seat opens the flop in both lines");
+        let (oa, ob) = (enc.encode(&a, viewer), enc.encode(&b, viewer));
+        let base = enc.history_base();
+        assert_ne!(
+            oa[base * PLANE..(base + 2) * PLANE],
+            ob[base * PLANE..(base + 2) * PLANE],
+            "the aggressor is visible in the history planes"
+        );
+        // Slot 0 of line `a`: the small blind (relative seat 1 of 2, viewed by the big blind,
+        // who opens the flop heads-up) raised.
+        assert_eq!(oa[base * PLANE], 1.0, "relative seat (1+1)/2");
+        assert_eq!(oa[(base + 1) * PLANE], 1.0, "raise = (2+1)/3");
+        // Non-history channels agree — the bookkeeping alone cannot tell the lines apart.
+        assert_eq!(
+            oa[..base * PLANE],
+            ob[..base * PLANE],
+            "identical commitments outside the history"
+        );
     }
 }

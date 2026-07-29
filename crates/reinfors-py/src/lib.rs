@@ -2860,6 +2860,7 @@ impl NativeState for reinfors_games::HoldemState {
         d.set_item("stacks", self.stacks.clone())?;
         d.set_item("total_committed", self.total_committed.clone())?;
         d.set_item("folded", self.folded.clone())?;
+        d.set_item("history", self.history.clone())?;
         d.set_item("done", self.is_done())?;
         Ok(d)
     }
