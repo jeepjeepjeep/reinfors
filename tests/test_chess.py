@@ -124,8 +124,8 @@ def test_env_plays_uci_like_moves() -> None:
     legal = env.legal_actions(0)
     assert len(legal) == 20  # the classic starting-position move count
     assert env.legal_actions(1) == []  # non-mover has no actions (sequential game)
-    events = env.step({0: legal[0]})
-    assert events == ["ongoing", "ongoing"]
+    trace = env.step({0: legal[0]})
+    assert trace == [], "an opening move settles nothing"
     assert env.state()["turn"] == 1 and env.active_agents() == [1]
 
 

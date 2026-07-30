@@ -184,7 +184,7 @@ impl Game for LeducPoker {
         }
         Transition {
             next_state: next,
-            events: vec![0.0; 2],
+            events: vec![None; 2],
             terminal: false,
         }
     }
@@ -230,9 +230,9 @@ impl Game for LeducPoker {
         next.history[round].push(action as u8);
         let terminal = next.is_terminal();
         let events = if terminal {
-            self.payouts(&next)
+            self.payouts(&next).into_iter().map(Some).collect()
         } else {
-            vec![0.0; 2]
+            vec![None; 2]
         };
         // A closed round 0 leaves the state at the reveal chance node (public still None) —
         // the framework draws it before any agent sees the state.
@@ -424,7 +424,7 @@ mod tests {
         // raise-fold in round 1: p1 folds, p0 wins p1's ante.
         let t = play(&g, dealt(0, 2), &[RAISE, FOLD]);
         assert!(t.terminal);
-        assert_eq!(t.events, vec![1.0, -1.0]);
+        assert_eq!(t.events, vec![Some(1.0), Some(-1.0)]);
         // check-check, reveal, check-check: showdown for the antes. Public pairs p1.
         let mut s = play(&g, dealt(0, 2), &[CALL, CALL]).next_state;
         assert!(matches!(g.actor(&s), Actor::Chance), "reveal pending");
@@ -432,7 +432,11 @@ mod tests {
         s = g.apply_chance_node(&s, reveal).next_state; // public = 3 pairs p1's card 2
         let t = play(&g, s, &[CALL, CALL]);
         assert!(t.terminal);
-        assert_eq!(t.events, vec![-1.0, 1.0], "pair beats high card");
+        assert_eq!(
+            t.events,
+            vec![Some(-1.0), Some(1.0)],
+            "pair beats high card"
+        );
         // raise-call round 1, reveal, raise-raise-call round 2 (both raises hit the cap):
         let mut s = play(&g, dealt(4, 0), &[RAISE, CALL]).next_state;
         let reveal = g.remaining(&s).iter().position(|&c| c == 2).unwrap();
@@ -441,12 +445,12 @@ mod tests {
         assert!(t.terminal);
         // Contributions: ante 1 + round-1 raise 2 + two round-2 raises of 4 -> 11 each;
         // K high beats J.
-        assert_eq!(t.events, vec![11.0, -11.0]);
+        assert_eq!(t.events, vec![Some(11.0), Some(-11.0)]);
         // Split: equal ranks at showdown.
         let mut s = play(&g, dealt(0, 1), &[CALL, CALL]).next_state;
         s = g.apply_chance_node(&s, 0).next_state;
         let t = play(&g, s, &[CALL, CALL]);
-        assert_eq!(t.events, vec![0.0, 0.0]);
+        assert_eq!(t.events, vec![Some(0.0), Some(0.0)]);
     }
 
     #[test]
@@ -472,7 +476,7 @@ mod tests {
                 joint[me] = legal[rng.below(legal.len())];
                 let t = step_env(&g, &s, &joint, &mut rng);
                 if t.terminal {
-                    assert_eq!(t.events.iter().sum::<f64>(), 0.0, "zero-sum");
+                    assert_eq!(t.trace.iter().map(|(_, d)| d).sum::<f64>(), 0.0, "zero-sum");
                     break;
                 }
                 s = t.next_state;

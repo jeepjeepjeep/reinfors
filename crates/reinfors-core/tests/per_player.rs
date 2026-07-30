@@ -39,7 +39,7 @@ impl Game for Alt {
     fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
         Transition {
             next_state: St { tick: s.tick + 1 },
-            events: vec![(); 2],
+            events: vec![None; 2],
             terminal: s.tick + 1 >= 6,
         }
     }
@@ -184,7 +184,7 @@ impl Game for Simul {
     fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
         Transition {
             next_state: St { tick: s.tick + 1 },
-            events: vec![(); 2],
+            events: vec![None; 2],
             terminal: s.tick + 1 >= 3,
         }
     }

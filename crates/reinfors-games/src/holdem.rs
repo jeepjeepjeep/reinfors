@@ -451,7 +451,7 @@ impl Game for TexasHoldem {
         let terminal_events = |s: &HoldemState| self.payouts(s);
         if live_count == 1 {
             next.street = Street::Done;
-            let events = terminal_events(&next);
+            let events: Vec<Option<f64>> = terminal_events(&next).into_iter().map(Some).collect();
             return Transition {
                 next_state: next,
                 events,
@@ -464,14 +464,14 @@ impl Game for TexasHoldem {
                 .expect("someone still owes an action");
             return Transition {
                 next_state: next,
-                events: vec![0.0; self.num_players],
+                events: vec![None; self.num_players],
                 terminal: false,
             };
         }
         // The street closes.
         if next.street == Street::River {
             next.street = Street::Done;
-            let events = terminal_events(&next);
+            let events: Vec<Option<f64>> = terminal_events(&next).into_iter().map(Some).collect();
             return Transition {
                 next_state: next,
                 events,
@@ -484,7 +484,7 @@ impl Game for TexasHoldem {
         self.close_street(&mut next);
         Transition {
             next_state: next,
-            events: vec![0.0; self.num_players],
+            events: vec![None; self.num_players],
             terminal: false,
         }
     }
@@ -552,7 +552,7 @@ impl Game for TexasHoldem {
             next.button = outcome;
             return Transition {
                 next_state: next,
-                events: vec![0.0; n],
+                events: vec![None; n],
                 terminal: false,
             };
         }
@@ -582,7 +582,7 @@ impl Game for TexasHoldem {
             }
             return Transition {
                 next_state: next,
-                events: vec![0.0; n],
+                events: vec![None; n],
                 terminal: false,
             };
         }
@@ -595,7 +595,7 @@ impl Game for TexasHoldem {
         if next.needs_action.iter().any(|&b| b) {
             return Transition {
                 next_state: next,
-                events: vec![0.0; self.num_players],
+                events: vec![None; self.num_players],
                 terminal: false,
             };
         }
@@ -603,7 +603,7 @@ impl Game for TexasHoldem {
         // the runout continues — the next street is itself a chance node.
         if next.street == Street::River {
             next.street = Street::Done;
-            let events = self.payouts(&next);
+            let events: Vec<Option<f64>> = self.payouts(&next).into_iter().map(Some).collect();
             return Transition {
                 next_state: next,
                 events,
@@ -613,7 +613,7 @@ impl Game for TexasHoldem {
         next.street = next.street.next();
         Transition {
             next_state: next,
-            events: vec![0.0; self.num_players],
+            events: vec![None; self.num_players],
             terminal: false,
         }
     }
@@ -774,10 +774,9 @@ mod tests {
             let outcome = g.chance_node(&s).draw(rng);
             let t = g.apply_chance_node(&s, outcome);
             assert!(!t.terminal, "the deal may not decide the game");
-            assert_eq!(
-                t.events,
-                vec![0.0; g.num_players],
-                "birth events are neutral"
+            assert!(
+                t.events.iter().all(Option::is_none),
+                "birth edges emit nothing"
             );
             s = t.next_state;
         }
@@ -985,9 +984,9 @@ mod tests {
         joint[t1.next_state.to_act] = FOLD;
         let t2 = g.step(&t1.next_state, &joint);
         assert!(t2.terminal);
-        assert_eq!(t2.events[bb], 5.0, "BB nets the small blind");
-        assert_eq!(t2.events[sb], -5.0);
-        assert_eq!(t2.events.iter().sum::<f64>(), 0.0);
+        assert_eq!(t2.events[bb], Some(5.0), "BB nets the small blind");
+        assert_eq!(t2.events[sb], Some(-5.0));
+        assert_eq!(t2.events.iter().flatten().sum::<f64>(), 0.0);
     }
 
     #[test]
@@ -1102,10 +1101,10 @@ mod tests {
                     joint[s.to_act] = legal[rng.below(legal.len())];
                     let t = step_env(&g, &s, &joint, &mut rng);
                     if t.terminal {
-                        assert_eq!(t.events.iter().sum::<f64>(), 0.0, "zero-sum");
-                        for (i, &d) in t.events.iter().enumerate() {
+                        let deltas: Vec<f64> = t.trace.iter().map(|(_, d)| *d).collect();
+                        assert_eq!(deltas.iter().sum::<f64>(), 0.0, "zero-sum");
+                        for &d in &deltas {
                             assert!(d >= -(g.stack as f64));
-                            let _ = i;
                         }
                         break;
                     }
@@ -1141,7 +1140,7 @@ mod tests {
         let t = step_env(&g, &s, &joint, &mut rng);
         assert!(t.terminal, "the call settles the hand in one transition");
         assert_eq!(t.next_state.board.len(), 5, "full board dealt");
-        assert_eq!(t.events.iter().sum::<f64>(), 0.0);
+        assert_eq!(t.trace.iter().map(|(_, d)| d).sum::<f64>(), 0.0);
         // History records the one real decision and nothing else.
         let all: Vec<_> = t.next_state.history.concat();
         assert_eq!(all, vec![(s.to_act as u8, CHECK_CALL as u8)]);

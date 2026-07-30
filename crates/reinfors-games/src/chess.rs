@@ -414,7 +414,7 @@ impl Game for Chess {
         let mover = state.turn();
         let other = 1 - mover;
         let mut next = state.clone();
-        let mut events = vec![ChessEvent::Ongoing; 2];
+        let mut events = vec![None, None];
 
         let decoded = decode_move(actions[mover], &state.board);
         let legal = decoded.is_some_and(|mv| next.board.try_play(mv).is_ok());
@@ -422,8 +422,8 @@ impl Game for Chess {
             // Unreachable through the masked searches; a raw Env can still submit anything. Same
             // posture as connect4's full column: an illegal action is an immediate loss.
             next.finished = Some(ChessOutcome::WonBy(other));
-            events[mover] = ChessEvent::Loss;
-            events[other] = ChessEvent::Win;
+            events[mover] = Some(ChessEvent::Loss);
+            events[other] = Some(ChessEvent::Win);
             return Transition {
                 next_state: next,
                 events,
@@ -448,11 +448,11 @@ impl Game for Chess {
             next.finished = Some(outcome);
             match outcome {
                 ChessOutcome::WonBy(w) => {
-                    events[w] = ChessEvent::Win;
-                    events[1 - w] = ChessEvent::Loss;
+                    events[w] = Some(ChessEvent::Win);
+                    events[1 - w] = Some(ChessEvent::Loss);
                 }
                 ChessOutcome::Draw => {
-                    events = vec![ChessEvent::Draw; 2];
+                    events = vec![Some(ChessEvent::Draw); 2];
                 }
             }
         }
@@ -919,8 +919,8 @@ mod tests {
         let bogus = encode_move("e2e4".parse().unwrap(), Color::White) + 1; // e2 ray, wrong slot
         let t = game.step(&state, &[bogus, 0]);
         assert!(t.terminal);
-        assert_eq!(t.events[0], ChessEvent::Loss);
-        assert_eq!(t.events[1], ChessEvent::Win);
+        assert_eq!(t.events[0], Some(ChessEvent::Loss));
+        assert_eq!(t.events[1], Some(ChessEvent::Win));
     }
 
     #[test]
@@ -989,7 +989,7 @@ mod tests {
         joint[mover] = action;
         let t = game.step(&state, &joint);
         assert!(t.terminal);
-        assert_eq!(t.events[0], ChessEvent::Draw);
+        assert_eq!(t.events[0], Some(ChessEvent::Draw));
     }
 }
 

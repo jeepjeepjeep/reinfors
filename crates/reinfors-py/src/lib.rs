@@ -2952,8 +2952,9 @@ impl PyEnv {
     }
 
     /// Advance one tick with `actions`, a `{agent: action}` map naming exactly the agents that act
-    /// this tick (see `active_agents()`). Returns this tick's per-agent events (game-specific objects);
-    /// a game-aware caller reads the outcome from them (`Env` holds no reward).
+    /// this tick (see `active_agents()`). Returns the tick's ordered `(agent, event)` trace — every
+    /// emission across the tick's edges (game-specific objects); a game-aware caller reads the
+    /// outcome from them (`Env` holds no reward).
     fn step<'py>(
         &mut self,
         py: Python<'py>,
@@ -3233,7 +3234,7 @@ trait ErasedEnv: Send + Sync {
     fn observation_space<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>>;
     fn state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>>;
     fn information_state_key(&self, agent: usize) -> PyResult<Vec<u8>>;
-    /// Advance one tick; returns this tick's per-agent events as a Python list (game-specific objects).
+    /// Advance one tick; returns the tick's ordered `(agent, event)` trace (game-specific objects).
     fn step<'py>(
         &mut self,
         py: Python<'py>,
@@ -3333,15 +3334,22 @@ where
         py: Python<'py>,
         actions: Vec<usize>,
     ) -> PyResult<Vec<Bound<'py, PyAny>>> {
-        let events = self.inner.step(&actions);
+        let trace = self.inner.step(&actions);
+        // Fold the tick's trace into per-agent rewards (events are per-edge and incremental).
         self.last_rewards = self.reward.as_ref().map(|r| {
-            events
-                .iter()
-                .enumerate()
-                .map(|(agent, e)| r.step_reward(e, agent))
-                .collect()
+            let mut out = vec![0.0; self.inner.num_agents()];
+            for (agent, e) in &trace {
+                out[*agent] += r.step_reward(e, *agent);
+            }
+            out
         });
-        events.iter().map(|e| e.to_py(py)).collect()
+        trace
+            .iter()
+            .map(|(agent, e)| {
+                let ev = e.to_py(py)?;
+                Ok((*agent, ev).into_pyobject(py)?.into_any())
+            })
+            .collect()
     }
     fn last_rewards(&self) -> Option<Vec<f64>> {
         self.last_rewards.clone()

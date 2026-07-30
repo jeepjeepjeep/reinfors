@@ -407,9 +407,11 @@ class Env:
     # Independent env at this exact point. Clone-exact by default (identical future chance
     # stream); pass seed for a divergent fork.
     def fork(self, seed: int | None = ...) -> Env: ...
-    # Per-agent events (game-specific: snake → dict, connect4 → str, gridworld → dict). The Env holds
-    # no reward; a game-aware caller reads the outcome from these.
-    def step(self, actions: dict[int, int]) -> list[Any]: ...
+    # The tick's ordered (agent, event) trace: every emission across the tick's edges (events are
+    # per-edge and incremental — an edge emits only what it causally determines, so quiet ticks
+    # return []). Event payloads are game-specific (snake → dict, connect4 → str, gridworld → dict).
+    # The Env holds no reward; a game-aware caller reads the outcome from these.
+    def step(self, actions: dict[int, int]) -> list[tuple[int, Any]]: ...
     # Per-agent scalar rewards for the most recent `step`, or None if built without a `reward` (the
     # reward-free play/eval default) or before the first `step`. The training-facing `reinfors.gym`
     # adapters read this so the event→reward mapping stays in Rust.

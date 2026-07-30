@@ -626,7 +626,7 @@ fn push_branches<G: Game>(
     rng: &mut dyn Rng,
 ) {
     let t = game.step(state, joint);
-    let step_reward = reward.step_reward(&t.events[agent], agent);
+    let step_reward = crate::reward::edge_reward(reward, &t.events, agent);
     // Fan the chance children from the game's DECLARED distribution (`chance_outcomes` +
     // `apply_chance` — the same seam the tree searches consume), per the configured mode:
     // `Committed{k}` draws k outcome indices proportionally to the declared probabilities (equal
@@ -1071,7 +1071,7 @@ mod tests {
             let a = actions[0] as i32;
             Transition {
                 next_state: pos + a,
-                events: vec![a as f64],
+                events: vec![Some(a as f64)],
                 terminal: false,
             }
         }
@@ -1264,13 +1264,13 @@ mod chance_mode_tests {
                 };
                 Transition {
                     next_state: St { total, ply: 1 },
-                    events: vec![0.0],
+                    events: vec![Some(0.0)],
                     terminal: false,
                 }
             } else {
                 Transition {
                     next_state: St { ..*s },
-                    events: vec![f64::from(s.total)],
+                    events: vec![Some(f64::from(s.total))],
                     terminal: true,
                 }
             }
@@ -1419,7 +1419,7 @@ mod frame_tests {
                     id: s.id * 2 + actions[s.turn] as i32 + 1,
                     turn: 1 - s.turn,
                 },
-                events: vec![0.0, 0.0],
+                events: vec![Some(0.0), Some(0.0)],
                 terminal: false,
             }
         }
@@ -1584,7 +1584,7 @@ mod n_player_tests {
             let mine = if actions[0] == 1 { others } else { 0.0 };
             Transition {
                 next_state: SimSt(true),
-                events: vec![mine, 0.0, 0.0],
+                events: vec![Some(mine), Some(0.0), Some(0.0)],
                 terminal: true,
             }
         }
@@ -1658,12 +1658,12 @@ mod n_player_tests {
             match s.phase {
                 0 if actions[0] == 1 => Transition {
                     next_state: ChainSt { phase: 3, a1: 0 },
-                    events: vec![1.0, 0.0, 0.0],
+                    events: vec![Some(1.0), Some(0.0), Some(0.0)],
                     terminal: true,
                 },
                 0 => Transition {
                     next_state: ChainSt { phase: 1, a1: 0 },
-                    events: vec![0.0; 3],
+                    events: vec![Some(0.0); 3],
                     terminal: false,
                 },
                 1 => Transition {
@@ -1671,7 +1671,7 @@ mod n_player_tests {
                         phase: 2,
                         a1: actions[1],
                     },
-                    events: vec![0.0; 3],
+                    events: vec![Some(0.0); 3],
                     terminal: false,
                 },
                 2 => {
@@ -1679,7 +1679,7 @@ mod n_player_tests {
                         2.0 * f64::from(u8::from(s.a1 == 0)) + f64::from(u8::from(actions[2] == 0));
                     Transition {
                         next_state: ChainSt { phase: 3, a1: s.a1 },
-                        events: vec![mine, 0.0, 0.0],
+                        events: vec![Some(mine), Some(0.0), Some(0.0)],
                         terminal: true,
                     }
                 }
@@ -1810,7 +1810,7 @@ mod joint_fan_bound_tests {
         fn step(&self, _s: &WSt, _actions: &[usize]) -> Transition<WSt, f64> {
             Transition {
                 next_state: WSt(true),
-                events: vec![0.0; 65],
+                events: vec![Some(0.0); 65],
                 terminal: true,
             }
         }

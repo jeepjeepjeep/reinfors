@@ -431,8 +431,8 @@ impl<G: Game> CfrSolver<G> {
 
     fn edge_rewards(&self, t: &Transition<G::State, G::Event>) -> [f64; 2] {
         [
-            self.reward.step_reward(&t.events[0], 0),
-            self.reward.step_reward(&t.events[1], 1),
+            crate::reward::edge_reward(&*self.reward, &t.events, 0),
+            crate::reward::edge_reward(&*self.reward, &t.events, 1),
         ]
     }
 

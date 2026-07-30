@@ -68,8 +68,8 @@ fn build_arena<G: Game>(game: &G, reward: &dyn Reward<Event = G::Event>) -> Aren
                     for (i, p) in probs.into_iter().enumerate() {
                         let t = self.game.apply_chance_node(state, i);
                         let r = [
-                            self.reward.step_reward(&t.events[0], 0),
-                            self.reward.step_reward(&t.events[1], 1),
+                            crate::reward::edge_reward(self.reward, &t.events, 0),
+                            crate::reward::edge_reward(self.reward, &t.events, 1),
                         ];
                         let child = if t.terminal {
                             self.terminal()
@@ -89,8 +89,8 @@ fn build_arena<G: Game>(game: &G, reward: &dyn Reward<Event = G::Event>) -> Aren
                         joint[who] = a;
                         let t = self.game.step(state, &joint);
                         let r = [
-                            self.reward.step_reward(&t.events[0], 0),
-                            self.reward.step_reward(&t.events[1], 1),
+                            crate::reward::edge_reward(self.reward, &t.events, 0),
+                            crate::reward::edge_reward(self.reward, &t.events, 1),
                         ];
                         // Transition-attached chance folds into an interposed chance node.
                         let child = if t.terminal {

@@ -36,7 +36,7 @@ impl Game for ThreeWay {
     fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
         Transition {
             next_state: St { tick: s.tick + 1 },
-            events: vec![(); 3],
+            events: vec![None; 3],
             terminal: s.tick + 1 >= 3,
         }
     }
@@ -147,7 +147,7 @@ impl Game for RoundRobin {
     fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
         Transition {
             next_state: St { tick: s.tick + 1 },
-            events: vec![(); 3],
+            events: vec![None; 3],
             terminal: s.tick + 1 >= 3,
         }
     }
@@ -469,7 +469,7 @@ impl Game for TwoTurn {
     fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
         Transition {
             next_state: St { tick: s.tick + 1 },
-            events: vec![(); 2],
+            events: vec![None; 2],
             terminal: s.tick + 1 >= 4,
         }
     }
@@ -641,9 +641,9 @@ impl Game for PayoutSeq {
         Transition {
             next_state: St { tick: s.tick + 1 },
             events: if terminal {
-                vec![1.0, 2.0, 3.0]
+                vec![Some(1.0), Some(2.0), Some(3.0)]
             } else {
-                vec![0.0; 3]
+                vec![Some(0.0); 3]
             },
             terminal,
         }
@@ -745,7 +745,7 @@ impl Game for EndlessRR {
     fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
         Transition {
             next_state: St { tick: s.tick + 1 },
-            events: vec![(); 3],
+            events: vec![None; 3],
             terminal: false,
         }
     }
@@ -838,7 +838,7 @@ impl Game for WideChance {
     fn step(&self, s: &WSt, _actions: &[usize]) -> Transition<WSt, ()> {
         Transition {
             next_state: WSt(s.0 + 1),
-            events: vec![(); 2],
+            events: vec![None; 2],
             terminal: s.0 + 1 >= 3,
         }
     }
@@ -993,7 +993,7 @@ impl Game for HiddenTwo {
     fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
         Transition {
             next_state: St { tick: s.tick + 1 },
-            events: vec![(); 2],
+            events: vec![None; 2],
             terminal: s.tick + 1 >= 4,
         }
     }
@@ -1030,7 +1030,7 @@ impl Game for NodeyTwo {
     fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
         Transition {
             next_state: St { tick: s.tick + 1 },
-            events: vec![(); 2],
+            events: vec![None; 2],
             terminal: s.tick + 1 >= 4,
         }
     }
@@ -1146,7 +1146,7 @@ impl Game for RootNodey {
     fn apply_chance_node(&self, s: &St, _outcome: usize) -> Transition<St, ()> {
         Transition {
             next_state: St { tick: s.tick + 1 },
-            events: vec![(); 2],
+            events: vec![None; 2],
             terminal: false,
         }
     }
@@ -1160,7 +1160,7 @@ impl Game for RootNodey {
     fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
         Transition {
             next_state: St { tick: s.tick + 1 },
-            events: vec![(); 2],
+            events: vec![None; 2],
             terminal: s.tick + 1 >= 4,
         }
     }
@@ -1254,7 +1254,7 @@ fn start_distribution_restores_must_be_decision_states() {
         fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
             Transition {
                 next_state: St { tick: s.tick + 1 },
-                events: vec![(); 2],
+                events: vec![None; 2],
                 terminal: s.tick + 1 >= 4,
             }
         }
@@ -1313,9 +1313,9 @@ impl Game for TwoRobin {
         Transition {
             next_state: St { tick: s.tick + 1 },
             events: if terminal {
-                vec![1.0, 2.0]
+                vec![Some(1.0), Some(2.0)]
             } else {
-                vec![0.0; 2]
+                vec![Some(0.0); 2]
             },
             terminal,
         }
@@ -1400,7 +1400,7 @@ impl Game for EndlessTwo {
     fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
         Transition {
             next_state: St { tick: s.tick + 1 },
-            events: vec![(); 2],
+            events: vec![None; 2],
             terminal: false,
         }
     }

@@ -439,7 +439,7 @@ impl<G: Game> DeepCfrSolver<G> {
                             // traverser's edge rewards, stop on a chain that settles the game.
                             let outcome = self.game.chance_node(&state).draw(&mut m.rng);
                             let t = self.game.apply_chance_node(&state, outcome);
-                            let r = self.reward.step_reward(&t.events[player], player);
+                            let r = crate::reward::edge_reward(&*self.reward, &t.events, player);
                             if t.terminal {
                                 m.step = Some(Step::Return(r));
                                 break;
@@ -562,7 +562,7 @@ impl<G: Game> DeepCfrSolver<G> {
         player: usize,
     ) -> (f64, Option<G::State>) {
         let t = self.game.step(state, joint);
-        let r = self.reward.step_reward(&t.events[player], player);
+        let r = crate::reward::edge_reward(&*self.reward, &t.events, player);
         if t.terminal {
             return (r, None);
         }
