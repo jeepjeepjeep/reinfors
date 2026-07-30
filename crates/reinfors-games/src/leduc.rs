@@ -11,7 +11,9 @@
 //! — cards, public card, per-round histories; pots, the actor, round, and terminal status are
 //! all derived, so decode validation is pure grammar checking.
 
-use reinfors_core::game::{Actor, ChanceDist, Game, Rng, Transition};
+use reinfors_core::game::{Actor, ChanceDist, Game, Transition};
+#[cfg(test)]
+use reinfors_core::Rng;
 
 pub const FOLD: usize = 0;
 pub const CALL: usize = 1;
@@ -136,10 +138,6 @@ impl Game for LeducPoker {
         false // the opponent's card is hidden
     }
 
-    fn all_chance_declared(&self) -> bool {
-        true // deals are root chance nodes, the reveal interior; initial_state draws nothing
-    }
-
     fn information_states(&self) -> bool {
         true
     }
@@ -235,8 +233,8 @@ impl Game for LeducPoker {
         }
     }
 
-    fn initial_state(&self, _rng: &mut dyn Rng) -> LeducState {
-        // Draws nothing (`all_chance_declared`): the empty deal is the birth-chain root.
+    fn initial_state(&self) -> LeducState {
+        // Draws nothing: the empty deal is the birth-chain root.
         LeducState {
             cards: Vec::new(),
             public: None,
@@ -451,7 +449,7 @@ mod tests {
         let mut rng = TestRng(7);
         for _ in 0..200 {
             // Birth chain via the realization path (step_env handles interior reveals).
-            let mut s = g.initial_state(&mut rng);
+            let mut s = g.initial_state();
             while matches!(g.actor(&s), Actor::Chance) {
                 let o = g.chance_node(&s).draw(&mut rng);
                 s = g.apply_chance_node(&s, o).next_state;

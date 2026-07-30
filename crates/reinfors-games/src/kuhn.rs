@@ -2,14 +2,14 @@
 //! information sets; known Nash family with game value -1/18 for the first player). Rules and
 //! action ids match OpenSpiel's `kuhn_poker`: both players ante 1, each is dealt one card from
 //! {J, Q, K}, then player 0 acts first with PASS/BET (bet size 1); passing when facing a bet
-//! folds. Fully declared chance (`all_chance_declared`): the two deals are root chance nodes
+//! folds. Fully declared chance: the two deals are root chance nodes
 //! realized at episode birth, so solvers can enumerate them. Hidden information
 //! (`perfect_information` = false): each player sees only its own card.
 //!
 //! The state is minimal — dealt cards plus the public action history; pots, the actor, and
 //! terminal status are all derived, so no consistency cross-checks are needed at decode.
 
-use reinfors_core::game::{Actor, ChanceDist, Game, Rng, Transition};
+use reinfors_core::game::{Actor, ChanceDist, Game, Transition};
 
 /// PASS checks, or folds when facing a bet (OpenSpiel action id 0).
 pub const PASS: usize = 0;
@@ -93,10 +93,6 @@ impl Game for KuhnPoker {
         false // the opponent's card is hidden
     }
 
-    fn all_chance_declared(&self) -> bool {
-        true // both deals are root chance nodes; initial_state draws nothing
-    }
-
     fn information_states(&self) -> bool {
         true
     }
@@ -151,8 +147,8 @@ impl Game for KuhnPoker {
         }
     }
 
-    fn initial_state(&self, _rng: &mut dyn Rng) -> KuhnState {
-        // Draws nothing (`all_chance_declared`): the empty deal is the birth-chain root.
+    fn initial_state(&self) -> KuhnState {
+        // Draws nothing: the empty deal is the birth-chain root.
         KuhnState {
             cards: Vec::new(),
             history: Vec::new(),
@@ -270,16 +266,7 @@ mod tests {
     #[test]
     fn the_deal_is_a_declared_root_chain() {
         let g = KuhnPoker;
-        struct Poisoned;
-        impl Rng for Poisoned {
-            fn below(&mut self, _n: usize) -> usize {
-                panic!("initial_state drew despite all_chance_declared")
-            }
-            fn unit(&mut self) -> f64 {
-                panic!("initial_state drew despite all_chance_declared")
-            }
-        }
-        let root = g.initial_state(&mut Poisoned);
+        let root = g.initial_state();
         assert!(matches!(g.actor(&root), Actor::Chance));
         assert_eq!(g.chance_node(&root).count(), 3);
         let s1 = g.apply_chance_node(&root, 1).next_state; // p0 gets Q

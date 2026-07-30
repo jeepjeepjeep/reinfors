@@ -120,7 +120,7 @@ impl<G: Game> Env<G> {
 mod tests {
     use super::*;
     use crate::encoder::{ActionView, StateEncoder};
-    use crate::game::{Actor, Game, Rng, Transition};
+    use crate::game::{Actor, Game, Transition};
 
     // A 1-agent walk to `goal`: action 1 steps right, 0 stays; the event is 1.0 at the goal, else 0.0.
     struct Walk {
@@ -154,7 +154,7 @@ mod tests {
                 terminal,
             }
         }
-        fn initial_state(&self, _: &mut dyn Rng) -> i32 {
+        fn initial_state(&self) -> i32 {
             0
         }
     }

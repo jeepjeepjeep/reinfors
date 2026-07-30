@@ -217,9 +217,6 @@ fn chance_root_simultaneous_games_fail_at_construction() {
         fn action_count(&self) -> usize {
             2
         }
-        fn all_chance_declared(&self) -> bool {
-            true
-        }
         fn information_states(&self) -> bool {
             true
         }
@@ -257,7 +254,7 @@ fn chance_root_simultaneous_games_fail_at_construction() {
                 terminal: true,
             }
         }
-        fn initial_state(&self, _rng: &mut dyn reinfors_core::Rng) -> St {
+        fn initial_state(&self) -> St {
             St { tick: 0 }
         }
     }

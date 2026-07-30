@@ -8,7 +8,7 @@
 
 use reinfors_core::{Game, Rng, StateCodec};
 use reinfors_games::{
-    Backgammon, Chess, Connect4, GridWorld, KuhnPoker, LeducPoker, Snake, TexasHoldem,
+    Backgammon, Chess, Connect4, GridState, GridWorld, KuhnPoker, LeducPoker, Snake, TexasHoldem,
 };
 
 struct Lcg(u64);
@@ -29,7 +29,7 @@ impl Rng for Lcg {
 /// declared deal) down to the first decision state — mid-chain states are transient and are
 /// exactly what `validate_decoded_state` rejects.
 fn birth<G: Game>(game: &G, rng: &mut dyn reinfors_core::Rng) -> <G as Game>::State {
-    let mut s = game.initial_state(rng);
+    let mut s = game.initial_state();
     while matches!(game.actor(&s), reinfors_core::Actor::Chance) {
         let o = game.chance_node(&s).draw(rng);
         s = game.apply_chance_node(&s, o).next_state;
@@ -167,6 +167,7 @@ fn validators_reject_unsafe_states() {
         snakes: vec![a, b],
         food: HashSet::from_iter(food.iter().copied()),
         pending_food: 0,
+        birth: false,
     };
     // a state with the wrong snake count would index out of the game's agent range
     let three = Snake {
@@ -182,6 +183,7 @@ fn validators_reject_unsafe_states() {
         snakes: vec![body(&[(1, 1)], true), body(&[(3, 3)], true)],
         food: HashSet::new(),
         pending_food: 0,
+        birth: false,
     };
     assert!(three
         .validate_decoded_state(&two_state, false)
@@ -256,8 +258,12 @@ fn validators_reject_unsafe_states() {
         goal: (4, 4),
         max_ticks: None,
     };
-    // lifecycle coherence: envelope done must agree with the recomputed state flag
-    let live = gw.initial_state(&mut Lcg(1));
+    // lifecycle coherence: envelope done must agree with the recomputed state flag. (The raw
+    // root is the unborn chance state — rejected as out-of-grid — so build a realized one.)
+    let live = GridState {
+        pos: (0, 0),
+        done: false,
+    };
     assert!(gw
         .validate_decoded_state(&live, true)
         .unwrap_err()
@@ -272,7 +278,7 @@ fn derived_flags_are_recomputed_at_decode() {
     // connect4: play to a win, round-trip, and the decoded state knows it is done.
     let c4 = Connect4;
     let mut rng = Lcg(3);
-    let mut s = c4.initial_state(&mut rng);
+    let mut s = c4.initial_state();
     loop {
         let mover = match c4.actor(&s) {
             reinfors_core::Actor::Agent(a) => a,
@@ -334,6 +340,7 @@ fn unreachable_but_safe_states_are_accepted() {
         snakes: vec![body(&[(1, 1)]), body(&[(1, 1)])],
         food: HashSet::from_iter([(1, 1)]),
         pending_food: 0,
+        birth: false,
     };
     game.validate_decoded_state(&overlap, false).unwrap();
 

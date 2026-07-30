@@ -12,7 +12,7 @@
 //! button. Folding is illegal when checking is free — which also guarantees the largest
 //! total commitment always belongs to a LIVE player, the invariant the side-pot sweep relies on.
 //!
-//! **Chance**: FULLY DECLARED (`all_chance_declared`): `initial_state` draws nothing — the
+//! **Chance**: FULLY DECLARED: `initial_state` draws nothing — the
 //! button and the per-seat hole deals are a chain of root chance nodes realized at episode
 //! birth (button `Uniform(N)`, then one `Uniform(C(remaining, 2))` node per seat; the last
 //! deal posts the blinds), so solvers can enumerate the deal the rollout samples. Every
@@ -29,8 +29,10 @@
 
 use std::collections::HashSet;
 
-use reinfors_core::game::{Actor, ChanceDist, Game, Rng, Transition};
+use reinfors_core::game::{Actor, ChanceDist, Game, Transition};
 use reinfors_core::Reward;
+#[cfg(test)]
+use reinfors_core::Rng;
 
 /// A card id `rank * 4 + suit`, rank 0 (deuce) to 12 (ace), suit 0-3 — the ACPC-style layout,
 /// chosen for the parity harness's card mapping.
@@ -481,10 +483,6 @@ impl Game for TexasHoldem {
         Transition::silent(next, self.num_players)
     }
 
-    fn all_chance_declared(&self) -> bool {
-        true // the deal is a root chance chain; initial_state draws nothing
-    }
-
     fn information_states(&self) -> bool {
         true
     }
@@ -590,8 +588,8 @@ impl Game for TexasHoldem {
         Transition::silent(next, self.num_players)
     }
 
-    fn initial_state(&self, _rng: &mut dyn Rng) -> HoldemState {
-        // Draws NOTHING (`all_chance_declared`): the state below is the root of the birth
+    fn initial_state(&self) -> HoldemState {
+        // Draws nothing: the state below is the root of the birth
         // chance chain — button sentinel `num_players` marks the button draw as pending, the
         // empty hole vector marks the seats still to be dealt. With nobody owing an action and
         // the hand live, `actor` reports `Actor::Chance` until the last deal posts the blinds.
@@ -741,7 +739,7 @@ mod tests {
 
     /// Realize the birth chance chain (button + deals) the way episode birth does.
     pub(super) fn deal(g: &TexasHoldem, rng: &mut dyn Rng) -> HoldemState {
-        let mut s = g.initial_state(rng);
+        let mut s = g.initial_state();
         while matches!(g.actor(&s), Actor::Chance) {
             let outcome = g.chance_node(&s).draw(rng);
             let t = g.apply_chance_node(&s, outcome);
@@ -757,19 +755,9 @@ mod tests {
 
     #[test]
     fn the_deal_is_a_declared_root_chain() {
-        // initial_state draws nothing (all_chance_declared): poisoned rng proves it.
-        struct Poisoned;
-        impl Rng for Poisoned {
-            fn below(&mut self, _n: usize) -> usize {
-                panic!("initial_state drew from the rng despite all_chance_declared")
-            }
-            fn unit(&mut self) -> f64 {
-                panic!("initial_state drew from the rng despite all_chance_declared")
-            }
-        }
+        // `initial_state` takes no rng — drawing nothing at the root is structural.
         let g = game(3);
-        assert!(g.all_chance_declared());
-        let root = g.initial_state(&mut Poisoned);
+        let root = g.initial_state();
         assert!(matches!(g.actor(&root), Actor::Chance));
         assert_eq!(g.chance_node(&root).count(), 3, "button draw first");
         // Chain: button, then one pair per seat; the last deal posts blinds and opens betting.

@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use crate::game::{Actor, Game, Rng};
+use crate::game::{Actor, Game};
 use crate::policy::MAX_ENUMERATED_OUTCOMES;
 use crate::reward::Reward;
 
@@ -118,16 +118,7 @@ fn build_arena<G: Game>(game: &G, reward: &dyn Reward<Event = G::Event>) -> Aren
         reward,
         nodes: Vec::new(),
     };
-    struct Poisoned;
-    impl Rng for Poisoned {
-        fn below(&mut self, _n: usize) -> usize {
-            panic!("best response requires all_chance_declared (initial_state drew)")
-        }
-        fn unit(&mut self) -> f64 {
-            panic!("best response requires all_chance_declared (initial_state drew)")
-        }
-    }
-    let root = game.initial_state(&mut Poisoned);
+    let root = game.initial_state();
     b.add(&root);
     Arena { nodes: b.nodes }
 }
@@ -300,22 +291,13 @@ pub fn enumerate_infosets<G: Game>(game: &G) -> Vec<(Vec<u8>, G::State, usize)> 
             }
         }
     }
-    struct Poisoned;
-    impl crate::game::Rng for Poisoned {
-        fn below(&mut self, _n: usize) -> usize {
-            panic!("infoset enumeration requires all_chance_declared (initial_state drew)")
-        }
-        fn unit(&mut self) -> f64 {
-            panic!("infoset enumeration requires all_chance_declared (initial_state drew)")
-        }
-    }
     let mut walk = Walk {
         game,
         seen: HashMap::new(),
         out: Vec::new(),
         visited: 0,
     };
-    let root = game.initial_state(&mut Poisoned);
+    let root = game.initial_state();
     walk.go(&root);
     walk.out
 }

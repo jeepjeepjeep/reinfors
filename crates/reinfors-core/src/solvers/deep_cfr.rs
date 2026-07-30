@@ -32,7 +32,7 @@
 //! reproducible and independent of cache state or advancement interleaving.
 //!
 //! Construction gates match tabular CFR: 2 players, [`Game::information_states`],
-//! [`Game::all_chance_declared`] (the root claim verified with a poisoned rng).
+//! rng-free `initial_state` (chance fully declared by construction).
 
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
@@ -80,18 +80,6 @@ pub struct DeepCfrStats {
     pub collect_seconds: f64,
     pub cache_lookups: usize,
     pub cache_hits: usize,
-}
-
-/// An rng that panics on any draw — proves `initial_state` honors `all_chance_declared`.
-struct PoisonedRng;
-
-impl Rng for PoisonedRng {
-    fn below(&mut self, _n: usize) -> usize {
-        panic!("initial_state drew from the rng despite declaring all_chance_declared")
-    }
-    fn unit(&mut self) -> f64 {
-        panic!("initial_state drew from the rng despite declaring all_chance_declared")
-    }
 }
 
 /// Regret matching over one net row restricted to the legal ids: play proportionally to
@@ -193,16 +181,10 @@ impl<G: Game> DeepCfrSolver<G> {
             game.information_states(),
             "Deep CFR requires information-state keys (Game::information_states)"
         );
-        assert!(
-            game.all_chance_declared(),
-            "Deep CFR samples declared chance and requires it fully declared \
-             (Game::all_chance_declared)"
-        );
-        let _ = game.initial_state(&mut PoisonedRng); // verifies the root claim loudly
-                                                      // Gate on the REALIZED root: a declared game's raw root is commonly a chance node,
-                                                      // which says nothing about decision dynamics — probing it would let a chance-root
-                                                      // simultaneous game through to a mid-collect panic. (Uniform dynamics per game is a
-                                                      // framework contract; a mid-game switch is caught by the loud runtime backstop.)
+        // Gate on the REALIZED root: a declared game's raw root is commonly a chance node,
+        // which says nothing about decision dynamics — probing it would let a chance-root
+        // simultaneous game through to a mid-collect panic. (Uniform dynamics per game is a
+        // framework contract; a mid-game switch is caught by the loud runtime backstop.)
         let realized = crate::game::realize_initial_state(&game, &mut SplitMix64::new(0x0517_B0BE));
         assert!(
             !matches!(game.actor(&realized), Actor::Simultaneous),
@@ -279,7 +261,7 @@ impl<G: Game> DeepCfrSolver<G> {
                 let salt = (self.collects << 32) ^ ((player as u64) << 24) ^ k as u64;
                 Machine {
                     stack: Vec::new(),
-                    step: Some(Step::Descend(self.game.initial_state(&mut PoisonedRng))),
+                    step: Some(Step::Descend(self.game.initial_state())),
                     blocked: None,
                     rng: SplitMix64::new(
                         self.seed

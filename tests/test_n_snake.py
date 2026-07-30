@@ -21,8 +21,14 @@ def test_construction_and_validation() -> None:
         _snake(9, grid_size=20)
     with pytest.raises(ValueError, match="two-snake"):
         _snake(3, win_food_lead=2, play_to_last=False)
+    # In-game multi-eats resolve as ONE combined ordered-tuple index, bounded at 2^53;
+    # births chain one apple per draw, bounded by the grid and the chance-chain limit.
     with pytest.raises(ValueError, match="respawn index space"):
         _snake(3, grid_size=1000, food=3)  # ~1e18 ordered triples: past the 2^53 index guard
+    with pytest.raises(ValueError, match="exceeds"):
+        _snake(2, grid_size=4, food=17)  # more food than cells
+    with pytest.raises(ValueError, match="chance-chain limit"):
+        _snake(2, grid_size=101, food=10_001)  # a birth chain past the framework backstop
 
 
 def test_default_three_snake_config_constructs_and_plays() -> None:
