@@ -60,10 +60,11 @@ pub trait Policy {
 
     /// Whether this policy is sound on games that present chance NODES
     /// (`Game::chance_nodes()` = true), whose realization may decide events and terminal
-    /// status. True only for policies that never plan over transitions (the DQN family); tree
-    /// searches cannot score an outcome-dependent payout without an explicit chance ply, so
-    /// they must say false. Required rather than defaulted: a soundness claim must be
-    /// deliberate. Checked at construction — never mid-collect.
+    /// status. True for policies that never plan over transitions (the DQN family — chance
+    /// realization is the env's business) and for the tree searches, which traverse chance
+    /// states as fixed-probability plies per their `ChanceMode`. Required rather than
+    /// defaulted: a soundness claim must be deliberate. Checked at construction — never
+    /// mid-collect.
     fn supports_chance_nodes(&self) -> bool;
 
     fn begin_episode(&self, rng: &mut dyn Rng) -> Self::PolicyState;
@@ -114,10 +115,11 @@ pub trait Policy {
     }
 }
 
-/// How the tree search consumes a stochastic transition's declared distribution
-/// ([`Game::chance_outcomes`] + [`Game::apply_chance`]). The *game seam* is one thing — the
-/// distribution, declared; this enum is the *search policy* over it, and the right mode is decided
-/// by one ratio: **simulations-per-chance-edge vs. fan width** (the number of outcomes).
+/// How the tree search consumes the game's declared chance — an explicit chance state's
+/// [`Game::chance_node`] distribution or a transition-attached [`Game::chance_outcomes`] one
+/// alike. The *game seam* is one thing — the distribution, declared; this enum is the *search
+/// policy* over it, and the right mode is decided by one ratio:
+/// **simulations-per-chance-edge vs. fan width** (the number of outcomes).
 ///
 /// Worked contrast (snake, 3 free cells A/B/C for the respawn, V ≈ +0.9 / +0.3 / −0.3, 30 sims
 /// through the "eat" edge):

@@ -15,12 +15,13 @@
 //! any N: each node keeps one [`AgentTable`] per agent, each agent independently applies the
 //! ordinary UCT/PUCT rule over its OWN table, the tuple steps the game as a joint action, and
 //! backup is per-agent own-perspective. A game must be uniformly one dynamics or the other
-//! (asserted); `Actor::Chance` (the explicit chance *player*) remains rejected — declare
-//! post-transition chance via `Game::chance_outcomes` instead.
+//! (asserted); `Actor::Chance` states are traversed as fixed-probability chance nodes —
+//! never UCB/PUCT arms, never net-evaluated, transparent to depth/discount/perspective.
 //!
-//! **Stochastic transitions** (post-move environment chance, e.g. a spawn after a move) are
-//! supported through the game's *declared* distribution — [`Game::chance_outcomes`] +
-//! [`Game::apply_chance`] — consumed per the configured [`ChanceMode`]: chance nodes sit between a
+//! **Chance** comes from the game's *declared* distributions — explicit chance states
+//! ([`Game::chance_node`], chains descended lazily or flattened under `ExpandAll`) and
+//! transition-attached [`Game::chance_outcomes`] alike —
+//! consumed per the configured [`ChanceMode`]: chance nodes sit between a
 //! decision edge and its outcome children, transparent to backup (the decision edge carries the
 //! reward and the discount). Games that declare no chance build byte-identical trees to before.
 //!
@@ -125,8 +126,9 @@ pub struct MctsConfig {
     /// of a sequential game, like AlphaZero's); `u32::MAX` means the whole episode. Irrelevant when
     /// `temperature == 0`.
     pub temperature_drop: u32,
-    /// How the search consumes stochastic transitions' declared chance (see [`ChanceMode`]).
-    /// Inert for games that declare no `chance_outcomes`.
+    /// How the search consumes the game's declared chance — explicit chance states and
+    /// transition-attached distributions alike (see [`ChanceMode`]). Inert for deterministic
+    /// games.
     pub chance: ChanceMode,
 }
 
@@ -170,6 +172,10 @@ struct Node<S> {
     obs_all: Vec<Vec<f32>>,
     values_all: Vec<f64>,
     rewards_all: Vec<f64>,
+    // Per-agent rewards emitted on the CHANCE edge that produced this node (empty = none — the
+    // common case, and always for transition-attached chance, whose events are outcome-invariant
+    // and live on the decision edge). Backups fold these into the tick above, undiscounted.
+    chance_in: Vec<f64>,
 }
 
 /// A node is a decision (an agent to move — the layout above), a **chance node** sitting between a
@@ -181,8 +187,15 @@ struct Node<S> {
 enum NodeKind {
     Decision,
     Chance {
-        /// The declared outcome distribution (`Game::chance_outcomes`), indexing `apply_chance`.
+        /// The declared outcome distribution: `Game::chance_outcomes` (transition-attached,
+        /// `explicit == false`) or `Game::chance_node` at an `Actor::Chance` state
+        /// (`explicit == true` — outcomes are full transitions that may emit events, end the
+        /// game, or land on another chance state).
         dist: ChanceDist,
+        /// True for an explicit chance STATE (the node's `state` is the chance state itself;
+        /// outcomes materialize via `apply_chance_node`). False for transition-attached chance
+        /// (outcomes re-derive the parent edge's transition via `apply_chance`).
+        explicit: bool,
         /// `Committed` mode: the frozen outcome draws (with replacement; `child` is parallel to
         /// this, so duplicated draws keep separate equal-weight branches, like `food_samples`).
         /// Empty in the other modes. Under `ExpandAll`, `child` is parallel to the (bounded)
@@ -194,6 +207,10 @@ enum NodeKind {
         /// would be O(S^2) since combinatorial draws are almost always distinct).
         /// `node.child` is empty in this mode, which is how the descent recognizes it.
         resampled: HashMap<usize, usize>,
+        /// Non-empty ONLY for an `ExpandAll` fan whose chance CHAIN was flattened: `child` then
+        /// parallels these compound leaf probabilities instead of the node's own `dist` (descent
+        /// draws ∝ these; `fan_backprop` mixes by them). Empty = children parallel the dist.
+        fan_weights: Vec<f64>,
     },
     Simultaneous(Box<SimNode>),
 }
@@ -276,6 +293,7 @@ impl<S> Node<S> {
             obs_all: Vec::new(),
             values_all: Vec::new(),
             rewards_all: Vec::new(),
+            chance_in: Vec::new(),
         }
     }
 }
@@ -356,6 +374,110 @@ struct Tree<S> {
     // in the 2p snake regression measurement, so these paths stay allocation-free.
     g_buf: Vec<f64>,
     val_buf: Vec<f64>,
+    // Undiscounted chance-edge rewards accumulated while a backup walks chance hops, consumed by
+    // the first decision edge above them (they belong to that edge's tick).
+    pend_buf: Vec<f64>,
+    // A fan's expected chance-edge rewards (per agent), seeded by `fan_backprop` so the decision
+    // edge above adds them UNDISCOUNTED — folding them into the mixed value would wrongly put
+    // them behind that edge's gamma. Consumed (cleared) by the next backup.
+    pend_seed: Vec<f64>,
+}
+
+/// The per-agent rewards a chance-edge transition emitted — empty when it emitted nothing (the
+/// common case, kept empty so backups skip the fold entirely).
+fn per_agent_chance_rewards<G: Game>(
+    reward: &dyn Reward<Event = G::Event>,
+    n: usize,
+    t: &Transition<G::State, G::Event>,
+) -> Vec<f64> {
+    if t.events.iter().all(Option::is_none) {
+        return Vec::new();
+    }
+    (0..n)
+        .map(|ag| crate::reward::edge_reward(reward, &t.events, ag))
+        .collect()
+}
+
+/// One flattened fan leaf: `(state, compound probability, accumulated per-agent chance
+/// rewards, terminal)`.
+type FanLeaf<S> = (S, f64, Vec<f64>, bool);
+
+/// Merge two per-agent chance-reward vectors (either may be empty = no emissions).
+fn merge_chance_rewards(a: &[f64], b: Vec<f64>, n: usize) -> Vec<f64> {
+    if b.is_empty() {
+        return a.to_vec();
+    }
+    let mut out = if a.is_empty() {
+        vec![0.0; n]
+    } else {
+        a.to_vec()
+    };
+    for (o, v) in out.iter_mut().zip(&b) {
+        *o += v;
+    }
+    out
+}
+
+/// Flatten chance CHAINS under `ExpandAll`: run every seeded `(state, prob, chance rewards,
+/// terminal)` entry to its final decision/terminal leaves, compounding probabilities and
+/// accumulating each chain edge's emitted rewards — the whole chain is one ply, exactly as the
+/// expectimax fan resolves it. The aggregate flattened width is capped at
+/// [`MAX_ENUMERATED_OUTCOMES`], checked BEFORE each expansion so the bound is real, not
+/// retrospective. Returns the leaves and whether any chain expansion happened (an unchained fan
+/// keeps its outcome-parallel layout and weights).
+fn flatten_chance_fan<G: Game>(
+    game: &G,
+    reward: &dyn Reward<Event = G::Event>,
+    n_agents: usize,
+    seed: Vec<FanLeaf<G::State>>,
+) -> (Vec<FanLeaf<G::State>>, bool) {
+    let mut leaves: Vec<FanLeaf<G::State>> = Vec::with_capacity(seed.len());
+    let mut chained = false;
+    // ONE stack holding every seed entry (plus hop counts — the chain-cycle backstop), so the
+    // projected-size check below sees unprocessed seeds too: a per-seed stack would let one
+    // outcome flatten to the full cap and later outcomes append past it. Seeds are pushed in
+    // reverse so pops preserve outcome order (an unchained fan must stay outcome-parallel).
+    let mut stack: Vec<(FanLeaf<G::State>, usize)> =
+        seed.into_iter().rev().map(|e| (e, 0)).collect();
+    {
+        while let Some(((s, p, ci, term), hops)) = stack.pop() {
+            if term || !matches!(game.actor(&s), Actor::Chance) {
+                leaves.push((s, p, ci, term));
+                continue;
+            }
+            chained = true;
+            assert!(
+                hops < crate::game::CHANCE_CHAIN_LIMIT,
+                "chance-node chain exceeded {} edges — the game cycles through chance states",
+                crate::game::CHANCE_CHAIN_LIMIT
+            );
+            let dist = game.chance_node(&s);
+            let count = dist.count();
+            assert!(
+                count <= MAX_ENUMERATED_OUTCOMES,
+                "ExpandAll cannot enumerate {count} chance outcomes (bound {}); use a sampling chance mode for combinatorial outcome spaces",
+                MAX_ENUMERATED_OUTCOMES
+            );
+            // Projected size BEFORE pushing (the popped parent is already off the list): the cap
+            // bounds the fan that will actually exist, not the fan minus its last expansion.
+            assert!(
+                leaves.len() + stack.len() + count <= MAX_ENUMERATED_OUTCOMES,
+                "a chance chain's flattened fan exceeds the enumeration bound ({}); use a narrower sampling mode",
+                MAX_ENUMERATED_OUTCOMES
+            );
+            let probs: Vec<f64> = dist.iter_probs().collect();
+            for (i, q) in probs.into_iter().enumerate() {
+                let ct = game.apply_chance_node(&s, i);
+                let ci2 = merge_chance_rewards(
+                    &ci,
+                    per_agent_chance_rewards::<G>(reward, n_agents, &ct),
+                    n_agents,
+                );
+                stack.push(((ct.next_state, p * q, ci2, ct.terminal), hops + 1));
+            }
+        }
+    }
+    (leaves, chained)
 }
 
 /// Build one agent's decoupled table at a simultaneous state.
@@ -461,8 +583,8 @@ impl<S: Clone> Tree<S> {
             }
             Actor::Simultaneous => (sim_leaf(game, enc, state, 0), TreeMode::Sim),
             Actor::Chance => panic!(
-                "MCTS does not support Actor::Chance (an explicit chance player); declare \
-                 post-transition chance via Game::chance_outcomes instead"
+                "search roots must be realized decision states — the rollout realizes chance \
+                 chains before any policy sees the state"
             ),
         };
         Tree {
@@ -484,6 +606,8 @@ impl<S: Clone> Tree<S> {
             extra_eval_rows: 0,
             g_buf: Vec::new(),
             val_buf: Vec::new(),
+            pend_buf: Vec::new(),
+            pend_seed: Vec::new(),
         }
     }
 
@@ -507,10 +631,18 @@ impl<S: Clone> Tree<S> {
     {
         self.path.clear();
         let mut ni = 0;
+        let mut chance_hops = 0usize;
         loop {
             if let NodeKind::Chance { .. } = self.arena[ni].kind {
                 // Chance descent: pick an outcome slot per mode; materialize its child on first
-                // visit (a fresh leaf to evaluate), else keep descending.
+                // visit (a fresh leaf to evaluate), else keep descending. Explicit chance states
+                // may chain — a materialized child that is itself a chance node keeps descending.
+                chance_hops += 1;
+                assert!(
+                    chance_hops <= crate::game::CHANCE_CHAIN_LIMIT,
+                    "chance-node chain exceeded {} edges — the game cycles through chance states",
+                    crate::game::CHANCE_CHAIN_LIMIT
+                );
                 let slot = self.pick_chance_slot(ni, chance);
                 self.path.push((ni, slot));
                 match self.chance_child(ni, slot) {
@@ -519,7 +651,11 @@ impl<S: Clone> Tree<S> {
                         continue;
                     }
                     None => {
-                        let child = self.materialize_outcome(game, enc, ni, slot);
+                        let child = self.materialize_outcome(game, enc, reward, ni, slot, chance);
+                        if let NodeKind::Chance { .. } = self.arena[child].kind {
+                            ni = child; // the outcome landed on another chance state
+                            continue;
+                        }
                         self.leaf = child;
                         return if self.arena[child].terminal {
                             Reached::Terminal
@@ -529,6 +665,7 @@ impl<S: Clone> Tree<S> {
                     }
                 }
             }
+            chance_hops = 0;
             let node = &self.arena[ni];
             self.max_depth_seen = self.max_depth_seen.max(node.depth);
             if node.terminal {
@@ -618,14 +755,24 @@ impl<S: Clone> Tree<S> {
         // needs the rng.
         let Tree { arena, rng, .. } = self;
         let NodeKind::Chance {
-            dist, committed, ..
+            dist,
+            committed,
+            fan_weights,
+            ..
         } = &arena[ni].kind
         else {
             unreachable!("pick_chance_slot on a decision node");
         };
         match chance {
             ChanceMode::Committed { .. } => rng.below(committed.len()),
-            ChanceMode::AlwaysResample | ChanceMode::ExpandAll => dist.draw(rng),
+            ChanceMode::AlwaysResample | ChanceMode::ExpandAll => {
+                if fan_weights.is_empty() {
+                    dist.draw(rng)
+                } else {
+                    // A flattened chain fan: slots carry compound leaf probabilities.
+                    crate::rng::weighted_index(rng, fan_weights)
+                }
+            }
         }
     }
 
@@ -652,31 +799,69 @@ impl<S: Clone> Tree<S> {
         &mut self,
         game: &G,
         enc: &dyn StateEncoder<State = S>,
+        reward: &dyn Reward<Event = G::Event>,
         cni: usize,
         slot: usize,
+        chance: ChanceMode,
     ) -> usize
     where
         G: Game<State = S>,
     {
-        let NodeKind::Chance { committed, .. } = &self.arena[cni].kind else {
+        let NodeKind::Chance {
+            committed,
+            explicit,
+            ..
+        } = &self.arena[cni].kind
+        else {
             unreachable!("materialize_outcome on a decision node");
         };
+        let explicit = *explicit;
         let outcome = if committed.is_empty() {
             slot
         } else {
             committed[slot]
         };
-        // The chance node's parent action edge is the path entry just above it.
-        let &(pni, pa) = self
-            .path
-            .iter()
-            .rev()
-            .find(|&&(n, _)| n != cni)
-            .expect("chance node with no parent action edge on the path");
-        let (joint, mover) = self.edge_joint(game, pni, pa);
-        let t = game.step(&self.arena[pni].state, &joint);
-        let state = game.apply_chance(&self.arena[pni].state, &t, outcome);
-        let child = self.child_leaf(game, enc, state, mover, self.arena[cni].depth + 1, false);
+        let child = if explicit {
+            // An explicit chance state realizes a full transition: it may emit events (folded
+            // into the tick above via `chance_in`), end the game, or chain to another chance
+            // state (the caller keeps descending).
+            let t = game.apply_chance_node(&self.arena[cni].state, outcome);
+            let chance_in = per_agent_chance_rewards::<G>(reward, self.n_agents, &t);
+            let mover = self.arena[cni].actor;
+            let mut child = self.child_leaf(
+                game,
+                enc,
+                t.next_state,
+                mover,
+                self.arena[cni].depth + 1,
+                t.terminal,
+                chance,
+            );
+            child.chance_in = chance_in;
+            child
+        } else {
+            // Transition-attached chance re-derives the parent action edge's transition (chance
+            // nodes store no transition; one extra `Game::step` per materialization, never per
+            // descent).
+            let &(pni, pa) = self
+                .path
+                .iter()
+                .rev()
+                .find(|&&(n, _)| n != cni)
+                .expect("chance node with no parent action edge on the path");
+            let (joint, mover) = self.edge_joint(game, pni, pa);
+            let t = game.step(&self.arena[pni].state, &joint);
+            let state = game.apply_chance(&self.arena[pni].state, &t, outcome);
+            self.child_leaf(
+                game,
+                enc,
+                state,
+                mover,
+                self.arena[cni].depth + 1,
+                false,
+                chance,
+            )
+        };
         let idx = self.arena.len();
         self.arena.push(child);
         if self.arena[cni].child.is_empty() {
@@ -752,16 +937,20 @@ impl<S: Clone> Tree<S> {
         }
     }
 
-    /// A fresh child leaf for `state` — terminal, sequential decision, or simultaneous, per the
-    /// game's actor there. v1 forbids mixing sequential and simultaneous dynamics in one game.
+    /// A fresh child leaf for `state` — terminal, sequential decision, simultaneous, or an
+    /// explicit CHANCE node, per the game's actor there. v1 forbids mixing sequential and
+    /// simultaneous dynamics in one game. `depth` is the would-be decision depth: a chance state
+    /// sits at `depth - 1` (transparent — its decision children land at `depth`, the same tick).
+    #[allow(clippy::too_many_arguments)]
     fn child_leaf<G>(
-        &self,
+        &mut self,
         game: &G,
         enc: &dyn StateEncoder<State = S>,
         state: S,
         mover: usize,
         depth: i32,
         terminal: bool,
+        chance: ChanceMode,
     ) -> Node<S>
     where
         G: Game<State = S>,
@@ -789,10 +978,42 @@ impl<S: Clone> Tree<S> {
                 );
                 sim_leaf(game, enc, state, depth)
             }
-            Actor::Chance => panic!(
-                "MCTS does not support Actor::Chance (an explicit chance player); declare \
-                 post-transition chance via Game::chance_outcomes instead"
-            ),
+            Actor::Chance => {
+                // An explicit chance state: a fixed-probability node — never an arm of UCB/PUCT,
+                // never evaluated by the net (no observation staged), transparent to depth.
+                let dist = game.chance_node(&state);
+                let committed: Vec<usize> = match chance {
+                    ChanceMode::Committed { samples } => (0..samples.max(1))
+                        .map(|_| dist.draw(&mut self.rng))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let width = match chance {
+                    ChanceMode::Committed { .. } => committed.len(),
+                    ChanceMode::ExpandAll => {
+                        let count = dist.count();
+                        assert!(
+                            count <= MAX_ENUMERATED_OUTCOMES,
+                            "ExpandAll cannot enumerate {count} chance outcomes (bound {}); use \
+                             a sampling chance mode for combinatorial outcome spaces",
+                            MAX_ENUMERATED_OUTCOMES
+                        );
+                        count
+                    }
+                    ChanceMode::AlwaysResample => 0,
+                };
+                let mut node = Node::leaf(state, mover, depth - 1, false, vec![0], Vec::new());
+                node.kind = NodeKind::Chance {
+                    dist,
+                    explicit: true,
+                    committed,
+                    resampled: HashMap::new(),
+                    fan_weights: Vec::new(),
+                };
+                node.actions = Vec::new();
+                node.child = vec![-1; width];
+                node
+            }
         }
     }
 
@@ -819,13 +1040,73 @@ impl<S: Clone> Tree<S> {
         if let Some(dist) = game.chance_outcomes(&self.arena[ni].state, &t) {
             debug_assert!(!t.terminal, "chance_outcomes on a terminal transition");
             debug_assert!(dist.count() >= 1);
-            return self.expand_chance(game, enc, ni, ai, &t, dist, chance);
+            return self.expand_chance(game, enc, reward, ni, ai, &t, dist, chance);
         }
-        let child = self.child_leaf(game, enc, t.next_state, mover, depth, t.terminal);
+        let child = self.child_leaf(game, enc, t.next_state, mover, depth, t.terminal, chance);
+        let is_chance = matches!(child.kind, NodeKind::Chance { .. });
         let idx = self.arena.len();
         self.arena.push(child);
         self.set_edge_child(ni, ai, idx);
+        if is_chance {
+            if let ChanceMode::ExpandAll = chance {
+                self.materialize_explicit_fan(game, enc, reward, idx, chance);
+                return Expanded::Fan(idx);
+            }
+            return Expanded::Chance(idx);
+        }
         Expanded::Leaf(idx)
+    }
+
+    /// Materialize the explicit chance node `cni`'s outcomes now (`ExpandAll`), so the caller
+    /// can stage them all for one pooled evaluation. Chained chance states flatten into the fan
+    /// (compound probabilities, accumulated chance rewards — `fan_weights` then carries the leaf
+    /// distribution); terminal outcomes need no row (their value is exact).
+    fn materialize_explicit_fan<G>(
+        &mut self,
+        game: &G,
+        enc: &dyn StateEncoder<State = S>,
+        reward: &dyn Reward<Event = G::Event>,
+        cni: usize,
+        chance: ChanceMode,
+    ) where
+        G: Game<State = S>,
+    {
+        let NodeKind::Chance { dist, .. } = &self.arena[cni].kind else {
+            unreachable!("materialize_explicit_fan on a decision node");
+        };
+        let probs: Vec<f64> = dist.iter_probs().collect();
+        let mover = self.arena[cni].actor;
+        let mut seed = Vec::with_capacity(probs.len());
+        for (i, p) in probs.into_iter().enumerate() {
+            let t = game.apply_chance_node(&self.arena[cni].state, i);
+            let ci = per_agent_chance_rewards::<G>(reward, self.n_agents, &t);
+            seed.push((t.next_state, p, ci, t.terminal));
+        }
+        let (leaves, chained) = flatten_chance_fan(game, reward, self.n_agents, seed);
+        self.arena[cni].child = vec![-1; leaves.len()];
+        let mut weights = Vec::with_capacity(leaves.len());
+        for (slot, (state, p, ci, term)) in leaves.into_iter().enumerate() {
+            let mut child = self.child_leaf(
+                game,
+                enc,
+                state,
+                mover,
+                self.arena[cni].depth + 1,
+                term,
+                chance,
+            );
+            child.chance_in = ci;
+            let idx = self.arena.len();
+            self.arena.push(child);
+            self.arena[cni].child[slot] = idx as i64;
+            weights.push(p);
+        }
+        if chained {
+            let NodeKind::Chance { fan_weights, .. } = &mut self.arena[cni].kind else {
+                unreachable!()
+            };
+            *fan_weights = weights;
+        }
     }
 
     /// Append the chance node for a declared-chance edge, shaped per mode: `Committed` freezes its
@@ -839,6 +1120,7 @@ impl<S: Clone> Tree<S> {
         &mut self,
         game: &G,
         enc: &dyn StateEncoder<State = S>,
+        reward: &dyn Reward<Event = G::Event>,
         ni: usize,
         ai: usize,
         t: &Transition<S, G::Event>,
@@ -889,8 +1171,10 @@ impl<S: Clone> Tree<S> {
         );
         chance_node.kind = NodeKind::Chance {
             dist,
+            explicit: false,
             committed,
             resampled: HashMap::new(),
+            fan_weights: Vec::new(),
         };
         chance_node.actions = Vec::new();
         chance_node.child = vec![-1; width];
@@ -900,12 +1184,32 @@ impl<S: Clone> Tree<S> {
         if let ChanceMode::ExpandAll = chance {
             // Materialize every outcome now; the caller stages all their observations at once and
             // `fan_backprop` seeds the edge with the exact weighted expectation when they arrive.
-            for slot in 0..width {
+            // An outcome landing on an explicit chance STATE flattens into the fan.
+            let NodeKind::Chance { dist, .. } = &self.arena[cni].kind else {
+                unreachable!()
+            };
+            let probs: Vec<f64> = dist.iter_probs().collect();
+            let mut seed = Vec::with_capacity(width);
+            for (slot, p) in probs.into_iter().enumerate() {
                 let state = game.apply_chance(&self.arena[ni].state, t, slot);
-                let child = self.child_leaf(game, enc, state, mover, depth + 1, false);
+                seed.push((state, p, Vec::new(), false));
+            }
+            let (leaves, chained) = flatten_chance_fan(game, reward, self.n_agents, seed);
+            self.arena[cni].child = vec![-1; leaves.len()];
+            let mut weights = Vec::with_capacity(leaves.len());
+            for (slot, (state, p, ci, term)) in leaves.into_iter().enumerate() {
+                let mut child = self.child_leaf(game, enc, state, mover, depth + 1, term, chance);
+                child.chance_in = ci;
                 let idx = self.arena.len();
                 self.arena.push(child);
                 self.arena[cni].child[slot] = idx as i64;
+                weights.push(p);
+            }
+            if chained {
+                let NodeKind::Chance { fan_weights, .. } = &mut self.arena[cni].kind else {
+                    unreachable!()
+                };
+                *fan_weights = weights;
             }
             return Expanded::Fan(cni);
         }
@@ -921,13 +1225,27 @@ impl<S: Clone> Tree<S> {
         self.arena[self.leaf].value = leaf_value;
         let mut g = leaf_value; // value from `g_actor`'s perspective
         let mut g_actor = self.arena[self.leaf].actor;
+        // Undiscounted chance-edge rewards awaiting the first decision edge above — they belong
+        // to that edge's tick, so they join BEFORE its gamma (negamax caps at two agents, so a
+        // stack pair suffices). Seeded by a completed fan, fed by chance hops on the path.
+        let mut pend = [0.0f64; 2];
+        for (p, r) in pend.iter_mut().zip(&self.pend_seed) {
+            *p += r;
+        }
+        self.pend_seed.clear();
         for &(ni, a) in self.path.iter().rev() {
             if let NodeKind::Chance { .. } = self.arena[ni].kind {
+                if let Some(child) = self.chance_child(ni, a) {
+                    for (p, r) in pend.iter_mut().zip(&self.arena[child].chance_in) {
+                        *p += r;
+                    }
+                }
                 continue; // transparent: perspective and value pass through unchanged
             }
             let node_actor = self.arena[ni].actor;
             let child_val = if g_actor == node_actor { g } else { -g };
-            let q = self.arena[ni].reward[a] + gamma * child_val;
+            let q = self.arena[ni].reward[a] + pend[node_actor] + gamma * child_val;
+            pend = [0.0; 2];
             self.arena[ni].value_sum[a] += q;
             self.arena[ni].visits[a] += 1;
             self.arena[ni].total_visits += 1;
@@ -994,9 +1312,23 @@ impl<S: Clone> Tree<S> {
         let mut g = std::mem::take(&mut self.g_buf);
         g.clear();
         g.extend_from_slice(leaf_vals);
+        let mut pend = std::mem::take(&mut self.pend_buf);
+        pend.clear();
+        pend.resize(self.n_agents, 0.0);
+        for (p, r) in pend.iter_mut().zip(&self.pend_seed) {
+            *p += r;
+        }
+        self.pend_seed.clear();
         for &(ni, slot) in self.path.iter().rev() {
+            if matches!(self.arena[ni].kind, NodeKind::Chance { .. }) {
+                if let Some(child) = self.chance_child(ni, slot) {
+                    for (p, r) in pend.iter_mut().zip(&self.arena[child].chance_in) {
+                        *p += r;
+                    }
+                }
+                continue;
+            }
             match &mut self.arena[ni].kind {
-                NodeKind::Chance { .. } => continue,
                 NodeKind::Simultaneous(sim) => {
                     // Mixed-radix digits come off least-significant (last agent) first; per-agent
                     // updates are independent, so the visiting order never affects results.
@@ -1006,19 +1338,21 @@ impl<S: Clone> Tree<S> {
                         let l = sim.tables[ag].actions.len();
                         let si = s % l;
                         s /= l;
-                        let q = sim.reward[slot * n + ag] + gamma * g[ag];
+                        let q = sim.reward[slot * n + ag] + pend[ag] + gamma * g[ag];
                         sim.tables[ag].value_sum[si] += q;
                         sim.tables[ag].visits[si] += 1;
                         sim.tables[ag].total_visits += 1;
                         g[ag] = q;
                     }
+                    pend.iter_mut().for_each(|p| *p = 0.0);
                 }
-                NodeKind::Decision => {
+                _ => {
                     unreachable!("decision node on a simultaneous tree's path (mixed dynamics)")
                 }
             }
         }
         self.g_buf = g;
+        self.pend_buf = pend;
     }
 
     /// The Max^N backup (sequential N>2): the per-agent value vector propagates absolutely — no
@@ -1029,19 +1363,33 @@ impl<S: Clone> Tree<S> {
         let mut g = std::mem::take(&mut self.g_buf);
         g.clear();
         g.extend_from_slice(leaf_vals);
+        let mut pend = std::mem::take(&mut self.pend_buf);
+        pend.clear();
+        pend.resize(n, 0.0);
+        for (p, r) in pend.iter_mut().zip(&self.pend_seed) {
+            *p += r;
+        }
+        self.pend_seed.clear();
         for &(ni, a) in self.path.iter().rev() {
-            if let NodeKind::Chance { .. } = self.arena[ni].kind {
+            if matches!(self.arena[ni].kind, NodeKind::Chance { .. }) {
+                if let Some(child) = self.chance_child(ni, a) {
+                    for (p, r) in pend.iter_mut().zip(&self.arena[child].chance_in) {
+                        *p += r;
+                    }
+                }
                 continue; // transparent: values pass through unchanged
             }
             let node = &mut self.arena[ni];
             for (i, gi) in g.iter_mut().enumerate() {
-                *gi = node.rewards_all[a * n + i] + gamma * *gi;
+                *gi = node.rewards_all[a * n + i] + pend[i] + gamma * *gi;
             }
+            pend.iter_mut().for_each(|p| *p = 0.0);
             node.value_sum[a] += g[node.actor];
             node.visits[a] += 1;
             node.total_visits += 1;
         }
         self.g_buf = g;
+        self.pend_buf = pend;
     }
 
     /// Complete an `ExpandAll` fan once every outcome child's evaluation has arrived: the sim backs
@@ -1050,43 +1398,86 @@ impl<S: Clone> Tree<S> {
     /// values mix independently on a simultaneous tree).
     fn fan_backprop(&mut self, gamma: f64) {
         let cni = self.leaf;
-        let NodeKind::Chance { dist, .. } = &self.arena[cni].kind else {
+        let NodeKind::Chance {
+            dist, fan_weights, ..
+        } = &self.arena[cni].kind
+        else {
             unreachable!("fan_backprop on a decision node");
         };
+        let fan_weights = fan_weights.clone();
         let dist = dist.clone();
+        let n = self.n_agents;
         let mut mix = vec![
             0.0f64;
             match self.mode {
                 TreeMode::SeqNegamax => 1,
-                _ => self.n_agents,
+                _ => n,
             }
         ];
-        let mut child_actor = self.arena[cni].actor;
-        let fan_probs: Vec<f64> = dist
-            .iter_probs()
-            .take(self.arena[cni].child.len())
-            .collect();
+        // The fan's expected chance-edge rewards, kept SEPARATE from the mixed value: they
+        // belong to the decision edge's tick above, so they must join before its gamma —
+        // `pend_seed` hands them to the backup undiscounted.
+        let mut reward_mix = vec![0.0f64; n];
+        // A flattened chain fan carries its own compound leaf probabilities.
+        let fan_probs: Vec<f64> = if fan_weights.is_empty() {
+            dist.iter_probs()
+                .take(self.arena[cni].child.len())
+                .collect()
+        } else {
+            fan_weights
+        };
+        // Negamax: children's values are each from their OWN mover's perspective, and explicit
+        // chance outcomes may hand the turn to different movers — normalize to a reference
+        // perspective (the first non-terminal child's; sound under this mode's 2p zero-sum
+        // contract). Terminal outcomes contribute their exact value, 0.
+        let mut ref_actor = self.arena[cni].actor;
+        if self.mode == TreeMode::SeqNegamax {
+            for &c in &self.arena[cni].child {
+                if !self.arena[c as usize].terminal {
+                    ref_actor = self.arena[c as usize].actor;
+                    break;
+                }
+            }
+        }
         for (slot, &p) in fan_probs.iter().enumerate() {
             let child = self.arena[cni].child[slot] as usize;
-            match &self.arena[child].kind {
-                NodeKind::Simultaneous(sim) => {
-                    for (m, t) in mix.iter_mut().zip(&sim.tables) {
-                        *m += p * t.value;
-                    }
-                }
-                _ if self.mode == TreeMode::SeqMaxN => {
-                    for (m, &v) in mix.iter_mut().zip(&self.arena[child].values_all) {
+            for (m, r) in reward_mix.iter_mut().zip(&self.arena[child].chance_in) {
+                *m += p * r;
+            }
+            match self.mode {
+                TreeMode::Sim => {
+                    for (ag, m) in mix.iter_mut().enumerate() {
+                        let v = match &self.arena[child].kind {
+                            NodeKind::Simultaneous(sim) => sim.tables[ag].value,
+                            _ => 0.0, // terminal outcome: exact value 0
+                        };
                         *m += p * v;
                     }
                 }
-                _ => {
-                    mix[0] += p * self.arena[child].value;
-                    child_actor = self.arena[child].actor;
+                TreeMode::SeqMaxN => {
+                    for (ag, m) in mix.iter_mut().enumerate() {
+                        let v = self.arena[child].values_all.get(ag).copied().unwrap_or(0.0);
+                        *m += p * v;
+                    }
+                }
+                TreeMode::SeqNegamax => {
+                    let c = &self.arena[child];
+                    let v = if c.terminal {
+                        0.0
+                    } else if c.actor == ref_actor {
+                        c.value
+                    } else {
+                        -c.value
+                    };
+                    mix[0] += p * v;
                 }
             }
         }
         if self.mode == TreeMode::SeqNegamax {
-            self.arena[cni].actor = child_actor; // fan value: the outcome children's perspective
+            self.arena[cni].actor = ref_actor; // fan value: the outcome children's perspective
+        }
+        if reward_mix.iter().any(|&r| r != 0.0) {
+            self.pend_seed = reward_mix;
         }
         self.backup(gamma, &mix);
     }
@@ -1280,10 +1671,6 @@ where
         "tree search on a hidden-information game is clairvoyant: its values condition on state \
          the agents cannot observe; use an observation-only policy family"
     );
-    assert!(
-        !game.chance_nodes(),
-        "tree search does not realize chance-node states (outcome-dependent payouts)"
-    );
     let a = game.action_count();
     let mut trees: Vec<Tree<G::State>> = requests
         .into_iter()
@@ -1383,15 +1770,26 @@ where
                         // ExpandAll: stage every outcome child of the chance node at `leaf` — one
                         // row per negamax decision child, N per sim/Max^N child. The sim's backup
                         // (`fan_backprop`) runs once the last row arrives — which may be
-                        // immediately, if the cache serves them all.
+                        // immediately, if the cache serves them all. Terminal outcomes (explicit
+                        // chance can end the game) need no row: their value is exactly 0.
                         let cni = tree.leaf;
-                        let kids: Vec<usize> =
-                            tree.arena[cni].child.iter().map(|&c| c as usize).collect();
+                        let kids: Vec<usize> = tree.arena[cni]
+                            .child
+                            .iter()
+                            .map(|&c| c as usize)
+                            .filter(|&c| !tree.arena[c].terminal)
+                            .collect();
                         let rows_per_child = match tree.mode {
                             TreeMode::SeqNegamax => 1,
                             _ => tree.n_agents,
                         };
                         let total_rows = kids.len() * rows_per_child;
+                        if total_rows == 0 {
+                            // Every outcome is terminal: the fan resolves exactly, in place.
+                            tree.terminal_sims += 1;
+                            tree.fan_backprop(gamma);
+                            continue;
+                        }
                         tree.extra_eval_rows += total_rows.saturating_sub(1);
                         // The count covers EVERY row before any is consumed, so an early cache hit
                         // cannot trigger the fan's backup prematurely; `consume_row` decrements
@@ -1632,7 +2030,7 @@ impl Policy for Mcts {
     type PolicyState = u32; // moves acted this episode — drives the temperature_drop cutoff
 
     fn supports_chance_nodes(&self) -> bool {
-        false // no chance ply: an outcome-dependent payout is unscorable in this tree
+        true // fixed-probability chance plies: sampled/committed/enumerated per ChanceMode
     }
 
     fn supports_imperfect_information(&self) -> bool {
@@ -1866,6 +2264,7 @@ mod tests {
             obs_all: Vec::new(),
             values_all: Vec::new(),
             rewards_all: Vec::new(),
+            chance_in: Vec::new(),
         }
     }
 

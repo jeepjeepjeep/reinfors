@@ -15,8 +15,9 @@
 //! [`SearchConfig`] are game-agnostic; concrete games (e.g. the snake `selective_search` wrappers in
 //! reinfors-games) build a `SearchConfig` and a `Game` and call [`search_many`].
 //!
-//! Chance comes from the game's *declared* distribution (`Game::chance_outcomes` +
-//! `apply_chance` — the game's only chance seam; the env realizes from the same declaration),
+//! Chance comes from the game's *declared* distributions — explicit chance states
+//! (`Game::chance_node`, chains flattened into the branch fan) and transition-attached
+//! `chance_outcomes` alike; the env realizes from the same declarations —
 //! fanned per the configured [`ChanceMode`]: `Committed{k}` draws k
 //! equal-weight realizations (the historical `food_samples` estimator), `ExpandAll` fans every
 //! outcome at its true probability (exact). A deterministic transition keeps a single child. Each
@@ -307,10 +308,6 @@ where
         game.perfect_information(),
         "tree search on a hidden-information game is clairvoyant: its values condition on state \
          the agents cannot observe; use an observation-only policy family"
-    );
-    assert!(
-        !game.chance_nodes(),
-        "tree search does not realize chance-node states (outcome-dependent payouts)"
     );
     let a = game.action_count();
     // Each search gets its own chance-sampling stream, seeded deterministically from the request
@@ -664,9 +661,74 @@ fn push_branches<G: Game>(
             ),
         },
     };
+    // Resolve explicit chance CHAINS: while a child sits at an `Actor::Chance` state, fan
+    // (`ExpandAll`, exact) or sample (`Committed`) its declared distribution, compounding
+    // probabilities and accumulating each chance edge's emitted reward for the requester. The
+    // whole chain is one ply — one discount, one depth step — and a chain edge may end the game
+    // (its payout rides the accumulated reward; the terminal child's value is exactly 0).
+    let mut resolved: Vec<(G::State, f64, f64, bool)> = Vec::with_capacity(children.len());
+    let mut work: Vec<(G::State, f64, f64, bool, usize)> = children
+        .into_iter()
+        .map(|(s, p)| (s, p, 0.0, t.terminal, 0))
+        .collect();
+    while let Some((s, p, r, term, hops)) = work.pop() {
+        if term || !matches!(game.actor(&s), Actor::Chance) {
+            resolved.push((s, p, r, term));
+            continue;
+        }
+        assert!(
+            hops < crate::game::CHANCE_CHAIN_LIMIT,
+            "chance-node chain exceeded {} edges — the game cycles through chance states",
+            crate::game::CHANCE_CHAIN_LIMIT
+        );
+        let dist = game.chance_node(&s);
+        match cfg.chance {
+            ChanceMode::Committed { samples } => {
+                let k = samples.max(1);
+                // Projected size BEFORE pushing (the popped parent is already off the list):
+                // the cap bounds the fan that will exist, not the fan minus its last expansion.
+                assert!(
+                    resolved.len() + work.len() + k <= MAX_ENUMERATED_OUTCOMES,
+                    "a chance chain's flattened fan exceeds the enumeration bound ({}); use a \
+                     narrower sampling mode",
+                    MAX_ENUMERATED_OUTCOMES
+                );
+                for _ in 0..k {
+                    let idx = dist.draw(rng);
+                    let ct = game.apply_chance_node(&s, idx);
+                    let er = crate::reward::edge_reward(reward, &ct.events, agent);
+                    work.push((ct.next_state, p / k as f64, r + er, ct.terminal, hops + 1));
+                }
+            }
+            ChanceMode::ExpandAll => {
+                let count = dist.count();
+                assert!(
+                    count <= MAX_ENUMERATED_OUTCOMES,
+                    "ExpandAll cannot enumerate {count} chance outcomes (bound {}); use a \
+                     sampling chance mode for combinatorial outcome spaces",
+                    MAX_ENUMERATED_OUTCOMES
+                );
+                assert!(
+                    resolved.len() + work.len() + count <= MAX_ENUMERATED_OUTCOMES,
+                    "a chance chain's flattened fan exceeds the enumeration bound ({}); use a \
+                     narrower sampling mode",
+                    MAX_ENUMERATED_OUTCOMES
+                );
+                let probs: Vec<f64> = dist.iter_probs().collect();
+                for (idx, pr) in probs.into_iter().enumerate() {
+                    let ct = game.apply_chance_node(&s, idx);
+                    let er = crate::reward::edge_reward(reward, &ct.events, agent);
+                    work.push((ct.next_state, p * pr, r + er, ct.terminal, hops + 1));
+                }
+            }
+            ChanceMode::AlwaysResample => unreachable!(
+                "rejected at SelectiveExpectimax construction (no traversal event to redraw on)"
+            ),
+        }
+    }
     // Each chance child is a distinct state, so its terminality and observation are computed per
     // child (the food position differs across outcomes).
-    for (child_state, p) in children {
+    for (child_state, p, chain_reward, chain_terminal) in resolved {
         // Fully fixed moves pre-scale into `weight`; any deferred factor leaves the weight to
         // resolution (scale carries the fixed part x the chance probability).
         let (weight, scale) = if mw.deferred.is_empty() {
@@ -674,7 +736,7 @@ fn push_branches<G: Game>(
         } else {
             (0.0, mw.fixed * p)
         };
-        let terminal = t.terminal
+        let terminal = chain_terminal
             || (agent_out_terminal && game.legal_actions(&child_state, agent).is_empty());
         let child = if terminal {
             push_node(arena, child_state, Vec::new(), depth + 1, true)
@@ -688,7 +750,7 @@ fn push_branches<G: Game>(
             weight,
             deferred: mw.deferred.clone(),
             scale,
-            reward: step_reward,
+            reward: step_reward + chain_reward,
             child,
         });
     }

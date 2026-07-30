@@ -1002,7 +1002,9 @@ impl Game for HiddenTwo {
     }
 }
 
-/// `TwoRobin` declaring chance NODES — outcome-dependent payouts the searches cannot score.
+/// `TwoRobin` declaring chance NODES — the searches traverse them as fixed-probability plies
+/// (the functional battery lives in `tests/chance_nodes.rs`; this stub never actually presents
+/// one, pinning only that the declaration no longer rejects at any boundary).
 struct NodeyTwo;
 
 impl Game for NodeyTwo {
@@ -1071,11 +1073,10 @@ fn direct_expectimax_rejects_hidden_information() {
 }
 
 #[test]
-#[should_panic(expected = "chance-node")]
-fn direct_mcts_rejects_chance_node_games() {
+fn searches_accept_chance_node_games() {
     let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2];
     let mut eval = Evaluator::new(&mut infer, reinfors_core::InferMode::Shared, None);
-    let _ = mcts_many(
+    let evals = mcts_many(
         &NodeyTwo,
         &Enc,
         &Zero,
@@ -1084,12 +1085,8 @@ fn direct_mcts_rejects_chance_node_games() {
         0,
         &mut eval,
     );
-}
-
-#[test]
-#[should_panic(expected = "chance-node")]
-fn direct_expectimax_rejects_chance_node_games() {
-    let _ = search_many(
+    assert_eq!(evals.len(), 1);
+    let results = search_many(
         &NodeyTwo,
         &Enc,
         &Zero,
@@ -1097,14 +1094,14 @@ fn direct_expectimax_rejects_chance_node_games() {
         vec![(St { tick: 0 }, 0)],
         false,
         0,
-        |_players: &[usize], _obs: Vec<f32>, n: usize| vec![0.0; n * 2],
+        |_players: &[usize], _obs: Vec<f32>, n: usize| vec![0.0; n * 4],
     );
+    assert_eq!(results.len(), 1);
 }
 
 #[test]
-#[should_panic(expected = "chance-node")]
-fn engine_rejects_search_policies_on_chance_node_games() {
-    let _ = Engine::new(
+fn engine_accepts_search_policies_on_chance_node_games() {
+    let mut engine = Engine::new(
         NodeyTwo,
         Box::new(Enc),
         Box::new(Zero),
@@ -1115,6 +1112,8 @@ fn engine_rejects_search_policies_on_chance_node_games() {
             seed: 0,
         },
     );
+    let (records, _) = engine.collect(4, |_obs: Vec<f32>, n: usize| vec![0.0; n * 2]);
+    assert!(records.len() >= 4);
 }
 
 /// `NodeyTwo` whose root IS the chance node — a declared deal, realized at episode birth by

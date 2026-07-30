@@ -38,8 +38,9 @@ pub struct AlphaZeroConfig {
     /// `∝ visits^(1/temperature)` for the first `temperature_drop` plies, 0 acts greedily.
     pub temperature: f64,
     pub temperature_drop: u32,
-    /// How the search consumes stochastic transitions' declared chance (see
-    /// [`ChanceMode`](crate::ChanceMode)). Inert for games that declare no `chance_outcomes`.
+    /// How the search consumes the game's declared chance — explicit chance states and
+    /// transition-attached distributions alike (see [`ChanceMode`](crate::ChanceMode)). Inert
+    /// for deterministic games.
     pub chance: ChanceMode,
     /// Simultaneous games: which root priors the Dirichlet noise perturbs — the requester's
     /// only, or every agent's. Irrelevant for sequential games (one root table).
@@ -102,7 +103,7 @@ impl Policy for AlphaZero {
     type PolicyState = u32; // plies acted this episode — drives the temperature_drop cutoff
 
     fn supports_chance_nodes(&self) -> bool {
-        false // no chance ply: an outcome-dependent payout is unscorable in this tree
+        true // fixed-probability chance plies: sampled/committed/enumerated per ChanceMode
     }
 
     fn supports_imperfect_information(&self) -> bool {
