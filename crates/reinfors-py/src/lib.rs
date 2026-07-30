@@ -2614,7 +2614,7 @@ fn build_engine(
             Box::new(KuhnEncoder { players }),
             Box::new(reward),
             Box::new(AlwaysInitialState),
-            Some(Box::new(KuhnPoker::default())),
+            Some(Box::new(KuhnPoker { players })),
             policy,
             learner,
             engine_params,

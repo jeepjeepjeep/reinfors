@@ -50,6 +50,33 @@ def test_engine_collects_three_player_kuhn() -> None:
     assert rebuilt.resolved_config()["game"]["players"] == 3
 
 
+def test_engine_snapshot_round_trips_three_player_kuhn() -> None:
+    """The engine codec must carry the 3-player game (a 2-player codec rejects 3-card deals
+    at decode with "every card must be dealt")."""
+    engine = rf.Engine(
+        rf.games.KuhnPoker(players=3),
+        rf.Reward(),
+        rf.policies.EpsilonGreedyQ(n_heads=1, epsilon=0.2),
+        rf.learners.Dqn(),
+        n_games=4,
+        seed=5,
+    )
+
+    def infer(obs: np.ndarray) -> np.ndarray:
+        return np.zeros((obs.shape[0], 1, 2))
+
+    def sig(n: int) -> dict[str, bytes]:
+        b = engine.collect(n, infer)
+        arrays = ((k, getattr(b, k, None)) for k in dir(b))
+        return {k: np.ascontiguousarray(v).tobytes() for k, v in arrays if isinstance(v, np.ndarray)}
+
+    sig(30)  # advance mid-hand so live states go through the codec
+    snap = engine.snapshot()
+    ahead = sig(40)
+    engine.restore(snap)
+    assert sig(40) == ahead
+
+
 def _env_at_deal(cards: list[int]) -> "rf.Env":
     """Our env realized at the exact target deal (24 deals; reseeding is cheap)."""
     for seed in range(5000):
