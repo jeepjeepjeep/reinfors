@@ -360,7 +360,7 @@ def main() -> None:
             adv_sizes = "/".join(str(b.size) for b in shown)
             line = (
                 f"iter {it:4d}  wall {wall:6.1f}s  adv buffers {adv_sizes}  "
-                f"strategy {strategy_buffer.size}  infer share {infer_share / (2 * it):.0%}"
+                f"strategy {strategy_buffer.size}  infer share {infer_share / (n_players * it):.0%}"
             )
             if enumerable:
                 e = solver.exploitability(make_policy_infer(policy_net, args.device))
@@ -382,7 +382,8 @@ def main() -> None:
     if enumerable:
         e = solver.exploitability(policy_infer)
         print(f"final exploitability: {e:.4f}")
-    if args.game == "kuhn_poker":
+    if args.game == "kuhn_poker" and args.players == 2:
+        # The classic alpha-parameterized infoset numbers exist only for the 2-player game.
         print("learned strategy at the classic infosets (mixed = the point):")
         print(kuhn_strategy_report(policy_infer))
     if args.game == "texas_holdem" and args.holdem_eval:
