@@ -116,9 +116,9 @@ pub trait Policy {
 }
 
 /// How the tree search consumes the game's declared chance — an explicit chance state's
-/// [`Game::chance_node`] distribution or a transition-attached [`Game::chance_outcomes`] one
-/// alike. The *game seam* is one thing — the distribution, declared; this enum is the *search
-/// policy* over it, and the right mode is decided by one ratio:
+/// [`Game::chance_node`] distribution (the canonical seam) or a deprecated transition-attached
+/// [`Game::chance_outcomes`] one. The *game seam* is one thing — the distribution, declared;
+/// this enum is the *search policy* over it, and the right mode is decided by one ratio:
 /// **simulations-per-chance-edge vs. fan width** (the number of outcomes).
 ///
 /// Worked contrast (snake, 3 free cells A/B/C for the respawn, V ≈ +0.9 / +0.3 / −0.3, 30 sims

@@ -16,8 +16,9 @@
 //! reinfors-games) build a `SearchConfig` and a `Game` and call [`search_many`].
 //!
 //! Chance comes from the game's *declared* distributions — explicit chance states
-//! (`Game::chance_node`, chains flattened into the branch fan) and transition-attached
-//! `chance_outcomes` alike; the env realizes from the same declarations —
+//! (`Game::chance_node`, the canonical seam; chains flattened into the branch fan) and the
+//! deprecated transition-attached `chance_outcomes`; the env realizes from the same
+//! declarations —
 //! fanned per the configured [`ChanceMode`]: `Committed{k}` draws k
 //! equal-weight realizations (the historical `food_samples` estimator), `ExpandAll` fans every
 //! outcome at its true probability (exact). A deterministic transition keeps a single child. Each

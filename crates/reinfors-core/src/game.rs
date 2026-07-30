@@ -143,10 +143,12 @@ pub trait Game {
 
     fn step(&self, state: &Self::State, actions: &[usize]) -> Transition<Self::State, Self::Event>;
 
-    /// The transition's chance distribution, *declared* (see [`ChanceDist`]): over the outcome
-    /// indices that [`apply_chance`](Self::apply_chance) accepts. `None` means the transition is
-    /// deterministic. This is the game's ONLY chance seam — there is no game-side sampler to
-    /// diverge from it. The framework realizes env transitions from it ([`step_env`], one draw),
+    /// DEPRECATED transition-attached chance (explicit chance states — `Actor::Chance` +
+    /// [`chance_node`](Self::chance_node) — are the canonical seam; no in-repo game implements
+    /// this one, and the framework serves it only until the removal PR). The transition's chance
+    /// distribution, *declared* (see [`ChanceDist`]): over the outcome indices that
+    /// [`apply_chance`](Self::apply_chance) accepts. `None` means the transition is
+    /// deterministic. The framework realizes env transitions from it ([`step_env`], one draw),
     /// and tree searches consume it per their configured [`ChanceMode`](crate::ChanceMode).
     /// Contract: `Weighted` probabilities are positive; `Uniform` counts are in `1..=2^53`;
     /// terminal transitions return `None`; and outcomes only vary the chance element — they share
@@ -160,7 +162,8 @@ pub trait Game {
     #[deprecated(
         note = "declare an explicit chance state instead (Actor::Chance + chance_node/\
                 apply_chance_node) — the canonical chance abstraction; this transition-attached \
-                seam has no in-repo users and is removal-pending"
+                seam has no in-repo game implementations (framework compatibility paths \
+                still serve it) and is removal-pending"
     )]
     fn chance_outcomes(
         &self,
@@ -177,7 +180,8 @@ pub trait Game {
     #[deprecated(
         note = "declare an explicit chance state instead (Actor::Chance + chance_node/\
                 apply_chance_node) — the canonical chance abstraction; this transition-attached \
-                seam has no in-repo users and is removal-pending"
+                seam has no in-repo game implementations (framework compatibility paths \
+                still serve it) and is removal-pending"
     )]
     fn apply_chance(
         &self,
