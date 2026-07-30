@@ -554,6 +554,8 @@ impl<G: Game> DeepCfrSolver<G> {
     /// Apply one decision: the deterministic step plus any transition-attached chance draw
     /// (outcome-invariant events, per the chance contract). Chance-NODE chains on the
     /// resulting state are the descent loop's job.
+    // The framework serves the deprecated transition-chance seam until its removal PR.
+    #[allow(deprecated)]
     fn realize_transition(
         &self,
         state: &G::State,

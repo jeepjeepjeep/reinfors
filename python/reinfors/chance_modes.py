@@ -1,8 +1,8 @@
 """``rf.chance_modes`` — how a search consumes a stochastic transition's declared distribution,
 passed to a search policy's ``chance=`` kwarg.
 
-The game *declares* chance (explicit chance states and transition-attached distributions
-alike); these handles pick the search policy over it. Parameterized variants carry their
+The game *declares* chance (explicit chance states — the canonical model); these handles
+pick the search policy over it. Parameterized variants carry their
 parameters here (the ``rf.encoders`` pattern):
 ``AlwaysResample()`` (fresh draw per descent — unbiased, the MCTS/AZ default), ``Committed(samples=k)``
 (freeze k draws per edge and plan deeply inside them — expectimax's default at k=1, the wide-fan

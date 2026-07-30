@@ -390,6 +390,8 @@ impl<G: Game> CfrSolver<G> {
 
     /// Fold a realized transition into the recursion: edge rewards + terminal stop +
     /// transition-attached chance enumeration + the child state.
+    // The framework serves the deprecated transition-chance seam until its removal PR.
+    #[allow(deprecated)]
     fn transition_values(
         &mut self,
         state: &G::State,
@@ -492,6 +494,8 @@ impl<G: Game> CfrSolver<G> {
         }
     }
 
+    // The framework serves the deprecated transition-chance seam until its removal PR.
+    #[allow(deprecated)]
     fn sampled_transition(
         &mut self,
         state: &G::State,
@@ -549,6 +553,8 @@ impl<G: Game> CfrSolver<G> {
         }
     }
 
+    // The framework serves the deprecated transition-chance seam until its removal PR.
+    #[allow(deprecated)]
     fn profile_transition(&self, state: &G::State, t: &Transition<G::State, G::Event>) -> [f64; 2] {
         let r = self.edge_rewards(t);
         if t.terminal {

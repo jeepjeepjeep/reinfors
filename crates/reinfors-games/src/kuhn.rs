@@ -123,11 +123,7 @@ impl Game for KuhnPoker {
     fn apply_chance_node(&self, state: &KuhnState, outcome: usize) -> Transition<KuhnState, f64> {
         let mut next = state.clone();
         next.cards.push(self.remaining(state)[outcome]);
-        Transition {
-            next_state: next,
-            events: vec![None; 2],
-            terminal: false,
-        }
+        Transition::silent(next, 2)
     }
 
     fn legal_actions(&self, state: &KuhnState, agent: usize) -> Vec<usize> {

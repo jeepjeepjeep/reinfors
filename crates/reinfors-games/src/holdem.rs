@@ -462,11 +462,7 @@ impl Game for TexasHoldem {
             next.to_act = self
                 .next_seat(next.to_act, |i| next.needs_action[i])
                 .expect("someone still owes an action");
-            return Transition {
-                next_state: next,
-                events: vec![None; self.num_players],
-                terminal: false,
-            };
+            return Transition::silent(next, self.num_players);
         }
         // The street closes.
         if next.street == Street::River {
@@ -482,11 +478,7 @@ impl Game for TexasHoldem {
         // reveal(s) from `chance_node` — several chained when everyone is all-in — before any
         // agent sees the state.
         self.close_street(&mut next);
-        Transition {
-            next_state: next,
-            events: vec![None; self.num_players],
-            terminal: false,
-        }
+        Transition::silent(next, self.num_players)
     }
 
     fn chance_nodes(&self) -> bool {
@@ -550,11 +542,7 @@ impl Game for TexasHoldem {
         let mut next = state.clone();
         if next.button == n {
             next.button = outcome;
-            return Transition {
-                next_state: next,
-                events: vec![None; n],
-                terminal: false,
-            };
+            return Transition::silent(next, n);
         }
         if next.hole.len() < n {
             let deck = next.remaining_deck();
@@ -580,11 +568,7 @@ impl Game for TexasHoldem {
                 next.to_act = if n == 2 { next.button } else { (bb + 1) % n };
                 debug_assert!(next.needs_action[next.to_act]);
             }
-            return Transition {
-                next_state: next,
-                events: vec![None; n],
-                terminal: false,
-            };
+            return Transition::silent(next, n);
         }
         let deck = next.remaining_deck();
         let missing = next.street.board_len() - next.board.len();
@@ -593,11 +577,7 @@ impl Game for TexasHoldem {
         }
         self.open_betting(&mut next);
         if next.needs_action.iter().any(|&b| b) {
-            return Transition {
-                next_state: next,
-                events: vec![None; self.num_players],
-                terminal: false,
-            };
+            return Transition::silent(next, self.num_players);
         }
         // Betting is moot (fewer than two seats can bet). River complete: showdown; otherwise
         // the runout continues — the next street is itself a chance node.
@@ -611,11 +591,7 @@ impl Game for TexasHoldem {
             };
         }
         next.street = next.street.next();
-        Transition {
-            next_state: next,
-            events: vec![None; self.num_players],
-            terminal: false,
-        }
+        Transition::silent(next, self.num_players)
     }
 
     fn initial_state(&self, _rng: &mut dyn Rng) -> HoldemState {

@@ -16,8 +16,9 @@
 //! reinfors-games) build a `SearchConfig` and a `Game` and call [`search_many`].
 //!
 //! Chance comes from the game's *declared* distributions — explicit chance states
-//! (`Game::chance_node`, chains flattened into the branch fan) and transition-attached
-//! `chance_outcomes` alike; the env realizes from the same declarations —
+//! (`Game::chance_node`, the canonical seam; chains flattened into the branch fan) and the
+//! deprecated transition-attached `chance_outcomes`; the env realizes from the same
+//! declarations —
 //! fanned per the configured [`ChanceMode`]: `Committed{k}` draws k
 //! equal-weight realizations (the historical `food_samples` estimator), `ExpandAll` fans every
 //! outcome at its true probability (exact). A deterministic transition keeps a single child. Each
@@ -606,6 +607,8 @@ fn agent_branching<G: Game>(
 /// transition fans per the configured `ChanceMode` over the game's declared distribution — the
 /// same declaration the env realizes from, so search and env cannot diverge.
 #[allow(clippy::too_many_arguments)]
+// The framework serves the deprecated transition-chance seam until its removal PR.
+#[allow(deprecated)]
 fn push_branches<G: Game>(
     arena: &mut Vec<Node<G::State>>,
     game: &G,

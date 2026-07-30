@@ -513,11 +513,7 @@ impl Game for Backgammon {
         }
         next.dice = ROLLS[outcome];
         // The roll settles nothing by itself — outcomes ride the checker plays it enables.
-        Transition {
-            next_state: next,
-            events: vec![None, None],
-            terminal: false,
-        }
+        Transition::silent(next, 2)
     }
 
     fn all_chance_declared(&self) -> bool {

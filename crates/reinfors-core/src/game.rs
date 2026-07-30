@@ -36,6 +36,18 @@ pub struct Transition<S, E> {
     pub terminal: bool,
 }
 
+impl<S, E> Transition<S, E> {
+    /// An edge that settles nothing: neutral events for every agent, game continues — the shape
+    /// of interior chance edges (a deal, a reveal, a roll) and quiet decision edges alike.
+    pub fn silent(next_state: S, num_agents: usize) -> Self {
+        Transition {
+            next_state,
+            events: (0..num_agents).map(|_| None).collect(),
+            terminal: false,
+        }
+    }
+}
+
 /// A transition's declared chance distribution over its outcome indices. `Weighted` is the
 /// general form (backgammon's 21 rolls). `Uniform(count)` declares a uniform distribution over
 /// `count` outcomes in O(1) at ANY size — the outcome space can be combinatorial (snake's
@@ -131,10 +143,12 @@ pub trait Game {
 
     fn step(&self, state: &Self::State, actions: &[usize]) -> Transition<Self::State, Self::Event>;
 
-    /// The transition's chance distribution, *declared* (see [`ChanceDist`]): over the outcome
-    /// indices that [`apply_chance`](Self::apply_chance) accepts. `None` means the transition is
-    /// deterministic. This is the game's ONLY chance seam — there is no game-side sampler to
-    /// diverge from it. The framework realizes env transitions from it ([`step_env`], one draw),
+    /// DEPRECATED transition-attached chance (explicit chance states — `Actor::Chance` +
+    /// [`chance_node`](Self::chance_node) — are the canonical seam; no in-repo game implements
+    /// this one, and the framework serves it only until the removal PR). The transition's chance
+    /// distribution, *declared* (see [`ChanceDist`]): over the outcome indices that
+    /// [`apply_chance`](Self::apply_chance) accepts. `None` means the transition is
+    /// deterministic. The framework realizes env transitions from it ([`step_env`], one draw),
     /// and tree searches consume it per their configured [`ChanceMode`](crate::ChanceMode).
     /// Contract: `Weighted` probabilities are positive; `Uniform` counts are in `1..=2^53`;
     /// terminal transitions return `None`; and outcomes only vary the chance element — they share
@@ -145,6 +159,12 @@ pub trait Game {
     /// fit this seam; that is a chance NODE (`Actor::Chance` + [`chance_node`](Self::chance_node)),
     /// the fully general form every consumer traverses. The default declares every
     /// transition deterministic.
+    #[deprecated(
+        note = "declare an explicit chance state instead (Actor::Chance + chance_node/\
+                apply_chance_node) — the canonical chance abstraction; this transition-attached \
+                seam has no in-repo game implementations (framework compatibility paths \
+                still serve it) and is removal-pending"
+    )]
     fn chance_outcomes(
         &self,
         state: &Self::State,
@@ -157,6 +177,12 @@ pub trait Game {
     /// Materialize outcome `outcome` (an index into the `chance_outcomes` probabilities) of the
     /// transition's chance distribution. Only called with indices of a `Some` distribution; games
     /// that declare no chance never see it.
+    #[deprecated(
+        note = "declare an explicit chance state instead (Actor::Chance + chance_node/\
+                apply_chance_node) — the canonical chance abstraction; this transition-attached \
+                seam has no in-repo game implementations (framework compatibility paths \
+                still serve it) and is removal-pending"
+    )]
     fn apply_chance(
         &self,
         state: &Self::State,
@@ -314,6 +340,8 @@ fn push_edge_events<E>(trace: &mut Vec<(usize, E)>, events: Vec<Option<E>>, num_
 /// training trajectories are made of are the same object by construction — divergence is not
 /// expressible. (The cost: realization materializes the probs vector; a game with a very large
 /// outcome space pays that per stochastic tick — acceptable today, revisit if measured.)
+// The framework serves the deprecated transition-chance seam until its removal PR.
+#[allow(deprecated)]
 pub fn step_env<G: Game>(
     game: &G,
     state: &G::State,

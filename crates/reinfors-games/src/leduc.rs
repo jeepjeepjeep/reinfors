@@ -182,11 +182,7 @@ impl Game for LeducPoker {
         } else {
             next.public = Some(card);
         }
-        Transition {
-            next_state: next,
-            events: vec![None; 2],
-            terminal: false,
-        }
+        Transition::silent(next, 2)
     }
 
     fn legal_actions(&self, state: &LeducState, agent: usize) -> Vec<usize> {

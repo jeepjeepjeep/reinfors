@@ -19,8 +19,8 @@
 //! never UCB/PUCT arms, never net-evaluated, transparent to depth/discount/perspective.
 //!
 //! **Chance** comes from the game's *declared* distributions — explicit chance states
-//! ([`Game::chance_node`], chains descended lazily or flattened under `ExpandAll`) and
-//! transition-attached [`Game::chance_outcomes`] alike —
+//! ([`Game::chance_node`], the canonical seam; chains descended lazily or flattened under
+//! `ExpandAll`) and the deprecated transition-attached [`Game::chance_outcomes`] —
 //! consumed per the configured [`ChanceMode`]: chance nodes sit between a
 //! decision edge and its outcome children, transparent to backup (the decision edge carries the
 //! reward and the discount). Games that declare no chance build byte-identical trees to before.
@@ -126,8 +126,8 @@ pub struct MctsConfig {
     /// of a sequential game, like AlphaZero's); `u32::MAX` means the whole episode. Irrelevant when
     /// `temperature == 0`.
     pub temperature_drop: u32,
-    /// How the search consumes the game's declared chance — explicit chance states and
-    /// transition-attached distributions alike (see [`ChanceMode`]). Inert for deterministic
+    /// How the search consumes the game's declared chance — explicit chance states (and the
+    /// deprecated transition-attached seam) — see [`ChanceMode`]. Inert for deterministic
     /// games.
     pub chance: ChanceMode,
 }
@@ -795,6 +795,8 @@ impl<S: Clone> Tree<S> {
     /// Build the decision child for outcome `slot` of chance node `cni`, re-deriving the parent
     /// edge's transition (chance nodes store no transition; one extra `Game::step` per
     /// materialization, never per descent).
+    // The framework serves the deprecated transition-chance seam until its removal PR.
+    #[allow(deprecated)]
     fn materialize_outcome<G>(
         &mut self,
         game: &G,
@@ -1021,6 +1023,8 @@ impl<S: Clone> Tree<S> {
     /// deterministic transition appends the child directly; a declared-chance transition appends a
     /// chance node instead (drawing `Committed` outcomes now, or materializing every outcome for
     /// `ExpandAll`).
+    // The framework serves the deprecated transition-chance seam until its removal PR.
+    #[allow(deprecated)]
     fn expand<G>(
         &mut self,
         game: &G,
@@ -1116,6 +1120,8 @@ impl<S: Clone> Tree<S> {
     /// recorded from the pre-chance transition — outcome-invariant by the `chance_outcomes`
     /// contract (chance that changed the reward would not fit this seam).
     #[allow(clippy::too_many_arguments)]
+    // The framework serves the deprecated transition-chance seam until its removal PR.
+    #[allow(deprecated)]
     fn expand_chance<G>(
         &mut self,
         game: &G,
