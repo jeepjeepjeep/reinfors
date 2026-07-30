@@ -285,7 +285,8 @@ fn searches_backgammon_dice_chance() {
     // deterministic, sane per-agent evaluations.
     use reinfors_games::{Backgammon, BackgammonReward, BackgammonTesauro};
     let g = Backgammon::default();
-    let state = g.initial_state(&mut NoRng);
+    // The opening is a root chance phase now — searches receive realized decision states.
+    let state = reinfors_core::realize_initial_state(&g, &mut NoRng);
     let reward = BackgammonReward::default();
     let run = |seed: u64| {
         let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 1353]; // A logits + value

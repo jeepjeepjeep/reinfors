@@ -2,13 +2,15 @@
 //! and observation encoding deliberately mirror OpenSpiel's `backgammon` (pinned in the benchmarks
 //! repo) so legal-move sets and encodings can be parity-tested position-for-position against it.
 //!
-//! **Chance modeling**: the dice look pre-decision (roll, then move) but fold into the state — a
-//! turn's transition *includes the next roll as its declared chance*: `step` applies the mover's
-//! two half-moves and hands off with dice unset; `chance_outcomes` declares the 21 distinct rolls
-//! (non-doubles 1/18, doubles 1/36 — a non-uniform declaration) and `apply_chance(i)` stamps roll
-//! `i` in. A doubles turn whose first action used both dice re-arms the SAME dice for the same
-//! player (an extra turn) — a deterministic transition, no chance declared. The opening (who
-//! starts + first roll, doubles excluded) is `initial_state` chance: 30 uniform outcomes.
+//! **Chance modeling**: explicit chance states throughout, and every random element declared
+//! (`all_chance_declared`). A completed turn hands off at the AwaitingRoll chance state (dice
+//! unset → `Actor::Chance`); `chance_node` declares the 21 distinct rolls (non-doubles 1/18,
+//! doubles 1/36) and `apply_chance_node(i)` stamps roll `i` in with neutral events. A doubles
+//! turn whose first action used both dice re-arms the SAME dice for the same player (an extra
+//! turn) — a deterministic transition, no chance state. The opening (who starts + first roll,
+//! doubles excluded) is a ROOT chance phase: `initial_state` draws nothing and returns the
+//! pre-roll state; its chance node declares 30 uniform outcomes (0–14 = X starts with roll i,
+//! 15–29 = O starts — OpenSpiel's `turns_ == -1` node), realized at episode birth.
 //!
 //! **Action space** (OpenSpiel-compatible, 1352): one turn = one action encoding two half-moves as
 //! 2 digits base 26 (source 0–23, bar = 24, pass = 25): `dig1 * 26 + dig0`, plus 676 when the LOW
@@ -82,11 +84,15 @@ pub struct BackgammonState {
     pub bar: [u8; 2],
     pub scores: [u8; 2],
     pub to_move: u8,
-    /// The two dice for the mover, 1–6; `die + 6` marks a used die; `[0, 0]` = awaiting the roll
-    /// (only ever observable inside a transition, before `apply_chance` stamps the next roll).
+    /// The two dice for the mover, 1–6; `die + 6` marks a used die; `[0, 0]` = the AwaitingRoll
+    /// chance state (transient — the framework realizes it before anyone moves).
     pub dice: [u8; 2],
     /// This action is the second half of a doubles turn (same dice re-armed, no fresh roll).
     pub double_turn: bool,
+    /// The root chance phase: the opening draw (starter + first roll) has not happened yet.
+    /// Transient — realized at episode birth; never observable afterwards.
+    #[serde(default)]
+    pub opening: bool,
 }
 
 pub struct Backgammon {
@@ -471,6 +477,11 @@ impl Game for Backgammon {
 
     fn chance_node(&self, state: &BackgammonState) -> reinfors_core::ChanceDist {
         debug_assert_eq!(state.dice, [0, 0], "chance only at AwaitingRoll states");
+        if state.opening {
+            // The opening: a non-double roll and who starts — 0–14 = X with `ROLLS[i]`,
+            // 15–29 = O with `ROLLS[i - 15]` (OpenSpiel's `turns_ == -1` node).
+            return reinfors_core::ChanceDist::Uniform(30);
+        }
         // The 21 distinct rolls in `ROLLS` order: 15 non-doubles at 1/18, 6 doubles at 1/36.
         let mut probs = vec![1.0 / 18.0; 21];
         for p in probs.iter_mut().skip(15) {
@@ -485,6 +496,21 @@ impl Game for Backgammon {
         outcome: usize,
     ) -> Transition<BackgammonState, BackgammonEvent> {
         let mut next = state.clone();
+        if state.opening {
+            let (starter, roll) = if outcome < 15 {
+                (0u8, outcome)
+            } else {
+                (1u8, outcome - 15)
+            };
+            next.opening = false;
+            next.to_move = starter;
+            next.dice = ROLLS[roll];
+            return Transition {
+                next_state: next,
+                events: vec![None, None],
+                terminal: false,
+            };
+        }
         next.dice = ROLLS[outcome];
         // The roll settles nothing by itself — outcomes ride the checker plays it enables.
         Transition {
@@ -494,18 +520,22 @@ impl Game for Backgammon {
         }
     }
 
-    fn initial_state(&self, rng: &mut dyn Rng) -> BackgammonState {
-        // The opening: 30 uniform outcomes — a non-double roll, 0–14 = X starts, 15–29 = O starts
-        // (OpenSpiel's turns_ == -1 chance node).
-        let draw = rng.below(30);
-        let (starter, roll) = if draw < 15 { (0, draw) } else { (1, draw - 15) };
+    fn all_chance_declared(&self) -> bool {
+        true // initial_state draws nothing; the opening is the root chance phase
+    }
+
+    fn initial_state(&self, _rng: &mut dyn Rng) -> BackgammonState {
+        // The opening is a declared ROOT chance phase (30 uniform outcomes — see `chance_node`);
+        // `initial_state` draws nothing, which is what `all_chance_declared` claims. The
+        // framework realizes the draw at episode birth.
         BackgammonState {
             board: BackgammonState::initial_board(),
             bar: [0, 0],
             scores: [0, 0],
-            to_move: starter as u8,
-            dice: ROLLS[roll],
+            to_move: 0, // placeholder until the opening draw decides the starter
+            dice: [0, 0],
             double_turn: false,
+            opening: true,
         }
     }
 
@@ -641,6 +671,7 @@ mod tests {
             to_move,
             dice,
             double_turn: false,
+            opening: false,
         }
     }
 
@@ -650,7 +681,7 @@ mod tests {
         let g = game();
         let mut seen = [[false; 2]; 15];
         for _ in 0..2000 {
-            let s = g.initial_state(&mut TestRng(rand_seed()));
+            let s = reinfors_core::game::realize_initial_state(&g, &mut TestRng(rand_seed()));
             assert_ne!(s.dice[0], s.dice[1], "opening roll is never a double");
             let roll = ROLLS.iter().position(|r| *r == s.dice).unwrap();
             assert!(roll < 15);
@@ -672,7 +703,7 @@ mod tests {
     fn encode_decode_roundtrip_on_legal_actions() {
         let g = game();
         let mut rng = TestRng(3);
-        let mut s = g.initial_state(&mut rng);
+        let mut s = reinfors_core::game::realize_initial_state(&g, &mut rng);
         for _ in 0..200 {
             let legal = g.legal_actions(&s, usize::from(s.to_move));
             assert!(!legal.is_empty());
@@ -691,7 +722,7 @@ mod tests {
             let a = legal[rng.below(legal.len())];
             let t = g.step(&s, &[a, a]);
             if t.terminal {
-                s = g.initial_state(&mut rng);
+                s = reinfors_core::game::realize_initial_state(&g, &mut rng);
             } else {
                 s = t.next_state;
                 while matches!(g.actor(&s), Actor::Chance) {
@@ -712,7 +743,7 @@ mod tests {
         let mut rng = TestRng(11);
         let mut finished = 0;
         for _ in 0..8 {
-            let mut s = g.initial_state(&mut rng);
+            let mut s = reinfors_core::game::realize_initial_state(&g, &mut rng);
             for _tick in 0..2000 {
                 for p in 0..2 {
                     assert_eq!(
@@ -937,7 +968,7 @@ mod tests {
     #[test]
     fn tesauro_encoding_shape_and_perspective() {
         let g = game();
-        let s = g.initial_state(&mut TestRng(5));
+        let s = reinfors_core::game::realize_initial_state(&g, &mut TestRng(5));
         let enc = BackgammonTesauro;
         let a = enc.encode(&s, 0);
         let b = enc.encode(&s, 1);
@@ -946,6 +977,45 @@ mod tests {
         assert_ne!(a, b, "egocentric views differ");
         assert_eq!(enc.obs_shape(), (200, 1, 1));
     }
+    #[test]
+    fn the_opening_is_a_declared_root_chance_phase() {
+        struct Poisoned;
+        impl Rng for Poisoned {
+            fn below(&mut self, _n: usize) -> usize {
+                panic!("initial_state must draw nothing")
+            }
+            fn unit(&mut self) -> f64 {
+                panic!("initial_state must draw nothing")
+            }
+        }
+        let g = game();
+        assert!(g.all_chance_declared());
+        let root = g.initial_state(&mut Poisoned); // proves the claim: no private sampling
+        assert!(matches!(g.actor(&root), Actor::Chance));
+        assert!(g.legal_actions(&root, 0).is_empty() && g.legal_actions(&root, 1).is_empty());
+        let dist = g.chance_node(&root);
+        assert_eq!(dist, reinfors_core::ChanceDist::Uniform(30));
+        for outcome in 0..30 {
+            let t = g.apply_chance_node(&root, outcome);
+            assert!(!t.terminal);
+            assert!(t.events.iter().all(Option::is_none));
+            let s = t.next_state;
+            assert!(!s.opening);
+            let (starter, roll) = if outcome < 15 {
+                (0, outcome)
+            } else {
+                (1, outcome - 15)
+            };
+            assert_eq!(usize::from(s.to_move), starter);
+            assert_eq!(s.dice, ROLLS[roll]);
+            assert_ne!(s.dice[0], s.dice[1], "the opening roll is never a double");
+        }
+        // Birth realization runs the root phase to a realized decision state.
+        let born = reinfors_core::game::realize_initial_state(&g, &mut TestRng(3));
+        assert!(!born.opening);
+        assert!(matches!(g.actor(&born), Actor::Agent(_)));
+    }
+
     fn tests_weighted(rng: &mut dyn Rng, probs: &[f64]) -> usize {
         let total: f64 = probs.iter().sum();
         let mut r = rng.unit() * total;
@@ -963,11 +1033,12 @@ impl reinfors_core::StateCodec for Backgammon {
     type State = BackgammonState;
 
     fn encode(&self, s: &BackgammonState) -> Vec<u8> {
-        crate::codec_util::serde_encode(2, s)
+        // Layout 3: the `opening` root-chance flag joined the state.
+        crate::codec_util::serde_encode(3, s)
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<BackgammonState, String> {
-        crate::codec_util::serde_decode(2, bytes)
+        crate::codec_util::serde_decode(3, bytes)
     }
 
     // Safety per the narrowed contract: the 15-checker sum bounds every count the move logic
@@ -975,6 +1046,10 @@ impl reinfors_core::StateCodec for Backgammon {
     // borne-off scores (no state-side flag exists), so the envelope check compares against the
     // single derived source, not a duplicate.
     fn validate_decoded_state(&self, state: &BackgammonState, done: bool) -> Result<(), String> {
+        if state.opening {
+            // The opening draw is realized at episode birth; positions cannot await it.
+            return Err("the opening roll is realized at episode birth".to_string());
+        }
         if state.to_move > 1 {
             return Err(format!("to_move {} out of range", state.to_move));
         }
@@ -1034,7 +1109,7 @@ mod codec_tests {
             }
         }
         let game = Backgammon { max_ticks: None };
-        let s = game.initial_state(&mut R(9));
+        let s = reinfors_core::game::realize_initial_state(&game, &mut R(9));
         (game, s)
     }
 
