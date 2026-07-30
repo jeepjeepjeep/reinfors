@@ -211,9 +211,10 @@ class PolicyHandle:
     # per-agent statistics) games. act_by: "value" | "visits".
     # temperature > 0 (AlphaZero-style) samples the first temperature_drop plies of each episode
     # ∝ visits^(1/temperature) for training self-play diversity (None = whole episode); 0 = greedy.
-    # chance_mode (declared-chance games): "always_resample" (fresh draw ∝ p per descent, unbiased
-    # default) | "committed" (freeze chance_samples draws per edge — food_samples-style, for wide
-    # fans) | "expand_all" (evaluate every outcome at expansion — exact, narrow fans).
+    # chance_mode (declared-chance games, explicit chance states included): "always_resample"
+    # (fresh draw ∝ p per descent, unbiased default) | "committed" (freeze chance_samples draws
+    # per edge — food_samples-style, for wide fans) | "expand_all" (evaluate every outcome at
+    # expansion — exact, narrow fans).
     @staticmethod
     def Mcts(
         num_simulations: int = ...,

@@ -648,6 +648,77 @@ fn expand_all_flattens_chains_with_decision_continuations() {
     assert!(q > 9.9 && q <= 10.0 + 1e-9, "{q}");
 }
 
+/// Seed outcome 0 chains into a cap-sized fan while outcome 1 is still unprocessed: the
+/// aggregate projected-size check must count BOTH, so the flatten rejects — a per-seed bound
+/// would let the fan reach nearly twice the documented cap.
+struct WideChain;
+impl Game for WideChain {
+    type State = St;
+    type Event = f64;
+    fn num_agents(&self) -> usize {
+        1
+    }
+    fn action_count(&self) -> usize {
+        1
+    }
+    fn chance_nodes(&self) -> bool {
+        true
+    }
+    fn actor(&self, s: &St) -> Actor {
+        if (1..=2).contains(&s.tick) {
+            Actor::Chance
+        } else {
+            Actor::Agent(0)
+        }
+    }
+    fn legal_actions(&self, s: &St, _agent: usize) -> Vec<usize> {
+        if s.tick == 0 {
+            vec![0]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, _s: &St, _actions: &[usize]) -> Transition<St, f64> {
+        Transition {
+            next_state: St { tick: 1 },
+            events: vec![None],
+            terminal: false,
+        }
+    }
+    fn chance_node(&self, s: &St) -> ChanceDist {
+        if s.tick == 1 {
+            ChanceDist::Weighted(vec![0.5, 0.5])
+        } else {
+            ChanceDist::Uniform(reinfors_core::MAX_ENUMERATED_OUTCOMES)
+        }
+    }
+    fn apply_chance_node(&self, s: &St, outcome: usize) -> Transition<St, f64> {
+        if s.tick == 1 && outcome == 0 {
+            Transition {
+                next_state: St { tick: 2 },
+                events: vec![None],
+                terminal: false,
+            }
+        } else {
+            Transition {
+                next_state: St { tick: 9 },
+                events: vec![None],
+                terminal: true,
+            }
+        }
+    }
+    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+        St { tick: 0 }
+    }
+}
+
+#[test]
+#[should_panic(expected = "flattened fan exceeds the enumeration bound")]
+fn the_flattened_fan_cap_counts_unprocessed_outcomes() {
+    let cfg = mcts_cfg(1, 8, 0.5, ChanceMode::ExpandAll);
+    let _ = run_mcts(&WideChain, branch_chance, &cfg, vec![(St { tick: 0 }, 0)]);
+}
+
 /// A chance state that always chains to another chance state — the framework must turn the
 /// cycle into a loud panic, not an infinite loop.
 struct Cycler;

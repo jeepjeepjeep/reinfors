@@ -15,12 +15,13 @@
 //! any N: each node keeps one [`AgentTable`] per agent, each agent independently applies the
 //! ordinary UCT/PUCT rule over its OWN table, the tuple steps the game as a joint action, and
 //! backup is per-agent own-perspective. A game must be uniformly one dynamics or the other
-//! (asserted); `Actor::Chance` (the explicit chance *player*) remains rejected — declare
-//! post-transition chance via `Game::chance_outcomes` instead.
+//! (asserted); `Actor::Chance` states are traversed as fixed-probability chance nodes —
+//! never UCB/PUCT arms, never net-evaluated, transparent to depth/discount/perspective.
 //!
-//! **Stochastic transitions** (post-move environment chance, e.g. a spawn after a move) are
-//! supported through the game's *declared* distribution — [`Game::chance_outcomes`] +
-//! [`Game::apply_chance`] — consumed per the configured [`ChanceMode`]: chance nodes sit between a
+//! **Chance** comes from the game's *declared* distributions — explicit chance states
+//! ([`Game::chance_node`], chains descended lazily or flattened under `ExpandAll`) and
+//! transition-attached [`Game::chance_outcomes`] alike —
+//! consumed per the configured [`ChanceMode`]: chance nodes sit between a
 //! decision edge and its outcome children, transparent to backup (the decision edge carries the
 //! reward and the discount). Games that declare no chance build byte-identical trees to before.
 //!
@@ -125,8 +126,9 @@ pub struct MctsConfig {
     /// of a sequential game, like AlphaZero's); `u32::MAX` means the whole episode. Irrelevant when
     /// `temperature == 0`.
     pub temperature_drop: u32,
-    /// How the search consumes stochastic transitions' declared chance (see [`ChanceMode`]).
-    /// Inert for games that declare no `chance_outcomes`.
+    /// How the search consumes the game's declared chance — explicit chance states and
+    /// transition-attached distributions alike (see [`ChanceMode`]). Inert for deterministic
+    /// games.
     pub chance: ChanceMode,
 }
 
@@ -431,10 +433,13 @@ fn flatten_chance_fan<G: Game>(
 ) -> (Vec<FanLeaf<G::State>>, bool) {
     let mut leaves: Vec<FanLeaf<G::State>> = Vec::with_capacity(seed.len());
     let mut chained = false;
-    for entry in seed {
-        // A fan leaf plus its hop count (the chain-cycle backstop).
-        let mut stack: Vec<(FanLeaf<G::State>, usize)> = Vec::new();
-        stack.push((entry, 0));
+    // ONE stack holding every seed entry (plus hop counts — the chain-cycle backstop), so the
+    // projected-size check below sees unprocessed seeds too: a per-seed stack would let one
+    // outcome flatten to the full cap and later outcomes append past it. Seeds are pushed in
+    // reverse so pops preserve outcome order (an unchained fan must stay outcome-parallel).
+    let mut stack: Vec<(FanLeaf<G::State>, usize)> =
+        seed.into_iter().rev().map(|e| (e, 0)).collect();
+    {
         while let Some(((s, p, ci, term), hops)) = stack.pop() {
             if term || !matches!(game.actor(&s), Actor::Chance) {
                 leaves.push((s, p, ci, term));
