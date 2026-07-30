@@ -68,7 +68,7 @@ fn xmax_cfg(gamma: f64, chance: ChanceMode) -> SearchConfig {
 }
 
 /// One decision, then a chance state paying 10 (p=0.25) or 20 (p=0.75) and ending the game.
-/// E = 17.5, decided entirely on the chance edge — inexpressible for transition-attached chance.
+/// E = 17.5, decided entirely on the chance edge.
 struct PayoutFan;
 impl Game for PayoutFan {
     type State = St;

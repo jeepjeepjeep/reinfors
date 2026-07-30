@@ -623,17 +623,14 @@ fn push_branches<G: Game>(
 ) {
     let t = game.step(state, joint);
     let step_reward = crate::reward::edge_reward(reward, &t.events, agent);
-    let children: Vec<(G::State, f64)> = vec![(t.next_state, 1.0)];
     // Resolve chance CHAINS: while a child sits at an `Actor::Chance` state, fan
     // (`ExpandAll`, exact) or sample (`Committed`) its declared distribution, compounding
     // probabilities and accumulating each chance edge's emitted reward for the requester. The
     // whole chain is one ply — one discount, one depth step — and a chain edge may end the game
     // (its payout rides the accumulated reward; the terminal child's value is exactly 0).
-    let mut resolved: Vec<(G::State, f64, f64, bool)> = Vec::with_capacity(children.len());
-    let mut work: Vec<(G::State, f64, f64, bool, usize)> = children
-        .into_iter()
-        .map(|(s, p)| (s, p, 0.0, t.terminal, 0))
-        .collect();
+    let mut resolved: Vec<(G::State, f64, f64, bool)> = Vec::with_capacity(1);
+    let mut work: Vec<(G::State, f64, f64, bool, usize)> =
+        vec![(t.next_state, 1.0, 0.0, t.terminal, 0)];
     while let Some((s, p, r, term, hops)) = work.pop() {
         if term || !matches!(game.actor(&s), Actor::Chance) {
             resolved.push((s, p, r, term));

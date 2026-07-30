@@ -1,5 +1,5 @@
 """The chance_mode surface: kwargs parse, invalid modes reject, and deterministic games are inert
-(no game today declares chance_outcomes — the tree semantics are pinned by the Rust chance suite)."""
+(the tree semantics over declared chance states are pinned by the Rust chance suite)."""
 
 import numpy as np
 import pytest

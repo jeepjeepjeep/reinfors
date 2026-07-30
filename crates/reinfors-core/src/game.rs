@@ -48,7 +48,7 @@ impl<S, E> Transition<S, E> {
     }
 }
 
-/// A transition's declared chance distribution over its outcome indices. `Weighted` is the
+/// A chance state's declared distribution over its outcome indices. `Weighted` is the
 /// general form (backgammon's 21 rolls). `Uniform(count)` declares a uniform distribution over
 /// `count` outcomes in O(1) at ANY size — the outcome space can be combinatorial (snake's
 /// k-apple respawn enumerates `P(free, k)` ordered placements) because sampling consumers draw
@@ -296,8 +296,8 @@ pub fn step_env<G: Game>(
     let num_agents = game.num_agents();
     let mut trace: Vec<(usize, G::Event)> = Vec::new();
     push_edge_events(&mut trace, std::mem::take(&mut t.events), num_agents);
-    // Chance-node chain: while the state belongs to no agent, draw and realize (see
-    // `Game::chance_nodes`). Runs to a decision state or terminal within this tick, so
+    // Chance-node chain: while the state belongs to no agent, draw and realize. Runs to a
+    // decision state or terminal within this tick, so
     // chain-interior states are never observable outside realization; each edge's emissions
     // accumulate into the tick's trace in edge order.
     let mut edges = 0usize;

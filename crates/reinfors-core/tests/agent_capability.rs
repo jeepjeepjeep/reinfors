@@ -1002,42 +1002,6 @@ impl Game for HiddenTwo {
     }
 }
 
-/// `TwoRobin` declaring chance NODES — the searches traverse them as fixed-probability plies
-/// (the functional battery lives in `tests/chance_nodes.rs`; this stub never actually presents
-/// one, pinning only that the declaration no longer rejects at any boundary).
-struct NodeyTwo;
-
-impl Game for NodeyTwo {
-    type State = St;
-    type Event = ();
-    fn num_agents(&self) -> usize {
-        2
-    }
-    fn action_count(&self) -> usize {
-        2
-    }
-    fn actor(&self, s: &St) -> Actor {
-        Actor::Agent(s.tick % 2)
-    }
-    fn legal_actions(&self, s: &St, agent: usize) -> Vec<usize> {
-        if agent == s.tick % 2 && s.tick < 4 {
-            vec![0, 1]
-        } else {
-            Vec::new()
-        }
-    }
-    fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
-        Transition {
-            next_state: St { tick: s.tick + 1 },
-            events: vec![None; 2],
-            terminal: s.tick + 1 >= 4,
-        }
-    }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
-        St { tick: 0 }
-    }
-}
-
 #[test]
 #[should_panic(expected = "clairvoyant")]
 fn direct_mcts_rejects_hidden_information() {
@@ -1065,56 +1029,12 @@ fn direct_expectimax_rejects_hidden_information() {
         vec![(St { tick: 0 }, 0)],
         false,
         0,
-        |_players: &[usize], _obs: Vec<f32>, n: usize| vec![0.0; n * 2],
-    );
-}
-
-#[test]
-fn searches_accept_chance_node_games() {
-    let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2];
-    let mut eval = Evaluator::new(&mut infer, reinfors_core::InferMode::Shared, None);
-    let evals = mcts_many(
-        &NodeyTwo,
-        &Enc,
-        &Zero,
-        &mcts_cfg(),
-        vec![(St { tick: 0 }, 0)],
-        0,
-        &mut eval,
-    );
-    assert_eq!(evals.len(), 1);
-    let results = search_many(
-        &NodeyTwo,
-        &Enc,
-        &Zero,
-        &search_cfg(),
-        vec![(St { tick: 0 }, 0)],
-        false,
-        0,
         |_players: &[usize], _obs: Vec<f32>, n: usize| vec![0.0; n * 4],
     );
-    assert_eq!(results.len(), 1);
 }
 
-#[test]
-fn engine_accepts_search_policies_on_chance_node_games() {
-    let mut engine = Engine::new(
-        NodeyTwo,
-        Box::new(Enc),
-        Box::new(Zero),
-        Mcts::new(mcts_cfg(), ActBy::Value),
-        TreeStrap::new(0.99, 0.3, 1.0, false),
-        EngineParams {
-            n_games: 1,
-            seed: 0,
-        },
-    );
-    let (records, _) = engine.collect(4, |_obs: Vec<f32>, n: usize| vec![0.0; n * 2]);
-    assert!(records.len() >= 4);
-}
-
-/// `NodeyTwo` whose root IS the chance node — a declared deal, realized at episode birth by
-/// the chain machinery (root chance is first-class; see `Game::all_chance_declared`).
+/// `TwoRobin` whose root IS a chance node — a declared deal, realized at episode birth by
+/// the chain machinery (root chance is first-class).
 struct RootNodey;
 
 impl Game for RootNodey {

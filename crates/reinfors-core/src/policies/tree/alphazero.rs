@@ -38,9 +38,8 @@ pub struct AlphaZeroConfig {
     /// `∝ visits^(1/temperature)` for the first `temperature_drop` plies, 0 acts greedily.
     pub temperature: f64,
     pub temperature_drop: u32,
-    /// How the search consumes the game's declared chance — explicit chance states (and the
-    /// deprecated transition-attached seam) — see [`ChanceMode`](crate::ChanceMode). Inert for
-    /// deterministic games.
+    /// How the search consumes the game's declared chance states (see
+    /// [`ChanceMode`](crate::ChanceMode)). Inert for deterministic games.
     pub chance: ChanceMode,
     /// Simultaneous games: which root priors the Dirichlet noise perturbs — the requester's
     /// only, or every agent's. Irrelevant for sequential games (one root table).

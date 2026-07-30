@@ -125,9 +125,8 @@ pub struct MctsConfig {
     /// of a sequential game, like AlphaZero's); `u32::MAX` means the whole episode. Irrelevant when
     /// `temperature == 0`.
     pub temperature_drop: u32,
-    /// How the search consumes the game's declared chance — explicit chance states (and the
-    /// deprecated transition-attached seam) — see [`ChanceMode`]. Inert for deterministic
-    /// games.
+    /// How the search consumes the game's declared chance states (see [`ChanceMode`]).
+    /// Inert for deterministic games.
     pub chance: ChanceMode,
 }
 
@@ -171,9 +170,8 @@ struct Node<S> {
     obs_all: Vec<Vec<f32>>,
     values_all: Vec<f64>,
     rewards_all: Vec<f64>,
-    // Per-agent rewards emitted on the CHANCE edge that produced this node (empty = none — the
-    // common case, and always for transition-attached chance, whose events are outcome-invariant
-    // and live on the decision edge). Backups fold these into the tick above, undiscounted.
+    // Per-agent rewards emitted on the CHANCE edge that produced this node (empty = the edge
+    // settled nothing, the common case). Backups fold these into the tick above, undiscounted.
     chance_in: Vec<f64>,
 }
 
@@ -977,11 +975,8 @@ impl<S: Clone> Tree<S> {
     }
 
     /// Step the game for the edge at slot `ai` (an index into the node's legal `actions`). A
-    /// deterministic transition appends the child directly; a declared-chance transition appends a
-    /// chance node instead (drawing `Committed` outcomes now, or materializing every outcome for
-    /// `ExpandAll`).
-    // The framework serves the deprecated transition-chance seam until its removal PR.
-    #[allow(deprecated)]
+    /// child at a decision state appends directly; one at a chance STATE appends a chance node
+    /// (drawing `Committed` outcomes now, or materializing every outcome for `ExpandAll`).
     fn expand<G>(
         &mut self,
         game: &G,
