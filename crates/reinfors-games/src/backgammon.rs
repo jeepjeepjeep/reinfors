@@ -406,14 +406,24 @@ impl Game for Backgammon {
     }
 
     fn actor(&self, state: &BackgammonState) -> Actor {
-        Actor::Agent(usize::from(state.to_move))
+        // Unarmed dice mark the AwaitingRoll chance state between turns: nature rolls before
+        // the next player sees the position.
+        if state.dice == [0, 0] {
+            Actor::Chance
+        } else {
+            Actor::Agent(usize::from(state.to_move))
+        }
     }
 
     fn legal_actions(&self, state: &BackgammonState, agent: usize) -> Vec<usize> {
-        if agent != usize::from(state.to_move) {
+        if state.dice == [0, 0] || agent != usize::from(state.to_move) {
             return Vec::new();
         }
         state.legal_action_ids(agent)
+    }
+
+    fn chance_nodes(&self) -> bool {
+        true
     }
 
     fn step(
@@ -449,7 +459,7 @@ impl Game for Backgammon {
             next.double_turn = true;
         } else {
             next.to_move = 1 - state.to_move;
-            next.dice = [0, 0]; // awaiting the transition's declared roll
+            next.dice = [0, 0]; // the AwaitingRoll chance state — nature rolls next
             next.double_turn = false;
         }
         Transition {
@@ -459,32 +469,29 @@ impl Game for Backgammon {
         }
     }
 
-    fn chance_outcomes(
-        &self,
-        _state: &BackgammonState,
-        t: &Transition<BackgammonState, BackgammonEvent>,
-    ) -> Option<reinfors_core::ChanceDist> {
-        // The next roll is the transition's chance — except on a doubles extra turn (dice
-        // re-armed, deterministic) and at game end.
-        if t.terminal || t.next_state.dice != [0, 0] {
-            return None;
-        }
+    fn chance_node(&self, state: &BackgammonState) -> reinfors_core::ChanceDist {
+        debug_assert_eq!(state.dice, [0, 0], "chance only at AwaitingRoll states");
+        // The 21 distinct rolls in `ROLLS` order: 15 non-doubles at 1/18, 6 doubles at 1/36.
         let mut probs = vec![1.0 / 18.0; 21];
         for p in probs.iter_mut().skip(15) {
             *p = 1.0 / 36.0;
         }
-        Some(reinfors_core::ChanceDist::Weighted(probs))
+        reinfors_core::ChanceDist::Weighted(probs)
     }
 
-    fn apply_chance(
+    fn apply_chance_node(
         &self,
-        _state: &BackgammonState,
-        t: &Transition<BackgammonState, BackgammonEvent>,
+        state: &BackgammonState,
         outcome: usize,
-    ) -> BackgammonState {
-        let mut next = t.next_state.clone();
+    ) -> Transition<BackgammonState, BackgammonEvent> {
+        let mut next = state.clone();
         next.dice = ROLLS[outcome];
-        next
+        // The roll settles nothing by itself — outcomes ride the checker plays it enables.
+        Transition {
+            next_state: next,
+            events: vec![None, None],
+            terminal: false,
+        }
     }
 
     fn initial_state(&self, rng: &mut dyn Rng) -> BackgammonState {
@@ -686,13 +693,15 @@ mod tests {
             if t.terminal {
                 s = g.initial_state(&mut rng);
             } else {
-                s = match g.chance_outcomes(&s, &t) {
-                    Some(reinfors_core::ChanceDist::Weighted(probs)) => {
-                        g.apply_chance(&s, &t, tests_weighted(&mut rng, &probs))
-                    }
-                    Some(_) => unreachable!("backgammon declares weighted rolls"),
-                    None => t.next_state,
-                };
+                s = t.next_state;
+                while matches!(g.actor(&s), Actor::Chance) {
+                    let reinfors_core::ChanceDist::Weighted(probs) = g.chance_node(&s) else {
+                        unreachable!("backgammon declares weighted rolls")
+                    };
+                    s = g
+                        .apply_chance_node(&s, tests_weighted(&mut rng, &probs))
+                        .next_state;
+                }
             }
         }
     }
@@ -736,13 +745,15 @@ mod tests {
                     }
                     break;
                 }
-                s = match g.chance_outcomes(&s, &t) {
-                    Some(reinfors_core::ChanceDist::Weighted(probs)) => {
-                        g.apply_chance(&s, &t, tests_weighted(&mut rng, &probs))
-                    }
-                    Some(_) => unreachable!("backgammon declares weighted rolls"),
-                    None => t.next_state,
-                };
+                s = t.next_state;
+                while matches!(g.actor(&s), Actor::Chance) {
+                    let reinfors_core::ChanceDist::Weighted(probs) = g.chance_node(&s) else {
+                        unreachable!("backgammon declares weighted rolls")
+                    };
+                    s = g
+                        .apply_chance_node(&s, tests_weighted(&mut rng, &probs))
+                        .next_state;
+                }
             }
         }
         assert!(
@@ -803,12 +814,12 @@ mod tests {
             vec![1351],
             "the double-pass is the only action"
         );
-        // And it applies as a no-op turn handing over with a declared roll.
+        // And it applies as a no-op turn handing over at the AwaitingRoll chance state.
         let g = game();
         let t = g.step(&s, &[1351, 0]);
         assert_eq!(t.next_state.bar[0], 1);
         assert_eq!(t.next_state.to_move, 1);
-        assert!(g.chance_outcomes(&s, &t).is_some());
+        assert!(matches!(g.actor(&t.next_state), Actor::Chance));
     }
 
     #[test]
@@ -852,14 +863,14 @@ mod tests {
         assert!(t.next_state.double_turn);
         assert_eq!(t.next_state.dice, [3, 3], "dice re-armed");
         assert!(
-            g.chance_outcomes(&s, &t).is_none(),
+            !matches!(g.actor(&t.next_state), Actor::Chance),
             "extra turn is deterministic"
         );
-        // The second half of the doubles turn hands over with a declared roll.
+        // The second half of the doubles turn hands over at the AwaitingRoll chance state.
         let legal2 = t.next_state.legal_action_ids(0);
         let t2 = g.step(&t.next_state, &[legal2[0], 0]);
         assert_eq!(t2.next_state.to_move, 1);
-        assert!(g.chance_outcomes(&t.next_state, &t2).is_some());
+        assert!(matches!(g.actor(&t2.next_state), Actor::Chance));
     }
 
     #[test]
@@ -879,10 +890,13 @@ mod tests {
         let s = state(&[(0, 2), (11, 13)], &[(23, 2), (12, 13)], [0, 0], [2, 5], 0);
         let legal = s.legal_action_ids(0);
         let t = g.step(&s, &[legal[0], 0]);
-        let reinfors_core::ChanceDist::Weighted(probs) = g
-            .chance_outcomes(&s, &t)
-            .expect("a completed turn declares the next roll")
-        else {
+        let next = t.next_state;
+        assert!(
+            matches!(g.actor(&next), Actor::Chance),
+            "a completed turn lands on the AwaitingRoll chance state"
+        );
+        assert!(g.legal_actions(&next, 0).is_empty() && g.legal_actions(&next, 1).is_empty());
+        let reinfors_core::ChanceDist::Weighted(probs) = g.chance_node(&next) else {
             panic!("backgammon declares weighted rolls");
         };
         assert_eq!(probs.len(), 21);
@@ -890,9 +904,11 @@ mod tests {
         assert!(probs[..15].iter().all(|&p| (p - 1.0 / 18.0).abs() < 1e-15));
         assert!(probs[15..].iter().all(|&p| (p - 1.0 / 36.0).abs() < 1e-15));
         for (i, roll) in ROLLS.iter().enumerate() {
-            let realized = g.apply_chance(&s, &t, i);
-            assert_eq!(realized.dice, *roll);
-            assert_eq!(realized.to_move, 1);
+            let realized = g.apply_chance_node(&next, i);
+            assert_eq!(realized.next_state.dice, *roll);
+            assert_eq!(realized.next_state.to_move, 1);
+            assert!(!realized.terminal);
+            assert!(realized.events.iter().all(Option::is_none));
         }
     }
 
@@ -983,6 +999,11 @@ impl reinfors_core::StateCodec for Backgammon {
             }
         }
         let finished = state.scores.iter().any(|&s| s >= 15);
+        if !finished && state.dice == [0, 0] {
+            // AwaitingRoll is a transient chance state the framework realizes inside a tick; a
+            // restored live position must be actionable, not stuck awaiting nature.
+            return Err("a live position must carry rolled dice".to_string());
+        }
         if finished != done {
             return Err(format!(
                 "borne-off counts {:?} disagree with done {done}",
