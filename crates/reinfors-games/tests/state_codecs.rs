@@ -122,7 +122,7 @@ fn every_game_round_trips_reachable_states() {
         200,
     );
     reachable_states_round_trip(Backgammon { max_ticks: None }, 300);
-    reachable_states_round_trip(KuhnPoker, 200);
+    reachable_states_round_trip(KuhnPoker::default(), 200);
     reachable_states_round_trip(LeducPoker, 300);
     reachable_states_round_trip(
         TexasHoldem {

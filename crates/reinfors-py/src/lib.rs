@@ -355,7 +355,7 @@ fn game_cfg(spec: &GameSpec) -> Value {
             "small_blind": small_blind,
             "big_blind": big_blind,
         }),
-        GameSpec::KuhnPoker => json!({"name": "kuhn_poker"}),
+        GameSpec::KuhnPoker { players } => json!({"name": "kuhn_poker", "players": players}),
         GameSpec::LeducPoker => json!({"name": "leduc_poker"}),
         GameSpec::Chess { max_ticks, encoder } => {
             let enc = match encoder {
@@ -1811,7 +1811,9 @@ enum GameSpec {
         small_blind: u32,
         big_blind: u32,
     },
-    KuhnPoker,
+    KuhnPoker {
+        players: usize,
+    },
     LeducPoker,
     GridWorld {
         size: i32,
@@ -1826,10 +1828,10 @@ impl GameSpec {
         match *self {
             GameSpec::Snake { num_snakes, .. } => num_snakes,
             GameSpec::TexasHoldem { num_players, .. } => num_players,
+            GameSpec::KuhnPoker { players } => players,
             GameSpec::Connect4
             | GameSpec::Chess { .. }
             | GameSpec::Backgammon { .. }
-            | GameSpec::KuhnPoker
             | GameSpec::LeducPoker => 2,
             GameSpec::GridWorld { .. } => 1,
         }
@@ -1885,7 +1887,7 @@ impl GameSpec {
                 },
                 &HoldemEgocentric { num_players, stack },
             ),
-            GameSpec::KuhnPoker => of(KuhnPoker, &KuhnEncoder),
+            GameSpec::KuhnPoker { players } => of(KuhnPoker { players }, &KuhnEncoder { players }),
             GameSpec::LeducPoker => of(LeducPoker, &LeducEncoder),
             GameSpec::GridWorld {
                 size,
@@ -1926,7 +1928,7 @@ fn reward_schema(game: &GameSpec) -> &'static [(&'static str, f64)] {
         // The chip deltas ARE the reward (already zero-sum); `scale` converts chips into the
         // training unit (e.g. 1/big_blind for rewards in blinds).
         GameSpec::TexasHoldem { .. } => &[("scale", 1.0)],
-        GameSpec::KuhnPoker | GameSpec::LeducPoker => &[("scale", 1.0)],
+        GameSpec::KuhnPoker { .. } | GameSpec::LeducPoker => &[("scale", 1.0)],
     }
 }
 
@@ -1976,7 +1978,7 @@ fn build_reward(game: &GameSpec, reward: Option<PyReward>) -> PyResult<RewardBox
                 goal: r[1],
             })
         }
-        GameSpec::TexasHoldem { .. } | GameSpec::KuhnPoker | GameSpec::LeducPoker => {
+        GameSpec::TexasHoldem { .. } | GameSpec::KuhnPoker { .. } | GameSpec::LeducPoker => {
             let r = resolve_reward(reward, reward_schema(game))?;
             RewardBox::Holdem(HoldemReward { scale: r[0] })
         }
@@ -2607,12 +2609,12 @@ fn build_engine(
             infer_caches,
             learn_players,
         ),
-        (GameSpec::KuhnPoker, RewardBox::Holdem(reward)) => build_for_game(
-            KuhnPoker,
-            Box::new(KuhnEncoder),
+        (GameSpec::KuhnPoker { players }, RewardBox::Holdem(reward)) => build_for_game(
+            KuhnPoker { players },
+            Box::new(KuhnEncoder { players }),
             Box::new(reward),
             Box::new(AlwaysInitialState),
-            Some(Box::new(KuhnPoker)),
+            Some(Box::new(KuhnPoker::default())),
             policy,
             learner,
             engine_params,
@@ -3481,12 +3483,16 @@ fn build_env(game: GameSpec, reward: Option<PyReward>, seed: u64) -> PyResult<Bo
                 last_rewards: None,
             })
         }
-        GameSpec::KuhnPoker => {
-            let obs_shape = KuhnEncoder.obs_shape();
+        GameSpec::KuhnPoker { players } => {
+            let obs_shape = KuhnEncoder { players }.obs_shape();
             Box::new(EnvImpl {
-                inner: Env::new(KuhnPoker, Box::new(KuhnEncoder), seed),
+                inner: Env::new(
+                    KuhnPoker { players },
+                    Box::new(KuhnEncoder { players }),
+                    seed,
+                ),
                 obs_shape,
-                codec: Some(Box::new(KuhnPoker)),
+                codec: Some(Box::new(KuhnPoker { players })),
                 reward: reward.map(|rb| match rb {
                     RewardBox::Holdem(r) => Box::new(r) as Box<dyn Reward<Event = f64>>,
                     _ => unreachable!("build_reward returns the reward variant matching the game"),
@@ -3737,11 +3743,14 @@ impl GameHandle {
     // The 3-card analytic testbed for imperfect-information algorithms (12 information sets,
     // known Nash family). Hidden information: search families reject it; solve with
     // rf.solvers or train with the DQN family.
-    #[pyo3(name = "KuhnPoker")]
-    fn kuhn_poker() -> Self {
-        GameHandle {
-            spec: GameSpec::KuhnPoker,
-        }
+    #[pyo3(name = "KuhnPoker", signature = (players=2))]
+    fn kuhn_poker(players: usize) -> PyResult<Self> {
+        (KuhnPoker { players })
+            .validate()
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        Ok(GameHandle {
+            spec: GameSpec::KuhnPoker { players },
+        })
     }
 
     #[staticmethod]
@@ -3846,7 +3855,7 @@ impl GameHandle {
             | GameSpec::GridWorld { max_ticks, .. } => max_ticks,
             GameSpec::Connect4
             | GameSpec::TexasHoldem { .. }
-            | GameSpec::KuhnPoker
+            | GameSpec::KuhnPoker { .. }
             | GameSpec::LeducPoker => None,
         }
     }
@@ -3979,9 +3988,12 @@ impl PyCfr {
         };
         let reward = HoldemReward { scale: 1.0 }; // solver utilities are raw chip deltas
         let inner: Box<dyn ErasedCfr> = match game.spec {
-            GameSpec::KuhnPoker => {
-                Box::new(CfrSolver::new(KuhnPoker, Box::new(reward), variant, seed))
-            }
+            GameSpec::KuhnPoker { players } => Box::new(CfrSolver::new(
+                KuhnPoker { players },
+                Box::new(reward),
+                variant,
+                seed,
+            )),
             GameSpec::LeducPoker => {
                 Box::new(CfrSolver::new(LeducPoker, Box::new(reward), variant, seed))
             }
@@ -4016,7 +4028,7 @@ impl PyCfr {
             _ => {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "CFR requires a 2-player game with declared chance and information-state \
-                     keys (KuhnPoker, LeducPoker, heads-up TexasHoldem)",
+                     keys (KuhnPoker::default(), LeducPoker, heads-up TexasHoldem)",
                 ))
             }
         };
@@ -4176,10 +4188,10 @@ impl PyDeepCfr {
         let reward = HoldemReward { scale: 1.0 }; // solver utilities are raw chip deltas
         let (inner, obs_dim, action_count): (Box<dyn ErasedDeepCfr>, usize, usize) = match game.spec
         {
-            GameSpec::KuhnPoker => (
+            GameSpec::KuhnPoker { players } => (
                 Box::new(DeepCfrSolver::new(
-                    KuhnPoker,
-                    Box::new(KuhnEncoder),
+                    KuhnPoker { players },
+                    Box::new(KuhnEncoder { players }),
                     Box::new(reward),
                     seed,
                 )),
@@ -4229,7 +4241,7 @@ impl PyDeepCfr {
             _ => {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "Deep CFR requires a 2-player game with declared chance and \
-                         information-state keys (KuhnPoker, LeducPoker, heads-up TexasHoldem)",
+                         information-state keys (KuhnPoker::default(), LeducPoker, heads-up TexasHoldem)",
                 ))
             }
         };

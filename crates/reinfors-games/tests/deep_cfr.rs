@@ -11,8 +11,8 @@ use reinfors_games::{HoldemReward, KuhnEncoder, KuhnPoker, LeducEncoder, LeducPo
 
 fn kuhn_solver(seed: u64) -> DeepCfrSolver<KuhnPoker> {
     DeepCfrSolver::new(
-        KuhnPoker,
-        Box::new(KuhnEncoder),
+        KuhnPoker::default(),
+        Box::new(KuhnEncoder::default()),
         Box::new(HoldemReward { scale: 1.0 }),
         seed,
     )

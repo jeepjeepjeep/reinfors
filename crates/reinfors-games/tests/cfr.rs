@@ -6,7 +6,12 @@ use reinfors_core::{best_response_value, exploitability, CfrSolver, CfrVariant};
 use reinfors_games::{HoldemReward, KuhnPoker, LeducPoker};
 
 fn kuhn_solver(variant: CfrVariant) -> CfrSolver<KuhnPoker> {
-    CfrSolver::new(KuhnPoker, Box::new(HoldemReward { scale: 1.0 }), variant, 7)
+    CfrSolver::new(
+        KuhnPoker::default(),
+        Box::new(HoldemReward { scale: 1.0 }),
+        variant,
+        7,
+    )
 }
 
 #[test]
@@ -32,7 +37,7 @@ fn kuhn_equilibrium_has_the_known_structure() {
     // Known equilibrium facts (any alpha in [0, 1/3]): with the JACK facing a bet, player 1
     // always folds; with the KING facing a bet, player 1 always calls; player 1 having the
     // KING after player 0 checks always bets.
-    let g = KuhnPoker;
+    let g = KuhnPoker::default();
     let key = |cards: [u8; 2], hist: &[u8], agent: usize| {
         use reinfors_core::Game;
         let state = reinfors_games::KuhnState {
@@ -154,7 +159,7 @@ fn best_response_exploits_a_uniform_profile() {
     // Uniform play is far from equilibrium; the exact best response must find real value, and
     // exploitability must be symmetric-positive.
     let uniform = |_key: &[u8], legal: usize| vec![1.0 / legal as f64; legal];
-    let g = KuhnPoker;
+    let g = KuhnPoker::default();
     let r = HoldemReward { scale: 1.0 };
     let br0 = best_response_value(&g, &r, &uniform, 0);
     let br1 = best_response_value(&g, &r, &uniform, 1);
