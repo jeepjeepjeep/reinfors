@@ -172,9 +172,10 @@ fn best_response_exploits_a_uniform_profile() {
 }
 
 #[test]
-#[should_panic(expected = "2-player zero-sum")]
-fn the_solver_rejects_more_than_two_players() {
-    let _ = CfrSolver::new(
+fn the_solver_accepts_more_than_two_players() {
+    // N-player CFR: no Nash guarantee past 2 players (documented at the gate), but the solver
+    // runs — 3-player hold'em constructs and MCCFR iterates.
+    let mut solver = CfrSolver::new(
         reinfors_games::TexasHoldem {
             num_players: 3,
             stack: 200,
@@ -185,6 +186,8 @@ fn the_solver_rejects_more_than_two_players() {
         CfrVariant::ExternalMccfr,
         0,
     );
+    solver.iterate(2);
+    assert!(solver.num_infosets() > 0);
 }
 
 #[test]
@@ -203,7 +206,7 @@ fn the_solver_rejects_games_without_information_states() {
 }
 
 #[test]
-#[should_panic(expected = "sequential 2-player only")]
+#[should_panic(expected = "sequential turn-taking only")]
 fn chance_root_simultaneous_games_fail_at_construction() {
     // The stub lives in deep_cfr.rs; a minimal inline twin here keeps the two solver gates
     // independently pinned. Chance root -> simultaneous decisions: the raw-root probe used

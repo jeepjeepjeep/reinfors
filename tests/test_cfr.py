@@ -89,7 +89,7 @@ def test_expected_value_validates_the_player() -> None:
     solver = rf.solvers.Cfr(rf.games.KuhnPoker(), variant="plus", seed=0)
     solver.iterate(10)
     assert abs(solver.expected_value(0) + solver.expected_value(1)) < 1e-12, "zero-sum"
-    with pytest.raises(ValueError, match="player must be 0 or 1"):
+    with pytest.raises(ValueError, match="player must be below 2"):
         solver.expected_value(2)
 
 

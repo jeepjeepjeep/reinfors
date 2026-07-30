@@ -3919,6 +3919,9 @@ trait ErasedCfr: Send + Sync {
     fn iterations(&self) -> u64;
     fn num_infosets(&self) -> usize;
     fn exploitability(&self) -> f64;
+    fn nash_conv(&self) -> f64;
+    fn best_response_values(&self) -> Vec<f64>;
+    fn num_players(&self) -> usize;
     fn expected_value(&self, player: usize) -> f64;
     fn average_strategy(&self, key: &[u8]) -> Option<(Vec<usize>, Vec<f64>)>;
     fn save(&self) -> Vec<u8>;
@@ -3937,6 +3940,15 @@ impl<G: Game + Send + Sync> ErasedCfr for reinfors_core::CfrSolver<G> {
     }
     fn exploitability(&self) -> f64 {
         reinfors_core::CfrSolver::exploitability(self)
+    }
+    fn nash_conv(&self) -> f64 {
+        reinfors_core::CfrSolver::nash_conv(self)
+    }
+    fn best_response_values(&self) -> Vec<f64> {
+        reinfors_core::CfrSolver::best_response_values(self)
+    }
+    fn num_players(&self) -> usize {
+        reinfors_core::CfrSolver::num_players(self)
     }
     fn expected_value(&self, player: usize) -> f64 {
         reinfors_core::CfrSolver::expected_value(self, player)
@@ -4056,18 +4068,31 @@ impl PyCfr {
         self.inner.num_infosets()
     }
 
-    /// Exact exploitability of the average profile (pyspiel's definition: NashConv / 2);
-    /// zero at Nash.
+    /// Exact exploitability of the average profile (pyspiel's definition:
+    /// NashConv / num_players); zero exactly at Nash. For more than 2 players this measures
+    /// distance from equilibrium with NO convergence guarantee — expect a fall to a plateau.
     fn exploitability(&self, py: Python<'_>) -> f64 {
         py.allow_threads(|| self.inner.exploitability())
     }
 
-    /// Expected value for `player` when both play the average profile.
+    /// NashConv of the average profile: `Σᵢ (brᵢ − vᵢ)` — every player's exact unilateral
+    /// improvement, summed. Zero exactly at a Nash equilibrium.
+    fn nash_conv(&self, py: Python<'_>) -> f64 {
+        py.allow_threads(|| self.inner.nash_conv())
+    }
+
+    /// Each player's exact best-response value against the others' average profile.
+    fn best_response_values(&self, py: Python<'_>) -> Vec<f64> {
+        py.allow_threads(|| self.inner.best_response_values())
+    }
+
+    /// Expected value for `player` when everyone plays the average profile.
     fn expected_value(&self, py: Python<'_>, player: usize) -> PyResult<f64> {
-        if player >= 2 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "player must be 0 or 1",
-            ));
+        if player >= self.inner.num_players() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "player must be below {}",
+                self.inner.num_players()
+            )));
         }
         Ok(py.allow_threads(|| self.inner.expected_value(player)))
     }
