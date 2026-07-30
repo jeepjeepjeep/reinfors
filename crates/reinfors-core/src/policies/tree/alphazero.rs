@@ -102,7 +102,7 @@ impl Policy for AlphaZero {
     type PolicyState = u32; // plies acted this episode — drives the temperature_drop cutoff
 
     fn supports_chance_nodes(&self) -> bool {
-        false // no chance ply: an outcome-dependent payout is unscorable in this tree
+        true // fixed-probability chance plies: sampled/committed/enumerated per ChanceMode
     }
 
     fn supports_imperfect_information(&self) -> bool {

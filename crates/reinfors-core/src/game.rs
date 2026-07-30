@@ -143,7 +143,7 @@ pub trait Game {
     /// share that reward across every outcome (snake: the eat reward is the same wherever the food
     /// respawns). A game whose chance element changes the reward — a stochastic payout — does not
     /// fit this seam; that is a chance NODE (`Actor::Chance` + [`chance_node`](Self::chance_node)),
-    /// realized by rollout consumers and rejected by tree search. The default declares every
+    /// the fully general form every consumer traverses. The default declares every
     /// transition deterministic.
     fn chance_outcomes(
         &self,
@@ -172,9 +172,9 @@ pub trait Game {
     /// occur AFTER episode birth. Unlike transition-attached `chance_outcomes`, a chance node's
     /// realization MAY determine events and terminal status (poker's all-in runout: the river
     /// decides the showdown). Rollout consumers (`Env`, `Engine`) realize chains of them
-    /// automatically inside one tick; tree searches reject games where they occur post-birth —
-    /// scoring an outcome-dependent payout needs an explicit chance ply the searches do not
-    /// implement.
+    /// automatically inside one tick; tree searches traverse them as fixed-probability plies per
+    /// their configured [`ChanceMode`](crate::ChanceMode) — transparent to depth, discount, and
+    /// perspective, with each edge's emissions joining the tick's reward.
     ///
     /// The ROOT is separate: `initial_state` may itself return a chance node (a declared deal —
     /// see [`all_chance_declared`](Self::all_chance_declared)), realized at episode birth by the

@@ -60,10 +60,11 @@ pub trait Policy {
 
     /// Whether this policy is sound on games that present chance NODES
     /// (`Game::chance_nodes()` = true), whose realization may decide events and terminal
-    /// status. True only for policies that never plan over transitions (the DQN family); tree
-    /// searches cannot score an outcome-dependent payout without an explicit chance ply, so
-    /// they must say false. Required rather than defaulted: a soundness claim must be
-    /// deliberate. Checked at construction — never mid-collect.
+    /// status. True for policies that never plan over transitions (the DQN family — chance
+    /// realization is the env's business) and for the tree searches, which traverse chance
+    /// states as fixed-probability plies per their `ChanceMode`. Required rather than
+    /// defaulted: a soundness claim must be deliberate. Checked at construction — never
+    /// mid-collect.
     fn supports_chance_nodes(&self) -> bool;
 
     fn begin_episode(&self, rng: &mut dyn Rng) -> Self::PolicyState;
