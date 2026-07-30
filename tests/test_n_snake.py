@@ -21,8 +21,11 @@ def test_construction_and_validation() -> None:
         _snake(9, grid_size=20)
     with pytest.raises(ValueError, match="two-snake"):
         _snake(3, win_food_lead=2, play_to_last=False)
-    with pytest.raises(ValueError, match="respawn index space"):
-        _snake(3, grid_size=1000, food=3)  # ~1e18 ordered triples: past the 2^53 index guard
+    # One apple per chance draw: the old ~1e18 ordered-triple index space is gone, so this
+    # config is simply valid now — while food that cannot fit the grid still rejects.
+    _snake(3, grid_size=1000, food=3)
+    with pytest.raises(ValueError, match="exceeds"):
+        _snake(2, grid_size=4, food=17)
 
 
 def test_default_three_snake_config_constructs_and_plays() -> None:

@@ -2086,8 +2086,9 @@ fn check_unit(name: &str, v: f64) -> PyResult<()> {
 
 /// The agent-count capability gate (no-panic contract): a policy that cannot plan for this many
 /// agents is a config error here, before `Engine::new`'s assert backstop.
-/// A throwaway deterministic RNG for probing `initial_state` (dynamics/legality only — the
-/// probed state is discarded, so the stream never touches collection determinism).
+/// A throwaway deterministic RNG for realizing a probe root (the root chance chain draws
+/// from it; dynamics/legality only — the probed state is discarded, so the stream never
+/// touches collection determinism).
 struct ProbeRng(u64);
 impl reinfors_core::Rng for ProbeRng {
     fn below(&mut self, n: usize) -> usize {

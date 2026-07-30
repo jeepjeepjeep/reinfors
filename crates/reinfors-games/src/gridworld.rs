@@ -1,7 +1,7 @@
 //! GridWorld — a minimal single-agent navigation game, the first non-snake `Game`. It exercises the
-//! framework's single-agent path (`num_agents == 1`, `Actor::Agent(0)` at every node — pure MAX +
-//! lookahead, no opponent) end to end through the generic search and rollout engine. Deterministic, so
-//! chance is the default (none declared).
+//! framework's single-agent path (`num_agents == 1` — pure MAX + lookahead, no opponent) end to
+//! end through the generic search and rollout engine. Transitions are deterministic; the only
+//! chance is the ROOT phase drawing the uniform non-goal start cell.
 
 use reinfors_core::{ActionView, Actor, Game, Reward, Space, StateEncoder, Transition};
 
@@ -56,9 +56,10 @@ pub struct GridWorld {
 }
 
 impl GridWorld {
-    /// Config invariants, checked once at the construction boundary so no input reaches a panic or
-    /// a hang later: `size >= 2` (a 1x1 grid has no non-goal start cell, so `initial_state` would
-    /// spin forever), the goal inside the grid, and the observation tensor within indexable bounds.
+    /// Config invariants, checked once at the construction boundary so no input reaches a panic
+    /// later: `size >= 2` (a 1x1 grid has no non-goal start cell — the root chance node would
+    /// declare zero outcomes), the goal inside the grid, and the observation tensor within
+    /// indexable bounds.
     pub fn validate(&self) -> Result<(), String> {
         if self.size < 2 {
             return Err(format!("size must be >= 2, got {}", self.size));
@@ -167,7 +168,7 @@ impl Game for GridWorld {
         self.max_ticks
     }
 
-    // Deterministic transitions: no chance states.
+    // Transitions are deterministic; the root start-cell phase is the game's only chance.
 }
 
 /// The default GridWorld observation: an agent-position plane and a goal-position plane. Carries
@@ -474,7 +475,7 @@ mod tests {
         for (size, goal) in [
             (4, (4, 4)),  // out of grid (the old fixed default vs a smaller size)
             (4, (-1, 0)), // negative coordinate
-            (1, (0, 0)),  // no non-goal start cell: initial_state would spin forever
+            (1, (0, 0)),  // no non-goal start cell: the root chance fan would be empty
             (0, (0, 0)),
             (-3, (0, 0)),
             (40_000, (0, 0)),   // obs tensor would exceed 2^31 elements
