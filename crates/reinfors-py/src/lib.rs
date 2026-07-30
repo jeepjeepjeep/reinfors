@@ -3877,8 +3877,13 @@ trait ErasedDeepCfr: Send + Sync {
         reinfors_core::DeepCfrStats,
     );
     #[allow(clippy::type_complexity)]
-    fn infoset_features(&self) -> Vec<(Vec<u8>, Vec<f32>, Vec<usize>)>;
-    fn exploitability_of(&self, probs: &HashMap<Vec<u8>, Vec<f64>>) -> f64;
+    fn infoset_features(
+        &self,
+    ) -> Result<Vec<(Vec<u8>, Vec<f32>, Vec<usize>)>, reinfors_core::EnumerationCapExceeded>;
+    fn exploitability_of(
+        &self,
+        probs: &HashMap<Vec<u8>, Vec<f64>>,
+    ) -> Result<f64, reinfors_core::EnumerationCapExceeded>;
     fn rollback_collect(&mut self);
 }
 
@@ -3901,10 +3906,15 @@ impl<G: Game + Send + Sync> ErasedDeepCfr for reinfors_core::DeepCfrSolver<G> {
     ) {
         reinfors_core::DeepCfrSolver::collect(self, player, traversals, infer)
     }
-    fn infoset_features(&self) -> Vec<(Vec<u8>, Vec<f32>, Vec<usize>)> {
+    fn infoset_features(
+        &self,
+    ) -> Result<Vec<(Vec<u8>, Vec<f32>, Vec<usize>)>, reinfors_core::EnumerationCapExceeded> {
         reinfors_core::DeepCfrSolver::infoset_features(self)
     }
-    fn exploitability_of(&self, probs: &HashMap<Vec<u8>, Vec<f64>>) -> f64 {
+    fn exploitability_of(
+        &self,
+        probs: &HashMap<Vec<u8>, Vec<f64>>,
+    ) -> Result<f64, reinfors_core::EnumerationCapExceeded> {
         reinfors_core::DeepCfrSolver::exploitability_of(self, probs)
     }
     fn rollback_collect(&mut self) {
@@ -3918,9 +3928,9 @@ trait ErasedCfr: Send + Sync {
     fn iterate(&mut self, n: u64);
     fn iterations(&self) -> u64;
     fn num_infosets(&self) -> usize;
-    fn exploitability(&self) -> f64;
-    fn nash_conv(&self) -> f64;
-    fn best_response_values(&self) -> Vec<f64>;
+    fn exploitability(&self) -> Result<f64, reinfors_core::EnumerationCapExceeded>;
+    fn nash_conv(&self) -> Result<f64, reinfors_core::EnumerationCapExceeded>;
+    fn best_response_values(&self) -> Result<Vec<f64>, reinfors_core::EnumerationCapExceeded>;
     fn num_players(&self) -> usize;
     fn expected_value(&self, player: usize) -> f64;
     fn average_strategy(&self, key: &[u8]) -> Option<(Vec<usize>, Vec<f64>)>;
@@ -3938,13 +3948,13 @@ impl<G: Game + Send + Sync> ErasedCfr for reinfors_core::CfrSolver<G> {
     fn num_infosets(&self) -> usize {
         reinfors_core::CfrSolver::num_infosets(self)
     }
-    fn exploitability(&self) -> f64 {
+    fn exploitability(&self) -> Result<f64, reinfors_core::EnumerationCapExceeded> {
         reinfors_core::CfrSolver::exploitability(self)
     }
-    fn nash_conv(&self) -> f64 {
+    fn nash_conv(&self) -> Result<f64, reinfors_core::EnumerationCapExceeded> {
         reinfors_core::CfrSolver::nash_conv(self)
     }
-    fn best_response_values(&self) -> Vec<f64> {
+    fn best_response_values(&self) -> Result<Vec<f64>, reinfors_core::EnumerationCapExceeded> {
         reinfors_core::CfrSolver::best_response_values(self)
     }
     fn num_players(&self) -> usize {
@@ -3962,6 +3972,13 @@ impl<G: Game + Send + Sync> ErasedCfr for reinfors_core::CfrSolver<G> {
     fn load(&mut self, bytes: &[u8]) -> Result<(), String> {
         reinfors_core::CfrSolver::load(self, bytes)
     }
+}
+
+/// The exact metrics walk the whole game tree; past the arena cap core returns a typed
+/// error. A big-but-valid game is public input, so it surfaces as ValueError (genuine
+/// panics, by contrast, keep propagating as bugs).
+fn cap_err(e: reinfors_core::EnumerationCapExceeded) -> pyo3::PyErr {
+    pyo3::exceptions::PyValueError::new_err(e.to_string())
 }
 
 /// `rf.solvers.Cfr` — counterfactual regret minimization over a sequential game with declared
@@ -4072,19 +4089,21 @@ impl PyCfr {
     /// Exact exploitability of the average profile (pyspiel's definition:
     /// NashConv / num_players); zero exactly at Nash. For more than 2 players this measures
     /// distance from equilibrium with NO convergence guarantee — expect a fall to a plateau.
-    fn exploitability(&self, py: Python<'_>) -> f64 {
+    fn exploitability(&self, py: Python<'_>) -> PyResult<f64> {
         py.allow_threads(|| self.inner.exploitability())
+            .map_err(cap_err)
     }
 
     /// NashConv of the average profile: `Σᵢ (brᵢ − vᵢ)` — every player's exact unilateral
     /// improvement, summed. Zero exactly at a Nash equilibrium.
-    fn nash_conv(&self, py: Python<'_>) -> f64 {
-        py.allow_threads(|| self.inner.nash_conv())
+    fn nash_conv(&self, py: Python<'_>) -> PyResult<f64> {
+        py.allow_threads(|| self.inner.nash_conv()).map_err(cap_err)
     }
 
     /// Each player's exact best-response value against the others' average profile.
-    fn best_response_values(&self, py: Python<'_>) -> Vec<f64> {
+    fn best_response_values(&self, py: Python<'_>) -> PyResult<Vec<f64>> {
         py.allow_threads(|| self.inner.best_response_values())
+            .map_err(cap_err)
     }
 
     /// Expected value for `player` when everyone plays the average profile.
@@ -4182,12 +4201,13 @@ struct PyDeepCfr {
     inner: Box<dyn ErasedDeepCfr>,
     obs_dim: usize,
     action_count: usize,
+    num_players: usize,
     config: Value,
 }
 
 /// Resolve the polymorphic `infer` argument: a bare callable serves every player; a sequence
 /// must have one callable per player.
-fn deep_cfr_callbacks(infer: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
+fn deep_cfr_callbacks(infer: &Bound<'_, PyAny>, num_players: usize) -> PyResult<Vec<Py<PyAny>>> {
     if infer.is_callable() {
         return Ok(vec![infer.clone().unbind()]);
     }
@@ -4196,11 +4216,18 @@ fn deep_cfr_callbacks(infer: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
             "infer must be a callable or a sequence of per-player callables",
         )
     })?;
-    if callbacks.len() != 2 {
+    if callbacks.len() != num_players {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "expected 2 per-player infer callables, got {}",
+            "expected {num_players} per-player infer callables, got {}",
             callbacks.len()
         )));
+    }
+    for (player, cb) in callbacks.iter().enumerate() {
+        if !cb.bind(infer.py()).is_callable() {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "per-player infer element {player} is not callable"
+            )));
+        }
     }
     Ok(callbacks)
 }
@@ -4221,7 +4248,7 @@ impl PyDeepCfr {
                     Box::new(reward),
                     seed,
                 )),
-                6,
+                3 * players,
                 2,
             ),
             GameSpec::LeducPoker => (
@@ -4240,12 +4267,6 @@ impl PyDeepCfr {
                 small_blind,
                 big_blind,
             } => {
-                if num_players != 2 {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "Deep CFR solves 2-player games only; construct \
-                             TexasHoldem(num_players=2)",
-                    ));
-                }
                 let enc = HoldemEgocentric { num_players, stack };
                 let (c, h, w) = enc.obs_shape();
                 (
@@ -4281,6 +4302,7 @@ impl PyDeepCfr {
             inner,
             obs_dim,
             action_count,
+            num_players: game.spec.num_agents(),
             config,
         })
     }
@@ -4311,17 +4333,18 @@ impl PyDeepCfr {
         traversals: usize,
         infer: &Bound<'py, PyAny>,
     ) -> PyResult<DeepCfrBatch> {
-        if player >= 2 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "player must be 0 or 1",
-            ));
+        if player >= self.num_players {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "player must be below {}",
+                self.num_players
+            )));
         }
         if self.inner.iteration() == 0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "call next_iteration() before collecting (samples are weighted by the iteration)",
             ));
         }
-        let callbacks = deep_cfr_callbacks(infer)?;
+        let callbacks = deep_cfr_callbacks(infer, self.num_players)?;
         let (dim, a) = (self.obs_dim, self.action_count);
         let mut callback_err: Option<PyErr> = None;
         let mut rust_infer = |who: usize, obs_flat: Vec<f32>, rows: usize| -> Vec<f64> {
@@ -4441,12 +4464,13 @@ impl PyDeepCfr {
         })
     }
 
-    /// Exact exploitability of the AVERAGE-POLICY network (NashConv / 2, zero at Nash) —
+    /// Exact exploitability of the AVERAGE-POLICY network (NashConv / num_players, zero at
+    /// Nash; for more than 2 players a positive plateau is the expected outcome) —
     /// enumerable games only (Kuhn/Leduc, not full hold'em). `policy_infer(obs) -> (M,
     /// action_count)` scores every reachable infoset in ONE batched call; rows are clamped
     /// non-negative and renormalized over the legal actions (uniform when degenerate).
     fn exploitability(&self, py: Python<'_>, policy_infer: &Bound<'_, PyAny>) -> PyResult<f64> {
-        let features = self.inner.infoset_features();
+        let features = self.inner.infoset_features().map_err(cap_err)?;
         let (dim, a) = (self.obs_dim, self.action_count);
         let mut obs_flat: Vec<f32> = Vec::with_capacity(features.len() * dim);
         for (_, obs, _) in &features {
@@ -4479,7 +4503,8 @@ impl PyDeepCfr {
             };
             probs.insert(key.clone(), sigma);
         }
-        Ok(py.allow_threads(|| self.inner.exploitability_of(&probs)))
+        py.allow_threads(|| self.inner.exploitability_of(&probs))
+            .map_err(cap_err)
     }
 }
 
