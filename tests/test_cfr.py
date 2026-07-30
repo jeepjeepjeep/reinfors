@@ -102,9 +102,30 @@ def test_mccfr_runs_on_heads_up_holdem() -> None:
 def test_construction_gates() -> None:
     with pytest.raises(ValueError, match="information-state"):
         rf.solvers.Cfr(rf.games.Connect4())
-    with pytest.raises(ValueError, match="2-player"):
-        rf.solvers.Cfr(rf.games.TexasHoldem(num_players=3), variant="external_mccfr")
     with pytest.raises(ValueError, match="external_mccfr"):
         rf.solvers.Cfr(rf.games.TexasHoldem(num_players=2), variant="plus")
+    with pytest.raises(ValueError, match="external_mccfr"):
+        rf.solvers.Cfr(rf.games.TexasHoldem(num_players=3), variant="plus")
+
+
+def test_mccfr_runs_on_multiway_holdem() -> None:
+    solver = rf.solvers.Cfr(rf.games.TexasHoldem(num_players=3, stack=20), variant="external_mccfr", seed=1)
+    solver.iterate(60)
+    assert solver.num_infosets > 60, "tables fill under sampling"
+    assert solver.num_players == 3
+
+
+def test_three_player_external_mccfr_average_converges() -> None:
+    """The N-player MCCFR average uses OpenSpiel's "simple" estimator: cumulative strategy
+    updated only at player (traverser + 1) % N along the sampled path (updating every sampled
+    non-traverser over-counts under the other traversers' passes). Pinned: the average is
+    usable — NashConv falls from uniform's 2.0625 into the tabular plateau's neighborhood."""
+    solver = rf.solvers.Cfr(rf.games.KuhnPoker(players=3), variant="external_mccfr", seed=0)
+    trail = []
+    for _ in range(10):
+        solver.iterate(1000)
+        trail.append(solver.nash_conv())
+    assert trail[-1] < trail[0] / 2, f"NashConv must fall: {trail}"
+    assert trail[-1] < 0.30, f"and land near the tabular plateau band: {trail}"
     with pytest.raises(ValueError, match="unknown CFR variant"):
         rf.solvers.Cfr(rf.games.KuhnPoker(), variant="zap")

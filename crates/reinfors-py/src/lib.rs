@@ -3964,8 +3964,9 @@ impl<G: Game + Send + Sync> ErasedCfr for reinfors_core::CfrSolver<G> {
     }
 }
 
-/// `rf.solvers.Cfr` — counterfactual regret minimization over a 2-player game with declared
-/// chance and information-state keys (the poker family). Variants: "vanilla", "plus" (CFR+),
+/// `rf.solvers.Cfr` — counterfactual regret minimization over a sequential game with declared
+/// chance and information-state keys (the poker family, 2..=10 players; convergence to Nash
+/// is only guaranteed at 2-player zero-sum). Variants: "vanilla", "plus" (CFR+),
 /// "external_mccfr". The output is the AVERAGE strategy (`average_strategy` by
 /// `env.information_state_key` bytes); `exploitability()` is the exact convergence metric
 /// (enumeration-capped: Kuhn/Leduc-sized games, not full hold'em).
@@ -4015,11 +4016,6 @@ impl PyCfr {
                 small_blind,
                 big_blind,
             } => {
-                if num_players != 2 {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "CFR solves 2-player games only; construct TexasHoldem(num_players=2)",
-                    ));
-                }
                 if variant != CfrVariant::ExternalMccfr {
                     return Err(pyo3::exceptions::PyValueError::new_err(
                         "full hold'em's chance fans are unenumerable: use variant=\"external_mccfr\"",
@@ -4039,8 +4035,8 @@ impl PyCfr {
             }
             _ => {
                 return Err(pyo3::exceptions::PyValueError::new_err(
-                    "CFR requires a 2-player game with declared chance and information-state \
-                     keys (KuhnPoker::default(), LeducPoker, heads-up TexasHoldem)",
+                    "CFR requires a sequential game with declared chance and information-state \
+                     keys (KuhnPoker, LeducPoker, TexasHoldem)",
                 ))
             }
         };
@@ -4066,6 +4062,11 @@ impl PyCfr {
     #[getter]
     fn num_infosets(&self) -> usize {
         self.inner.num_infosets()
+    }
+
+    #[getter]
+    fn num_players(&self) -> usize {
+        self.inner.num_players()
     }
 
     /// Exact exploitability of the average profile (pyspiel's definition:

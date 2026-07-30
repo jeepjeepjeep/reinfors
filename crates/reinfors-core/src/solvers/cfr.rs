@@ -230,8 +230,14 @@ impl<G: Game> CfrSolver<G> {
         }
     }
 
-    /// Expected value for `player` when BOTH play the average profile (full enumeration).
+    /// Expected value for `player` when EVERY player plays the average profile (full
+    /// enumeration).
     pub fn expected_value(&self, player: usize) -> f64 {
+        assert!(
+            player < self.num_players(),
+            "player {player} out of range: this game has {} players",
+            self.num_players()
+        );
         let root = self.game.initial_state();
         self.profile_value(&root)[player]
     }
@@ -443,9 +449,12 @@ impl<G: Game> CfrSolver<G> {
 
     // ---------------- external-sampling MCCFR ----------------
 
-    /// The traverser's sampled value: chance and the opponent sampled, the traverser's actions
-    /// enumerated. Regrets updated at traverser infosets, cumulative strategy at the
-    /// opponent's sampled path (the standard external-sampling scheme).
+    /// The traverser's sampled value: chance and the other players sampled, the traverser's
+    /// actions enumerated. Regrets updated at traverser infosets; cumulative strategy updated
+    /// only at player `(traverser + 1) % N` along the sampled path — OpenSpiel's "simple"
+    /// average estimator, which at N=2 is exactly the classic scheme. Updating EVERY sampled
+    /// non-traverser would double-count players reached under other traversers' passes;
+    /// unbiased full averaging needs a separate reach-weighted pass we don't do.
     fn sample_values(&mut self, state: &G::State, player: usize) -> f64 {
         match self.game.actor(state) {
             Actor::Chance => {
@@ -480,7 +489,7 @@ impl<G: Game> CfrSolver<G> {
                     }
                     v
                 } else {
-                    {
+                    if who == (player + 1) % self.game.num_agents() {
                         let node = self.nodes.get_mut(&key).expect("created above");
                         for (ai, &s) in sigma.iter().enumerate() {
                             node.cumulative[ai] += s;

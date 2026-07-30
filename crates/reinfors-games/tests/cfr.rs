@@ -292,3 +292,13 @@ fn mccfr_runs_on_heads_up_holdem() {
     solver.iterate(200);
     assert!(solver.num_infosets() > 100, "tables fill under sampling");
 }
+
+#[test]
+#[should_panic(expected = "player 2 out of range")]
+fn expected_value_rejects_an_out_of_range_player() {
+    // A fixed-width Vals row exists for every slot up to MAX_CFR_PLAYERS; without the guard,
+    // expected_value(9) on a 2-player game silently returns 0.0.
+    let mut solver = kuhn_solver(CfrVariant::Vanilla);
+    solver.iterate(1);
+    solver.expected_value(2);
+}
