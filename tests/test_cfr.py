@@ -106,6 +106,8 @@ def test_construction_gates() -> None:
         rf.solvers.Cfr(rf.games.TexasHoldem(num_players=2), variant="plus")
     with pytest.raises(ValueError, match="external_mccfr"):
         rf.solvers.Cfr(rf.games.TexasHoldem(num_players=3), variant="plus")
+    with pytest.raises(ValueError, match="unknown CFR variant"):
+        rf.solvers.Cfr(rf.games.KuhnPoker(), variant="zap")
 
 
 def test_mccfr_runs_on_multiway_holdem() -> None:
@@ -127,5 +129,3 @@ def test_three_player_external_mccfr_average_converges() -> None:
         trail.append(solver.nash_conv())
     assert trail[-1] < trail[0] / 2, f"NashConv must fall: {trail}"
     assert trail[-1] < 0.30, f"and land near the tabular plateau band: {trail}"
-    with pytest.raises(ValueError, match="unknown CFR variant"):
-        rf.solvers.Cfr(rf.games.KuhnPoker(), variant="zap")
