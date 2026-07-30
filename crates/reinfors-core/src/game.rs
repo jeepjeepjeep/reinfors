@@ -323,6 +323,7 @@ pub fn step_env<G: Game>(
 /// (asserted) and their events are contractually neutral.
 pub fn realize_initial_state<G: Game>(game: &G, rng: &mut dyn Rng) -> G::State {
     let mut state = game.initial_state();
+    let num_agents = game.num_agents();
     let mut edges = 0usize;
     while matches!(game.actor(&state), Actor::Chance) {
         edges += 1;
@@ -335,6 +336,14 @@ pub fn realize_initial_state<G: Game>(game: &G, rng: &mut dyn Rng) -> G::State {
         assert!(
             !t.terminal,
             "an episode cannot end during its birth chain — the deal may not decide the game"
+        );
+        // Mirror `step_env`'s shape check: position IS the agent id, so a malformed birth edge
+        // must fail HERE — a solver scoring the same edge later would index it and panic far
+        // from the cause.
+        assert!(
+            t.events.len() == num_agents,
+            "a transition must carry exactly one event slot per agent ({} for {num_agents} agents)",
+            t.events.len()
         );
         // A REAL assert: a rollout would silently discard a birth emission while a solver
         // scoring the same edge would not — release builds must reject the divergence too.
@@ -540,6 +549,67 @@ mod step_env_tests {
             },
             &mut Unit(0.5),
         );
+    }
+
+    /// A 2-agent root chance whose birth edge carries `len` event slots.
+    struct BirthArity {
+        len: usize,
+    }
+    impl Game for BirthArity {
+        type State = i32;
+        type Event = f64;
+        fn num_agents(&self) -> usize {
+            2
+        }
+        fn action_count(&self) -> usize {
+            1
+        }
+        fn actor(&self, s: &i32) -> Actor {
+            if *s == 0 {
+                Actor::Chance
+            } else {
+                Actor::Agent(0)
+            }
+        }
+        fn legal_actions(&self, s: &i32, agent: usize) -> Vec<usize> {
+            if *s == 1 && agent == 0 {
+                vec![0]
+            } else {
+                Vec::new()
+            }
+        }
+        fn step(&self, _s: &i32, _actions: &[usize]) -> Transition<i32, f64> {
+            Transition {
+                next_state: 2,
+                events: vec![None, None],
+                terminal: true,
+            }
+        }
+        fn chance_node(&self, _s: &i32) -> ChanceDist {
+            ChanceDist::Uniform(1)
+        }
+        fn apply_chance_node(&self, _s: &i32, _outcome: usize) -> Transition<i32, f64> {
+            Transition {
+                next_state: 1,
+                events: vec![None; self.len],
+                terminal: false,
+            }
+        }
+        fn initial_state(&self) -> i32 {
+            0
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "exactly one event slot per agent")]
+    fn a_short_birth_event_vector_is_rejected() {
+        let _ = realize_initial_state(&BirthArity { len: 0 }, &mut Unit(0.5));
+    }
+
+    #[test]
+    #[should_panic(expected = "exactly one event slot per agent")]
+    fn a_long_birth_event_vector_is_rejected() {
+        let _ = realize_initial_state(&BirthArity { len: 3 }, &mut Unit(0.5));
     }
 
     #[test]
