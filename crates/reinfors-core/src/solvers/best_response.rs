@@ -27,13 +27,13 @@ const MAX_TREE_NODES: usize = 4_000_000;
 
 enum ArenaNode {
     Terminal,
-    /// `(probability, edge rewards, child)` per outcome.
-    Chance(Vec<(f64, [f64; 2], usize)>),
-    /// A decision: `(actor, infoset key, (edge rewards, child) per legal action)`.
+    /// `(probability, per-player edge rewards, child)` per outcome.
+    Chance(Vec<(f64, Vec<f64>, usize)>),
+    /// A decision: `(actor, infoset key, (per-player edge rewards, child) per legal action)`.
     Decision {
         who: usize,
         key: Vec<u8>,
-        children: Vec<([f64; 2], usize)>,
+        children: Vec<(Vec<f64>, usize)>,
     },
 }
 
@@ -67,10 +67,10 @@ fn build_arena<G: Game>(game: &G, reward: &dyn Reward<Event = G::Event>) -> Aren
                     let mut outcomes = Vec::with_capacity(probs.len());
                     for (i, p) in probs.into_iter().enumerate() {
                         let t = self.game.apply_chance_node(state, i);
-                        let r = [
-                            crate::reward::edge_reward(self.reward, &t.events, 0),
-                            crate::reward::edge_reward(self.reward, &t.events, 1),
-                        ];
+                        let n = self.game.num_agents();
+                        let r: Vec<f64> = (0..n)
+                            .map(|p| crate::reward::edge_reward(self.reward, &t.events, p))
+                            .collect();
                         let child = if t.terminal {
                             self.terminal()
                         } else {
@@ -85,13 +85,13 @@ fn build_arena<G: Game>(game: &G, reward: &dyn Reward<Event = G::Event>) -> Aren
                     let key = self.game.information_state_key(state, who);
                     let mut children = Vec::with_capacity(legal.len());
                     for &a in &legal {
-                        let mut joint = vec![0; 2];
+                        let mut joint = vec![0; self.game.num_agents()];
                         joint[who] = a;
                         let t = self.game.step(state, &joint);
-                        let r = [
-                            crate::reward::edge_reward(self.reward, &t.events, 0),
-                            crate::reward::edge_reward(self.reward, &t.events, 1),
-                        ];
+                        let n = self.game.num_agents();
+                        let r: Vec<f64> = (0..n)
+                            .map(|p| crate::reward::edge_reward(self.reward, &t.events, p))
+                            .collect();
                         let child = if t.terminal {
                             self.terminal()
                         } else {
@@ -179,7 +179,7 @@ impl BrPass<'_> {
                 let (who, key, children) = (*who, key.clone(), children.clone());
                 if who == self.br_player {
                     let a = self.choose(&key);
-                    let (r, child) = children[a];
+                    let (r, child) = children[a].clone();
                     r[self.br_player] + self.value(child)
                 } else {
                     let sigma = (self.profile)(&key, children.len());
@@ -210,7 +210,7 @@ impl BrPass<'_> {
             let mut q = 0.0;
             for &(idx, w) in &members {
                 let (r, child) = match &self.arena.nodes[idx] {
-                    ArenaNode::Decision { children, .. } => children[a],
+                    ArenaNode::Decision { children, .. } => children[a].clone(),
                     _ => unreachable!(),
                 };
                 q += w * (r[self.br_player] + self.value(child));
@@ -302,13 +302,75 @@ pub fn enumerate_infosets<G: Game>(game: &G) -> Vec<(Vec<u8>, G::State, usize)> 
     walk.out
 }
 
-/// pyspiel's exploitability: `(br_0 + br_1) / 2` for a 2-player zero-sum game — zero exactly
-/// at a Nash equilibrium of `profile`.
+/// Every player's exact best-response value against the others playing `profile`.
+pub fn best_response_values<G: Game>(
+    game: &G,
+    reward: &dyn Reward<Event = G::Event>,
+    profile: &Profile<'_>,
+) -> Vec<f64> {
+    (0..game.num_agents())
+        .map(|p| best_response_value(game, reward, profile, p))
+        .collect()
+}
+
+/// Every player's expected value when EVERYONE plays `profile` (one arena walk).
+pub fn profile_values<G: Game>(
+    game: &G,
+    reward: &dyn Reward<Event = G::Event>,
+    profile: &Profile<'_>,
+) -> Vec<f64> {
+    let arena = build_arena(game, reward);
+    fn go(arena: &Arena, profile: &Profile<'_>, idx: usize, n: usize) -> Vec<f64> {
+        match &arena.nodes[idx] {
+            ArenaNode::Terminal => vec![0.0; n],
+            ArenaNode::Chance(outcomes) => {
+                let mut v = vec![0.0; n];
+                for (p, r, child) in outcomes {
+                    let c = go(arena, profile, *child, n);
+                    for i in 0..n {
+                        v[i] += p * (r[i] + c[i]);
+                    }
+                }
+                v
+            }
+            ArenaNode::Decision { key, children, .. } => {
+                let sigma = profile(key, children.len());
+                let mut v = vec![0.0; n];
+                for (ai, (r, child)) in children.iter().enumerate() {
+                    let c = go(arena, profile, *child, n);
+                    for i in 0..n {
+                        v[i] += sigma[ai] * (r[i] + c[i]);
+                    }
+                }
+                v
+            }
+        }
+    }
+    go(&arena, profile, 0, game.num_agents())
+}
+
+/// NashConv: `Σᵢ (brᵢ − vᵢ)` — every player's exact unilateral improvement over `profile`,
+/// summed. Zero exactly at a Nash equilibrium; for more than 2 players a positive plateau is
+/// the expected outcome (regret minimization carries no equilibrium guarantee there).
+pub fn nash_conv<G: Game>(
+    game: &G,
+    reward: &dyn Reward<Event = G::Event>,
+    profile: &Profile<'_>,
+) -> f64 {
+    let on_policy = profile_values(game, reward, profile);
+    best_response_values(game, reward, profile)
+        .into_iter()
+        .zip(on_policy)
+        .map(|(br, v)| br - v)
+        .sum()
+}
+
+/// pyspiel's exploitability: NashConv / num_players — for a 2-player zero-sum game exactly
+/// the historical `(br_0 + br_1) / 2`.
 pub fn exploitability<G: Game>(
     game: &G,
     reward: &dyn Reward<Event = G::Event>,
     profile: &Profile<'_>,
 ) -> f64 {
-    (best_response_value(game, reward, profile, 0) + best_response_value(game, reward, profile, 1))
-        / 2.0
+    nash_conv(game, reward, profile) / game.num_agents() as f64
 }
