@@ -39,7 +39,9 @@ pub use rollout::env::Env;
 pub use rollout::evaluator::{CommittedRows, EvalBatch, Evaluator, InferMode, Resolve};
 pub use rollout::infer_cache::InferCache;
 pub use rollout::start::{AlwaysInitialState, ReachedStateBuffer, Start, StartDistribution};
-pub use solvers::best_response::{best_response_value, enumerate_infosets, exploitability};
+pub use solvers::best_response::{
+    best_response_value, enumerate_infosets, exploitability, EnumerationCapExceeded,
+};
 pub use solvers::cfr::{CfrSolver, CfrVariant};
 pub use solvers::deep_cfr::{AdvantageSample, DeepCfrSolver, DeepCfrStats, StrategySample};
 pub use space::Space;

@@ -5,8 +5,10 @@
 //!
 //! - at the traverser's infosets: one advantage sample per visit, `(features, iteration,
 //!   legal ids, targets)` with targets `v(a) − Σ_a σ(a)·v(a)` over the enumerated actions;
-//! - at opponent infosets: one strategy sample `(features, iteration, legal ids, σ)` — the
-//!   average-policy network (the playable product) trains on these.
+//! - at the infosets of player `(traverser + 1) % N` along the sampled path: one strategy
+//!   sample `(features, iteration, legal ids, σ)` — the average-policy network (the playable
+//!   product) trains on these. That is OpenSpiel's "simple" average estimator, the same rule
+//!   as tabular MCCFR (at 2 players it is every opponent infoset).
 //!
 //! The user owns reservoir buffers, iteration-weighted losses, and (re)training — reinfors
 //! ships the data generator (the DQN-family division of labor). Strategies are derived from
@@ -36,7 +38,7 @@
 //! minimization (the Pluribus regime), measured by the exact NashConv instrument on
 //! enumerable games and by frozen-policy exploiters at scale.
 //!
-//! Construction gates match tabular CFR: 2 players, [`Game::information_states`],
+//! Construction gates match tabular CFR: 2..=10 players, [`Game::information_states`],
 //! rng-free `initial_state` (chance fully declared by construction).
 
 use std::collections::HashMap;
@@ -50,6 +52,10 @@ use crate::rng::SplitMix64;
 use crate::rollout::infer_cache::InferCache;
 use crate::solvers::best_response;
 
+/// `(infoset key, encoded features, legal ids)` per reachable infoset — the exploitability
+/// instrument's input rows.
+pub type InfosetFeatures = Vec<(Vec<u8>, Vec<f32>, Vec<usize>)>;
+
 /// One advantage-network training sample, emitted at a traverser infoset visit.
 pub struct AdvantageSample {
     pub obs: Vec<f32>,
@@ -60,7 +66,8 @@ pub struct AdvantageSample {
     pub targets: Vec<f64>,
 }
 
-/// One average-policy training sample, emitted at an opponent infoset visit.
+/// One average-policy training sample, emitted at the infosets of player
+/// `(traverser + 1) % N` along the sampled path (the simple average estimator).
 pub struct StrategySample {
     /// The acting (opponent) player the sample belongs to.
     pub player: usize,
@@ -231,7 +238,8 @@ impl<G: Game> DeepCfrSolver<G> {
     }
 
     /// Run `traversals` external-sampling traversals with `player` as the traverser, emitting
-    /// advantage samples for `player` and strategy samples at opponent infosets.
+    /// advantage samples for `player` and strategy samples at the infosets of player
+    /// `(player + 1) % N` (the simple average estimator).
     ///
     /// `infer(player, obs_flat, rows) -> advantages` serves the CURRENT advantage network of
     /// `player` on a row-major `[rows, obs_dim]` batch, returning `rows * action_count` f64s.
@@ -382,13 +390,18 @@ impl<G: Game> DeepCfrSolver<G> {
                 legal,
             } => {
                 let sigma = matched_strategy(row, &legal);
-                strategy.push(StrategySample {
-                    player: who,
-                    obs,
-                    iteration: self.iteration,
-                    legal: legal.clone(),
-                    probs: sigma.clone(),
-                });
+                // OpenSpiel's "simple" average estimator (matching tabular MCCFR): the
+                // strategy stream records only player (traverser + 1) % N — recording every
+                // sampled non-traverser over-counts under the other traversers' passes.
+                if who == (player + 1) % self.game.num_agents() {
+                    strategy.push(StrategySample {
+                        player: who,
+                        obs,
+                        iteration: self.iteration,
+                        legal: legal.clone(),
+                        probs: sigma.clone(),
+                    });
+                }
                 let action = legal[sample_index(&sigma, &mut m.rng)];
                 let mut joint = vec![0; self.game.num_agents()];
                 joint[who] = action;
@@ -567,22 +580,27 @@ impl<G: Game> DeepCfrSolver<G> {
     /// Every reachable information set with an exemplar state and its features — the input to
     /// the exact-exploitability instrument for a NET policy (enumerable games only: the walk
     /// is capped like best response). Returns `(key, features, legal ids)` per infoset.
-    pub fn infoset_features(&self) -> Vec<(Vec<u8>, Vec<f32>, Vec<usize>)> {
-        best_response::enumerate_infosets(&self.game)
+    pub fn infoset_features(
+        &self,
+    ) -> Result<InfosetFeatures, best_response::EnumerationCapExceeded> {
+        Ok(best_response::enumerate_infosets(&self.game)?
             .into_iter()
             .map(|(key, state, agent)| {
                 let obs = self.encoder.encode(&state, agent);
                 let legal = self.game.legal_actions(&state, agent);
                 (key, obs, legal)
             })
-            .collect()
+            .collect())
     }
 
     /// Exact exploitability of a policy given per-infoset action probabilities (aligned with
     /// each infoset's legal ids, as returned by [`infoset_features`](Self::infoset_features));
     /// unlisted infosets play uniform. Same instrument and definition as tabular CFR
     /// (NashConv / num_players, zero at Nash).
-    pub fn exploitability_of(&self, probs: &HashMap<Vec<u8>, Vec<f64>>) -> f64 {
+    pub fn exploitability_of(
+        &self,
+        probs: &HashMap<Vec<u8>, Vec<f64>>,
+    ) -> Result<f64, best_response::EnumerationCapExceeded> {
         best_response::exploitability(&self.game, &*self.reward, &|key, legal| {
             probs
                 .get(key)

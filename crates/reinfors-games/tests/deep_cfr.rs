@@ -147,7 +147,7 @@ fn table_emulated_deep_cfr_converges_on_kuhn() {
         }
     }
     // Normalize the average policy and re-key it by information-set key for the instrument.
-    let features = solver.infoset_features();
+    let features = solver.infoset_features().unwrap();
     assert_eq!(features.len(), 12, "Kuhn has exactly 12 infosets");
     let mut probs: HashMap<Vec<u8>, Vec<f64>> = HashMap::new();
     for (key, obs, legal) in &features {
@@ -160,7 +160,7 @@ fn table_emulated_deep_cfr_converges_on_kuhn() {
         }
         assert!(!legal.is_empty());
     }
-    let exploitability = solver.exploitability_of(&probs);
+    let exploitability = solver.exploitability_of(&probs).unwrap();
     assert!(
         exploitability < 0.1,
         "table-emulated Deep CFR approaches Nash: {exploitability}"
@@ -229,7 +229,7 @@ fn table_emulated_deep_cfr_plateaus_on_three_player_kuhn() {
             }
         }
     }
-    let features = solver.infoset_features();
+    let features = solver.infoset_features().unwrap();
     assert_eq!(
         features.len(),
         48,
@@ -245,7 +245,7 @@ fn table_emulated_deep_cfr_plateaus_on_three_player_kuhn() {
             }
         }
     }
-    let exploitability = solver.exploitability_of(&probs);
+    let exploitability = solver.exploitability_of(&probs).unwrap();
     assert!(
         exploitability < 0.08,
         "3p table-emulated Deep CFR reaches the tabular plateau band: {exploitability}"
@@ -254,7 +254,9 @@ fn table_emulated_deep_cfr_plateaus_on_three_player_kuhn() {
 }
 
 #[test]
-fn three_player_strategy_samples_cover_every_non_traverser() {
+fn three_player_strategy_samples_follow_the_simple_estimator() {
+    // OpenSpiel's multiplayer simple-averaging rule: each traversal pass records the
+    // strategy of player (traverser + 1) % N only. Rotating the traverser covers everyone.
     let mut solver = DeepCfrSolver::new(
         KuhnPoker { players: 3 },
         Box::new(KuhnEncoder { players: 3 }),
@@ -262,13 +264,15 @@ fn three_player_strategy_samples_cover_every_non_traverser() {
         5,
     );
     solver.next_iteration();
-    let (_, strat0, _) = solver.collect(0, 32, zeros);
-    let seen: std::collections::HashSet<usize> = strat0.iter().map(|s| s.player).collect();
-    assert_eq!(
-        seen,
-        [1, 2].into_iter().collect(),
-        "both non-traversers sampled"
-    );
+    for player in 0..3 {
+        let (_, strat, _) = solver.collect(player, 32, zeros);
+        let seen: std::collections::HashSet<usize> = strat.iter().map(|s| s.player).collect();
+        assert_eq!(
+            seen,
+            [(player + 1) % 3].into_iter().collect(),
+            "traverser {player} records exactly the next player"
+        );
+    }
 }
 
 #[test]
@@ -276,7 +280,7 @@ fn uniform_policy_exploitability_matches_the_known_values() {
     // No probs at all = uniform everywhere; the exact values are pinned by the tabular CFR
     // parity harness (iteration-1 CFR averages are uniform).
     let kuhn = kuhn_solver(0);
-    let e = kuhn.exploitability_of(&HashMap::new());
+    let e = kuhn.exploitability_of(&HashMap::new()).unwrap();
     assert!((e - 11.0 / 24.0).abs() < 1e-12, "Kuhn uniform: {e}");
     let leduc = DeepCfrSolver::new(
         LeducPoker,
@@ -284,7 +288,7 @@ fn uniform_policy_exploitability_matches_the_known_values() {
         Box::new(HoldemReward { scale: 1.0 }),
         0,
     );
-    let e = leduc.exploitability_of(&HashMap::new());
+    let e = leduc.exploitability_of(&HashMap::new()).unwrap();
     assert!((e - 2.373611111111111).abs() < 1e-9, "Leduc uniform: {e}");
 }
 

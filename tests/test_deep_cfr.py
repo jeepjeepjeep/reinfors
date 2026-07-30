@@ -189,8 +189,9 @@ def test_table_emulated_deep_cfr_converges_on_kuhn() -> None:
 
 
 def test_three_player_kuhn_collects_and_measures() -> None:
-    """The N-player lift end to end: per-player infer list of 3, strategy samples from every
-    non-traverser, and the exact instrument (NashConv / num_players) on the uniform policy."""
+    """The N-player lift end to end: per-player infer list of 3, strategy samples from
+    player (traverser + 1) % 3 only (the simple average estimator), and the exact instrument
+    (NashConv / num_players) on the uniform policy."""
     solver = rf.solvers.DeepCfr(rf.games.KuhnPoker(players=3), seed=0)
     solver.next_iteration()
 
@@ -206,7 +207,7 @@ def test_three_player_kuhn_collects_and_measures() -> None:
         batch = solver.collect(player=player, traversals=32, infer=[net, net, net])
         assert batch.advantage_obs.shape[1] == 9
         others = set(batch.strategy_players.tolist())
-        assert player not in others
+        assert others == {(player + 1) % 3}, "simple estimator: exactly the next player"
         seen |= others
     assert seen == {0, 1, 2}
     # Uniform policy instrument: NashConv/3 for uniform 3p Kuhn, pinned from the tabular solver.

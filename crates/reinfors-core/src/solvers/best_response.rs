@@ -25,6 +25,21 @@ pub type Profile<'a> = dyn Fn(&[u8], usize) -> Vec<f64> + 'a;
 /// instrument's scope.
 const MAX_TREE_NODES: usize = 4_000_000;
 
+/// The exact enumeration outgrew a cap — the game is out of exact-metric range. A typed
+/// error rather than a panic: a big-but-valid game is expected input at the public boundary,
+/// and a panic there would either escape it or force callers to catch unwinds (masking
+/// genuine bugs and printing panic diagnostics on the way).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumerationCapExceeded(pub String);
+
+impl std::fmt::Display for EnumerationCapExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for EnumerationCapExceeded {}
+
 enum ArenaNode {
     Terminal,
     /// `(probability, per-player edge rewards, child)` per outcome.
@@ -41,28 +56,33 @@ struct Arena {
     nodes: Vec<ArenaNode>,
 }
 
-fn build_arena<G: Game>(game: &G, reward: &dyn Reward<Event = G::Event>) -> Arena {
+fn build_arena<G: Game>(
+    game: &G,
+    reward: &dyn Reward<Event = G::Event>,
+) -> Result<Arena, EnumerationCapExceeded> {
     struct Builder<'a, G: Game> {
         game: &'a G,
         reward: &'a dyn Reward<Event = G::Event>,
         nodes: Vec<ArenaNode>,
     }
     impl<G: Game> Builder<'_, G> {
-        fn add(&mut self, state: &G::State) -> usize {
-            assert!(
-                self.nodes.len() < MAX_TREE_NODES,
-                "game tree exceeds the exact best-response cap ({MAX_TREE_NODES} nodes)"
-            );
+        fn add(&mut self, state: &G::State) -> Result<usize, EnumerationCapExceeded> {
+            if self.nodes.len() >= MAX_TREE_NODES {
+                return Err(EnumerationCapExceeded(format!(
+                    "game tree exceeds the exact best-response cap ({MAX_TREE_NODES} nodes)"
+                )));
+            }
             let idx = self.nodes.len();
             self.nodes.push(ArenaNode::Terminal); // placeholder, patched below
             let node = match self.game.actor(state) {
                 Actor::Chance => {
                     let dist = self.game.chance_node(state);
-                    assert!(
-                        dist.count() <= MAX_ENUMERATED_OUTCOMES,
-                        "chance fan {} exceeds the enumeration cap",
-                        dist.count()
-                    );
+                    if dist.count() > MAX_ENUMERATED_OUTCOMES {
+                        return Err(EnumerationCapExceeded(format!(
+                            "chance fan {} exceeds the enumeration cap",
+                            dist.count()
+                        )));
+                    }
                     let probs: Vec<f64> = dist.iter_probs().collect();
                     let mut outcomes = Vec::with_capacity(probs.len());
                     for (i, p) in probs.into_iter().enumerate() {
@@ -74,7 +94,7 @@ fn build_arena<G: Game>(game: &G, reward: &dyn Reward<Event = G::Event>) -> Aren
                         let child = if t.terminal {
                             self.terminal()
                         } else {
-                            self.add(&t.next_state)
+                            self.add(&t.next_state)?
                         };
                         outcomes.push((p, r, child));
                     }
@@ -95,7 +115,7 @@ fn build_arena<G: Game>(game: &G, reward: &dyn Reward<Event = G::Event>) -> Aren
                         let child = if t.terminal {
                             self.terminal()
                         } else {
-                            self.add(&t.next_state)
+                            self.add(&t.next_state)?
                         };
                         children.push((r, child));
                     }
@@ -104,7 +124,7 @@ fn build_arena<G: Game>(game: &G, reward: &dyn Reward<Event = G::Event>) -> Aren
                 Actor::Simultaneous => panic!("a simultaneous decision was reached mid-game: solvers support uniformly SEQUENTIAL games (the framework assumes one dynamics per game; mixing violates that contract)"),
             };
             self.nodes[idx] = node;
-            idx
+            Ok(idx)
         }
 
         fn terminal(&mut self) -> usize {
@@ -119,8 +139,8 @@ fn build_arena<G: Game>(game: &G, reward: &dyn Reward<Event = G::Event>) -> Aren
         nodes: Vec::new(),
     };
     let root = game.initial_state();
-    b.add(&root);
-    Arena { nodes: b.nodes }
+    b.add(&root)?;
+    Ok(Arena { nodes: b.nodes })
 }
 
 struct BrPass<'a> {
@@ -231,8 +251,8 @@ pub fn best_response_value<G: Game>(
     reward: &dyn Reward<Event = G::Event>,
     profile: &Profile<'_>,
     br_player: usize,
-) -> f64 {
-    let arena = build_arena(game, reward);
+) -> Result<f64, EnumerationCapExceeded> {
+    let arena = build_arena(game, reward)?;
     let mut pass = BrPass {
         arena: &arena,
         profile,
@@ -241,14 +261,19 @@ pub fn best_response_value<G: Game>(
         choice: HashMap::new(),
     };
     pass.collect(0, 1.0);
-    pass.value(0)
+    Ok(pass.value(0))
 }
 
 /// Every reachable information set, with one exemplar state and the acting agent — the
 /// enumeration behind the net-policy exploitability instrument (a full capped tree walk over
 /// declared chance nodes; enumerable games only). First-visit exemplar per key; the key
 /// contract guarantees every member state yields the same features and ordered legal list.
-pub fn enumerate_infosets<G: Game>(game: &G) -> Vec<(Vec<u8>, G::State, usize)> {
+/// `(infoset key, exemplar state, acting agent)` per reachable infoset.
+pub type InfosetExemplars<S> = Vec<(Vec<u8>, S, usize)>;
+
+pub fn enumerate_infosets<G: Game>(
+    game: &G,
+) -> Result<InfosetExemplars<G::State>, EnumerationCapExceeded> {
     struct Walk<'a, G: Game> {
         game: &'a G,
         seen: HashMap<Vec<u8>, ()>,
@@ -256,21 +281,24 @@ pub fn enumerate_infosets<G: Game>(game: &G) -> Vec<(Vec<u8>, G::State, usize)> 
         visited: usize,
     }
     impl<G: Game> Walk<'_, G> {
-        fn go(&mut self, state: &G::State) {
+        fn go(&mut self, state: &G::State) -> Result<(), EnumerationCapExceeded> {
             self.visited += 1;
-            assert!(
-                self.visited < MAX_TREE_NODES,
-                "game tree exceeds the enumeration cap ({MAX_TREE_NODES} nodes) — the                  exploitability instrument is for enumerable games"
-            );
+            if self.visited >= MAX_TREE_NODES {
+                return Err(EnumerationCapExceeded(format!(
+                    "game tree exceeds the enumeration cap ({MAX_TREE_NODES} nodes) — the \
+                     exploitability instrument is for enumerable games"
+                )));
+            }
             match self.game.actor(state) {
                 Actor::Chance => {
                     let dist = self.game.chance_node(state);
                     for outcome in 0..dist.count() {
                         let t = self.game.apply_chance_node(state, outcome);
                         if !t.terminal {
-                            self.go(&t.next_state);
+                            self.go(&t.next_state)?;
                         }
                     }
+                    Ok(())
                 }
                 Actor::Agent(who) => {
                     let key = self.game.information_state_key(state, who);
@@ -284,8 +312,9 @@ pub fn enumerate_infosets<G: Game>(game: &G) -> Vec<(Vec<u8>, G::State, usize)> 
                         if t.terminal {
                             continue;
                         }
-                        self.go(&t.next_state);
+                        self.go(&t.next_state)?;
                     }
+                    Ok(())
                 }
                 Actor::Simultaneous => panic!("a simultaneous decision was reached mid-game: solvers support uniformly SEQUENTIAL games (the framework assumes one dynamics per game; mixing violates that contract)"),
             }
@@ -298,8 +327,8 @@ pub fn enumerate_infosets<G: Game>(game: &G) -> Vec<(Vec<u8>, G::State, usize)> 
         visited: 0,
     };
     let root = game.initial_state();
-    walk.go(&root);
-    walk.out
+    walk.go(&root)?;
+    Ok(walk.out)
 }
 
 /// Every player's exact best-response value against the others playing `profile`.
@@ -307,7 +336,7 @@ pub fn best_response_values<G: Game>(
     game: &G,
     reward: &dyn Reward<Event = G::Event>,
     profile: &Profile<'_>,
-) -> Vec<f64> {
+) -> Result<Vec<f64>, EnumerationCapExceeded> {
     (0..game.num_agents())
         .map(|p| best_response_value(game, reward, profile, p))
         .collect()
@@ -318,8 +347,8 @@ pub fn profile_values<G: Game>(
     game: &G,
     reward: &dyn Reward<Event = G::Event>,
     profile: &Profile<'_>,
-) -> Vec<f64> {
-    let arena = build_arena(game, reward);
+) -> Result<Vec<f64>, EnumerationCapExceeded> {
+    let arena = build_arena(game, reward)?;
     fn go(arena: &Arena, profile: &Profile<'_>, idx: usize, n: usize) -> Vec<f64> {
         match &arena.nodes[idx] {
             ArenaNode::Terminal => vec![0.0; n],
@@ -346,7 +375,7 @@ pub fn profile_values<G: Game>(
             }
         }
     }
-    go(&arena, profile, 0, game.num_agents())
+    Ok(go(&arena, profile, 0, game.num_agents()))
 }
 
 /// NashConv: `Σᵢ (brᵢ − vᵢ)` — every player's exact unilateral improvement over `profile`,
@@ -356,13 +385,13 @@ pub fn nash_conv<G: Game>(
     game: &G,
     reward: &dyn Reward<Event = G::Event>,
     profile: &Profile<'_>,
-) -> f64 {
-    let on_policy = profile_values(game, reward, profile);
-    best_response_values(game, reward, profile)
+) -> Result<f64, EnumerationCapExceeded> {
+    let on_policy = profile_values(game, reward, profile)?;
+    Ok(best_response_values(game, reward, profile)?
         .into_iter()
         .zip(on_policy)
         .map(|(br, v)| br - v)
-        .sum()
+        .sum())
 }
 
 /// pyspiel's exploitability: NashConv / num_players — for a 2-player zero-sum game exactly
@@ -371,6 +400,6 @@ pub fn exploitability<G: Game>(
     game: &G,
     reward: &dyn Reward<Event = G::Event>,
     profile: &Profile<'_>,
-) -> f64 {
-    nash_conv(game, reward, profile) / game.num_agents() as f64
+) -> Result<f64, EnumerationCapExceeded> {
+    Ok(nash_conv(game, reward, profile)? / game.num_agents() as f64)
 }

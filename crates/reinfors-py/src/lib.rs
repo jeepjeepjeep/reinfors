@@ -3877,8 +3877,13 @@ trait ErasedDeepCfr: Send + Sync {
         reinfors_core::DeepCfrStats,
     );
     #[allow(clippy::type_complexity)]
-    fn infoset_features(&self) -> Vec<(Vec<u8>, Vec<f32>, Vec<usize>)>;
-    fn exploitability_of(&self, probs: &HashMap<Vec<u8>, Vec<f64>>) -> f64;
+    fn infoset_features(
+        &self,
+    ) -> Result<Vec<(Vec<u8>, Vec<f32>, Vec<usize>)>, reinfors_core::EnumerationCapExceeded>;
+    fn exploitability_of(
+        &self,
+        probs: &HashMap<Vec<u8>, Vec<f64>>,
+    ) -> Result<f64, reinfors_core::EnumerationCapExceeded>;
     fn rollback_collect(&mut self);
 }
 
@@ -3901,10 +3906,15 @@ impl<G: Game + Send + Sync> ErasedDeepCfr for reinfors_core::DeepCfrSolver<G> {
     ) {
         reinfors_core::DeepCfrSolver::collect(self, player, traversals, infer)
     }
-    fn infoset_features(&self) -> Vec<(Vec<u8>, Vec<f32>, Vec<usize>)> {
+    fn infoset_features(
+        &self,
+    ) -> Result<Vec<(Vec<u8>, Vec<f32>, Vec<usize>)>, reinfors_core::EnumerationCapExceeded> {
         reinfors_core::DeepCfrSolver::infoset_features(self)
     }
-    fn exploitability_of(&self, probs: &HashMap<Vec<u8>, Vec<f64>>) -> f64 {
+    fn exploitability_of(
+        &self,
+        probs: &HashMap<Vec<u8>, Vec<f64>>,
+    ) -> Result<f64, reinfors_core::EnumerationCapExceeded> {
         reinfors_core::DeepCfrSolver::exploitability_of(self, probs)
     }
     fn rollback_collect(&mut self) {
@@ -3918,9 +3928,9 @@ trait ErasedCfr: Send + Sync {
     fn iterate(&mut self, n: u64);
     fn iterations(&self) -> u64;
     fn num_infosets(&self) -> usize;
-    fn exploitability(&self) -> f64;
-    fn nash_conv(&self) -> f64;
-    fn best_response_values(&self) -> Vec<f64>;
+    fn exploitability(&self) -> Result<f64, reinfors_core::EnumerationCapExceeded>;
+    fn nash_conv(&self) -> Result<f64, reinfors_core::EnumerationCapExceeded>;
+    fn best_response_values(&self) -> Result<Vec<f64>, reinfors_core::EnumerationCapExceeded>;
     fn num_players(&self) -> usize;
     fn expected_value(&self, player: usize) -> f64;
     fn average_strategy(&self, key: &[u8]) -> Option<(Vec<usize>, Vec<f64>)>;
@@ -3938,13 +3948,13 @@ impl<G: Game + Send + Sync> ErasedCfr for reinfors_core::CfrSolver<G> {
     fn num_infosets(&self) -> usize {
         reinfors_core::CfrSolver::num_infosets(self)
     }
-    fn exploitability(&self) -> f64 {
+    fn exploitability(&self) -> Result<f64, reinfors_core::EnumerationCapExceeded> {
         reinfors_core::CfrSolver::exploitability(self)
     }
-    fn nash_conv(&self) -> f64 {
+    fn nash_conv(&self) -> Result<f64, reinfors_core::EnumerationCapExceeded> {
         reinfors_core::CfrSolver::nash_conv(self)
     }
-    fn best_response_values(&self) -> Vec<f64> {
+    fn best_response_values(&self) -> Result<Vec<f64>, reinfors_core::EnumerationCapExceeded> {
         reinfors_core::CfrSolver::best_response_values(self)
     }
     fn num_players(&self) -> usize {
@@ -3964,18 +3974,11 @@ impl<G: Game + Send + Sync> ErasedCfr for reinfors_core::CfrSolver<G> {
     }
 }
 
-/// The exact metrics (best-response enumeration) walk the whole game tree and panic in core
-/// past the arena cap. A big-but-valid game is public input, so that must surface as
-/// ValueError, not a PanicException escaping the boundary.
-fn enumeration_result<T>(f: impl FnOnce() -> T) -> PyResult<T> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|e| {
-        let msg = e
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| e.downcast_ref::<&str>().copied())
-            .unwrap_or("exact enumeration failed");
-        pyo3::exceptions::PyValueError::new_err(msg.to_string())
-    })
+/// The exact metrics walk the whole game tree; past the arena cap core returns a typed
+/// error. A big-but-valid game is public input, so it surfaces as ValueError (genuine
+/// panics, by contrast, keep propagating as bugs).
+fn cap_err(e: reinfors_core::EnumerationCapExceeded) -> pyo3::PyErr {
+    pyo3::exceptions::PyValueError::new_err(e.to_string())
 }
 
 /// `rf.solvers.Cfr` — counterfactual regret minimization over a sequential game with declared
@@ -4087,18 +4090,20 @@ impl PyCfr {
     /// NashConv / num_players); zero exactly at Nash. For more than 2 players this measures
     /// distance from equilibrium with NO convergence guarantee — expect a fall to a plateau.
     fn exploitability(&self, py: Python<'_>) -> PyResult<f64> {
-        py.allow_threads(|| enumeration_result(|| self.inner.exploitability()))
+        py.allow_threads(|| self.inner.exploitability())
+            .map_err(cap_err)
     }
 
     /// NashConv of the average profile: `Σᵢ (brᵢ − vᵢ)` — every player's exact unilateral
     /// improvement, summed. Zero exactly at a Nash equilibrium.
     fn nash_conv(&self, py: Python<'_>) -> PyResult<f64> {
-        py.allow_threads(|| enumeration_result(|| self.inner.nash_conv()))
+        py.allow_threads(|| self.inner.nash_conv()).map_err(cap_err)
     }
 
     /// Each player's exact best-response value against the others' average profile.
     fn best_response_values(&self, py: Python<'_>) -> PyResult<Vec<f64>> {
-        py.allow_threads(|| enumeration_result(|| self.inner.best_response_values()))
+        py.allow_threads(|| self.inner.best_response_values())
+            .map_err(cap_err)
     }
 
     /// Expected value for `player` when everyone plays the average profile.
@@ -4109,7 +4114,7 @@ impl PyCfr {
                 self.inner.num_players()
             )));
         }
-        py.allow_threads(|| enumeration_result(|| self.inner.expected_value(player)))
+        Ok(py.allow_threads(|| self.inner.expected_value(player)))
     }
 
     /// The average strategy at an `env.information_state_key(...)` key:
@@ -4465,7 +4470,7 @@ impl PyDeepCfr {
     /// action_count)` scores every reachable infoset in ONE batched call; rows are clamped
     /// non-negative and renormalized over the legal actions (uniform when degenerate).
     fn exploitability(&self, py: Python<'_>, policy_infer: &Bound<'_, PyAny>) -> PyResult<f64> {
-        let features = enumeration_result(|| self.inner.infoset_features())?;
+        let features = self.inner.infoset_features().map_err(cap_err)?;
         let (dim, a) = (self.obs_dim, self.action_count);
         let mut obs_flat: Vec<f32> = Vec::with_capacity(features.len() * dim);
         for (_, obs, _) in &features {
@@ -4498,7 +4503,8 @@ impl PyDeepCfr {
             };
             probs.insert(key.clone(), sigma);
         }
-        py.allow_threads(|| enumeration_result(|| self.inner.exploitability_of(&probs)))
+        py.allow_threads(|| self.inner.exploitability_of(&probs))
+            .map_err(cap_err)
     }
 }
 

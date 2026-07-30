@@ -206,18 +206,18 @@ impl<G: Game> CfrSolver<G> {
     /// Exploitability of the current AVERAGE profile: NashConv / num_players (pyspiel's
     /// definition). Zero exactly at a Nash equilibrium; for more than 2 players it measures
     /// distance from equilibrium with NO convergence guarantee — expect a fall to a plateau.
-    pub fn exploitability(&self) -> f64 {
+    pub fn exploitability(&self) -> Result<f64, best_response::EnumerationCapExceeded> {
         best_response::exploitability(&self.game, &*self.reward, &self.profile())
     }
 
     /// NashConv of the average profile: `Σᵢ (brᵢ − vᵢ)` — every player's exact unilateral
     /// improvement, summed. Zero exactly at a Nash equilibrium.
-    pub fn nash_conv(&self) -> f64 {
+    pub fn nash_conv(&self) -> Result<f64, best_response::EnumerationCapExceeded> {
         best_response::nash_conv(&self.game, &*self.reward, &self.profile())
     }
 
     /// Each player's exact best-response value against the others' average profile.
-    pub fn best_response_values(&self) -> Vec<f64> {
+    pub fn best_response_values(&self) -> Result<Vec<f64>, best_response::EnumerationCapExceeded> {
         best_response::best_response_values(&self.game, &*self.reward, &self.profile())
     }
 
