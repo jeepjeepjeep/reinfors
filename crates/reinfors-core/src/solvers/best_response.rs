@@ -48,6 +48,8 @@ fn build_arena<G: Game>(game: &G, reward: &dyn Reward<Event = G::Event>) -> Aren
         nodes: Vec<ArenaNode>,
     }
     impl<G: Game> Builder<'_, G> {
+        // The framework serves the deprecated transition-chance seam until its removal PR.
+        #[allow(deprecated)]
         fn add(&mut self, state: &G::State) -> usize {
             assert!(
                 self.nodes.len() < MAX_TREE_NODES,
@@ -281,6 +283,8 @@ pub fn enumerate_infosets<G: Game>(game: &G) -> Vec<(Vec<u8>, G::State, usize)> 
         visited: usize,
     }
     impl<G: Game> Walk<'_, G> {
+        // The framework serves the deprecated transition-chance seam until its removal PR.
+        #[allow(deprecated)]
         fn go(&mut self, state: &G::State) {
             self.visited += 1;
             assert!(

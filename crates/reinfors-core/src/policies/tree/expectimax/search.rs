@@ -606,6 +606,8 @@ fn agent_branching<G: Game>(
 /// transition fans per the configured `ChanceMode` over the game's declared distribution — the
 /// same declaration the env realizes from, so search and env cannot diverge.
 #[allow(clippy::too_many_arguments)]
+// The framework serves the deprecated transition-chance seam until its removal PR.
+#[allow(deprecated)]
 fn push_branches<G: Game>(
     arena: &mut Vec<Node<G::State>>,
     game: &G,

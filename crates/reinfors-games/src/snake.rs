@@ -874,11 +874,7 @@ impl Game for Snake {
             out.food.insert(cell);
         }
         // The respawn settles nothing — eats and deaths were decided on the action edge.
-        Transition {
-            next_state: out,
-            events: vec![None; self.num_snakes],
-            terminal: false,
-        }
+        Transition::silent(out, self.num_snakes)
     }
 
     fn initial_state(&self, rng: &mut dyn Rng) -> SnakeState {

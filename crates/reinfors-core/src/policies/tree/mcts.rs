@@ -795,6 +795,8 @@ impl<S: Clone> Tree<S> {
     /// Build the decision child for outcome `slot` of chance node `cni`, re-deriving the parent
     /// edge's transition (chance nodes store no transition; one extra `Game::step` per
     /// materialization, never per descent).
+    // The framework serves the deprecated transition-chance seam until its removal PR.
+    #[allow(deprecated)]
     fn materialize_outcome<G>(
         &mut self,
         game: &G,
@@ -1021,6 +1023,8 @@ impl<S: Clone> Tree<S> {
     /// deterministic transition appends the child directly; a declared-chance transition appends a
     /// chance node instead (drawing `Committed` outcomes now, or materializing every outcome for
     /// `ExpandAll`).
+    // The framework serves the deprecated transition-chance seam until its removal PR.
+    #[allow(deprecated)]
     fn expand<G>(
         &mut self,
         game: &G,
@@ -1116,6 +1120,8 @@ impl<S: Clone> Tree<S> {
     /// recorded from the pre-chance transition — outcome-invariant by the `chance_outcomes`
     /// contract (chance that changed the reward would not fit this seam).
     #[allow(clippy::too_many_arguments)]
+    // The framework serves the deprecated transition-chance seam until its removal PR.
+    #[allow(deprecated)]
     fn expand_chance<G>(
         &mut self,
         game: &G,
