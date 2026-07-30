@@ -4182,12 +4182,13 @@ struct PyDeepCfr {
     inner: Box<dyn ErasedDeepCfr>,
     obs_dim: usize,
     action_count: usize,
+    num_players: usize,
     config: Value,
 }
 
 /// Resolve the polymorphic `infer` argument: a bare callable serves every player; a sequence
 /// must have one callable per player.
-fn deep_cfr_callbacks(infer: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
+fn deep_cfr_callbacks(infer: &Bound<'_, PyAny>, num_players: usize) -> PyResult<Vec<Py<PyAny>>> {
     if infer.is_callable() {
         return Ok(vec![infer.clone().unbind()]);
     }
@@ -4196,11 +4197,18 @@ fn deep_cfr_callbacks(infer: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
             "infer must be a callable or a sequence of per-player callables",
         )
     })?;
-    if callbacks.len() != 2 {
+    if callbacks.len() != num_players {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "expected 2 per-player infer callables, got {}",
+            "expected {num_players} per-player infer callables, got {}",
             callbacks.len()
         )));
+    }
+    for (player, cb) in callbacks.iter().enumerate() {
+        if !cb.bind(infer.py()).is_callable() {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "per-player infer element {player} is not callable"
+            )));
+        }
     }
     Ok(callbacks)
 }
@@ -4221,7 +4229,7 @@ impl PyDeepCfr {
                     Box::new(reward),
                     seed,
                 )),
-                6,
+                3 * players,
                 2,
             ),
             GameSpec::LeducPoker => (
@@ -4240,12 +4248,6 @@ impl PyDeepCfr {
                 small_blind,
                 big_blind,
             } => {
-                if num_players != 2 {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "Deep CFR solves 2-player games only; construct \
-                             TexasHoldem(num_players=2)",
-                    ));
-                }
                 let enc = HoldemEgocentric { num_players, stack };
                 let (c, h, w) = enc.obs_shape();
                 (
@@ -4281,6 +4283,7 @@ impl PyDeepCfr {
             inner,
             obs_dim,
             action_count,
+            num_players: game.spec.num_agents(),
             config,
         })
     }
@@ -4311,17 +4314,18 @@ impl PyDeepCfr {
         traversals: usize,
         infer: &Bound<'py, PyAny>,
     ) -> PyResult<DeepCfrBatch> {
-        if player >= 2 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "player must be 0 or 1",
-            ));
+        if player >= self.num_players {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "player must be below {}",
+                self.num_players
+            )));
         }
         if self.inner.iteration() == 0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "call next_iteration() before collecting (samples are weighted by the iteration)",
             ));
         }
-        let callbacks = deep_cfr_callbacks(infer)?;
+        let callbacks = deep_cfr_callbacks(infer, self.num_players)?;
         let (dim, a) = (self.obs_dim, self.action_count);
         let mut callback_err: Option<PyErr> = None;
         let mut rust_infer = |who: usize, obs_flat: Vec<f32>, rows: usize| -> Vec<f64> {
@@ -4441,7 +4445,8 @@ impl PyDeepCfr {
         })
     }
 
-    /// Exact exploitability of the AVERAGE-POLICY network (NashConv / 2, zero at Nash) —
+    /// Exact exploitability of the AVERAGE-POLICY network (NashConv / num_players, zero at
+    /// Nash; for more than 2 players a positive plateau is the expected outcome) —
     /// enumerable games only (Kuhn/Leduc, not full hold'em). `policy_infer(obs) -> (M,
     /// action_count)` scores every reachable infoset in ONE batched call; rows are clamped
     /// non-negative and renormalized over the legal actions (uniform when degenerate).

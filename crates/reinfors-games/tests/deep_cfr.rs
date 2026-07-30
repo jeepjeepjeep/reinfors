@@ -168,6 +168,110 @@ fn table_emulated_deep_cfr_converges_on_kuhn() {
 }
 
 #[test]
+fn table_emulated_deep_cfr_plateaus_on_three_player_kuhn() {
+    // The 2p table-emulation argument, at 3 players: with per-player t-weighted mean tables
+    // this loop IS linear external-sampling MCCFR — no Nash guarantee here, so the pin is the
+    // honest one: NashConv falls WELL below the uniform profile's 2.0625 and lands in the
+    // plateau band the tabular solver reaches, never asserted to vanish.
+    struct Table {
+        rows: HashMap<Vec<u8>, (Vec<f64>, f64)>,
+    }
+    impl Table {
+        fn predict(&self, obs: &[f32]) -> Vec<f64> {
+            let key: Vec<u8> = obs.iter().flat_map(|f| f.to_le_bytes()).collect();
+            match self.rows.get(&key) {
+                Some((sums, w)) => sums.iter().map(|s| s / w).collect(),
+                None => vec![0.0; 2],
+            }
+        }
+        fn learn(&mut self, obs: &[f32], legal: &[usize], targets: &[f64], t: f64) {
+            let key: Vec<u8> = obs.iter().flat_map(|f| f.to_le_bytes()).collect();
+            let (sums, w) = self.rows.entry(key).or_insert_with(|| (vec![0.0; 2], 0.0));
+            for (&a, &target) in legal.iter().zip(targets) {
+                sums[a] += t * target;
+            }
+            *w += t;
+        }
+    }
+    let mut solver = DeepCfrSolver::new(
+        KuhnPoker { players: 3 },
+        Box::new(KuhnEncoder { players: 3 }),
+        Box::new(HoldemReward { scale: 1.0 }),
+        11,
+    );
+    let mut tables: Vec<Table> = (0..3)
+        .map(|_| Table {
+            rows: HashMap::new(),
+        })
+        .collect();
+    let mut policy: HashMap<Vec<u8>, Vec<f64>> = HashMap::new();
+    for _ in 0..250 {
+        solver.next_iteration();
+        let t = solver.iteration() as f64;
+        for player in 0..3 {
+            let (advantage, strategy, _) = solver.collect(player, 32, |who, obs, rows| {
+                let dim = obs.len() / rows.max(1);
+                (0..rows)
+                    .flat_map(|i| tables[who].predict(&obs[i * dim..(i + 1) * dim]))
+                    .collect()
+            });
+            for s in &advantage {
+                tables[player].learn(&s.obs, &s.legal, &s.targets, t);
+            }
+            for s in &strategy {
+                let key: Vec<u8> = s.obs.iter().flat_map(|f| f.to_le_bytes()).collect();
+                let acc = policy
+                    .entry(key)
+                    .or_insert_with(|| vec![0.0; s.legal.len()]);
+                for (i, &p) in s.probs.iter().enumerate() {
+                    acc[i] += t * p;
+                }
+            }
+        }
+    }
+    let features = solver.infoset_features();
+    assert_eq!(
+        features.len(),
+        48,
+        "3p Kuhn: 4 cards x 12 public lines per player"
+    );
+    let mut probs: HashMap<Vec<u8>, Vec<f64>> = HashMap::new();
+    for (key, obs, _legal) in &features {
+        let obs_key: Vec<u8> = obs.iter().flat_map(|f| f.to_le_bytes()).collect();
+        if let Some(acc) = policy.get(&obs_key) {
+            let total: f64 = acc.iter().sum();
+            if total > 0.0 {
+                probs.insert(key.clone(), acc.iter().map(|a| a / total).collect());
+            }
+        }
+    }
+    let exploitability = solver.exploitability_of(&probs);
+    assert!(
+        exploitability < 0.08,
+        "3p table-emulated Deep CFR reaches the tabular plateau band: {exploitability}"
+    );
+    assert!(exploitability > 0.0, "and (honestly) does not certify Nash");
+}
+
+#[test]
+fn three_player_strategy_samples_cover_every_non_traverser() {
+    let mut solver = DeepCfrSolver::new(
+        KuhnPoker { players: 3 },
+        Box::new(KuhnEncoder { players: 3 }),
+        Box::new(HoldemReward { scale: 1.0 }),
+        5,
+    );
+    solver.next_iteration();
+    let (_, strat0, _) = solver.collect(0, 32, zeros);
+    let seen: std::collections::HashSet<usize> = strat0.iter().map(|s| s.player).collect();
+    assert_eq!(
+        seen,
+        [1, 2].into_iter().collect(),
+        "both non-traversers sampled"
+    );
+}
+
+#[test]
 fn uniform_policy_exploitability_matches_the_known_values() {
     // No probs at all = uniform everywhere; the exact values are pinned by the tabular CFR
     // parity harness (iteration-1 CFR averages are uniform).
@@ -202,15 +306,16 @@ fn collecting_before_the_first_iteration_is_a_misuse() {
 }
 
 #[test]
-#[should_panic(expected = "2-player zero-sum")]
-fn the_solver_rejects_more_than_two_players() {
+fn the_solver_accepts_more_than_two_players() {
+    // N-player Deep CFR: no Nash guarantee past 2 (documented at the gate), but the machinery
+    // runs — 3-player hold'em constructs and a traversal pass emits samples.
     let game = reinfors_games::TexasHoldem {
         num_players: 3,
         stack: 200,
         small_blind: 5,
         big_blind: 10,
     };
-    let _ = DeepCfrSolver::new(
+    let mut solver = DeepCfrSolver::new(
         game,
         Box::new(reinfors_games::HoldemEgocentric {
             num_players: 3,
@@ -219,6 +324,13 @@ fn the_solver_rejects_more_than_two_players() {
         Box::new(HoldemReward { scale: 1.0 }),
         0,
     );
+    solver.next_iteration();
+    let (advantage, strategy, _) =
+        solver.collect(2, 8, |_p: usize, _obs: Vec<f32>, rows: usize| {
+            vec![0.0; rows * 3]
+        });
+    assert!(!advantage.is_empty());
+    assert!(strategy.iter().all(|s| s.player != 2));
 }
 
 #[test]
@@ -319,7 +431,7 @@ impl reinfors_core::Game for ChanceRootSim {
 }
 
 #[test]
-#[should_panic(expected = "sequential 2-player only")]
+#[should_panic(expected = "sequential turn-taking only")]
 fn chance_root_simultaneous_games_fail_at_construction() {
     let _ = DeepCfrSolver::new(
         ChanceRootSim,

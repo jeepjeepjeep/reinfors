@@ -31,6 +31,11 @@
 //! calling thread. Per-machine rng streams are derived deterministically, so results are
 //! reproducible and independent of cache state or advancement interleaving.
 //!
+//! **Player count**: any 2..=10 sequential players. The 2-player zero-sum Nash story does
+//! NOT survive past two players — there the traversals are empirical per-player regret
+//! minimization (the Pluribus regime), measured by the exact NashConv instrument on
+//! enumerable games and by frozen-policy exploiters at scale.
+//!
 //! Construction gates match tabular CFR: 2 players, [`Game::information_states`],
 //! rng-free `initial_state` (chance fully declared by construction).
 
@@ -161,8 +166,8 @@ pub struct DeepCfrSolver<G: Game> {
     reward: Box<dyn Reward<Event = G::Event>>,
     iteration: u64,
     seed: u64,
-    collects: u64, // salts per-machine rng streams across collect calls
-    caches: [InferCache; 2],
+    collects: u64,           // salts per-machine rng streams across collect calls
+    caches: Vec<InferCache>, // one per player (never share obs-keyed rows across nets)
 }
 
 impl<G: Game> DeepCfrSolver<G> {
@@ -173,8 +178,11 @@ impl<G: Game> DeepCfrSolver<G> {
         seed: u64,
     ) -> Self {
         assert!(
-            game.num_agents() == 2,
-            "Deep CFR v1 solves 2-player zero-sum games only; this game has {} agents",
+            (2..=super::cfr::MAX_CFR_PLAYERS).contains(&game.num_agents()),
+            "Deep CFR supports 2..={} players; this game has {} agents. NOTE: for more than 2 \
+             players the average policy carries NO Nash guarantee — regret minimization is \
+             empirical there (see the module docs)",
+            super::cfr::MAX_CFR_PLAYERS,
             game.num_agents()
         );
         assert!(
@@ -188,9 +196,12 @@ impl<G: Game> DeepCfrSolver<G> {
         let realized = crate::game::realize_initial_state(&game, &mut SplitMix64::new(0x0517_B0BE));
         assert!(
             !matches!(game.actor(&realized), Actor::Simultaneous),
-            "simultaneous games are not supported by Deep CFR v1 (sequential 2-player only)"
+            "simultaneous games are not supported by Deep CFR (sequential turn-taking only)"
         );
         let generation = Arc::new(AtomicU64::new(0));
+        let caches = (0..game.num_agents())
+            .map(|_| InferCache::new(CACHE_ROWS, Arc::clone(&generation)))
+            .collect();
         DeepCfrSolver {
             game,
             encoder,
@@ -198,10 +209,7 @@ impl<G: Game> DeepCfrSolver<G> {
             iteration: 0,
             seed,
             collects: 0,
-            caches: [
-                InferCache::new(CACHE_ROWS, Arc::clone(&generation)),
-                InferCache::new(CACHE_ROWS, generation),
-            ],
+            caches,
         }
     }
 
@@ -238,7 +246,11 @@ impl<G: Game> DeepCfrSolver<G> {
     where
         F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
-        assert!(player < 2, "player must be 0 or 1");
+        assert!(
+            player < self.game.num_agents(),
+            "player must be below {}",
+            self.game.num_agents()
+        );
         assert!(
             self.iteration >= 1,
             "call next_iteration() before collecting (samples are weighted by the iteration)"
@@ -378,7 +390,7 @@ impl<G: Game> DeepCfrSolver<G> {
                     probs: sigma.clone(),
                 });
                 let action = legal[sample_index(&sigma, &mut m.rng)];
-                let mut joint = vec![0; 2];
+                let mut joint = vec![0; self.game.num_agents()];
                 joint[who] = action;
                 let (edge, next) = self.realize_transition(&state, &joint, player);
                 m.stack.push(Frame::Edge { r: edge });
@@ -522,7 +534,7 @@ impl<G: Game> DeepCfrSolver<G> {
             unreachable!("start_child runs on a traverser frame")
         };
         let action = legal[values.len()];
-        let mut joint = vec![0; 2];
+        let mut joint = vec![0; self.game.num_agents()];
         joint[player] = action;
         let state = state.clone();
         let (edge, next) = self.realize_transition(&state, &joint, player);
