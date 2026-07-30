@@ -417,6 +417,10 @@ where
                 if truncated {
                     self.game
                         .mark_truncation(&self.episodes[gi].state, &mut trace);
+                    assert!(
+                        trace.iter().all(|(agent, _)| *agent < num_agents),
+                        "mark_truncation pushed an event for an out-of-range agent"
+                    );
                 }
                 // Fold the tick's trace into per-agent rewards once: events are per-edge and
                 // incremental, so the tick's reward is the sum over its emissions.

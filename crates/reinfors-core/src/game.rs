@@ -111,7 +111,8 @@ impl ChanceDist {
 pub trait Game {
     type State: Clone;
 
-    /// The per-agent outcome of a tick (e.g. snake's `StepEvent`), consumed by a `Reward`.
+    /// What an EDGE causally decided for one agent (e.g. snake's `StepEvent`), consumed by a
+    /// `Reward`; a tick's outcome is the ordered trace of its edges' emissions.
     type Event;
 
     fn num_agents(&self) -> usize;
@@ -235,9 +236,10 @@ pub trait Game {
 
     /// Realize outcome `outcome` at a chance-node state, completing (part of) the transition:
     /// the result may carry events and end the game. Within one tick the framework chains these
-    /// until a decision state or terminal; the FINAL transition of the chain owns the tick's
-    /// events — a transition INTO a chance node must therefore carry no outcome of its own
-    /// (neutral events), and intermediate chain steps likewise.
+    /// until a decision state or terminal. Events are per-edge and CAUSAL like everywhere else
+    /// ([`Transition`]): each chain edge emits exactly what its outcome decides — hold'em's
+    /// final runout edge emits the payout, an interior reveal emits nothing — and the tick's
+    /// trace accumulates every emission in edge order.
     fn apply_chance_node(
         &self,
         state: &Self::State,
@@ -290,7 +292,14 @@ pub struct Tick<S, E> {
 /// Backstop against a buggy game cycling through chance states forever.
 pub const CHANCE_CHAIN_LIMIT: usize = 10_000;
 
-fn push_edge_events<E>(trace: &mut Vec<(usize, E)>, events: Vec<Option<E>>) {
+fn push_edge_events<E>(trace: &mut Vec<(usize, E)>, events: Vec<Option<E>>, num_agents: usize) {
+    // Position IS the agent id: a short vector would silently drop agents from the trace, a
+    // long one would mint nonexistent ids that panic later in reward indexing.
+    assert!(
+        events.len() == num_agents,
+        "a transition must carry exactly one event slot per agent ({} for {num_agents} agents)",
+        events.len()
+    );
     for (agent, e) in events.into_iter().enumerate() {
         if let Some(e) = e {
             trace.push((agent, e));
@@ -323,22 +332,23 @@ pub fn step_env<G: Game>(
             }
         }
     };
+    let num_agents = game.num_agents();
     let mut trace: Vec<(usize, G::Event)> = Vec::new();
-    push_edge_events(&mut trace, std::mem::take(&mut t.events));
+    push_edge_events(&mut trace, std::mem::take(&mut t.events), num_agents);
     // Chance-node chain: while the state belongs to no agent, draw and realize (see
     // `Game::chance_nodes`). Runs to a decision state or terminal within this tick, so
     // chain-interior states are never observable outside realization; each edge's emissions
     // accumulate into the tick's trace in edge order.
-    let mut fuel = CHANCE_CHAIN_LIMIT;
+    let mut edges = 0usize;
     while !t.terminal && matches!(game.actor(&t.next_state), Actor::Chance) {
-        fuel -= 1;
+        edges += 1;
         assert!(
-            fuel > 0,
+            edges <= CHANCE_CHAIN_LIMIT,
             "chance-node chain exceeded {CHANCE_CHAIN_LIMIT} edges — the game cycles through chance states"
         );
         let outcome = game.chance_node(&t.next_state).draw(rng);
         t = game.apply_chance_node(&t.next_state, outcome);
-        push_edge_events(&mut trace, std::mem::take(&mut t.events));
+        push_edge_events(&mut trace, std::mem::take(&mut t.events), num_agents);
     }
     Tick {
         next_state: t.next_state,
@@ -356,14 +366,22 @@ pub fn step_env<G: Game>(
 /// (asserted) and their events are contractually neutral.
 pub fn realize_initial_state<G: Game>(game: &G, rng: &mut dyn Rng) -> G::State {
     let mut state = game.initial_state(rng);
+    let mut edges = 0usize;
     while matches!(game.actor(&state), Actor::Chance) {
+        edges += 1;
+        assert!(
+            edges <= CHANCE_CHAIN_LIMIT,
+            "chance-node chain exceeded {CHANCE_CHAIN_LIMIT} edges — the game cycles through chance states"
+        );
         let outcome = game.chance_node(&state).draw(rng);
         let t = game.apply_chance_node(&state, outcome);
         assert!(
             !t.terminal,
             "an episode cannot end during its birth chain — the deal may not decide the game"
         );
-        debug_assert!(
+        // A REAL assert: a rollout would silently discard a birth emission while a solver
+        // scoring the same edge would not — release builds must reject the divergence too.
+        assert!(
             t.events.iter().all(Option::is_none),
             "birth-chain edges emit no events — there is no tick to deliver them into"
         );
@@ -504,6 +522,155 @@ mod step_env_tests {
         fn unit(&mut self) -> f64 {
             self.0
         }
+    }
+
+    /// `chain_len` chance edges after the action, then a decision state; `emit_at_birth`
+    /// makes `initial_state` return the chain head instead (a birth chain).
+    struct Chains {
+        chain_len: usize,
+        from_birth: bool,
+        emit: bool,
+    }
+    impl Game for Chains {
+        type State = i32;
+        type Event = f64;
+        fn num_agents(&self) -> usize {
+            1
+        }
+        fn action_count(&self) -> usize {
+            1
+        }
+        fn chance_nodes(&self) -> bool {
+            true
+        }
+        fn actor(&self, s: &i32) -> Actor {
+            if (*s as usize) < self.chain_len {
+                Actor::Chance
+            } else {
+                Actor::Agent(0)
+            }
+        }
+        fn legal_actions(&self, s: &i32, _agent: usize) -> Vec<usize> {
+            if (*s as usize) >= self.chain_len {
+                vec![0]
+            } else {
+                Vec::new()
+            }
+        }
+        fn step(&self, _s: &i32, _actions: &[usize]) -> Transition<i32, f64> {
+            Transition {
+                next_state: 0,
+                events: vec![None],
+                terminal: false,
+            }
+        }
+        fn chance_node(&self, _s: &i32) -> ChanceDist {
+            ChanceDist::Uniform(1)
+        }
+        fn apply_chance_node(&self, s: &i32, _outcome: usize) -> Transition<i32, f64> {
+            Transition {
+                next_state: s + 1,
+                events: vec![if self.emit { Some(1.0) } else { None }],
+                terminal: false,
+            }
+        }
+        fn initial_state(&self, _rng: &mut dyn Rng) -> i32 {
+            if self.from_birth {
+                0
+            } else {
+                self.chain_len as i32
+            }
+        }
+    }
+
+    #[test]
+    fn chain_limit_allows_exactly_the_cap() {
+        let g = Chains {
+            chain_len: CHANCE_CHAIN_LIMIT,
+            from_birth: false,
+            emit: false,
+        };
+        let t = step_env(&g, &(g.chain_len as i32), &[0], &mut Unit(0.5));
+        assert_eq!(t.next_state as usize, CHANCE_CHAIN_LIMIT);
+        let born = realize_initial_state(
+            &Chains {
+                chain_len: CHANCE_CHAIN_LIMIT,
+                from_birth: true,
+                emit: false,
+            },
+            &mut Unit(0.5),
+        );
+        assert_eq!(born as usize, CHANCE_CHAIN_LIMIT);
+    }
+
+    #[test]
+    #[should_panic(expected = "chance-node chain exceeded")]
+    fn chain_limit_rejects_one_past_the_cap() {
+        let g = Chains {
+            chain_len: CHANCE_CHAIN_LIMIT + 1,
+            from_birth: false,
+            emit: false,
+        };
+        let _ = step_env(&g, &(g.chain_len as i32), &[0], &mut Unit(0.5));
+    }
+
+    #[test]
+    #[should_panic(expected = "chance-node chain exceeded")]
+    fn a_cyclic_birth_chain_panics_instead_of_hanging() {
+        let _ = realize_initial_state(
+            &Chains {
+                chain_len: usize::MAX,
+                from_birth: true,
+                emit: false,
+            },
+            &mut Unit(0.5),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "birth-chain edges emit no events")]
+    fn a_birth_emission_is_rejected_in_every_build() {
+        let _ = realize_initial_state(
+            &Chains {
+                chain_len: 1,
+                from_birth: true,
+                emit: true,
+            },
+            &mut Unit(0.5),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "exactly one event slot per agent")]
+    fn a_short_event_vector_is_rejected() {
+        struct Short;
+        impl Game for Short {
+            type State = i32;
+            type Event = f64;
+            fn num_agents(&self) -> usize {
+                2
+            }
+            fn action_count(&self) -> usize {
+                1
+            }
+            fn actor(&self, _: &i32) -> Actor {
+                Actor::Simultaneous
+            }
+            fn legal_actions(&self, _: &i32, _: usize) -> Vec<usize> {
+                vec![0]
+            }
+            fn step(&self, _: &i32, _: &[usize]) -> Transition<i32, f64> {
+                Transition {
+                    next_state: 1,
+                    events: vec![Some(1.0)], // one slot for two agents
+                    terminal: true,
+                }
+            }
+            fn initial_state(&self, _: &mut dyn Rng) -> i32 {
+                0
+            }
+        }
+        let _ = step_env(&Short, &0, &[0, 0], &mut Unit(0.5));
     }
 
     #[test]

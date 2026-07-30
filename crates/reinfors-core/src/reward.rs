@@ -1,13 +1,13 @@
-//! The reward seam: a `Reward` turns a game's per-agent `Event`s — the outcome of a tick that
-//! [`Game::step`](crate::Game) produces — into scalar rewards. It is decoupled from `Game` (which owns
+//! The reward seam: a `Reward` turns a game's `Event`s — what each EDGE causally decided for an
+//! agent (a tick's outcome is the ordered trace of its edges' emissions) — into scalar rewards. It is decoupled from `Game` (which owns
 //! only dynamics + outcomes), mirroring how [`StateEncoder`](crate::StateEncoder) decouples the
 //! observation: the reward is the agent's / training objective, not a rule of the game, so it is a
 //! separate handle threaded into the `Engine` and the search.
 //!
 //! `Reward` is purely `Event -> scalar` — the reward-relevant mirror of the encoder's `State -> obs`,
 //! so the two halves of a transition never cross over (`State` is observational, `Event` is
-//! reward-relevant). Even truncation flows through here: the rollout stamps the truncation outcome onto
-//! the tick's `Event` (via [`Game::mark_truncation`](crate::Game::mark_truncation)), so this is the one
+//! reward-relevant). Even truncation flows through here: the rollout lets the game amend the
+//! tick's trace (via [`Game::mark_truncation`](crate::Game::mark_truncation)), so this is the one
 //! path that maps outcomes to scalars.
 //!
 //! Object-safe (no generic methods, no `Self` by value), so it is held as
