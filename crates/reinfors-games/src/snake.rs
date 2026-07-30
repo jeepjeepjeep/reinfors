@@ -293,6 +293,10 @@ pub struct SnakeState {
     pub snakes: Vec<SnakeBody>, // [num_snakes]
     #[serde(with = "food_serde")]
     pub food: HashSet<Cell>,
+    /// Apples awaiting respawn after this tick's eats — nonzero marks the transient
+    /// AwaitingRespawn chance state nature resolves before anyone moves again.
+    #[serde(default)]
+    pub pending_food: u8,
 }
 
 // Coarsening for the reached-state buffer: bucket a snake length, and how many buckets. Difficulty
@@ -762,12 +766,16 @@ impl Game for Snake {
         RELATIVE_ACTIONS.len()
     }
 
-    fn actor(&self, _state: &SnakeState) -> Actor {
-        Actor::Simultaneous
+    fn actor(&self, state: &SnakeState) -> Actor {
+        if state.pending_food > 0 {
+            Actor::Chance
+        } else {
+            Actor::Simultaneous
+        }
     }
 
     fn legal_actions(&self, state: &SnakeState, agent: usize) -> Vec<usize> {
-        if state.snakes[agent].alive {
+        if state.pending_food == 0 && state.snakes[agent].alive {
             (0..RELATIVE_ACTIONS.len()).collect()
         } else {
             Vec::new()
@@ -785,14 +793,24 @@ impl Game for Snake {
                 ));
             }
         }
-        // `|| None` = no in-advance respawn; the respawn is the declared chance step
-        // (`chance_outcomes`/`apply_chance`, realized by the framework), so the deterministic part
-        // and the chance element stay separable and are shared by the rollout and search.
+        // `|| None` = no in-advance respawn; eaten apples arm the AwaitingRespawn chance state
+        // (`chance_node`/`apply_chance_node`, realized by the framework), so the deterministic
+        // part and the chance element stay separable and are shared by the rollout and search.
         let mut snakes = state.snakes.clone();
         let mut food = state.food.clone();
         let (events, done) = self.advance(&mut snakes, &mut food, &moves, || None);
+        let eaten = state.food.len().saturating_sub(food.len());
+        let pending_food = if done {
+            0
+        } else {
+            eaten.min(usize::from(u8::MAX)) as u8
+        };
         Transition {
-            next_state: SnakeState { snakes, food },
+            next_state: SnakeState {
+                snakes,
+                food,
+                pending_food,
+            },
             // Every tick settles each snake's outcome on the action edge; the respawn draw
             // that may follow settles nothing.
             events: events.into_iter().map(Some).collect(),
@@ -800,49 +818,46 @@ impl Game for Snake {
         }
     }
 
-    /// The respawn chance, declared (the game's only chance seam). `k` apples eaten on one tick
-    /// (each living head eats at most one, so `k <= min(snakes, food)`) respawn as `k` sequential
-    /// uniform draws over the shrinking free set — indexed as ordered tuples, mixed-radix with
-    /// bases `n, n-1, …, n-k+1` over the free-cell count `n` (the k = 2 case is exactly the old
-    /// `n·(n-1)` ordered-pair layout). Placements cap at the free cells available; a full board
-    /// degenerates to one no-op outcome, keeping the sampler/declaration agreement exact.
-    /// Declared as `Uniform(count)`: O(1) at any size — sampling consumers draw one index and
-    /// `apply_chance` decodes it procedurally; only `ExpandAll` enumerates (bounded at the
-    /// consumer). The index space is validated to fit 2^53 at construction.
-    fn chance_outcomes(
-        &self,
-        state: &SnakeState,
-        transition: &Transition<SnakeState, StepEvent>,
-    ) -> Option<reinfors_core::ChanceDist> {
-        let next = &transition.next_state;
-        let eaten = state.food.len().saturating_sub(next.food.len());
-        if eaten == 0 || transition.terminal {
-            return None;
-        }
-        let n = self.free_cell_count(next);
-        let placeable = eaten.min(n);
+    fn chance_nodes(&self) -> bool {
+        true
+    }
+
+    /// The respawn chance at an AwaitingRespawn state. `k = pending_food` apples eaten on the
+    /// tick (each living head eats at most one, so `k <= min(snakes, food)`) respawn as `k`
+    /// sequential uniform draws over the shrinking free set — indexed as ordered tuples,
+    /// mixed-radix with bases `n, n-1, …, n-k+1` over the free-cell count `n` (the k = 2 case is
+    /// exactly the old `n·(n-1)` ordered-pair layout). Placements cap at the free cells
+    /// available; a full board degenerates to one no-op outcome, keeping the sampler/declaration
+    /// agreement exact. Declared as `Uniform(count)`: O(1) at any size — sampling consumers draw
+    /// one index and `apply_chance_node` decodes it procedurally; only `ExpandAll` enumerates
+    /// (bounded at the consumer). The index space is validated to fit 2^53 at construction.
+    fn chance_node(&self, state: &SnakeState) -> reinfors_core::ChanceDist {
+        debug_assert!(
+            state.pending_food > 0,
+            "chance only at AwaitingRespawn states"
+        );
+        let n = self.free_cell_count(state);
+        let placeable = usize::from(state.pending_food).min(n);
         // Checked as a defensive backstop: construction AND decoded-state validation bound the
         // index space, but a silent wrap here would mean silently wrong probabilities.
         let outcomes = (0..placeable)
             .try_fold(1usize, |acc, i| acc.checked_mul(n - i))
             .expect("respawn index space overflows usize (bounded at construction and decode)")
             .max(1);
-        Some(reinfors_core::ChanceDist::Uniform(outcomes))
+        reinfors_core::ChanceDist::Uniform(outcomes)
     }
 
-    fn apply_chance(
+    fn apply_chance_node(
         &self,
         state: &SnakeState,
-        transition: &Transition<SnakeState, StepEvent>,
         outcome: usize,
-    ) -> SnakeState {
-        let next = &transition.next_state;
-        let eaten = state.food.len().saturating_sub(next.food.len());
-        let n = self.free_cell_count(next);
-        let placeable = eaten.min(n);
+    ) -> Transition<SnakeState, StepEvent> {
+        let n = self.free_cell_count(state);
+        let placeable = usize::from(state.pending_food).min(n);
         let mut out = SnakeState {
-            snakes: next.snakes.clone(),
-            food: next.food.clone(),
+            snakes: state.snakes.clone(),
+            food: state.food.clone(),
+            pending_food: 0,
         };
         // Mixed-radix digits, least-significant (base n-k+1, the LAST draw) first; each placement
         // indexes the free cells REMAINING after the ones before it, matching the sequential
@@ -858,7 +873,12 @@ impl Game for Snake {
             let cell = self.nth_free_cell(&out, d);
             out.food.insert(cell);
         }
-        out
+        // The respawn settles nothing — eats and deaths were decided on the action edge.
+        Transition {
+            next_state: out,
+            events: vec![None; self.num_snakes],
+            terminal: false,
+        }
     }
 
     fn initial_state(&self, rng: &mut dyn Rng) -> SnakeState {
@@ -867,7 +887,11 @@ impl Game for Snake {
         for _ in 0..self.initial_food_count {
             self.spawn_one(&snakes, &mut food, rng);
         }
-        SnakeState { snakes, food }
+        SnakeState {
+            snakes,
+            food,
+            pending_food: 0,
+        }
     }
 
     fn truncation_horizon(&self) -> Option<usize> {
@@ -970,6 +994,7 @@ mod game_tests {
         SnakeState {
             snakes: game().initial_snakes(),
             food: food.iter().copied().collect(),
+            pending_food: 0,
         }
     }
 
@@ -995,9 +1020,11 @@ mod game_tests {
         let st = initial_state(&[(4, 3)]); // in front of A: Forward eats
         let actions = [0usize, 0];
         let t = g.step(&st, &actions);
-        let dist = g
-            .chance_outcomes(&st, &t)
-            .expect("an eaten apple declares chance");
+        assert!(
+            matches!(g.actor(&t.next_state), reinfors_core::Actor::Chance),
+            "an eaten apple lands on the AwaitingRespawn chance state"
+        );
+        let dist = g.chance_node(&t.next_state);
         let realized = reinfors_core::game::step_env(&g, &st, &actions, &mut TestRng(42));
         let trace_events: Vec<Option<StepEvent>> = realized
             .trace
@@ -1007,7 +1034,8 @@ mod game_tests {
         assert_eq!(trace_events, t.events);
         assert_eq!(realized.terminal, t.terminal);
         assert!(
-            (0..dist.count()).any(|d| realized.next_state == g.apply_chance(&st, &t, d)),
+            (0..dist.count())
+                .any(|d| realized.next_state == g.apply_chance_node(&t.next_state, d).next_state),
             "the realized state must be one of the declared outcomes"
         );
         let again = reinfors_core::game::step_env(&g, &st, &actions, &mut TestRng(42));
@@ -1032,8 +1060,8 @@ mod game_tests {
         let st = initial_state(&[(0, 0)]); // far corner, untouched
         for actions in [[0usize, 0], [1, 2], [2, 1], [0, 2]] {
             let t = g.step(&st, &actions);
-            // Nothing eaten -> no declared chance (`None`).
-            assert!(g.chance_outcomes(&st, &t).is_none(), "actions {actions:?}");
+            // Nothing eaten -> no AwaitingRespawn state.
+            assert_eq!(t.next_state.pending_food, 0, "actions {actions:?}");
             // ...so the realized env step is exactly the deterministic step.
             let realized = reinfors_core::game::step_env(&g, &st, &actions, &mut TestRng(1));
             assert_eq!(realized.next_state, t.next_state, "actions {actions:?}");
@@ -1085,7 +1113,7 @@ mod game_tests {
         let g = game();
         let st = initial_state(&[(4, 3)]);
         let t = g.step(&st, &[0, 0]); // A eats the only apple -> a respawn chance node
-        let dist = g.chance_outcomes(&st, &t).expect("eat declares chance");
+        let dist = g.chance_node(&t.next_state);
         let empties = empty_cells(&t.next_state.snakes, &t.next_state.food, G);
         assert_eq!(
             dist,
@@ -1093,8 +1121,11 @@ mod game_tests {
             "one uniform outcome per empty cell"
         );
         for (i, &cell) in empties.iter().enumerate() {
-            let placed: Vec<Cell> = g
-                .apply_chance(&st, &t, i)
+            let realized = g.apply_chance_node(&t.next_state, i);
+            assert_eq!(realized.next_state.pending_food, 0);
+            assert!(realized.events.iter().all(Option::is_none));
+            let placed: Vec<Cell> = realized
+                .next_state
                 .food
                 .difference(&t.next_state.food)
                 .copied()
@@ -1221,6 +1252,7 @@ mod game_tests {
                     },
                 ],
                 food: HashSet::new(),
+                pending_food: 0,
             }
         };
         // Self-play symmetry: mirror states are the same (off-diagonal) cell.
@@ -1505,12 +1537,12 @@ impl reinfors_core::StateCodec for Snake {
     type State = SnakeState;
 
     fn encode(&self, s: &SnakeState) -> Vec<u8> {
-        // Layout 3: `snakes` became a length-prefixed Vec (the fixed two-element array era was 2).
-        crate::codec_util::serde_encode(3, s)
+        // Layout 4: `pending_food` joined the state (3 was the length-prefixed Vec era).
+        crate::codec_util::serde_encode(4, s)
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<SnakeState, String> {
-        crate::codec_util::serde_decode(3, bytes)
+        crate::codec_util::serde_decode(4, bytes)
     }
 
     // Safety per the narrowed codec contract: bounds that game methods index by, plus lifecycle
@@ -1519,6 +1551,11 @@ impl reinfors_core::StateCodec for Snake {
     // source, not a re-implementation). Occupancy rules are NOT re-proved here; unreachable-but-
     // safe states are accepted.
     fn validate_decoded_state(&self, state: &SnakeState, done: bool) -> Result<(), String> {
+        if state.pending_food != 0 {
+            // AwaitingRespawn is transient inside a tick; a restored live position must be
+            // actionable, not stuck awaiting nature.
+            return Err("a live position cannot await a respawn".to_string());
+        }
         if state.snakes.len() != self.num_snakes {
             return Err(format!(
                 "state has {} snakes; this game has {}",
@@ -1727,9 +1764,8 @@ mod n_player_tests {
         }
         let t = g.step(&state, &[0, 0, 0]); // Forward for everyone
         assert!(state.food.len() == 3 && t.next_state.food.is_empty());
-        let dist = g
-            .chance_outcomes(&state, &t)
-            .expect("3 eats declare chance");
+        assert_eq!(t.next_state.pending_food, 3);
+        let dist = g.chance_node(&t.next_state);
         let n = (6 * 6)
             - t.next_state
                 .snakes
@@ -1740,9 +1776,11 @@ mod n_player_tests {
         assert_eq!(dist.count(), n * (n - 1) * (n - 2));
         // Every outcome yields exactly 3 fresh apples on free cells; outcome 0 places the three
         // lowest free cells in row-major order (sequential draws at index 0 each time).
-        let s0 = g.apply_chance(&state, &t, 0);
+        let s0 = g.apply_chance_node(&t.next_state, 0).next_state;
         assert_eq!(s0.food.len(), 3);
-        let last = g.apply_chance(&state, &t, dist.count() - 1);
+        let last = g
+            .apply_chance_node(&t.next_state, dist.count() - 1)
+            .next_state;
         assert_eq!(last.food.len(), 3);
         assert_ne!(s0.food, last.food);
     }
@@ -1762,11 +1800,13 @@ mod n_player_tests {
         let ok_state = SnakeState {
             snakes: snakes.clone(),
             food: (0..3).map(|c| (1, c)).collect(),
+            pending_food: 0,
         };
         g.validate_decoded_state(&ok_state, false).unwrap();
         let over = SnakeState {
             snakes,
             food: (0..8).map(|c| (1, c)).collect(),
+            pending_food: 0,
         };
         assert!(g
             .validate_decoded_state(&over, false)
@@ -1782,6 +1822,7 @@ mod n_player_tests {
                 body_at(&[(2, 2), (2, 3), (2, 4)], Action::Up),
             ],
             food: HashSet::new(),
+            pending_food: 0,
         };
         // buckets: len 1 -> 0, len 3 -> 1; legacy packing (lo << 16) | hi.
         assert_eq!(snake_length_cell(&two), Some(1));
@@ -1792,6 +1833,7 @@ mod n_player_tests {
                 body_at(&[(5, 5)], Action::Up),
             ],
             food: HashSet::new(),
+            pending_food: 0,
         };
         // sorted buckets [0, 0, 1] -> (((0)<<16 | 0) << 16) | 1
         assert_eq!(snake_length_cell(&three), Some(1));
