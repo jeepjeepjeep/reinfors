@@ -167,6 +167,7 @@ fn validators_reject_unsafe_states() {
         snakes: vec![a, b],
         food: HashSet::from_iter(food.iter().copied()),
         pending_food: 0,
+        birth: false,
     };
     // a state with the wrong snake count would index out of the game's agent range
     let three = Snake {
@@ -182,6 +183,7 @@ fn validators_reject_unsafe_states() {
         snakes: vec![body(&[(1, 1)], true), body(&[(3, 3)], true)],
         food: HashSet::new(),
         pending_food: 0,
+        birth: false,
     };
     assert!(three
         .validate_decoded_state(&two_state, false)
@@ -338,6 +340,7 @@ fn unreachable_but_safe_states_are_accepted() {
         snakes: vec![body(&[(1, 1)]), body(&[(1, 1)])],
         food: HashSet::from_iter([(1, 1)]),
         pending_food: 0,
+        birth: false,
     };
     game.validate_decoded_state(&overlap, false).unwrap();
 

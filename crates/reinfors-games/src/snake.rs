@@ -296,10 +296,16 @@ pub struct SnakeState {
     #[serde(with = "food_serde")]
     pub food: HashSet<Cell>,
     /// Apples awaiting placement — nonzero marks the transient AwaitingRespawn chance state
-    /// (one apple per chance draw; a count chains) nature resolves before anyone moves again.
-    /// u32: the root phase carries `initial_food_count`, bounded only by the cell count.
+    /// nature resolves before anyone moves again. u32: the root phase carries
+    /// `initial_food_count`, bounded only by the cell count.
     #[serde(default)]
     pub pending_food: u32,
+    /// The transient ROOT placement phase: one apple per chance draw, chained — an unbounded
+    /// birth count must not become one combinatorial index. In-game respawns (`birth == false`)
+    /// instead resolve ALL pending apples in ONE combined draw, so a `Committed{s}` search keeps
+    /// s complete worlds rather than s^k chained branches.
+    #[serde(default)]
+    pub birth: bool,
 }
 
 // Coarsening for the reached-state buffer: bucket a snake length, and how many buckets. Difficulty
@@ -409,14 +415,35 @@ impl Snake {
                 "grid_size {g} makes the observation tensor exceed 2^31 elements"
             ));
         }
-        // One apple per chance draw (counts chain), so the respawn fan is bounded by the cell
-        // count — no combinatorial index space exists to bound. Food beyond the grid could
-        // never place and would only pad birth chains with no-ops.
+        // BIRTH places one apple per draw (chained), so any food count that fits the grid is
+        // fine there. IN-GAME respawns resolve k <= min(snakes, food) apples in one combined
+        // ordered-tuple index, which must survive an f64 mantissa and a usize decode — bound
+        // the worst case at 2^53 (unreachable for realistic configs; a 20-grid triple-eat is
+        // ~6e7).
         let cell_count = self.grid_size.max(0) as u128 * self.grid_size.max(0) as u128;
         if self.initial_food_count as u128 > cell_count {
             return Err(format!(
                 "initial_food_count {} exceeds the {cell_count}-cell grid",
                 self.initial_food_count
+            ));
+        }
+        // One birth edge per apple: the chain must fit the framework's cycle backstop.
+        if self.initial_food_count > reinfors_core::game::CHANCE_CHAIN_LIMIT {
+            return Err(format!(
+                "initial_food_count {} exceeds the {}-edge chance-chain limit",
+                self.initial_food_count,
+                reinfors_core::game::CHANCE_CHAIN_LIMIT
+            ));
+        }
+        let k_max = self.num_snakes.min(self.initial_food_count) as u128;
+        let worst: u128 = (0..k_max)
+            .map(|i| cell_count.saturating_sub(i))
+            .try_fold(1u128, |acc, f| acc.checked_mul(f))
+            .unwrap_or(u128::MAX);
+        if worst > (1u128 << 53).min(usize::MAX as u128) {
+            return Err(format!(
+                "worst-case respawn index space ({k_max} apples eatable at once on a \
+                 {cell_count}-cell grid) exceeds min(2^53, usize::MAX); reduce food or grid size"
             ));
         }
         let snakes = self.initial_snakes_checked()?;
@@ -782,6 +809,7 @@ impl Game for Snake {
                 snakes,
                 food,
                 pending_food,
+                birth: false,
             },
             // Every tick settles each snake's outcome on the action edge; the respawn draw
             // that may follow settles nothing.
@@ -790,17 +818,31 @@ impl Game for Snake {
         }
     }
 
-    /// The respawn chance at an AwaitingRespawn state: ONE apple per chance draw, uniform over
-    /// the free cells; `pending_food > 1` simply chains (the shrinking free set makes the chain
-    /// exactly the sequential-uniform placement, with a fan never larger than the grid — no
-    /// combinatorial index space to bound). A full board degenerates to one no-op outcome that
-    /// drains the pending count, keeping chains finite.
+    /// The chance at an AwaitingRespawn state, in two regimes. BIRTH (`state.birth`): one apple
+    /// per draw, uniform over the free cells, chained — the unbounded initial count never forms
+    /// a combinatorial index. IN-GAME: `k = pending_food` apples (each living head eats at most
+    /// one, so `k <= min(snakes, food)`) resolve in ONE combined draw — indexed as ordered
+    /// k-tuples over the shrinking free set, mixed-radix with bases `n, n-1, …, n-k+1` — so a
+    /// `Committed{s}` search keeps s complete worlds rather than s^k chained branches.
+    /// Placements cap at the free cells available; a full board degenerates to one no-op
+    /// outcome. The in-game index space is validated to fit 2^53 at construction and decode.
     fn chance_node(&self, state: &SnakeState) -> reinfors_core::ChanceDist {
         debug_assert!(
             state.pending_food > 0,
             "chance only at AwaitingRespawn states"
         );
-        reinfors_core::ChanceDist::Uniform(self.free_cell_count(state).max(1))
+        let n = self.free_cell_count(state);
+        if state.birth {
+            return reinfors_core::ChanceDist::Uniform(n.max(1));
+        }
+        let placeable = (state.pending_food as usize).min(n);
+        // Checked as a defensive backstop: construction AND decoded-state validation bound the
+        // index space, but a silent wrap here would mean silently wrong probabilities.
+        let outcomes = (0..placeable)
+            .try_fold(1usize, |acc, i| acc.checked_mul(n - i))
+            .expect("respawn index space overflows usize (bounded at construction and decode)")
+            .max(1);
+        reinfors_core::ChanceDist::Uniform(outcomes)
     }
 
     fn apply_chance_node(
@@ -809,14 +851,40 @@ impl Game for Snake {
         outcome: usize,
     ) -> Transition<SnakeState, StepEvent> {
         let n = self.free_cell_count(state);
+        if state.birth {
+            let drained = n == 0 || state.pending_food == 1;
+            let mut out = SnakeState {
+                snakes: state.snakes.clone(),
+                food: state.food.clone(),
+                // A full board drains the whole count (no cell will free up mid-chain).
+                pending_food: if n == 0 { 0 } else { state.pending_food - 1 },
+                birth: !drained,
+            };
+            if n > 0 {
+                let cell = self.nth_free_cell(&out, outcome);
+                out.food.insert(cell);
+            }
+            return Transition::silent(out, self.num_snakes);
+        }
+        let placeable = (state.pending_food as usize).min(n);
         let mut out = SnakeState {
             snakes: state.snakes.clone(),
             food: state.food.clone(),
-            // A full board drains the whole count (no cell will free up mid-chain).
-            pending_food: if n == 0 { 0 } else { state.pending_food - 1 },
+            pending_food: 0,
+            birth: false,
         };
-        if n > 0 {
-            let cell = self.nth_free_cell(&out, outcome);
+        // Mixed-radix digits, least-significant (base n-k+1, the LAST draw) first; each placement
+        // indexes the free cells REMAINING after the ones before it, matching the sequential
+        // draws bijectively.
+        let mut digits = vec![0usize; placeable];
+        let mut rem = outcome;
+        for i in (0..placeable).rev() {
+            let base = n - i;
+            digits[i] = rem % base;
+            rem /= base;
+        }
+        for &d in &digits {
+            let cell = self.nth_free_cell(&out, d);
             out.food.insert(cell);
         }
         // The respawn settles nothing — eats and deaths were decided on the action edge.
@@ -831,6 +899,7 @@ impl Game for Snake {
             snakes: self.initial_snakes(),
             food: HashSet::new(),
             pending_food: self.initial_food_count as u32,
+            birth: self.initial_food_count > 0,
         }
     }
 
@@ -935,6 +1004,7 @@ mod game_tests {
             snakes: game().initial_snakes(),
             food: food.iter().copied().collect(),
             pending_food: 0,
+            birth: false,
         }
     }
 
@@ -1208,6 +1278,7 @@ mod game_tests {
                 ],
                 food: HashSet::new(),
                 pending_food: 0,
+                birth: false,
             }
         };
         // Self-play symmetry: mirror states are the same (off-diagonal) cell.
@@ -1506,9 +1577,9 @@ impl reinfors_core::StateCodec for Snake {
     // source, not a re-implementation). Occupancy rules are NOT re-proved here; unreachable-but-
     // safe states are accepted.
     fn validate_decoded_state(&self, state: &SnakeState, done: bool) -> Result<(), String> {
-        if state.pending_food != 0 {
-            // AwaitingRespawn is transient inside a tick; a restored live position must be
-            // actionable, not stuck awaiting nature.
+        if state.pending_food != 0 || state.birth {
+            // AwaitingRespawn (and the birth phase) is transient; a restored live position
+            // must be actionable, not stuck awaiting nature.
             return Err("a live position cannot await a respawn".to_string());
         }
         if state.snakes.len() != self.num_snakes {
@@ -1534,6 +1605,24 @@ impl reinfors_core::StateCodec for Snake {
             if !in_grid(cell) {
                 return Err(format!("food cell {cell:?} outside the grid"));
             }
+        }
+        // A decoded state may carry MORE food than `initial_food_count` (validation is safety,
+        // not reachability) — but the combined in-game respawn index it implies must still be
+        // indexable, or a later multi-eat would overflow the chance arithmetic the
+        // construction-time bound was computed to prevent.
+        let k = self.num_snakes.min(state.food.len()) as u128;
+        let cells = self.grid_size.max(0) as u128 * self.grid_size.max(0) as u128;
+        let worst: u128 = (0..k)
+            .map(|i| cells.saturating_sub(i))
+            .try_fold(1u128, |acc, f| acc.checked_mul(f))
+            .unwrap_or(u128::MAX);
+        if worst > (1u128 << 53).min(usize::MAX as u128) {
+            return Err(format!(
+                "{} food cells with {} snakes imply a respawn index space past \
+                 min(2^53, usize::MAX)",
+                state.food.len(),
+                self.num_snakes
+            ));
         }
         let terminal = self.is_terminal(&state.snakes);
         if terminal != done {
@@ -1570,12 +1659,19 @@ mod n_player_tests {
         let mut lead = game(3, 8, 2);
         lead.win_food_lead = Some(2);
         assert!(lead.validate().is_err(), "the lead rule is two-snake only");
-        // One apple per chance draw: no combinatorial index space exists, so ANY food count
-        // that fits the grid is valid — and one that cannot fit is rejected.
+        // Birth is chained (any count fitting the grid AND the chain limit); in-game respawns
+        // are one combined ordered-tuple index bounded at 2^53.
         assert!(game(3, 20, 3).validate().is_ok());
-        assert!(game(3, 1000, 3).validate().is_ok()); // the old joint index rejected this
-        assert!(game(2, 8, 10).validate().is_ok()); // the reviewer repro: fine as a chain
+        assert!(game(2, 8, 10).validate().is_ok()); // 10 birth apples chain fine
         assert!(game(2, 4, 17).validate().is_err(), "more food than cells");
+        assert!(
+            game(3, 1000, 3).validate().is_err(),
+            "a 1000-grid triple-eat's combined index (~1e18) is past 2^53"
+        );
+        assert!(
+            game(2, 200, 10_001).validate().is_err(),
+            "a birth chain past CHANCE_CHAIN_LIMIT edges could never realize"
+        );
     }
 
     #[test]
@@ -1701,7 +1797,11 @@ mod n_player_tests {
         let t = g.step(&state, &[0, 0, 0]); // Forward for everyone
         assert!(state.food.len() == 3 && t.next_state.food.is_empty());
         assert_eq!(t.next_state.pending_food, 3);
-        // One apple per draw over the SHRINKING free set: the chain's fans are n, n-1, n-2.
+        assert!(
+            !t.next_state.birth,
+            "in-game respawns are combined, not chained"
+        );
+        let dist = g.chance_node(&t.next_state);
         let n = (6 * 6)
             - t.next_state
                 .snakes
@@ -1709,17 +1809,19 @@ mod n_player_tests {
                 .map(|s| s.body.len())
                 .sum::<usize>() as i32;
         let n = n as usize;
-        let mut s = t.next_state;
-        for (k, want) in [(3u32, n), (2, n - 1), (1, n - 2)] {
-            assert_eq!(s.pending_food, k);
-            assert_eq!(g.chance_node(&s).count(), want);
-            let step = g.apply_chance_node(&s, 0); // always the lowest free cell
-            assert!(!step.terminal);
-            assert!(step.events.iter().all(Option::is_none));
-            s = step.next_state;
-        }
-        assert_eq!(s.pending_food, 0);
-        assert_eq!(s.food.len(), 3, "three chained draws placed three apples");
+        assert_eq!(
+            dist.count(),
+            n * (n - 1) * (n - 2),
+            "ONE combined draw: a Committed search keeps s complete worlds, not s^k branches"
+        );
+        let s0 = g.apply_chance_node(&t.next_state, 0).next_state;
+        assert_eq!(s0.food.len(), 3);
+        assert_eq!(s0.pending_food, 0);
+        let last = g
+            .apply_chance_node(&t.next_state, dist.count() - 1)
+            .next_state;
+        assert_eq!(last.food.len(), 3);
+        assert_ne!(s0.food, last.food);
     }
 
     #[test]
@@ -1736,6 +1838,7 @@ mod n_player_tests {
             ],
             food: std::iter::once((5, 5)).collect(),
             pending_food: 0,
+            birth: false,
         };
         g.validate_decoded_state(&st, false).unwrap();
         st.pending_food = 1;
@@ -1749,22 +1852,34 @@ mod n_player_tests {
     }
 
     #[test]
-    fn any_in_grid_food_set_decodes_safely() {
+    fn decoded_food_counts_past_the_index_space_reject() {
         use reinfors_core::StateCodec;
-        // With one apple per chance draw there is no combinatorial index space: a decoded
-        // state may carry ANY in-grid food set safely (8 snakes x 8 food used to imply
-        // P(400, 8) ≈ 4e20 ordered placements and had to be rejected).
+        // The game constructs with 1 food (worst-case k = 1, trivially indexable) — but a
+        // decoded state can carry any in-grid food set, and 8 snakes x 8 food implies
+        // P(400, 8) ≈ 4e20 ordered placements for a combined multi-eat: past the index guard,
+        // so validation must reject it before the chance arithmetic ever sees it.
         let g = game(8, 20, 1);
         assert!(g.validate().is_ok());
         let snakes: Vec<SnakeBody> = (0..8)
             .map(|i| body_at(&[(2 * i, 0)], Action::Right))
             .collect();
-        let dense = SnakeState {
+        let ok_state = SnakeState {
+            snakes: snakes.clone(),
+            food: (0..3).map(|c| (1, c)).collect(),
+            pending_food: 0,
+            birth: false,
+        };
+        g.validate_decoded_state(&ok_state, false).unwrap();
+        let over = SnakeState {
             snakes,
             food: (0..8).map(|c| (1, c)).collect(),
             pending_food: 0,
+            birth: false,
         };
-        g.validate_decoded_state(&dense, false).unwrap();
+        assert!(g
+            .validate_decoded_state(&over, false)
+            .unwrap_err()
+            .contains("index space"));
     }
 
     #[test]
@@ -1776,6 +1891,7 @@ mod n_player_tests {
             ],
             food: HashSet::new(),
             pending_food: 0,
+            birth: false,
         };
         // buckets: len 1 -> 0, len 3 -> 1; legacy packing (lo << 16) | hi.
         assert_eq!(snake_length_cell(&two), Some(1));
@@ -1787,6 +1903,7 @@ mod n_player_tests {
             ],
             food: HashSet::new(),
             pending_food: 0,
+            birth: false,
         };
         // sorted buckets [0, 0, 1] -> (((0)<<16 | 0) << 16) | 1
         assert_eq!(snake_length_cell(&three), Some(1));
