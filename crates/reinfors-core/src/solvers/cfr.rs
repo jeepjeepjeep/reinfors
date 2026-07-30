@@ -12,10 +12,9 @@
 //!
 //! Requirements, asserted at construction: 2 players; `Game::information_states` (tables are
 //! keyed by information-set bytes — what forces the learned strategy to be measurable with
-//! respect to each player's information); `Game::all_chance_declared`, with the root claim
-//! verified by calling `initial_state` with an rng that PANICS on any draw — a game that
-//! samples privately would be solved against the wrong tree. Chance is consumed through all
-//! declared chance nodes (root deals and interior states alike):
+//! respect to each player's information). Chance is consumed through declared chance nodes
+//! (root deals and interior states alike — `initial_state` is rng-free, so a game cannot
+//! sample privately):
 //! enumerated by the exact variants (fan-capped at [`MAX_ENUMERATED_OUTCOMES`]), sampled by
 //! MCCFR — full hold'em therefore runs only under MCCFR (the deal fan is astronomical), and
 //! at that scale nothing converges anyway; the solver's home ground is Kuhn/Leduc-sized
@@ -95,18 +94,6 @@ impl Node {
     }
 }
 
-/// An rng that panics on any draw — proves `initial_state` honors `all_chance_declared`.
-struct PoisonedRng;
-
-impl Rng for PoisonedRng {
-    fn below(&mut self, _n: usize) -> usize {
-        panic!("initial_state drew from the rng despite declaring all_chance_declared")
-    }
-    fn unit(&mut self) -> f64 {
-        panic!("initial_state drew from the rng despite declaring all_chance_declared")
-    }
-}
-
 pub struct CfrSolver<G: Game> {
     game: G,
     reward: Box<dyn Reward<Event = G::Event>>,
@@ -132,13 +119,8 @@ impl<G: Game> CfrSolver<G> {
             game.information_states(),
             "CFR requires information-state keys (Game::information_states)"
         );
-        assert!(
-            game.all_chance_declared(),
-            "CFR enumerates chance and requires it fully declared (Game::all_chance_declared)"
-        );
-        let _ = game.initial_state(&mut PoisonedRng); // verifies the root claim loudly
-                                                      // Gate on the REALIZED root — the raw root of a declared game is commonly a chance
-                                                      // node, which says nothing about decision dynamics (see the same gate in Deep CFR).
+        // Gate on the REALIZED root — the raw root of a declared game is commonly a chance
+        // node, which says nothing about decision dynamics (see the same gate in Deep CFR).
         let realized = crate::game::realize_initial_state(&game, &mut SplitMix64::new(0x0517_B0BE));
         assert!(
             !matches!(game.actor(&realized), Actor::Simultaneous),
@@ -169,7 +151,7 @@ impl<G: Game> CfrSolver<G> {
             match self.variant {
                 CfrVariant::Vanilla | CfrVariant::Plus => {
                     for player in 0..2 {
-                        let root = self.game.initial_state(&mut PoisonedRng);
+                        let root = self.game.initial_state();
                         self.enumerate_values(&root, [1.0, 1.0, 1.0], player);
                         if self.variant == CfrVariant::Plus {
                             for node in self.nodes.values_mut() {
@@ -185,7 +167,7 @@ impl<G: Game> CfrSolver<G> {
                 }
                 CfrVariant::ExternalMccfr => {
                     for player in 0..2 {
-                        let root = self.game.initial_state(&mut PoisonedRng);
+                        let root = self.game.initial_state();
                         self.sample_values(&root, player);
                     }
                 }
@@ -214,7 +196,7 @@ impl<G: Game> CfrSolver<G> {
 
     /// Expected value for `player` when BOTH play the average profile (full enumeration).
     pub fn expected_value(&self, player: usize) -> f64 {
-        let root = self.game.initial_state(&mut PoisonedRng);
+        let root = self.game.initial_state();
         self.profile_value(&root)[player]
     }
 

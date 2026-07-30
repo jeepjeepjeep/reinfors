@@ -9,7 +9,9 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use reinfors_core::game::{Actor, Game, Rng, Transition};
+use reinfors_core::game::{Actor, Game, Transition};
+#[cfg(test)]
+use reinfors_core::Rng;
 use reinfors_core::{ActionView, Reward, Space, StateEncoder};
 
 pub type Cell = (i32, i32);
@@ -695,24 +697,6 @@ impl Snake {
             .find(|&j| j != victim && snakes[j].alive && snakes[j].body.contains(&fatal_head))
     }
 
-    /// Spawn one apple at a uniform-random empty cell (the env's true spawn), or nothing if the grid is
-    /// full. A single `rng.below(n)` picks `k`, the index of the chosen cell among the empties in
-    /// row-major order; the cell itself is found analytically from the sorted occupied indices (each
-    /// occupied cell at or below the running target shifts it one further on), so there is no O(g²)
-    /// scan over the grid. This selects the same cell a linear walk would for the same `k`.
-    /// Place one apple on the `i`-th free cell drawn by `rng` — initial-state placement, routed
-    /// through the SAME free-cell indexing (`occupied_of` + `nth_free_of`) as
-    /// `apply_chance_node`, so exactly one implementation of "the i-th free cell" exists.
-    fn spawn_one(&self, snakes: &[SnakeBody], food: &mut HashSet<Cell>, rng: &mut dyn Rng) {
-        let occupied = self.occupied_of(snakes, food);
-        let n = (self.grid_size * self.grid_size) as usize - occupied.len();
-        if n == 0 {
-            return;
-        }
-        let i = rng.below(n);
-        food.insert(Self::nth_free_of(&occupied, self.grid_size, i));
-    }
-
     /// Occupied cell ids (food + both bodies), sorted + deduped — the complement enumerates the
     /// free cells in row-major order.
     fn occupied_of(&self, snakes: &[SnakeBody], food: &HashSet<Cell>) -> Vec<usize> {
@@ -873,16 +857,14 @@ impl Game for Snake {
         Transition::silent(out, self.num_snakes)
     }
 
-    fn initial_state(&self, rng: &mut dyn Rng) -> SnakeState {
-        let snakes = self.initial_snakes();
-        let mut food = HashSet::new();
-        for _ in 0..self.initial_food_count {
-            self.spawn_one(&snakes, &mut food, rng);
-        }
+    fn initial_state(&self) -> SnakeState {
+        // Births are declared: the configured apples arrive as a ROOT AwaitingRespawn phase,
+        // realized at episode birth through the same machinery as in-game respawns —
+        // `initial_state` draws nothing.
         SnakeState {
-            snakes,
-            food,
-            pending_food: 0,
+            snakes: self.initial_snakes(),
+            food: HashSet::new(),
+            pending_food: self.initial_food_count.min(usize::from(u8::MAX)) as u8,
         }
     }
 
@@ -1162,12 +1144,17 @@ mod game_tests {
     }
 
     #[test]
-    fn initial_state_spawns_the_configured_food_count_deterministically() {
+    fn births_are_a_declared_root_respawn_phase() {
+        // `initial_state` draws nothing: the configured apples arrive as a ROOT AwaitingRespawn
+        // phase, realized through the same machinery as in-game respawns.
         let mut g = game();
         g.initial_food_count = 3;
-        let a = g.initial_state(&mut TestRng(7));
-        let b = g.initial_state(&mut TestRng(7));
-        assert_eq!(a, b, "same seed -> same initial state");
+        let root = g.initial_state();
+        assert_eq!(root.pending_food, 3);
+        assert!(root.food.is_empty());
+        assert!(matches!(g.actor(&root), reinfors_core::Actor::Chance));
+        let a = reinfors_core::realize_initial_state(&g, &mut TestRng(9));
+        assert_eq!(a.pending_food, 0);
         assert_eq!(a.food.len(), 3);
         // Snakes match the initial placement; food sits on empty cells.
         assert_eq!(a.snakes, game().initial_snakes());
@@ -1744,9 +1731,9 @@ mod n_player_tests {
         // 3 snakes all eating on one tick: outcomes = n·(n-1)·(n-2) ordered triples of free
         // cells, each applying as three sequential placements over the shrinking free set.
         let g = game(3, 6, 3);
-        let mut rng = TestRng(3);
-        let mut state = g.initial_state(&mut rng);
-        // Put an apple directly ahead of each head so every snake eats simultaneously.
+        let mut state = g.initial_state();
+        state.pending_food = 0; // hand-build the position: no birth phase
+                                // Put an apple directly ahead of each head so every snake eats simultaneously.
         state.food.clear();
         let mut expected_heads = Vec::new();
         for s in &state.snakes {
@@ -1859,19 +1846,5 @@ mod n_player_tests {
         let mut dead = three.clone();
         dead.snakes[1].alive = false;
         assert_eq!(snake_length_cell(&dead), None);
-    }
-
-    struct TestRng(u64);
-    impl Rng for TestRng {
-        fn below(&mut self, n: usize) -> usize {
-            self.0 = self
-                .0
-                .wrapping_mul(2862933555777941757)
-                .wrapping_add(3037000493);
-            (self.0 >> 33) as usize % n.max(1)
-        }
-        fn unit(&mut self) -> f64 {
-            self.below(1 << 20) as f64 / (1 << 20) as f64
-        }
     }
 }

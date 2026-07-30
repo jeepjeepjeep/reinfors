@@ -40,7 +40,7 @@ impl Game for ThreeWay {
             terminal: s.tick + 1 >= 3,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -151,7 +151,7 @@ impl Game for RoundRobin {
             terminal: s.tick + 1 >= 3,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -469,7 +469,7 @@ impl Game for TwoTurn {
             terminal: s.tick + 1 >= 4,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -644,7 +644,7 @@ impl Game for PayoutSeq {
             terminal,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -745,7 +745,7 @@ impl Game for EndlessRR {
             terminal: false,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
     fn truncation_horizon(&self) -> Option<usize> {
@@ -852,7 +852,7 @@ impl Game for WideChance {
             terminal: s.0 + 1 >= 6,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> WSt {
+    fn initial_state(&self) -> WSt {
         WSt(0)
     }
 }
@@ -997,7 +997,7 @@ impl Game for HiddenTwo {
             terminal: s.tick + 1 >= 4,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -1046,9 +1046,6 @@ impl Game for RootNodey {
     fn action_count(&self) -> usize {
         2
     }
-    fn all_chance_declared(&self) -> bool {
-        true // the root draw below is this game's only randomness
-    }
     fn actor(&self, s: &St) -> Actor {
         if s.tick == 0 {
             Actor::Chance
@@ -1080,7 +1077,7 @@ impl Game for RootNodey {
             terminal: s.tick + 1 >= 4,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -1101,7 +1098,7 @@ fn realized_roots_expose_the_true_decision_dynamics() {
         }
     }
     assert!(matches!(
-        Game::actor(&RootNodey, &RootNodey.initial_state(&mut P(3))),
+        Game::actor(&RootNodey, &RootNodey.initial_state()),
         Actor::Chance
     ));
     let realized = reinfors_core::realize_initial_state(&RootNodey, &mut P(3));
@@ -1168,7 +1165,7 @@ fn start_distribution_restores_must_be_decision_states() {
                 terminal: s.tick + 1 >= 4,
             }
         }
-        fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+        fn initial_state(&self) -> St {
             St { tick: 0 }
         }
     }
@@ -1230,7 +1227,7 @@ impl Game for TwoRobin {
             terminal,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -1314,7 +1311,7 @@ impl Game for EndlessTwo {
             terminal: false,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
     fn truncation_horizon(&self) -> Option<usize> {

@@ -2162,7 +2162,7 @@ mod masking_tests {
     //! action space (every real game today is fully legal, so only this covers sparse nodes).
     use super::*;
     use crate::encoder::StateEncoder;
-    use crate::game::{Actor, Game, Rng, Transition};
+    use crate::game::{Actor, Game, Transition};
     use crate::policies::tree::alphazero::{alphazero_many, AlphaZeroConfig};
     use crate::reward::Reward as RewardTrait;
 
@@ -2197,7 +2197,7 @@ mod masking_tests {
                 terminal: total >= 8,
             }
         }
-        fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+        fn initial_state(&self) -> St {
             St(0)
         }
     }
@@ -2318,7 +2318,7 @@ mod chance_tests {
     //! chance-node machinery, not the immediate edge reward.
     use super::*;
     use crate::encoder::StateEncoder;
-    use crate::game::{Actor, Game, Rng, Transition};
+    use crate::game::{Actor, Game, Transition};
     use crate::policies::tree::alphazero::{alphazero_many, AlphaZeroConfig};
     use crate::reward::Reward as RewardTrait;
 
@@ -2386,7 +2386,7 @@ mod chance_tests {
                 terminal: false,
             }
         }
-        fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+        fn initial_state(&self) -> St {
             St { total: 0, ply: 0 }
         }
     }
@@ -2589,7 +2589,7 @@ mod duct_tests {
     //! opponent's behavior, and the two per-request trees must agree from either seat.
     use super::*;
     use crate::encoder::StateEncoder;
-    use crate::game::{Actor, Game, Rng, Transition};
+    use crate::game::{Actor, Game, Transition};
     use crate::policies::tree::alphazero::{alphazero_many, AlphaZeroConfig};
     use crate::reward::Reward as RewardTrait;
 
@@ -2625,7 +2625,7 @@ mod duct_tests {
                 terminal: true,
             }
         }
-        fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+        fn initial_state(&self) -> St {
             St { done: false }
         }
     }
@@ -2898,7 +2898,7 @@ mod frame_tests {
     //! any gather that skipped (or double-applied) the view would break the equality.
     use super::*;
     use crate::encoder::StateEncoder;
-    use crate::game::{Actor, Game, Rng, Transition};
+    use crate::game::{Actor, Game, Transition};
     use crate::policies::tree::alphazero::{alphazero_many, AlphaZeroConfig};
     use crate::reward::Reward as RewardTrait;
 
@@ -2930,7 +2930,7 @@ mod frame_tests {
                 terminal: next > 40,
             }
         }
-        fn initial_state(&self, _: &mut dyn Rng) -> St {
+        fn initial_state(&self) -> St {
             St(0)
         }
     }
@@ -3082,7 +3082,7 @@ mod maxn_tests {
     //! (simultaneous) must let every agent find its own dominant action.
     use super::*;
     use crate::encoder::StateEncoder;
-    use crate::game::{Actor, Game, Rng, Transition};
+    use crate::game::{Actor, Game, Transition};
     use crate::policies::tree::alphazero::{alphazero_many, AlphaZeroConfig};
     use crate::reward::Reward as RewardTrait;
     use crate::rollout::evaluator::Evaluator;
@@ -3145,7 +3145,7 @@ mod maxn_tests {
                 Lr::Done => unreachable!("stepping a terminal state"),
             }
         }
-        fn initial_state(&self, _rng: &mut dyn Rng) -> Lr {
+        fn initial_state(&self) -> Lr {
             Lr::Root
         }
     }
@@ -3254,7 +3254,7 @@ mod maxn_tests {
                 terminal: true,
             }
         }
-        fn initial_state(&self, _rng: &mut dyn Rng) -> DSt {
+        fn initial_state(&self) -> DSt {
             DSt(false)
         }
     }
@@ -3316,7 +3316,7 @@ mod forced_maxn_tests {
     //! can't see this: the value-row plumbing looks identical either way.)
     use super::*;
     use crate::encoder::StateEncoder;
-    use crate::game::{Actor, Game, Rng, Transition};
+    use crate::game::{Actor, Game, Transition};
     use crate::policies::tree::alphazero::{alphazero_many, AlphaZeroConfig};
     use crate::reward::Reward as RewardTrait;
     use crate::rollout::evaluator::Evaluator;
@@ -3377,7 +3377,7 @@ mod forced_maxn_tests {
                 Lr::Done => unreachable!("stepping a terminal state"),
             }
         }
-        fn initial_state(&self, _rng: &mut dyn Rng) -> Lr {
+        fn initial_state(&self) -> Lr {
             Lr::Root
         }
     }

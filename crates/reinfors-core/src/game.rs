@@ -143,15 +143,6 @@ pub trait Game {
 
     fn step(&self, state: &Self::State, actions: &[usize]) -> Transition<Self::State, Self::Event>;
 
-    /// Whether EVERY random element of the game is declared through chance nodes (root
-    /// deals and interior states alike) — i.e. `initial_state` draws NOTHING from its rng. Solvers that enumerate chance (CFR) require
-    /// this and verify the root claim by calling `initial_state` with an rng that panics on any
-    /// draw; a game that samples privately would otherwise be solved against the wrong tree.
-    /// Deliberate claim, default false.
-    fn all_chance_declared(&self) -> bool {
-        false
-    }
-
     /// Whether this game provides information-set keys (below). Deliberate claim, default
     /// false; `true` obliges `information_state_key` to answer at every REALIZED state.
     fn information_states(&self) -> bool {
@@ -232,7 +223,12 @@ pub trait Game {
         true
     }
 
-    fn initial_state(&self, rng: &mut dyn Rng) -> Self::State;
+    /// The root state — DETERMINISTIC. All randomness is declared through chance nodes, so a
+    /// random opening (a deal, a roll, a placement) is a ROOT chance state this returns
+    /// unrealized; [`realize_initial_state`] draws it at episode birth. Nothing else in the
+    /// framework hands a game an rng, which is what lets solvers enumerate the full tree from
+    /// the root without a private-sampling escape hatch.
+    fn initial_state(&self) -> Self::State;
 
     /// The episode-length cap after which the rollout truncates a still-running game, or `None` for a
     /// game that always ends on its own (e.g. Connect-4). This is a property the game *declares* — the
@@ -319,14 +315,14 @@ pub fn step_env<G: Game>(
 }
 
 /// Realize an episode's birth: `initial_state` may return a chance node (a declared deal —
-/// see [`Game::all_chance_declared`]), possibly chaining; draw until the first decision
+/// a declared deal), possibly chaining; draw until the first decision
 /// state. The single realization path for episode starts — used by the rollout runtime
 /// (`Episode::new`/`reset`) and by any consumer that must probe POST-birth properties (the
 /// binding's decision-dynamics probe: `actor` on an unrealized root is `Actor::Chance`, which
 /// says nothing about how the game's agents take turns). Birth chains may not end the episode
 /// (asserted) and their events are contractually neutral.
 pub fn realize_initial_state<G: Game>(game: &G, rng: &mut dyn Rng) -> G::State {
-    let mut state = game.initial_state(rng);
+    let mut state = game.initial_state();
     let mut edges = 0usize;
     while matches!(game.actor(&state), Actor::Chance) {
         edges += 1;
@@ -405,7 +401,7 @@ mod step_env_tests {
                 terminal,
             }
         }
-        fn initial_state(&self, _rng: &mut dyn Rng) -> i32 {
+        fn initial_state(&self) -> i32 {
             0
         }
     }
@@ -493,7 +489,7 @@ mod step_env_tests {
                 terminal: false,
             }
         }
-        fn initial_state(&self, _rng: &mut dyn Rng) -> i32 {
+        fn initial_state(&self) -> i32 {
             if self.from_birth {
                 0
             } else {
@@ -585,7 +581,7 @@ mod step_env_tests {
                     terminal: true,
                 }
             }
-            fn initial_state(&self, _: &mut dyn Rng) -> i32 {
+            fn initial_state(&self) -> i32 {
                 0
             }
         }
@@ -634,7 +630,7 @@ mod step_env_tests {
             fn apply_chance_node(&self, _: &i32, outcome: usize) -> Transition<i32, ()> {
                 Transition::silent(10 + 10 * outcome as i32, 1)
             }
-            fn initial_state(&self, _: &mut dyn Rng) -> i32 {
+            fn initial_state(&self) -> i32 {
                 0
             }
         }
@@ -670,7 +666,7 @@ mod step_env_tests {
                     terminal: false,
                 }
             }
-            fn initial_state(&self, _: &mut dyn Rng) -> i32 {
+            fn initial_state(&self) -> i32 {
                 0
             }
         }

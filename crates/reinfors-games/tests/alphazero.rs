@@ -67,7 +67,7 @@ fn argmax(v: &[f64]) -> usize {
 /// Build a position where P0 has three in column 3 and it is P0's move — column 3 wins outright.
 fn forced_win_state() -> reinfors_games::Connect4State {
     let game = Connect4;
-    let mut state = game.initial_state(&mut NoRng);
+    let mut state = game.initial_state();
     for &(mover, col) in &[(0, 3), (1, 0), (0, 3), (1, 0), (0, 3), (1, 0)] {
         assert_eq!(game.actor(&state), Actor::Agent(mover));
         let mut joint = vec![0usize; 2];
@@ -101,7 +101,7 @@ fn finds_the_forced_connect4_win() {
 fn priors_steer_visits() {
     // With few sims and no terminal signal from the opening position, visits follow the prior.
     let game = Connect4;
-    let state = game.initial_state(&mut NoRng);
+    let state = game.initial_state();
     for col in [2usize, 5] {
         let evals = alphazero_many(
             &game,
@@ -127,7 +127,7 @@ fn priors_steer_visits() {
 #[test]
 fn search_is_deterministic_per_seed_and_noise_diversifies_across_seeds() {
     let game = Connect4;
-    let state = game.initial_state(&mut NoRng);
+    let state = game.initial_state();
     let run = |seed: u64, eps: f64| {
         alphazero_many(
             &game,
@@ -157,7 +157,7 @@ fn pooled_trees_draw_independent_noise() {
     // Two identical requests in one pooled call: with noise on, their searches should diverge
     // (per-tree noise streams), not mirror each other.
     let game = Connect4;
-    let state = game.initial_state(&mut NoRng);
+    let state = game.initial_state();
     let evals = alphazero_many(
         &game,
         &Connect4Planes,
@@ -187,7 +187,8 @@ fn searches_simultaneous_stochastic_snake() {
         initial_food_count: 1,
         max_ticks: None,
     };
-    let state = snake.initial_state(&mut NoRng);
+    // Births are a root chance phase now — searches receive realized decision states.
+    let state = reinfors_core::realize_initial_state(&snake, &mut NoRng);
     let reward = reinfors_games::SnakeReward {
         step: 0.0,
         food: 1.0,
@@ -243,7 +244,7 @@ fn infer_cache_is_behavior_identical_and_hits() {
     use std::sync::atomic::AtomicU64;
     use std::sync::Arc;
     let game = Connect4;
-    let state = game.initial_state(&mut NoRng);
+    let state = game.initial_state();
     // Repeated identical requests in one pool: heavy transposition + within-batch dedup territory.
     let requests: Vec<_> = (0..4).map(|_| (state.clone(), 0)).collect();
     let run = |cache: Option<&mut [InferCache]>| {

@@ -8,7 +8,7 @@
 
 use reinfors_core::{
     mcts_many, search_many, ActBy, Actor, ChanceDist, ChanceMode, Engine, EngineParams, Evaluator,
-    Game, InferMode, Mcts, MctsConfig, Opponent, Reward, Rng, SearchConfig, Space, StateEncoder,
+    Game, InferMode, Mcts, MctsConfig, Opponent, Reward, SearchConfig, Space, StateEncoder,
     Transition, TreeStrap,
 };
 
@@ -111,7 +111,7 @@ impl Game for PayoutFan {
             terminal: true,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -233,7 +233,7 @@ impl Game for ChainTick {
             terminal: false,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -333,7 +333,7 @@ impl Game for MixedFan {
             }
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -416,7 +416,7 @@ impl Game for SimChance {
             terminal: true,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -489,7 +489,7 @@ impl Game for TurnFlip {
             terminal: false,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -585,7 +585,7 @@ impl Game for BranchChain {
             _ => unreachable!(),
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -686,7 +686,7 @@ impl Game for WideChain {
             }
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -741,7 +741,7 @@ impl Game for Cycler {
             terminal: false,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }

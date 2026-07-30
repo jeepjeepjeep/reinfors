@@ -105,12 +105,16 @@ impl Game for GridWorld {
         DELTAS.len()
     }
 
-    fn actor(&self, _state: &GridState) -> Actor {
-        Actor::Agent(0)
+    fn actor(&self, state: &GridState) -> Actor {
+        if state.pos == (-1, -1) {
+            Actor::Chance // the unborn root: the start cell is nature's draw
+        } else {
+            Actor::Agent(0)
+        }
     }
 
     fn legal_actions(&self, state: &GridState, agent: usize) -> Vec<usize> {
-        if agent == 0 && !state.done {
+        if agent == 0 && !state.done && state.pos != (-1, -1) {
             (0..DELTAS.len()).collect()
         } else {
             Vec::new()
@@ -127,16 +131,36 @@ impl Game for GridWorld {
         }
     }
 
-    fn initial_state(&self, rng: &mut dyn reinfors_core::Rng) -> GridState {
-        // A uniform-random start cell that is not already the goal.
-        let cells = (self.size * self.size) as usize;
-        loop {
-            let i = rng.below(cells) as i32;
-            let pos = (i / self.size, i % self.size);
-            if pos != self.goal {
-                return GridState { pos, done: false };
-            }
+    fn initial_state(&self) -> GridState {
+        // The start cell is a declared ROOT chance phase (uniform over non-goal cells — see
+        // `chance_node`); `initial_state` draws nothing. `(-1, -1)` marks the unborn state.
+        GridState {
+            pos: (-1, -1),
+            done: false,
         }
+    }
+
+    fn chance_node(&self, state: &GridState) -> reinfors_core::ChanceDist {
+        debug_assert_eq!(state.pos, (-1, -1), "chance only at the unborn root");
+        reinfors_core::ChanceDist::Uniform((self.size * self.size - 1) as usize)
+    }
+
+    fn apply_chance_node(
+        &self,
+        _state: &GridState,
+        outcome: usize,
+    ) -> Transition<GridState, GridEvent> {
+        // Uniform over non-goal cells: indices at or past the goal's row-major index shift up
+        // by one, so exactly the goal cell is excluded.
+        let goal_idx = (self.goal.0 * self.size + self.goal.1) as usize;
+        let i = (outcome + usize::from(outcome >= goal_idx)) as i32;
+        Transition::silent(
+            GridState {
+                pos: (i / self.size, i % self.size),
+                done: false,
+            },
+            1,
+        )
     }
 
     fn truncation_horizon(&self) -> Option<usize> {

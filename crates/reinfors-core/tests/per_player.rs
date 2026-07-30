@@ -5,7 +5,7 @@
 //! cross-contaminate. The shared wrapper stays byte-identical to the historical path.
 
 use reinfors_core::{
-    Actor, Dqn, Engine, EngineParams, EpsilonGreedyQ, Game, InferCache, InferMode, Rng, Transition,
+    Actor, Dqn, Engine, EngineParams, EpsilonGreedyQ, Game, InferCache, InferMode, Transition,
 };
 
 #[derive(Clone)]
@@ -43,7 +43,7 @@ impl Game for Alt {
             terminal: s.tick + 1 >= 6,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -188,7 +188,7 @@ impl Game for Simul {
             terminal: s.tick + 1 >= 3,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }

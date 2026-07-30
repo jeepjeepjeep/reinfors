@@ -1061,7 +1061,7 @@ fn softmax_floor(q: &[f64], temperature: f64, floor: f64) -> Vec<f64> {
 mod tests {
     use super::*;
     use crate::encoder::StateEncoder;
-    use crate::game::{Actor, Game, Rng, Transition};
+    use crate::game::{Actor, Game, Transition};
     use crate::reward::Reward;
     use std::cell::Cell;
 
@@ -1097,7 +1097,7 @@ mod tests {
                 terminal: false,
             }
         }
-        fn initial_state(&self, _: &mut dyn Rng) -> i32 {
+        fn initial_state(&self) -> i32 {
             0
         }
     }
@@ -1248,7 +1248,7 @@ mod chance_mode_tests {
     //! certain +1, rewards landing on the NEXT ply so everything flows through chance branches.
     use super::*;
     use crate::encoder::StateEncoder;
-    use crate::game::{Actor, ChanceDist, Game, Rng, Transition};
+    use crate::game::{Actor, ChanceDist, Game, Transition};
     use crate::policies::tree::expectimax::SelectiveExpectimax;
     use crate::reward::Reward as RewardTrait;
 
@@ -1315,7 +1315,7 @@ mod chance_mode_tests {
                 terminal: false,
             }
         }
-        fn initial_state(&self, _: &mut dyn Rng) -> St {
+        fn initial_state(&self) -> St {
             St { total: 0, ply: 0 }
         }
     }
@@ -1413,7 +1413,7 @@ mod frame_tests {
     //! agent-dependent view + rows permuted into each agent's head frame; results must be equal.
     use super::*;
     use crate::encoder::{ActionView, StateEncoder};
-    use crate::game::{Actor, Game, Rng, Transition};
+    use crate::game::{Actor, Game, Transition};
     use crate::reward::Reward as RewardTrait;
 
     /// Two agents alternating by an explicit turn flag; searcher = agent 0, so leaf rows are
@@ -1453,7 +1453,7 @@ mod frame_tests {
                 terminal: false,
             }
         }
-        fn initial_state(&self, _: &mut dyn Rng) -> St {
+        fn initial_state(&self) -> St {
             St { id: 0, turn: 0 }
         }
     }
@@ -1618,7 +1618,7 @@ mod n_player_tests {
                 terminal: true,
             }
         }
-        fn initial_state(&self, _rng: &mut dyn Rng) -> SimSt {
+        fn initial_state(&self) -> SimSt {
             SimSt(false)
         }
     }
@@ -1716,7 +1716,7 @@ mod n_player_tests {
                 _ => unreachable!("stepping a terminal state"),
             }
         }
-        fn initial_state(&self, _rng: &mut dyn Rng) -> ChainSt {
+        fn initial_state(&self) -> ChainSt {
             ChainSt { phase: 0, a1: 0 }
         }
     }
@@ -1844,7 +1844,7 @@ mod joint_fan_bound_tests {
                 terminal: true,
             }
         }
-        fn initial_state(&self, _rng: &mut dyn Rng) -> WSt {
+        fn initial_state(&self) -> WSt {
             WSt(false)
         }
     }
