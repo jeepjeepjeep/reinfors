@@ -701,8 +701,8 @@ impl Snake {
     /// occupied cell at or below the running target shifts it one further on), so there is no O(g²)
     /// scan over the grid. This selects the same cell a linear walk would for the same `k`.
     /// Place one apple on the `i`-th free cell drawn by `rng` — initial-state placement, routed
-    /// through the SAME free-cell indexing (`occupied_of` + `nth_free_of`) as `apply_chance`, so
-    /// exactly one implementation of "the i-th free cell" exists.
+    /// through the SAME free-cell indexing (`occupied_of` + `nth_free_of`) as
+    /// `apply_chance_node`, so exactly one implementation of "the i-th free cell" exists.
     fn spawn_one(&self, snakes: &[SnakeBody], food: &mut HashSet<Cell>, rng: &mut dyn Rng) {
         let occupied = self.occupied_of(snakes, food);
         let n = (self.grid_size * self.grid_size) as usize - occupied.len();
@@ -1013,9 +1013,9 @@ mod game_tests {
     #[test]
     fn step_env_realizes_the_declared_chance() {
         // Realization is the framework's (`reinfors_core::game::step_env` — one draw from the
-        // game's declared distribution). The realized state must be `apply_chance` of SOME
-        // declared outcome, with the deterministic parts (events, terminal) untouched — and the
-        // same seed must realize the same outcome.
+        // game's declared distribution). The realized state must be `apply_chance_node` of SOME
+        // declared outcome of the AwaitingRespawn state, with the deterministic parts (events,
+        // terminal) untouched — and the same seed must realize the same outcome.
         let g = game();
         let st = initial_state(&[(4, 3)]); // in front of A: Forward eats
         let actions = [0usize, 0];
@@ -1108,8 +1108,9 @@ mod game_tests {
     #[test]
     fn declared_chance_is_uniform_over_the_empty_cell_oracle() {
         // Stronger than the old sampled-frequency check, and deterministic: the declared
-        // distribution is uniform with exactly one outcome per empty cell, and `apply_chance(i)`
-        // places the apple on precisely the i-th cell of the independent `empty_cells` oracle.
+        // distribution is uniform with exactly one outcome per empty cell, and
+        // `apply_chance_node(i)` places the apple on precisely the i-th cell of the independent
+        // `empty_cells` oracle.
         let g = game();
         let st = initial_state(&[(4, 3)]);
         let t = g.step(&st, &[0, 0]); // A eats the only apple -> a respawn chance node
@@ -1783,6 +1784,32 @@ mod n_player_tests {
             .next_state;
         assert_eq!(last.food.len(), 3);
         assert_ne!(s0.food, last.food);
+    }
+
+    #[test]
+    fn a_pending_respawn_state_is_not_restorable() {
+        use reinfors_core::StateCodec;
+        // AwaitingRespawn is transient inside a tick; Engine/Env snapshots restore at DECISION
+        // boundaries, so a decoded state still awaiting nature must be rejected — restoring it
+        // would leave an env no agent can ever step.
+        let g = game(2, 6, 1);
+        let mut st = SnakeState {
+            snakes: vec![
+                body_at(&[(0, 0)], Action::Right),
+                body_at(&[(3, 3)], Action::Right),
+            ],
+            food: std::iter::once((5, 5)).collect(),
+            pending_food: 0,
+        };
+        g.validate_decoded_state(&st, false).unwrap();
+        st.pending_food = 1;
+        let err = g.validate_decoded_state(&st, false).unwrap_err();
+        assert!(err.contains("await"), "{err}");
+        // And the round trip itself preserves the field, so the rejection is reachable from
+        // bytes, not only from in-process states.
+        let decoded = g.decode(&g.encode(&st)).unwrap();
+        assert_eq!(decoded.pending_food, 1);
+        assert!(g.validate_decoded_state(&decoded, false).is_err());
     }
 
     #[test]
