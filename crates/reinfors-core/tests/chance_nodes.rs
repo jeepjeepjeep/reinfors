@@ -539,6 +539,115 @@ fn engine_collects_with_search_policies_through_chance() {
     assert!(stats.decisions > 0);
 }
 
+/// A branching chain: p=0.5 pays +2 and ends the game; p=0.5 chains to a SECOND chance state
+/// that pays +6 and ends. E = 4 — under `ExpandAll` the chain flattens into one weighted fan
+/// (compound probabilities, accumulated chance rewards), exactly like expectimax's branch fan.
+struct BranchChain;
+impl Game for BranchChain {
+    type State = St;
+    type Event = f64;
+    fn num_agents(&self) -> usize {
+        1
+    }
+    fn action_count(&self) -> usize {
+        1
+    }
+    fn chance_nodes(&self) -> bool {
+        true
+    }
+    fn actor(&self, s: &St) -> Actor {
+        if (1..=2).contains(&s.tick) {
+            Actor::Chance
+        } else {
+            Actor::Agent(0)
+        }
+    }
+    fn legal_actions(&self, s: &St, _agent: usize) -> Vec<usize> {
+        if s.tick == 0 {
+            vec![0]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, _s: &St, _actions: &[usize]) -> Transition<St, f64> {
+        Transition {
+            next_state: St { tick: 1 },
+            events: vec![None],
+            terminal: false,
+        }
+    }
+    fn chance_node(&self, s: &St) -> ChanceDist {
+        if s.tick == 1 {
+            ChanceDist::Weighted(vec![0.5, 0.5])
+        } else {
+            ChanceDist::Weighted(vec![1.0])
+        }
+    }
+    fn apply_chance_node(&self, s: &St, outcome: usize) -> Transition<St, f64> {
+        match (s.tick, outcome) {
+            (1, 0) => Transition {
+                next_state: St { tick: 9 },
+                events: vec![Some(2.0)],
+                terminal: true,
+            },
+            (1, 1) => Transition {
+                next_state: St { tick: 2 },
+                events: vec![None],
+                terminal: false,
+            },
+            (2, _) => Transition {
+                next_state: St { tick: 9 },
+                events: vec![Some(6.0)],
+                terminal: true,
+            },
+            _ => unreachable!(),
+        }
+    }
+    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+        St { tick: 0 }
+    }
+}
+fn branch_chance(s: &St) -> bool {
+    (1..=2).contains(&s.tick)
+}
+
+#[test]
+fn expand_all_flattens_chance_chains() {
+    // The all-terminal flattened fan resolves exactly on the first simulation: Q = 0.5·2 +
+    // 0.5·6 = 4, undiscounted, with the nested chance state folded through at compound weight.
+    let cfg = mcts_cfg(1, 8, 0.5, ChanceMode::ExpandAll);
+    let e = run_mcts(&BranchChain, branch_chance, &cfg, vec![(St { tick: 0 }, 0)]);
+    assert!(
+        (e[0].values[0][0] - 4.0).abs() < 1e-12,
+        "{}",
+        e[0].values[0][0]
+    );
+
+    let results = search_many(
+        &BranchChain,
+        &GuardEnc(branch_chance),
+        &Pass,
+        &xmax_cfg(0.5, ChanceMode::ExpandAll),
+        vec![(St { tick: 0 }, 0)],
+        false,
+        0,
+        |_p: &[usize], _obs: Vec<f32>, n: usize| vec![0.0; n],
+    );
+    let (values, _, _) = &results[0];
+    assert!((values[0][0] - 4.0).abs() < 1e-9, "{}", values[0][0]);
+}
+
+#[test]
+fn expand_all_flattens_chains_with_decision_continuations() {
+    // ChainTick's two single-outcome chance edges flatten to ONE leaf (the second decision)
+    // carrying +5 of accumulated chance rewards — same exact root Q = (1+2+3) + 0.5·8 = 10 as
+    // the sampling modes.
+    let cfg = mcts_cfg(256, 2, 0.5, ChanceMode::ExpandAll);
+    let e = run_mcts(&ChainTick, chain_chance, &cfg, vec![(St { tick: 0 }, 0)]);
+    let q = e[0].values[0][0];
+    assert!(q > 9.9 && q <= 10.0 + 1e-9, "{q}");
+}
+
 /// A chance state that always chains to another chance state — the framework must turn the
 /// cycle into a loud panic, not an infinite loop.
 struct Cycler;

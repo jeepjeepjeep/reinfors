@@ -15,8 +15,9 @@
 //! [`SearchConfig`] are game-agnostic; concrete games (e.g. the snake `selective_search` wrappers in
 //! reinfors-games) build a `SearchConfig` and a `Game` and call [`search_many`].
 //!
-//! Chance comes from the game's *declared* distribution (`Game::chance_outcomes` +
-//! `apply_chance` — the game's only chance seam; the env realizes from the same declaration),
+//! Chance comes from the game's *declared* distributions — explicit chance states
+//! (`Game::chance_node`, chains flattened into the branch fan) and transition-attached
+//! `chance_outcomes` alike; the env realizes from the same declarations —
 //! fanned per the configured [`ChanceMode`]: `Committed{k}` draws k
 //! equal-weight realizations (the historical `food_samples` estimator), `ExpandAll` fans every
 //! outcome at its true probability (exact). A deterministic transition keeps a single child. Each
@@ -680,16 +681,18 @@ fn push_branches<G: Game>(
             "chance-node chain exceeded {} edges — the game cycles through chance states",
             crate::game::CHANCE_CHAIN_LIMIT
         );
-        assert!(
-            resolved.len() + work.len() <= MAX_ENUMERATED_OUTCOMES,
-            "a chance chain's flattened fan exceeds the enumeration bound ({}); use a narrower \
-             sampling mode",
-            MAX_ENUMERATED_OUTCOMES
-        );
         let dist = game.chance_node(&s);
         match cfg.chance {
             ChanceMode::Committed { samples } => {
                 let k = samples.max(1);
+                // Projected size BEFORE pushing (the popped parent is already off the list):
+                // the cap bounds the fan that will exist, not the fan minus its last expansion.
+                assert!(
+                    resolved.len() + work.len() + k <= MAX_ENUMERATED_OUTCOMES,
+                    "a chance chain's flattened fan exceeds the enumeration bound ({}); use a \
+                     narrower sampling mode",
+                    MAX_ENUMERATED_OUTCOMES
+                );
                 for _ in 0..k {
                     let idx = dist.draw(rng);
                     let ct = game.apply_chance_node(&s, idx);
@@ -703,6 +706,12 @@ fn push_branches<G: Game>(
                     count <= MAX_ENUMERATED_OUTCOMES,
                     "ExpandAll cannot enumerate {count} chance outcomes (bound {}); use a \
                      sampling chance mode for combinatorial outcome spaces",
+                    MAX_ENUMERATED_OUTCOMES
+                );
+                assert!(
+                    resolved.len() + work.len() + count <= MAX_ENUMERATED_OUTCOMES,
+                    "a chance chain's flattened fan exceeds the enumeration bound ({}); use a \
+                     narrower sampling mode",
                     MAX_ENUMERATED_OUTCOMES
                 );
                 let probs: Vec<f64> = dist.iter_probs().collect();
