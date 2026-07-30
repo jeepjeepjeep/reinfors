@@ -19,8 +19,8 @@ use crate::game::Rng;
 
 /// Where a fresh episode starts.
 pub enum Start<S> {
-    /// Use the game's `initial_state` — the engine calls it (so the per-game env RNG is consumed
-    /// exactly as with no seam).
+    /// A fresh root: realize the game's `initial_state` (drawing any root chance chain from
+    /// the per-game env RNG, exactly as with no seam).
     Fresh,
     /// Start from this specific state.
     Restore(S),

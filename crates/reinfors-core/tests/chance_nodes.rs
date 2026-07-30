@@ -8,7 +8,7 @@
 
 use reinfors_core::{
     mcts_many, search_many, ActBy, Actor, ChanceDist, ChanceMode, Engine, EngineParams, Evaluator,
-    Game, InferMode, Mcts, MctsConfig, Opponent, Reward, Rng, SearchConfig, Space, StateEncoder,
+    Game, InferMode, Mcts, MctsConfig, Opponent, Reward, SearchConfig, Space, StateEncoder,
     Transition, TreeStrap,
 };
 
@@ -68,7 +68,7 @@ fn xmax_cfg(gamma: f64, chance: ChanceMode) -> SearchConfig {
 }
 
 /// One decision, then a chance state paying 10 (p=0.25) or 20 (p=0.75) and ending the game.
-/// E = 17.5, decided entirely on the chance edge — inexpressible for transition-attached chance.
+/// E = 17.5, decided entirely on the chance edge.
 struct PayoutFan;
 impl Game for PayoutFan {
     type State = St;
@@ -78,9 +78,6 @@ impl Game for PayoutFan {
     }
     fn action_count(&self) -> usize {
         1
-    }
-    fn chance_nodes(&self) -> bool {
-        true
     }
     fn actor(&self, s: &St) -> Actor {
         if s.tick == 1 {
@@ -114,7 +111,7 @@ impl Game for PayoutFan {
             terminal: true,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -197,9 +194,6 @@ impl Game for ChainTick {
     fn action_count(&self) -> usize {
         1
     }
-    fn chance_nodes(&self) -> bool {
-        true
-    }
     fn actor(&self, s: &St) -> Actor {
         if (1..=2).contains(&s.tick) {
             Actor::Chance
@@ -239,7 +233,7 @@ impl Game for ChainTick {
             terminal: false,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -285,9 +279,6 @@ impl Game for MixedFan {
     }
     fn action_count(&self) -> usize {
         1
-    }
-    fn chance_nodes(&self) -> bool {
-        true
     }
     fn actor(&self, s: &St) -> Actor {
         if s.tick == 1 {
@@ -342,7 +333,7 @@ impl Game for MixedFan {
             }
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -394,9 +385,6 @@ impl Game for SimChance {
     fn action_count(&self) -> usize {
         2
     }
-    fn chance_nodes(&self) -> bool {
-        true
-    }
     fn actor(&self, s: &St) -> Actor {
         if s.tick == 1 {
             Actor::Chance
@@ -428,7 +416,7 @@ impl Game for SimChance {
             terminal: true,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -462,9 +450,6 @@ impl Game for TurnFlip {
     }
     fn action_count(&self) -> usize {
         1
-    }
-    fn chance_nodes(&self) -> bool {
-        true
     }
     fn actor(&self, s: &St) -> Actor {
         match s.tick {
@@ -504,7 +489,7 @@ impl Game for TurnFlip {
             terminal: false,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -551,9 +536,6 @@ impl Game for BranchChain {
     }
     fn action_count(&self) -> usize {
         1
-    }
-    fn chance_nodes(&self) -> bool {
-        true
     }
     fn actor(&self, s: &St) -> Actor {
         if (1..=2).contains(&s.tick) {
@@ -603,7 +585,7 @@ impl Game for BranchChain {
             _ => unreachable!(),
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -661,9 +643,6 @@ impl Game for WideChain {
     fn action_count(&self) -> usize {
         1
     }
-    fn chance_nodes(&self) -> bool {
-        true
-    }
     fn actor(&self, s: &St) -> Actor {
         if (1..=2).contains(&s.tick) {
             Actor::Chance
@@ -707,7 +686,7 @@ impl Game for WideChain {
             }
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -730,9 +709,6 @@ impl Game for Cycler {
     }
     fn action_count(&self) -> usize {
         1
-    }
-    fn chance_nodes(&self) -> bool {
-        true
     }
     fn actor(&self, s: &St) -> Actor {
         if s.tick >= 1 {
@@ -765,7 +741,7 @@ impl Game for Cycler {
             terminal: false,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }

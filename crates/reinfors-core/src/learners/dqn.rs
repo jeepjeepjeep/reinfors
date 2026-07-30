@@ -204,6 +204,6 @@ mod tests {
         fn step(&self, _: &(), _: &[usize]) -> Transition<(), ()> {
             unimplemented!()
         }
-        fn initial_state(&self, _: &mut dyn Rng) {}
+        fn initial_state(&self) {}
     }
 }

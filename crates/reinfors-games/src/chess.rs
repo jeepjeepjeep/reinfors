@@ -33,7 +33,7 @@
 //! is an immediate loss for the mover — the same posture as connect4's full-column rule.
 
 use cozy_chess::{Board, Color, File, GameStatus, Move, Piece, Rank, Square};
-use reinfors_core::{ActionView, Actor, Game, Reward, Rng, StateEncoder, Transition};
+use reinfors_core::{ActionView, Actor, Game, Reward, StateEncoder, Transition};
 
 pub const CHESS_ACTIONS: usize = 64 * 73; // 4672
 
@@ -464,7 +464,7 @@ impl Game for Chess {
         }
     }
 
-    fn initial_state(&self, _rng: &mut dyn Rng) -> ChessState {
+    fn initial_state(&self) -> ChessState {
         let board = Board::default();
         let hashes = vec![board.hash()];
         let recent = if self.history_len > 0 {
@@ -819,19 +819,9 @@ impl StateEncoder for ChessPlanesAz119 {
 mod tests {
     use super::*;
 
-    struct NoRng;
-    impl Rng for NoRng {
-        fn below(&mut self, _: usize) -> usize {
-            0
-        }
-        fn unit(&mut self) -> f64 {
-            0.0
-        }
-    }
-
     fn start() -> (Chess, ChessState) {
         let game = Chess::default();
-        let state = game.initial_state(&mut NoRng);
+        let state = game.initial_state();
         (game, state)
     }
 
@@ -997,22 +987,12 @@ mod tests {
 mod az119_tests {
     use super::*;
 
-    struct NoRng;
-    impl Rng for NoRng {
-        fn below(&mut self, _: usize) -> usize {
-            0
-        }
-        fn unit(&mut self) -> f64 {
-            0.0
-        }
-    }
-
     fn hist_game() -> (Chess, ChessState) {
         let game = Chess {
             max_ticks: Some(512),
             history_len: 8,
         };
-        let state = game.initial_state(&mut NoRng);
+        let state = game.initial_state();
         (game, state)
     }
 
@@ -1095,7 +1075,7 @@ mod az119_tests {
         };
         let enc = ChessPlanesAz119 { history: 2 };
         assert_eq!(enc.obs_shape(), (35, 8, 8)); // 14*2 + 7
-        let state = game.initial_state(&mut NoRng);
+        let state = game.initial_state();
         let s = play(&game, state, &["e2e4", "e7e5", "g1f3"]);
         let obs = enc.encode(&s, 0);
         assert_eq!(obs.len(), 35 * PLANE);
@@ -1108,7 +1088,7 @@ mod az119_tests {
     #[test]
     fn history_off_populates_only_the_current_step() {
         let game = Chess::default(); // history_len: 0
-        let state = game.initial_state(&mut NoRng);
+        let state = game.initial_state();
         let s = play(&game, state, &["e2e4", "e7e5"]);
         let obs = ChessPlanesAz119::default().encode(&s, 0);
         assert!(obs[..12 * PLANE].contains(&1.0)); // t=0 present
@@ -1277,18 +1257,7 @@ mod openspiel_obs_tests {
             max_ticks: None,
             history_len: 0,
         };
-        let s = {
-            struct R;
-            impl reinfors_core::Rng for R {
-                fn below(&mut self, _: usize) -> usize {
-                    0
-                }
-                fn unit(&mut self) -> f64 {
-                    0.0
-                }
-            }
-            game.initial_state(&mut R)
-        };
+        let s = { game.initial_state() };
         let obs = ChessPlanesOpenSpiel.encode(&s, 0);
         let plane = |p: usize| obs[p * 64..(p + 1) * 64].iter().sum::<f32>();
         // K Q R B N P interleaved white/black
@@ -1433,16 +1402,7 @@ mod codec_tests {
             max_ticks: None,
             history_len: 8,
         };
-        struct R;
-        impl reinfors_core::Rng for R {
-            fn below(&mut self, _: usize) -> usize {
-                0
-            }
-            fn unit(&mut self) -> f64 {
-                0.0
-            }
-        }
-        let mut s = game.initial_state(&mut R);
+        let mut s = game.initial_state();
         for uci in ["e2e4", "e7e5", "g1f3", "b8c6"] {
             let mv: Move = uci.parse().unwrap();
             let a = encode_move(mv, s.board.side_to_move());
@@ -1498,16 +1458,7 @@ mod codec_tests {
             max_ticks: None,
             history_len: 0,
         };
-        struct R;
-        impl reinfors_core::Rng for R {
-            fn below(&mut self, _: usize) -> usize {
-                0
-            }
-            fn unit(&mut self) -> f64 {
-                0.0
-            }
-        }
-        let mut s = game.initial_state(&mut R);
+        let mut s = game.initial_state();
         for uci in ["f2f3", "e7e5", "g2g4", "d8h4"] {
             let mv: Move = uci.parse().unwrap();
             let a = encode_move(mv, s.board.side_to_move());

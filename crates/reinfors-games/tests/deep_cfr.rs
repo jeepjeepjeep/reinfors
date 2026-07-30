@@ -272,9 +272,6 @@ impl reinfors_core::Game for ChanceRootSim {
     fn perfect_information(&self) -> bool {
         false
     }
-    fn all_chance_declared(&self) -> bool {
-        true
-    }
     fn information_states(&self) -> bool {
         true
     }
@@ -316,7 +313,7 @@ impl reinfors_core::Game for ChanceRootSim {
             terminal: true,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn reinfors_core::Rng) -> SimState {
+    fn initial_state(&self) -> SimState {
         SimState { tick: 0 }
     }
 }

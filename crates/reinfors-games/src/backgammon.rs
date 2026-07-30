@@ -3,7 +3,7 @@
 //! repo) so legal-move sets and encodings can be parity-tested position-for-position against it.
 //!
 //! **Chance modeling**: explicit chance states throughout, and every random element declared
-//! (`all_chance_declared`). A completed turn hands off at the AwaitingRoll chance state (dice
+//! (`initial_state` draws nothing). A completed turn hands off at the AwaitingRoll chance state (dice
 //! unset → `Actor::Chance`); `chance_node` declares the 21 distinct rolls (non-doubles 1/18,
 //! doubles 1/36) and `apply_chance_node(i)` stamps roll `i` in with neutral events. A doubles
 //! turn whose first action used both dice re-arms the SAME dice for the same player (an extra
@@ -24,7 +24,9 @@
 
 use std::collections::BTreeSet;
 
-use reinfors_core::{ActionView, Actor, Game, Reward, Rng, StateEncoder, Transition};
+#[cfg(test)]
+use reinfors_core::Rng;
+use reinfors_core::{ActionView, Actor, Game, Reward, StateEncoder, Transition};
 
 pub const NUM_POINTS: usize = 24;
 pub const NUM_CHECKERS: u8 = 15;
@@ -428,10 +430,6 @@ impl Game for Backgammon {
         state.legal_action_ids(agent)
     }
 
-    fn chance_nodes(&self) -> bool {
-        true
-    }
-
     fn step(
         &self,
         state: &BackgammonState,
@@ -516,13 +514,9 @@ impl Game for Backgammon {
         Transition::silent(next, 2)
     }
 
-    fn all_chance_declared(&self) -> bool {
-        true // initial_state draws nothing; the opening is the root chance phase
-    }
-
-    fn initial_state(&self, _rng: &mut dyn Rng) -> BackgammonState {
+    fn initial_state(&self) -> BackgammonState {
         // The opening is a declared ROOT chance phase (30 uniform outcomes — see `chance_node`);
-        // `initial_state` draws nothing, which is what `all_chance_declared` claims. The
+        // `initial_state` draws nothing — structural now that it takes no rng. The
         // framework realizes the draw at episode birth.
         BackgammonState {
             board: BackgammonState::initial_board(),
@@ -975,18 +969,8 @@ mod tests {
     }
     #[test]
     fn the_opening_is_a_declared_root_chance_phase() {
-        struct Poisoned;
-        impl Rng for Poisoned {
-            fn below(&mut self, _n: usize) -> usize {
-                panic!("initial_state must draw nothing")
-            }
-            fn unit(&mut self) -> f64 {
-                panic!("initial_state must draw nothing")
-            }
-        }
         let g = game();
-        assert!(g.all_chance_declared());
-        let root = g.initial_state(&mut Poisoned); // proves the claim: no private sampling
+        let root = g.initial_state(); // draws nothing: the opening is declared
         assert!(matches!(g.actor(&root), Actor::Chance));
         assert!(g.legal_actions(&root, 0).is_empty() && g.legal_actions(&root, 1).is_empty());
         let dist = g.chance_node(&root);

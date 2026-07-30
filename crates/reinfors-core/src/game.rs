@@ -48,13 +48,13 @@ impl<S, E> Transition<S, E> {
     }
 }
 
-/// A transition's declared chance distribution over its outcome indices. `Weighted` is the
+/// A chance state's declared distribution over its outcome indices. `Weighted` is the
 /// general form (backgammon's 21 rolls). `Uniform(count)` declares a uniform distribution over
 /// `count` outcomes in O(1) at ANY size — the outcome space can be combinatorial (snake's
 /// k-apple respawn enumerates `P(free, k)` ordered placements) because sampling consumers draw
-/// one index and decode it procedurally through `apply_chance`; only enumeration (`ExpandAll`)
+/// one index and decode it procedurally through `apply_chance_node`; only enumeration (`ExpandAll`)
 /// ever pays per-outcome cost, and it bounds itself. `count` is the outcome-INDEX type
-/// (`usize`, matching `apply_chance`) and must fit `min(2^53, usize::MAX)` — indices must
+/// (`usize`, matching `apply_chance_node`) and must fit `min(2^53, usize::MAX)` — indices must
 /// survive both an f64 mantissa (the uniform draw) and the platform word (validated by the
 /// declaring game at construction AND against decoded state).
 #[derive(Clone, Debug, PartialEq)]
@@ -143,87 +143,6 @@ pub trait Game {
 
     fn step(&self, state: &Self::State, actions: &[usize]) -> Transition<Self::State, Self::Event>;
 
-    /// DEPRECATED transition-attached chance (explicit chance states — `Actor::Chance` +
-    /// [`chance_node`](Self::chance_node) — are the canonical seam; no in-repo game implements
-    /// this one, and the framework serves it only until the removal PR). The transition's chance
-    /// distribution, *declared* (see [`ChanceDist`]): over the outcome indices that
-    /// [`apply_chance`](Self::apply_chance) accepts. `None` means the transition is
-    /// deterministic. The framework realizes env transitions from it ([`step_env`], one draw),
-    /// and tree searches consume it per their configured [`ChanceMode`](crate::ChanceMode).
-    /// Contract: `Weighted` probabilities are positive; `Uniform` counts are in `1..=2^53`;
-    /// terminal transitions return `None`; and outcomes only vary the chance element — they share
-    /// the transition's `terminal` flag, next actor, **and events: rewards are edge-level and
-    /// outcome-invariant**. Searches score the action edge once from the pre-chance transition and
-    /// share that reward across every outcome (snake: the eat reward is the same wherever the food
-    /// respawns). A game whose chance element changes the reward — a stochastic payout — does not
-    /// fit this seam; that is a chance NODE (`Actor::Chance` + [`chance_node`](Self::chance_node)),
-    /// the fully general form every consumer traverses. The default declares every
-    /// transition deterministic.
-    #[deprecated(
-        note = "declare an explicit chance state instead (Actor::Chance + chance_node/\
-                apply_chance_node) — the canonical chance abstraction; this transition-attached \
-                seam has no in-repo game implementations (framework compatibility paths \
-                still serve it) and is removal-pending"
-    )]
-    fn chance_outcomes(
-        &self,
-        state: &Self::State,
-        transition: &Transition<Self::State, Self::Event>,
-    ) -> Option<ChanceDist> {
-        let _ = (state, transition);
-        None
-    }
-
-    /// Materialize outcome `outcome` (an index into the `chance_outcomes` probabilities) of the
-    /// transition's chance distribution. Only called with indices of a `Some` distribution; games
-    /// that declare no chance never see it.
-    #[deprecated(
-        note = "declare an explicit chance state instead (Actor::Chance + chance_node/\
-                apply_chance_node) — the canonical chance abstraction; this transition-attached \
-                seam has no in-repo game implementations (framework compatibility paths \
-                still serve it) and is removal-pending"
-    )]
-    fn apply_chance(
-        &self,
-        state: &Self::State,
-        transition: &Transition<Self::State, Self::Event>,
-        outcome: usize,
-    ) -> Self::State {
-        let _ = (state, transition, outcome);
-        unreachable!("apply_chance called on a game that declares no chance_outcomes")
-    }
-
-    /// Whether chance-node states — states whose `actor` is [`Actor::Chance`], where no agent
-    /// decides and the framework must draw from [`chance_node`](Self::chance_node) to continue —
-    /// occur AFTER episode birth. Unlike transition-attached `chance_outcomes`, a chance node's
-    /// realization MAY determine events and terminal status (poker's all-in runout: the river
-    /// decides the showdown). Rollout consumers (`Env`, `Engine`) realize chains of them
-    /// automatically inside one tick; tree searches traverse them as fixed-probability plies per
-    /// their configured [`ChanceMode`](crate::ChanceMode) — transparent to depth, discount, and
-    /// perspective, with each edge's emissions joining the tick's reward.
-    ///
-    /// The ROOT is separate: `initial_state` may itself return a chance node (a declared deal —
-    /// see [`all_chance_declared`](Self::all_chance_declared)), realized at episode birth by the
-    /// same chain machinery; birth chains must reach a NON-terminal decision state (asserted —
-    /// an episode over before any decision stays inexpressible), and any events they emit are
-    /// contractually neutral (there is no tick to deliver them into). A game whose ONLY chance
-    /// nodes are at the root returns `false` here — searches receive post-birth states and
-    /// never meet them. `true` obliges `chance_node`/`apply_chance_node` to answer at every
-    /// `Actor::Chance` state.
-    fn chance_nodes(&self) -> bool {
-        false
-    }
-
-    /// Whether EVERY random element of the game is declared through the chance seams (root
-    /// chance nodes for the deal, `chance_outcomes`/chance nodes thereafter) — i.e.
-    /// `initial_state` draws NOTHING from its rng. Solvers that enumerate chance (CFR) require
-    /// this and verify the root claim by calling `initial_state` with an rng that panics on any
-    /// draw; a game that samples privately would otherwise be solved against the wrong tree.
-    /// Deliberate claim, default false.
-    fn all_chance_declared(&self) -> bool {
-        false
-    }
-
     /// Whether this game provides information-set keys (below). Deliberate claim, default
     /// false; `true` obliges `information_state_key` to answer at every REALIZED state.
     fn information_states(&self) -> bool {
@@ -252,9 +171,28 @@ pub trait Game {
     }
 
     /// The distribution at a chance-node state (`actor` returned [`Actor::Chance`]): over the
-    /// outcome indices [`apply_chance_node`](Self::apply_chance_node) accepts. Same declaration
-    /// contract as [`chance_outcomes`](Self::chance_outcomes) (positive weights, `Uniform` counts
-    /// in `1..=2^53`).
+    /// outcome indices [`apply_chance_node`](Self::apply_chance_node) accepts. Declaration
+    /// contract: `Weighted` probabilities are positive; `Uniform` counts are in `1..=2^53`.
+    /// This is the game's ONLY chance seam — there is no game-side sampler to diverge from it.
+    ///
+    /// A chance state is where no agent decides and the framework draws to continue. Its
+    /// realization MAY determine events and terminal status (poker's all-in runout: the river
+    /// decides the showdown). Rollout consumers (`Env`, `Engine`) realize chains of them inside
+    /// one tick; tree searches traverse them as fixed-probability plies per their configured
+    /// [`ChanceMode`](crate::ChanceMode) — transparent to depth, discount, and perspective, with
+    /// each edge's emissions joining the tick's reward. The ROOT is ordinary chance:
+    /// `initial_state` may return a chance node (a declared deal), realized at episode birth by
+    /// the same chain machinery; birth chains must reach a NON-terminal decision state
+    /// (asserted) and emit no events (there is no tick to deliver them into).
+    ///
+    /// AUTHORING PATTERN (distilled from the backgammon and snake migrations): mark the pending
+    /// nature operation with a cheap sentinel on the state (`dice == [0, 0]`, `pending_food > 0`)
+    /// rather than a wrapper enum — `actor` branches on it, `legal_actions` returns empty there,
+    /// `apply_chance_node` clears it (usually a [`Transition::silent`] — the outcome's effects
+    /// ride the edges that causally decide them). Keep the sentinel out of observations (the
+    /// framework never encodes chance states), and REJECT it in `validate_decoded_state` on live
+    /// states: the pending state is transient inside a tick, and a restored env stuck awaiting
+    /// nature could never be stepped.
     fn chance_node(&self, state: &Self::State) -> ChanceDist {
         let _ = state;
         unreachable!("chance_node called on a game that declares no chance nodes")
@@ -285,7 +223,12 @@ pub trait Game {
         true
     }
 
-    fn initial_state(&self, rng: &mut dyn Rng) -> Self::State;
+    /// The root state — DETERMINISTIC. All randomness is declared through chance nodes, so a
+    /// random opening (a deal, a roll, a placement) is a ROOT chance state this returns
+    /// unrealized; [`realize_initial_state`] draws it at episode birth. Nothing else in the
+    /// framework hands a game an rng, which is what lets solvers enumerate the full tree from
+    /// the root without a private-sampling escape hatch.
+    fn initial_state(&self) -> Self::State;
 
     /// The episode-length cap after which the rollout truncates a still-running game, or `None` for a
     /// game that always ends on its own (e.g. Connect-4). This is a property the game *declares* — the
@@ -333,15 +276,12 @@ fn push_edge_events<E>(trace: &mut Vec<(usize, E)>, events: Vec<Option<E>>, num_
     }
 }
 
-/// Realize one environment transition: the deterministic [`Game::step`], then — for a transition
-/// with declared chance — ONE draw from `chance_outcomes` materialized via `apply_chance`. The
-/// framework realizes; the game only declares. This is the sole realization path (rollout engine
-/// and `Env` both route through it), so the chance model the searches plan against and the one the
+/// Realize one environment TICK: the deterministic [`Game::step`], then the chance-node chain
+/// (one draw per chance state) run to the next decision state or terminal. The framework
+/// realizes; the game only declares. This is the sole realization path (rollout engine and
+/// `Env` both route through it), so the chance model the searches plan against and the one the
 /// training trajectories are made of are the same object by construction — divergence is not
-/// expressible. (The cost: realization materializes the probs vector; a game with a very large
-/// outcome space pays that per stochastic tick — acceptable today, revisit if measured.)
-// The framework serves the deprecated transition-chance seam until its removal PR.
-#[allow(deprecated)]
+/// expressible.
 pub fn step_env<G: Game>(
     game: &G,
     state: &G::State,
@@ -349,22 +289,11 @@ pub fn step_env<G: Game>(
     rng: &mut dyn Rng,
 ) -> Tick<G::State, G::Event> {
     let mut t = game.step(state, actions);
-    let mut t = match game.chance_outcomes(state, &t) {
-        None => t,
-        Some(dist) => {
-            let outcome = dist.draw(rng);
-            Transition {
-                next_state: game.apply_chance(state, &t, outcome),
-                events: std::mem::take(&mut t.events),
-                terminal: t.terminal,
-            }
-        }
-    };
     let num_agents = game.num_agents();
     let mut trace: Vec<(usize, G::Event)> = Vec::new();
     push_edge_events(&mut trace, std::mem::take(&mut t.events), num_agents);
-    // Chance-node chain: while the state belongs to no agent, draw and realize (see
-    // `Game::chance_nodes`). Runs to a decision state or terminal within this tick, so
+    // Chance-node chain: while the state belongs to no agent, draw and realize. Runs to a
+    // decision state or terminal within this tick, so
     // chain-interior states are never observable outside realization; each edge's emissions
     // accumulate into the tick's trace in edge order.
     let mut edges = 0usize;
@@ -386,14 +315,15 @@ pub fn step_env<G: Game>(
 }
 
 /// Realize an episode's birth: `initial_state` may return a chance node (a declared deal —
-/// see [`Game::all_chance_declared`]), possibly chaining; draw until the first decision
+/// a declared deal), possibly chaining; draw until the first decision
 /// state. The single realization path for episode starts — used by the rollout runtime
 /// (`Episode::new`/`reset`) and by any consumer that must probe POST-birth properties (the
 /// binding's decision-dynamics probe: `actor` on an unrealized root is `Actor::Chance`, which
 /// says nothing about how the game's agents take turns). Birth chains may not end the episode
 /// (asserted) and their events are contractually neutral.
 pub fn realize_initial_state<G: Game>(game: &G, rng: &mut dyn Rng) -> G::State {
-    let mut state = game.initial_state(rng);
+    let mut state = game.initial_state();
+    let num_agents = game.num_agents();
     let mut edges = 0usize;
     while matches!(game.actor(&state), Actor::Chance) {
         edges += 1;
@@ -406,6 +336,14 @@ pub fn realize_initial_state<G: Game>(game: &G, rng: &mut dyn Rng) -> G::State {
         assert!(
             !t.terminal,
             "an episode cannot end during its birth chain — the deal may not decide the game"
+        );
+        // Mirror `step_env`'s shape check: position IS the agent id, so a malformed birth edge
+        // must fail HERE — a solver scoring the same edge later would index it and panic far
+        // from the cause.
+        assert!(
+            t.events.len() == num_agents,
+            "a transition must carry exactly one event slot per agent ({} for {num_agents} agents)",
+            t.events.len()
         );
         // A REAL assert: a rollout would silently discard a birth emission while a solver
         // scoring the same edge would not — release builds must reject the divergence too.
@@ -423,8 +361,7 @@ mod step_env_tests {
     use super::*;
 
     /// Action at tick 0, then a two-node chance chain (ticks 1, 2), terminal at 3 with the
-    /// payout decided by the FINAL chain step — the outcome-dependent shape transition chance
-    /// cannot express.
+    /// payout decided by the FINAL chain step.
     struct Chainy;
     impl Game for Chainy {
         type State = i32;
@@ -457,9 +394,6 @@ mod step_env_tests {
                 terminal: false,
             }
         }
-        fn chance_nodes(&self) -> bool {
-            true
-        }
         fn chance_node(&self, _s: &i32) -> ChanceDist {
             ChanceDist::Uniform(2)
         }
@@ -476,7 +410,7 @@ mod step_env_tests {
                 terminal,
             }
         }
-        fn initial_state(&self, _rng: &mut dyn Rng) -> i32 {
+        fn initial_state(&self) -> i32 {
             0
         }
     }
@@ -507,41 +441,6 @@ mod step_env_tests {
         assert_eq!(t.trace, vec![(0, 1.0), (0, 11.0)]);
     }
 
-    /// One action; chance outcomes {0: +10, 1: +20} at p = [0.25, 0.75] on every step.
-    struct Chancy;
-    impl Game for Chancy {
-        type State = i32;
-        type Event = ();
-        fn num_agents(&self) -> usize {
-            1
-        }
-        fn action_count(&self) -> usize {
-            1
-        }
-        fn actor(&self, _: &i32) -> Actor {
-            Actor::Agent(0)
-        }
-        fn legal_actions(&self, _: &i32, _: usize) -> Vec<usize> {
-            vec![0]
-        }
-        fn step(&self, s: &i32, _: &[usize]) -> Transition<i32, ()> {
-            Transition {
-                next_state: *s + 1,
-                events: vec![None],
-                terminal: false,
-            }
-        }
-        fn chance_outcomes(&self, _: &i32, _: &Transition<i32, ()>) -> Option<ChanceDist> {
-            Some(ChanceDist::Weighted(vec![0.25, 0.75]))
-        }
-        fn apply_chance(&self, _: &i32, t: &Transition<i32, ()>, outcome: usize) -> i32 {
-            t.next_state + if outcome == 0 { 10 } else { 20 }
-        }
-        fn initial_state(&self, _: &mut dyn Rng) -> i32 {
-            0
-        }
-    }
-
     struct Unit(f64);
     impl Rng for Unit {
         fn below(&mut self, _: usize) -> usize {
@@ -567,9 +466,6 @@ mod step_env_tests {
         }
         fn action_count(&self) -> usize {
             1
-        }
-        fn chance_nodes(&self) -> bool {
-            true
         }
         fn actor(&self, s: &i32) -> Actor {
             if (*s as usize) < self.chain_len {
@@ -602,7 +498,7 @@ mod step_env_tests {
                 terminal: false,
             }
         }
-        fn initial_state(&self, _rng: &mut dyn Rng) -> i32 {
+        fn initial_state(&self) -> i32 {
             if self.from_birth {
                 0
             } else {
@@ -655,6 +551,67 @@ mod step_env_tests {
         );
     }
 
+    /// A 2-agent root chance whose birth edge carries `len` event slots.
+    struct BirthArity {
+        len: usize,
+    }
+    impl Game for BirthArity {
+        type State = i32;
+        type Event = f64;
+        fn num_agents(&self) -> usize {
+            2
+        }
+        fn action_count(&self) -> usize {
+            1
+        }
+        fn actor(&self, s: &i32) -> Actor {
+            if *s == 0 {
+                Actor::Chance
+            } else {
+                Actor::Agent(0)
+            }
+        }
+        fn legal_actions(&self, s: &i32, agent: usize) -> Vec<usize> {
+            if *s == 1 && agent == 0 {
+                vec![0]
+            } else {
+                Vec::new()
+            }
+        }
+        fn step(&self, _s: &i32, _actions: &[usize]) -> Transition<i32, f64> {
+            Transition {
+                next_state: 2,
+                events: vec![None, None],
+                terminal: true,
+            }
+        }
+        fn chance_node(&self, _s: &i32) -> ChanceDist {
+            ChanceDist::Uniform(1)
+        }
+        fn apply_chance_node(&self, _s: &i32, _outcome: usize) -> Transition<i32, f64> {
+            Transition {
+                next_state: 1,
+                events: vec![None; self.len],
+                terminal: false,
+            }
+        }
+        fn initial_state(&self) -> i32 {
+            0
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "exactly one event slot per agent")]
+    fn a_short_birth_event_vector_is_rejected() {
+        let _ = realize_initial_state(&BirthArity { len: 0 }, &mut Unit(0.5));
+    }
+
+    #[test]
+    #[should_panic(expected = "exactly one event slot per agent")]
+    fn a_long_birth_event_vector_is_rejected() {
+        let _ = realize_initial_state(&BirthArity { len: 3 }, &mut Unit(0.5));
+    }
+
     #[test]
     #[should_panic(expected = "birth-chain edges emit no events")]
     fn a_birth_emission_is_rejected_in_every_build() {
@@ -694,7 +651,7 @@ mod step_env_tests {
                     terminal: true,
                 }
             }
-            fn initial_state(&self, _: &mut dyn Rng) -> i32 {
+            fn initial_state(&self) -> i32 {
                 0
             }
         }
@@ -703,14 +660,54 @@ mod step_env_tests {
 
     #[test]
     fn realizes_the_declared_distribution() {
-        // The framework's ONE derivation, pinned once here (not per game — games no longer have a
+        // The framework's ONE derivation, pinned once here (not per game — games have no
         // sampler to agree with): a unit draw below 0.25 lands on outcome 0, above on outcome 1,
-        // and the realized state is exactly `apply_chance` of that outcome.
-        let g = Chancy;
-        let low = step_env(&g, &0, &[0], &mut Unit(0.1));
-        assert_eq!(low.next_state, 11); // step +1, outcome 0 (+10)
-        let high = step_env(&g, &0, &[0], &mut Unit(0.9));
-        assert_eq!(high.next_state, 21); // step +1, outcome 1 (+20)
+        // and the realized state is exactly `apply_chance_node` of that outcome.
+        struct Fanny;
+        impl Game for Fanny {
+            type State = i32;
+            type Event = ();
+            fn num_agents(&self) -> usize {
+                1
+            }
+            fn action_count(&self) -> usize {
+                1
+            }
+            fn actor(&self, s: &i32) -> Actor {
+                if *s == 1 {
+                    Actor::Chance
+                } else {
+                    Actor::Agent(0)
+                }
+            }
+            fn legal_actions(&self, s: &i32, _: usize) -> Vec<usize> {
+                if *s == 1 {
+                    Vec::new()
+                } else {
+                    vec![0]
+                }
+            }
+            fn step(&self, _: &i32, _: &[usize]) -> Transition<i32, ()> {
+                Transition {
+                    next_state: 1,
+                    events: vec![None],
+                    terminal: false,
+                }
+            }
+            fn chance_node(&self, _: &i32) -> ChanceDist {
+                ChanceDist::Weighted(vec![0.25, 0.75])
+            }
+            fn apply_chance_node(&self, _: &i32, outcome: usize) -> Transition<i32, ()> {
+                Transition::silent(10 + 10 * outcome as i32, 1)
+            }
+            fn initial_state(&self) -> i32 {
+                0
+            }
+        }
+        let low = step_env(&Fanny, &0, &[0], &mut Unit(0.1));
+        assert_eq!(low.next_state, 10); // outcome 0
+        let high = step_env(&Fanny, &0, &[0], &mut Unit(0.9));
+        assert_eq!(high.next_state, 20); // outcome 1
         assert!(!low.terminal);
     }
 
@@ -739,7 +736,7 @@ mod step_env_tests {
                     terminal: false,
                 }
             }
-            fn initial_state(&self, _: &mut dyn Rng) -> i32 {
+            fn initial_state(&self) -> i32 {
                 0
             }
         }

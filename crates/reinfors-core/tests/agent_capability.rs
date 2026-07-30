@@ -40,7 +40,7 @@ impl Game for ThreeWay {
             terminal: s.tick + 1 >= 3,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -151,7 +151,7 @@ impl Game for RoundRobin {
             terminal: s.tick + 1 >= 3,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -165,10 +165,6 @@ impl Policy for CappedStub {
     fn max_agents(&self, _sequential: bool) -> Option<usize> {
         Some(2)
     }
-    fn supports_chance_nodes(&self) -> bool {
-        true
-    }
-
     fn supports_imperfect_information(&self) -> bool {
         false
     }
@@ -473,7 +469,7 @@ impl Game for TwoTurn {
             terminal: s.tick + 1 >= 4,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -648,7 +644,7 @@ impl Game for PayoutSeq {
             terminal,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -749,7 +745,7 @@ impl Game for EndlessRR {
             terminal: false,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
     fn truncation_horizon(&self) -> Option<usize> {
@@ -811,11 +807,11 @@ fn truncation_bootstraps_every_perspectives_own_tail() {
     }
 }
 
-/// A simultaneous 2-agent game whose every transition declares a combinatorial Uniform chance —
-/// the shape the compact declaration exists for.
+/// A simultaneous 2-agent game whose every tick passes through a combinatorial Uniform chance
+/// STATE — the shape the compact declaration exists for.
 struct WideChance;
 #[derive(Clone)]
-struct WSt(usize);
+struct WSt(usize); // even = joint decision, odd = the chance state its tick runs through
 impl Game for WideChance {
     type State = WSt;
     type Event = ();
@@ -825,34 +821,38 @@ impl Game for WideChance {
     fn action_count(&self) -> usize {
         2
     }
-    fn actor(&self, _s: &WSt) -> Actor {
-        Actor::Simultaneous
+    fn actor(&self, s: &WSt) -> Actor {
+        if !s.0.is_multiple_of(2) {
+            Actor::Chance
+        } else {
+            Actor::Simultaneous
+        }
     }
     fn legal_actions(&self, s: &WSt, _agent: usize) -> Vec<usize> {
-        if s.0 >= 3 {
-            Vec::new()
-        } else {
+        if s.0.is_multiple_of(2) && s.0 < 6 {
             vec![0, 1]
+        } else {
+            Vec::new()
         }
     }
     fn step(&self, s: &WSt, _actions: &[usize]) -> Transition<WSt, ()> {
         Transition {
-            next_state: WSt(s.0 + 1),
+            next_state: WSt(s.0 + 1), // into this tick's chance state
             events: vec![None; 2],
-            terminal: s.0 + 1 >= 3,
+            terminal: false,
         }
     }
-    fn chance_outcomes(
-        &self,
-        _s: &WSt,
-        t: &Transition<WSt, ()>,
-    ) -> Option<reinfors_core::ChanceDist> {
-        (!t.terminal).then_some(reinfors_core::ChanceDist::Uniform(50_000_000))
+    fn chance_node(&self, _s: &WSt) -> reinfors_core::ChanceDist {
+        reinfors_core::ChanceDist::Uniform(50_000_000)
     }
-    fn apply_chance(&self, _s: &WSt, t: &Transition<WSt, ()>, _outcome: usize) -> WSt {
-        t.next_state.clone()
+    fn apply_chance_node(&self, s: &WSt, _outcome: usize) -> Transition<WSt, ()> {
+        Transition {
+            next_state: WSt(s.0 + 1),
+            events: vec![None; 2],
+            terminal: s.0 + 1 >= 6,
+        }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> WSt {
+    fn initial_state(&self) -> WSt {
         WSt(0)
     }
 }
@@ -997,46 +997,7 @@ impl Game for HiddenTwo {
             terminal: s.tick + 1 >= 4,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
-        St { tick: 0 }
-    }
-}
-
-/// `TwoRobin` declaring chance NODES — the searches traverse them as fixed-probability plies
-/// (the functional battery lives in `tests/chance_nodes.rs`; this stub never actually presents
-/// one, pinning only that the declaration no longer rejects at any boundary).
-struct NodeyTwo;
-
-impl Game for NodeyTwo {
-    type State = St;
-    type Event = ();
-    fn num_agents(&self) -> usize {
-        2
-    }
-    fn action_count(&self) -> usize {
-        2
-    }
-    fn chance_nodes(&self) -> bool {
-        true
-    }
-    fn actor(&self, s: &St) -> Actor {
-        Actor::Agent(s.tick % 2)
-    }
-    fn legal_actions(&self, s: &St, agent: usize) -> Vec<usize> {
-        if agent == s.tick % 2 && s.tick < 4 {
-            vec![0, 1]
-        } else {
-            Vec::new()
-        }
-    }
-    fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
-        Transition {
-            next_state: St { tick: s.tick + 1 },
-            events: vec![None; 2],
-            terminal: s.tick + 1 >= 4,
-        }
-    }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -1068,56 +1029,12 @@ fn direct_expectimax_rejects_hidden_information() {
         vec![(St { tick: 0 }, 0)],
         false,
         0,
-        |_players: &[usize], _obs: Vec<f32>, n: usize| vec![0.0; n * 2],
-    );
-}
-
-#[test]
-fn searches_accept_chance_node_games() {
-    let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2];
-    let mut eval = Evaluator::new(&mut infer, reinfors_core::InferMode::Shared, None);
-    let evals = mcts_many(
-        &NodeyTwo,
-        &Enc,
-        &Zero,
-        &mcts_cfg(),
-        vec![(St { tick: 0 }, 0)],
-        0,
-        &mut eval,
-    );
-    assert_eq!(evals.len(), 1);
-    let results = search_many(
-        &NodeyTwo,
-        &Enc,
-        &Zero,
-        &search_cfg(),
-        vec![(St { tick: 0 }, 0)],
-        false,
-        0,
         |_players: &[usize], _obs: Vec<f32>, n: usize| vec![0.0; n * 4],
     );
-    assert_eq!(results.len(), 1);
 }
 
-#[test]
-fn engine_accepts_search_policies_on_chance_node_games() {
-    let mut engine = Engine::new(
-        NodeyTwo,
-        Box::new(Enc),
-        Box::new(Zero),
-        Mcts::new(mcts_cfg(), ActBy::Value),
-        TreeStrap::new(0.99, 0.3, 1.0, false),
-        EngineParams {
-            n_games: 1,
-            seed: 0,
-        },
-    );
-    let (records, _) = engine.collect(4, |_obs: Vec<f32>, n: usize| vec![0.0; n * 2]);
-    assert!(records.len() >= 4);
-}
-
-/// `NodeyTwo` whose root IS the chance node — a declared deal, realized at episode birth by
-/// the chain machinery (root chance is first-class; see `Game::all_chance_declared`).
+/// `TwoRobin` whose root IS a chance node — a declared deal, realized at episode birth by
+/// the chain machinery (root chance is first-class).
 struct RootNodey;
 
 impl Game for RootNodey {
@@ -1128,9 +1045,6 @@ impl Game for RootNodey {
     }
     fn action_count(&self) -> usize {
         2
-    }
-    fn all_chance_declared(&self) -> bool {
-        true // the root draw below is this game's only randomness
     }
     fn actor(&self, s: &St) -> Actor {
         if s.tick == 0 {
@@ -1163,7 +1077,7 @@ impl Game for RootNodey {
             terminal: s.tick + 1 >= 4,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -1184,7 +1098,7 @@ fn realized_roots_expose_the_true_decision_dynamics() {
         }
     }
     assert!(matches!(
-        Game::actor(&RootNodey, &RootNodey.initial_state(&mut P(3))),
+        Game::actor(&RootNodey, &RootNodey.initial_state()),
         Actor::Chance
     ));
     let realized = reinfors_core::realize_initial_state(&RootNodey, &mut P(3));
@@ -1198,9 +1112,6 @@ fn realized_roots_expose_the_true_decision_dynamics() {
 fn episode_birth_realizes_root_chance_chains() {
     // The root chance node (a declared deal) is realized at birth: construction succeeds,
     // every episode starts at the post-deal decision state, and collect proceeds normally.
-    // Note RootNodey::chance_nodes() stays FALSE — the capability describes POST-birth
-    // states, so a root-only-chance game keeps its tree-search compatibility.
-    assert!(!Game::chance_nodes(&RootNodey));
     let mut engine = Engine::new(
         RootNodey,
         Box::new(Enc),
@@ -1233,9 +1144,6 @@ fn start_distribution_restores_must_be_decision_states() {
         fn action_count(&self) -> usize {
             2
         }
-        fn chance_nodes(&self) -> bool {
-            true
-        }
         fn actor(&self, s: &St) -> Actor {
             if s.tick >= 5 {
                 Actor::Chance
@@ -1257,7 +1165,7 @@ fn start_distribution_restores_must_be_decision_states() {
                 terminal: s.tick + 1 >= 4,
             }
         }
-        fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+        fn initial_state(&self) -> St {
             St { tick: 0 }
         }
     }
@@ -1319,7 +1227,7 @@ impl Game for TwoRobin {
             terminal,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
 }
@@ -1403,7 +1311,7 @@ impl Game for EndlessTwo {
             terminal: false,
         }
     }
-    fn initial_state(&self, _rng: &mut dyn Rng) -> St {
+    fn initial_state(&self) -> St {
         St { tick: 0 }
     }
     fn truncation_horizon(&self) -> Option<usize> {

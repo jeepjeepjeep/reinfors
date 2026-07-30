@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use crate::game::{Actor, Game, Rng};
+use crate::game::{Actor, Game};
 use crate::policy::MAX_ENUMERATED_OUTCOMES;
 use crate::reward::Reward;
 
@@ -48,8 +48,6 @@ fn build_arena<G: Game>(game: &G, reward: &dyn Reward<Event = G::Event>) -> Aren
         nodes: Vec<ArenaNode>,
     }
     impl<G: Game> Builder<'_, G> {
-        // The framework serves the deprecated transition-chance seam until its removal PR.
-        #[allow(deprecated)]
         fn add(&mut self, state: &G::State) -> usize {
             assert!(
                 self.nodes.len() < MAX_TREE_NODES,
@@ -76,7 +74,7 @@ fn build_arena<G: Game>(game: &G, reward: &dyn Reward<Event = G::Event>) -> Aren
                         let child = if t.terminal {
                             self.terminal()
                         } else {
-                            self.resolve_transition_chance(&t.next_state)
+                            self.add(&t.next_state)
                         };
                         outcomes.push((p, r, child));
                     }
@@ -94,20 +92,8 @@ fn build_arena<G: Game>(game: &G, reward: &dyn Reward<Event = G::Event>) -> Aren
                             crate::reward::edge_reward(self.reward, &t.events, 0),
                             crate::reward::edge_reward(self.reward, &t.events, 1),
                         ];
-                        // Transition-attached chance folds into an interposed chance node.
                         let child = if t.terminal {
                             self.terminal()
-                        } else if let Some(dist) = self.game.chance_outcomes(state, &t) {
-                            let probs: Vec<f64> = dist.iter_probs().collect();
-                            let mut outcomes = Vec::with_capacity(probs.len());
-                            for (i, p) in probs.into_iter().enumerate() {
-                                let cs = self.game.apply_chance(state, &t, i);
-                                let child = self.add(&cs);
-                                outcomes.push((p, [0.0, 0.0], child));
-                            }
-                            let idx = self.nodes.len();
-                            self.nodes.push(ArenaNode::Chance(outcomes));
-                            idx
                         } else {
                             self.add(&t.next_state)
                         };
@@ -121,10 +107,6 @@ fn build_arena<G: Game>(game: &G, reward: &dyn Reward<Event = G::Event>) -> Aren
             idx
         }
 
-        fn resolve_transition_chance(&mut self, state: &G::State) -> usize {
-            self.add(state)
-        }
-
         fn terminal(&mut self) -> usize {
             let idx = self.nodes.len();
             self.nodes.push(ArenaNode::Terminal);
@@ -136,16 +118,7 @@ fn build_arena<G: Game>(game: &G, reward: &dyn Reward<Event = G::Event>) -> Aren
         reward,
         nodes: Vec::new(),
     };
-    struct Poisoned;
-    impl Rng for Poisoned {
-        fn below(&mut self, _n: usize) -> usize {
-            panic!("best response requires all_chance_declared (initial_state drew)")
-        }
-        fn unit(&mut self) -> f64 {
-            panic!("best response requires all_chance_declared (initial_state drew)")
-        }
-    }
-    let root = game.initial_state(&mut Poisoned);
+    let root = game.initial_state();
     b.add(&root);
     Arena { nodes: b.nodes }
 }
@@ -273,7 +246,7 @@ pub fn best_response_value<G: Game>(
 
 /// Every reachable information set, with one exemplar state and the acting agent — the
 /// enumeration behind the net-policy exploitability instrument (a full capped tree walk over
-/// all three chance seams; enumerable games only). First-visit exemplar per key; the key
+/// declared chance nodes; enumerable games only). First-visit exemplar per key; the key
 /// contract guarantees every member state yields the same features and ordered legal list.
 pub fn enumerate_infosets<G: Game>(game: &G) -> Vec<(Vec<u8>, G::State, usize)> {
     struct Walk<'a, G: Game> {
@@ -283,8 +256,6 @@ pub fn enumerate_infosets<G: Game>(game: &G) -> Vec<(Vec<u8>, G::State, usize)> 
         visited: usize,
     }
     impl<G: Game> Walk<'_, G> {
-        // The framework serves the deprecated transition-chance seam until its removal PR.
-        #[allow(deprecated)]
         fn go(&mut self, state: &G::State) {
             self.visited += 1;
             assert!(
@@ -313,27 +284,11 @@ pub fn enumerate_infosets<G: Game>(game: &G) -> Vec<(Vec<u8>, G::State, usize)> 
                         if t.terminal {
                             continue;
                         }
-                        if let Some(dist) = self.game.chance_outcomes(state, &t) {
-                            for outcome in 0..dist.count() {
-                                let child = self.game.apply_chance(state, &t, outcome);
-                                self.go(&child);
-                            }
-                        } else {
-                            self.go(&t.next_state);
-                        }
+                        self.go(&t.next_state);
                     }
                 }
                 Actor::Simultaneous => panic!("a simultaneous decision was reached mid-game: solvers support uniformly SEQUENTIAL games (the framework assumes one dynamics per game; mixing violates that contract)"),
             }
-        }
-    }
-    struct Poisoned;
-    impl crate::game::Rng for Poisoned {
-        fn below(&mut self, _n: usize) -> usize {
-            panic!("infoset enumeration requires all_chance_declared (initial_state drew)")
-        }
-        fn unit(&mut self) -> f64 {
-            panic!("infoset enumeration requires all_chance_declared (initial_state drew)")
         }
     }
     let mut walk = Walk {
@@ -342,7 +297,7 @@ pub fn enumerate_infosets<G: Game>(game: &G) -> Vec<(Vec<u8>, G::State, usize)> 
         out: Vec::new(),
         visited: 0,
     };
-    let root = game.initial_state(&mut Poisoned);
+    let root = game.initial_state();
     walk.go(&root);
     walk.out
 }

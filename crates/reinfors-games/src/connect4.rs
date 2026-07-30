@@ -5,7 +5,7 @@
 //! (`None`). Standard rules: only non-full columns are legal (the searches mask to the legal set;
 //! the retired "full column = immediate loss" rule predates sparse legality).
 
-use reinfors_core::{ActionView, Actor, Game, Reward, Rng, Space, StateEncoder, Transition};
+use reinfors_core::{ActionView, Actor, Game, Reward, Space, StateEncoder, Transition};
 
 const COLS: usize = 7;
 const ROWS: usize = 6;
@@ -244,7 +244,7 @@ impl Game for Connect4 {
         }
     }
 
-    fn initial_state(&self, _rng: &mut dyn Rng) -> Connect4State {
+    fn initial_state(&self) -> Connect4State {
         Connect4State {
             cells: [0; COLS * ROWS],
             turn: 0,
@@ -252,7 +252,7 @@ impl Game for Connect4 {
         }
     }
 
-    // Deterministic: no `chance_outcomes` declaration needed (the trait default suffices).
+    // Deterministic transitions: no chance states.
 }
 
 /// The default Connect-4 observation: two own/opponent piece planes from the mover's perspective.

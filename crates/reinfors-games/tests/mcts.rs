@@ -49,7 +49,7 @@ fn argmax(v: &[f64]) -> usize {
 /// Build a position where P0 has three in column 3 and it is P0's move — column 3 wins outright.
 fn forced_win_state() -> reinfors_games::Connect4State {
     let game = Connect4;
-    let mut state = game.initial_state(&mut NoRng);
+    let mut state = game.initial_state();
     for &(mover, col) in &[(0, 3), (1, 0), (0, 3), (1, 0), (0, 3), (1, 0)] {
         assert_eq!(game.actor(&state), Actor::Agent(mover));
         let mut joint = vec![0usize; 2];
@@ -88,7 +88,7 @@ fn mcts_finds_a_forced_connect4_win() {
 /// there next turn. P0's only safe move is to block by playing column 0.
 fn opponent_threat_state() -> reinfors_games::Connect4State {
     let game = Connect4;
-    let mut state = game.initial_state(&mut NoRng);
+    let mut state = game.initial_state();
     for &(mover, col) in &[(0, 1), (1, 0), (0, 1), (1, 0), (0, 2), (1, 0)] {
         assert_eq!(game.actor(&state), Actor::Agent(mover));
         let mut joint = vec![0usize; 2];
@@ -171,7 +171,7 @@ fn mcts_searches_simultaneous_snake() {
         initial_food_count: 1,
         max_ticks: None,
     };
-    let state = snake.initial_state(&mut NoRng);
+    let state = reinfors_core::realize_initial_state(&snake, &mut NoRng);
     let reward = reinfors_games::SnakeReward {
         step: 0.0,
         food: 0.0,

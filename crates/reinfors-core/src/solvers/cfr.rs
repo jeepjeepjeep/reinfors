@@ -12,10 +12,9 @@
 //!
 //! Requirements, asserted at construction: 2 players; `Game::information_states` (tables are
 //! keyed by information-set bytes — what forces the learned strategy to be measurable with
-//! respect to each player's information); `Game::all_chance_declared`, with the root claim
-//! verified by calling `initial_state` with an rng that PANICS on any draw — a game that
-//! samples privately would be solved against the wrong tree. Chance is consumed through all
-//! three declared seams (root/interior chance nodes, transition-attached `chance_outcomes`):
+//! respect to each player's information). Chance is consumed through declared chance nodes
+//! (root deals and interior states alike — `initial_state` is rng-free, so a game cannot
+//! sample privately):
 //! enumerated by the exact variants (fan-capped at [`MAX_ENUMERATED_OUTCOMES`]), sampled by
 //! MCCFR — full hold'em therefore runs only under MCCFR (the deal fan is astronomical), and
 //! at that scale nothing converges anyway; the solver's home ground is Kuhn/Leduc-sized
@@ -95,18 +94,6 @@ impl Node {
     }
 }
 
-/// An rng that panics on any draw — proves `initial_state` honors `all_chance_declared`.
-struct PoisonedRng;
-
-impl Rng for PoisonedRng {
-    fn below(&mut self, _n: usize) -> usize {
-        panic!("initial_state drew from the rng despite declaring all_chance_declared")
-    }
-    fn unit(&mut self) -> f64 {
-        panic!("initial_state drew from the rng despite declaring all_chance_declared")
-    }
-}
-
 pub struct CfrSolver<G: Game> {
     game: G,
     reward: Box<dyn Reward<Event = G::Event>>,
@@ -132,13 +119,8 @@ impl<G: Game> CfrSolver<G> {
             game.information_states(),
             "CFR requires information-state keys (Game::information_states)"
         );
-        assert!(
-            game.all_chance_declared(),
-            "CFR enumerates chance and requires it fully declared (Game::all_chance_declared)"
-        );
-        let _ = game.initial_state(&mut PoisonedRng); // verifies the root claim loudly
-                                                      // Gate on the REALIZED root — the raw root of a declared game is commonly a chance
-                                                      // node, which says nothing about decision dynamics (see the same gate in Deep CFR).
+        // Gate on the REALIZED root — the raw root of a declared game is commonly a chance
+        // node, which says nothing about decision dynamics (see the same gate in Deep CFR).
         let realized = crate::game::realize_initial_state(&game, &mut SplitMix64::new(0x0517_B0BE));
         assert!(
             !matches!(game.actor(&realized), Actor::Simultaneous),
@@ -169,7 +151,7 @@ impl<G: Game> CfrSolver<G> {
             match self.variant {
                 CfrVariant::Vanilla | CfrVariant::Plus => {
                     for player in 0..2 {
-                        let root = self.game.initial_state(&mut PoisonedRng);
+                        let root = self.game.initial_state();
                         self.enumerate_values(&root, [1.0, 1.0, 1.0], player);
                         if self.variant == CfrVariant::Plus {
                             for node in self.nodes.values_mut() {
@@ -185,7 +167,7 @@ impl<G: Game> CfrSolver<G> {
                 }
                 CfrVariant::ExternalMccfr => {
                     for player in 0..2 {
-                        let root = self.game.initial_state(&mut PoisonedRng);
+                        let root = self.game.initial_state();
                         self.sample_values(&root, player);
                     }
                 }
@@ -214,7 +196,7 @@ impl<G: Game> CfrSolver<G> {
 
     /// Expected value for `player` when BOTH play the average profile (full enumeration).
     pub fn expected_value(&self, player: usize) -> f64 {
-        let root = self.game.initial_state(&mut PoisonedRng);
+        let root = self.game.initial_state();
         self.profile_value(&root)[player]
     }
 
@@ -323,9 +305,7 @@ impl<G: Game> CfrSolver<G> {
                 let mut v = [0.0; 2];
                 for (i, p) in probs.into_iter().enumerate() {
                     let t = self.game.apply_chance_node(state, i);
-                    let child = self.transition_values(
-                        state,
-                        &t,
+                    let child = self.transition_values(&t,
                         {
                             let mut r = reach;
                             r[2] *= p;
@@ -355,9 +335,7 @@ impl<G: Game> CfrSolver<G> {
                     let mut joint = vec![0; 2];
                     joint[who] = a;
                     let t = self.game.step(state, &joint);
-                    let child = self.transition_values(
-                        state,
-                        &t,
+                    let child = self.transition_values(&t,
                         {
                             let mut r = reach;
                             r[who] *= current[ai];
@@ -388,13 +366,10 @@ impl<G: Game> CfrSolver<G> {
         }
     }
 
-    /// Fold a realized transition into the recursion: edge rewards + terminal stop +
-    /// transition-attached chance enumeration + the child state.
-    // The framework serves the deprecated transition-chance seam until its removal PR.
-    #[allow(deprecated)]
+    /// Fold a realized transition into the recursion: edge rewards + terminal stop + the child
+    /// state (chance-node states recurse through the `Actor::Chance` arm).
     fn transition_values(
         &mut self,
-        state: &G::State,
         t: &Transition<G::State, G::Event>,
         reach: [f64; 3],
         player: usize,
@@ -402,30 +377,6 @@ impl<G: Game> CfrSolver<G> {
         let r = self.edge_rewards(t);
         if t.terminal {
             return r;
-        }
-        if let Some(dist) = self.game.chance_outcomes(state, t) {
-            assert!(
-                dist.count() <= MAX_ENUMERATED_OUTCOMES,
-                "chance fan {} exceeds the enumeration cap; use CfrVariant::ExternalMccfr",
-                dist.count()
-            );
-            let probs: Vec<f64> = dist.iter_probs().collect();
-            let mut v = r;
-            for (i, p) in probs.into_iter().enumerate() {
-                let child_state = self.game.apply_chance(state, t, i);
-                let child = self.enumerate_values(
-                    &child_state,
-                    {
-                        let mut rr = reach;
-                        rr[2] *= p;
-                        rr
-                    },
-                    player,
-                );
-                v[0] += p * child[0];
-                v[1] += p * child[1];
-            }
-            return v;
         }
         let child = self.enumerate_values(&t.next_state, reach, player);
         [r[0] + child[0], r[1] + child[1]]
@@ -448,7 +399,7 @@ impl<G: Game> CfrSolver<G> {
             Actor::Chance => {
                 let outcome = self.game.chance_node(state).draw(&mut self.rng);
                 let t = self.game.apply_chance_node(state, outcome);
-                self.sampled_transition(state, &t, player)
+                self.sampled_transition(&t, player)
             }
             Actor::Agent(who) => {
                 let legal = self.game.legal_actions(state, who);
@@ -467,7 +418,7 @@ impl<G: Game> CfrSolver<G> {
                         let mut joint = vec![0; 2];
                         joint[who] = a;
                         let t = self.game.step(state, &joint);
-                        let value = self.sampled_transition(state, &t, player);
+                        let value = self.sampled_transition(&t, player);
                         values.push(value);
                         v += sigma[values.len() - 1] * value;
                     }
@@ -487,29 +438,17 @@ impl<G: Game> CfrSolver<G> {
                     let mut joint = vec![0; 2];
                     joint[who] = a;
                     let t = self.game.step(state, &joint);
-                    self.sampled_transition(state, &t, player)
+                    self.sampled_transition(&t, player)
                 }
             }
             Actor::Simultaneous => panic!("a simultaneous decision was reached mid-game: solvers support uniformly SEQUENTIAL games (the framework assumes one dynamics per game; mixing violates that contract)"),
         }
     }
 
-    // The framework serves the deprecated transition-chance seam until its removal PR.
-    #[allow(deprecated)]
-    fn sampled_transition(
-        &mut self,
-        state: &G::State,
-        t: &Transition<G::State, G::Event>,
-        player: usize,
-    ) -> f64 {
+    fn sampled_transition(&mut self, t: &Transition<G::State, G::Event>, player: usize) -> f64 {
         let r = self.edge_rewards(t)[player];
         if t.terminal {
             return r;
-        }
-        if let Some(dist) = self.game.chance_outcomes(state, t) {
-            let outcome = dist.draw(&mut self.rng);
-            let child_state = self.game.apply_chance(state, t, outcome);
-            return r + self.sample_values(&child_state, player);
         }
         r + self.sample_values(&t.next_state, player)
     }
@@ -525,7 +464,7 @@ impl<G: Game> CfrSolver<G> {
                 let mut v = [0.0; 2];
                 for (i, p) in probs.into_iter().enumerate() {
                     let t = self.game.apply_chance_node(state, i);
-                    let child = self.profile_transition(state, &t);
+                    let child = self.profile_transition(&t);
                     v[0] += p * child[0];
                     v[1] += p * child[1];
                 }
@@ -543,7 +482,7 @@ impl<G: Game> CfrSolver<G> {
                     let mut joint = vec![0; 2];
                     joint[who] = a;
                     let t = self.game.step(state, &joint);
-                    let child = self.profile_transition(state, &t);
+                    let child = self.profile_transition(&t);
                     v[0] += sigma[ai] * child[0];
                     v[1] += sigma[ai] * child[1];
                 }
@@ -553,23 +492,10 @@ impl<G: Game> CfrSolver<G> {
         }
     }
 
-    // The framework serves the deprecated transition-chance seam until its removal PR.
-    #[allow(deprecated)]
-    fn profile_transition(&self, state: &G::State, t: &Transition<G::State, G::Event>) -> [f64; 2] {
+    fn profile_transition(&self, t: &Transition<G::State, G::Event>) -> [f64; 2] {
         let r = self.edge_rewards(t);
         if t.terminal {
             return r;
-        }
-        if let Some(dist) = self.game.chance_outcomes(state, t) {
-            let probs: Vec<f64> = dist.iter_probs().collect();
-            let mut v = r;
-            for (i, p) in probs.into_iter().enumerate() {
-                let child_state = self.game.apply_chance(state, t, i);
-                let child = self.profile_value(&child_state);
-                v[0] += p * child[0];
-                v[1] += p * child[1];
-            }
-            return v;
         }
         let child = self.profile_value(&t.next_state);
         [r[0] + child[0], r[1] + child[1]]

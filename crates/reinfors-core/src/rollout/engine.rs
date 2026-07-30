@@ -14,8 +14,8 @@
 //! its own RNG environment chance: games start from the same deterministic
 //! placement, so without this they would be identical. The framework realizes env chance
 //! (`game::step_env`, one draw from the game's DECLARED distribution) from each game's own RNG —
-//! the same `chance_outcomes` the searches consume from their own seeded streams, so env and
-//! search share one chance model by construction. When a game hits its
+//! the same declared chance nodes the searches consume from their own seeded streams, so env
+//! and search share one chance model by construction. When a game hits its
 //! `truncation_horizon`, the engine has it `mark_truncation` the tick's events (e.g. snake's survival
 //! flag) so the `Reward` scores the bonus, which the `Learner`'s z-mix carries back to earlier steps.
 
@@ -158,11 +158,6 @@ where
             game.perfect_information() || policy.supports_imperfect_information(),
             "this policy searches the true state and would be clairvoyant on a \
              hidden-information game; use an observation-only (DQN-family) policy"
-        );
-        assert!(
-            !game.chance_nodes() || policy.supports_chance_nodes(),
-            "this policy plans over transitions and cannot score chance-node realizations \
-             (outcome-dependent payouts); use an observation-only (DQN-family) policy"
         );
         if let Some(cap) = policy.max_agents(sequential) {
             assert!(
@@ -522,8 +517,8 @@ where
             // RNG, so this is the current reset path unchanged.
             match self.start_dist.choose(&mut self.buffer_rng) {
                 Start::Restore(state) => {
-                    // A public injection seam: hold a custom distribution to the same
-                    // decision-state start contract as `initial_state`.
+                    // A public injection seam: a custom distribution must restore REALIZED
+                    // decision states (fresh starts realize the root chance chain to one).
                     Episode::assert_decision_state(&self.game, &state);
                     self.episodes[gi].state = state;
                     self.seeded[gi] = true;

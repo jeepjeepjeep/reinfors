@@ -108,7 +108,7 @@ pub trait StateEncoder: ActionView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::{Actor, Game, Rng, Transition};
+    use crate::game::{Actor, Game, Transition};
     use crate::learners::dqn::Dqn;
     use crate::policies::modelfree::epsilon_greedy_q::EpsilonGreedyQ;
     use crate::reward::Reward;
@@ -145,7 +145,7 @@ mod tests {
                 terminal: true,
             }
         }
-        fn initial_state(&self, _: &mut dyn Rng) -> St {
+        fn initial_state(&self) -> St {
             St(0)
         }
     }
@@ -253,7 +253,7 @@ mod dispatch_tests {
     //! wall-clock is flaky in unit tests, so we count the mechanism instead: virtual
     //! `head_index` calls must be O(A) table builds, never O(K x A x n) per-scalar gathers).
     use super::*;
-    use crate::game::{Actor, Game, Rng, Transition};
+    use crate::game::{Actor, Game, Transition};
     use crate::policies::modelfree::epsilon_greedy_q::EpsilonGreedyQ;
     use crate::policy::Policy;
     use crate::reward::Reward;
@@ -286,7 +286,7 @@ mod dispatch_tests {
                 terminal: true,
             }
         }
-        fn initial_state(&self, _: &mut dyn Rng) -> St {
+        fn initial_state(&self) -> St {
             St
         }
     }
