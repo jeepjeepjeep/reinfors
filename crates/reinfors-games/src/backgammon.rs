@@ -428,10 +428,6 @@ impl Game for Backgammon {
         state.legal_action_ids(agent)
     }
 
-    fn chance_nodes(&self) -> bool {
-        true
-    }
-
     fn step(
         &self,
         state: &BackgammonState,

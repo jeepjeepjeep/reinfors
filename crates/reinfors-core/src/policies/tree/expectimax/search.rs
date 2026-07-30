@@ -15,10 +15,8 @@
 //! [`SearchConfig`] are game-agnostic; concrete games (e.g. the snake `selective_search` wrappers in
 //! reinfors-games) build a `SearchConfig` and a `Game` and call [`search_many`].
 //!
-//! Chance comes from the game's *declared* distributions — explicit chance states
-//! (`Game::chance_node`, the canonical seam; chains flattened into the branch fan) and the
-//! deprecated transition-attached `chance_outcomes`; the env realizes from the same
-//! declarations —
+//! Chance comes from the game's *declared* `Game::chance_node` distributions (chains
+//! flattened into the branch fan); the env realizes from the same declarations —
 //! fanned per the configured [`ChanceMode`]: `Committed{k}` draws k
 //! equal-weight realizations (the historical `food_samples` estimator), `ExpandAll` fans every
 //! outcome at its true probability (exact). A deterministic transition keeps a single child. Each
@@ -54,7 +52,7 @@ pub struct SearchConfig {
     pub expansion_budget: usize,
     pub top_k: usize,
     pub max_depth: i32,
-    /// How stochastic transitions' declared chance (`Game::chance_outcomes`) fans into branches
+    /// How a chance state's declared distribution (`Game::chance_node`) fans into branches
     /// (see [`ChanceMode`](crate::ChanceMode)): `Committed{k}` draws k realizations at equal weight
     /// (the historical `food_samples` estimator), `ExpandAll` fans every outcome at its true
     /// probability — the exact exhaustive-expectimax treatment. `AlwaysResample` is rejected at
@@ -603,12 +601,10 @@ fn agent_branching<G: Game>(
 /// Build the child node(s) for one `joint` action and append the resulting branch(es) to `branches`.
 /// `bw` is the move's chance weight. `agent_out_terminal` decides whether "the searching agent has no
 /// legal actions in the child" counts as terminal: true for simultaneous play (it means the agent
-/// died), false for a sequential turn (it just means it is not the agent's move next). A stochastic
-/// transition fans per the configured `ChanceMode` over the game's declared distribution — the
-/// same declaration the env realizes from, so search and env cannot diverge.
+/// died), false for a sequential turn (it just means it is not the agent's move next). A child at
+/// a chance STATE fans per the configured `ChanceMode` over the game's declared distribution —
+/// the same declaration the env realizes from, so search and env cannot diverge.
 #[allow(clippy::too_many_arguments)]
-// The framework serves the deprecated transition-chance seam until its removal PR.
-#[allow(deprecated)]
 fn push_branches<G: Game>(
     arena: &mut Vec<Node<G::State>>,
     game: &G,
@@ -627,44 +623,8 @@ fn push_branches<G: Game>(
 ) {
     let t = game.step(state, joint);
     let step_reward = crate::reward::edge_reward(reward, &t.events, agent);
-    // Fan the chance children from the game's DECLARED distribution (`chance_outcomes` +
-    // `apply_chance` — the same seam the tree searches consume), per the configured mode:
-    // `Committed{k}` draws k outcome indices proportionally to the declared probabilities (equal
-    // 1/k branch weights — the historical `food_samples` Monte-Carlo estimator); `ExpandAll` fans
-    // every outcome at its true probability (exact). `None` = deterministic: one child.
-    let children: Vec<(G::State, f64)> = match game.chance_outcomes(state, &t) {
-        None => vec![(t.next_state, 1.0)],
-        Some(dist) => match cfg.chance {
-            ChanceMode::Committed { samples } => {
-                let k = samples.max(1);
-                (0..k)
-                    .map(|_| {
-                        let idx = dist.draw(rng);
-                        (game.apply_chance(state, &t, idx), 1.0 / k as f64)
-                    })
-                    .collect()
-            }
-            ChanceMode::ExpandAll => {
-                // Exhaustive fan: exact, so an outcome space past the enumeration bound is an
-                // error rather than an approximation — sample (Committed) instead.
-                let count = dist.count();
-                assert!(
-                    count <= MAX_ENUMERATED_OUTCOMES,
-                    "ExpandAll cannot enumerate {count} chance outcomes (bound {}); use a \
-                     sampling chance mode for combinatorial outcome spaces",
-                    MAX_ENUMERATED_OUTCOMES
-                );
-                dist.iter_probs()
-                    .enumerate()
-                    .map(|(idx, pr)| (game.apply_chance(state, &t, idx), pr))
-                    .collect()
-            }
-            ChanceMode::AlwaysResample => unreachable!(
-                "rejected at SelectiveExpectimax construction (no traversal event to redraw on)"
-            ),
-        },
-    };
-    // Resolve explicit chance CHAINS: while a child sits at an `Actor::Chance` state, fan
+    let children: Vec<(G::State, f64)> = vec![(t.next_state, 1.0)];
+    // Resolve chance CHAINS: while a child sits at an `Actor::Chance` state, fan
     // (`ExpandAll`, exact) or sample (`Committed`) its declared distribution, compounding
     // probabilities and accumulating each chance edge's emitted reward for the requester. The
     // whole chain is one ply — one discount, one depth step — and a chain edge may end the game
@@ -1310,11 +1270,15 @@ mod chance_mode_tests {
         fn action_count(&self) -> usize {
             2
         }
-        fn actor(&self, _: &St) -> Actor {
-            Actor::Agent(0)
+        fn actor(&self, s: &St) -> Actor {
+            if s.ply == 2 {
+                Actor::Chance // the risky action's unresolved bonus
+            } else {
+                Actor::Agent(0)
+            }
         }
-        fn legal_actions(&self, _: &St, agent: usize) -> Vec<usize> {
-            if agent == 0 {
+        fn legal_actions(&self, s: &St, agent: usize) -> Vec<usize> {
+            if agent == 0 && s.ply != 2 {
                 vec![0, 1]
             } else {
                 Vec::new()
@@ -1322,13 +1286,14 @@ mod chance_mode_tests {
         }
         fn step(&self, s: &St, actions: &[usize]) -> Transition<St, f64> {
             if s.ply == 0 {
-                let total = if actions[0] == 0 {
-                    s.total + 1
+                // Safe (+1) resolves now; risky enters the chance state.
+                let (total, ply) = if actions[0] == 0 {
+                    (s.total + 1, 1)
                 } else {
-                    s.total
+                    (s.total, 2)
                 };
                 Transition {
-                    next_state: St { total, ply: 1 },
+                    next_state: St { total, ply },
                     events: vec![Some(0.0)],
                     terminal: false,
                 }
@@ -1340,14 +1305,17 @@ mod chance_mode_tests {
                 }
             }
         }
-        fn chance_outcomes(&self, s: &St, t: &Transition<St, f64>) -> Option<ChanceDist> {
-            (s.ply == 0 && t.next_state.total == s.total)
-                .then(|| ChanceDist::Weighted(vec![0.5, 0.5]))
+        fn chance_node(&self, _s: &St) -> ChanceDist {
+            ChanceDist::Weighted(vec![0.5, 0.5])
         }
-        fn apply_chance(&self, _s: &St, t: &Transition<St, f64>, outcome: usize) -> St {
-            St {
-                total: t.next_state.total + if outcome == 0 { 0 } else { 3 },
-                ply: t.next_state.ply,
+        fn apply_chance_node(&self, s: &St, outcome: usize) -> Transition<St, f64> {
+            Transition {
+                next_state: St {
+                    total: s.total + if outcome == 0 { 0 } else { 3 },
+                    ply: 1,
+                },
+                events: vec![None],
+                terminal: false,
             }
         }
         fn initial_state(&self, _: &mut dyn Rng) -> St {

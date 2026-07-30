@@ -481,10 +481,6 @@ impl Game for TexasHoldem {
         Transition::silent(next, self.num_players)
     }
 
-    fn chance_nodes(&self) -> bool {
-        true // street reveals; a reveal that completes an all-in runout settles the showdown
-    }
-
     fn all_chance_declared(&self) -> bool {
         true // the deal is a root chance chain; initial_state draws nothing
     }

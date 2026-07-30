@@ -818,10 +818,6 @@ impl Game for Snake {
         }
     }
 
-    fn chance_nodes(&self) -> bool {
-        true
-    }
-
     /// The respawn chance at an AwaitingRespawn state. `k = pending_food` apples eaten on the
     /// tick (each living head eats at most one, so `k <= min(snakes, food)`) respawn as `k`
     /// sequential uniform draws over the shrinking free set — indexed as ordered tuples,

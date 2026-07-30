@@ -136,10 +136,6 @@ impl Game for LeducPoker {
         false // the opponent's card is hidden
     }
 
-    fn chance_nodes(&self) -> bool {
-        true // the public reveal is an interior chance node
-    }
-
     fn all_chance_declared(&self) -> bool {
         true // deals are root chance nodes, the reveal interior; initial_state draws nothing
     }

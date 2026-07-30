@@ -4512,7 +4512,7 @@ impl PolicyHandle {
     /// (AlphaZero-style): the first `temperature_drop` plies of each episode are sampled
     /// `∝ visits^(1/temperature)` from the seeded acting RNG (later plies act greedily);
     /// `temperature_drop=None` applies it to the whole episode. Same seed → same games.
-    /// `chance_mode` (games with declared `chance_outcomes` only; inert otherwise) picks how the
+    /// `chance_mode` (games with declared chance states only; inert otherwise) picks how the
     /// search consumes stochastic transitions: `"always_resample"` (fresh draw ∝ probability every
     /// descent — unbiased, the asymptotically correct default), `"committed"` (freeze
     /// `chance_samples` draws at edge expansion and plan deeply inside them — expectimax's

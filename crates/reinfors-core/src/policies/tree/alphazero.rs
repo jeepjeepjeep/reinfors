@@ -102,10 +102,6 @@ impl Policy for AlphaZero {
     type Evaluation = SearchEvaluation;
     type PolicyState = u32; // plies acted this episode — drives the temperature_drop cutoff
 
-    fn supports_chance_nodes(&self) -> bool {
-        true // fixed-probability chance plies: sampled/committed/enumerated per ChanceMode
-    }
-
     fn supports_imperfect_information(&self) -> bool {
         false // rides the MCTS tree: branches on the true state
     }

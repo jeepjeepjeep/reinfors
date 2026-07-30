@@ -165,10 +165,6 @@ impl Policy for CappedStub {
     fn max_agents(&self, _sequential: bool) -> Option<usize> {
         Some(2)
     }
-    fn supports_chance_nodes(&self) -> bool {
-        true
-    }
-
     fn supports_imperfect_information(&self) -> bool {
         false
     }
@@ -811,11 +807,11 @@ fn truncation_bootstraps_every_perspectives_own_tail() {
     }
 }
 
-/// A simultaneous 2-agent game whose every transition declares a combinatorial Uniform chance —
-/// the shape the compact declaration exists for.
+/// A simultaneous 2-agent game whose every tick passes through a combinatorial Uniform chance
+/// STATE — the shape the compact declaration exists for.
 struct WideChance;
 #[derive(Clone)]
-struct WSt(usize);
+struct WSt(usize); // even = joint decision, odd = the chance state its tick runs through
 impl Game for WideChance {
     type State = WSt;
     type Event = ();
@@ -825,32 +821,36 @@ impl Game for WideChance {
     fn action_count(&self) -> usize {
         2
     }
-    fn actor(&self, _s: &WSt) -> Actor {
-        Actor::Simultaneous
+    fn actor(&self, s: &WSt) -> Actor {
+        if !s.0.is_multiple_of(2) {
+            Actor::Chance
+        } else {
+            Actor::Simultaneous
+        }
     }
     fn legal_actions(&self, s: &WSt, _agent: usize) -> Vec<usize> {
-        if s.0 >= 3 {
-            Vec::new()
-        } else {
+        if s.0.is_multiple_of(2) && s.0 < 6 {
             vec![0, 1]
+        } else {
+            Vec::new()
         }
     }
     fn step(&self, s: &WSt, _actions: &[usize]) -> Transition<WSt, ()> {
         Transition {
-            next_state: WSt(s.0 + 1),
+            next_state: WSt(s.0 + 1), // into this tick's chance state
             events: vec![None; 2],
-            terminal: s.0 + 1 >= 3,
+            terminal: false,
         }
     }
-    fn chance_outcomes(
-        &self,
-        _s: &WSt,
-        t: &Transition<WSt, ()>,
-    ) -> Option<reinfors_core::ChanceDist> {
-        (!t.terminal).then_some(reinfors_core::ChanceDist::Uniform(50_000_000))
+    fn chance_node(&self, _s: &WSt) -> reinfors_core::ChanceDist {
+        reinfors_core::ChanceDist::Uniform(50_000_000)
     }
-    fn apply_chance(&self, _s: &WSt, t: &Transition<WSt, ()>, _outcome: usize) -> WSt {
-        t.next_state.clone()
+    fn apply_chance_node(&self, s: &WSt, _outcome: usize) -> Transition<WSt, ()> {
+        Transition {
+            next_state: WSt(s.0 + 1),
+            events: vec![None; 2],
+            terminal: s.0 + 1 >= 6,
+        }
     }
     fn initial_state(&self, _rng: &mut dyn Rng) -> WSt {
         WSt(0)
@@ -1015,9 +1015,6 @@ impl Game for NodeyTwo {
     }
     fn action_count(&self) -> usize {
         2
-    }
-    fn chance_nodes(&self) -> bool {
-        true
     }
     fn actor(&self, s: &St) -> Actor {
         Actor::Agent(s.tick % 2)
@@ -1198,9 +1195,6 @@ fn realized_roots_expose_the_true_decision_dynamics() {
 fn episode_birth_realizes_root_chance_chains() {
     // The root chance node (a declared deal) is realized at birth: construction succeeds,
     // every episode starts at the post-deal decision state, and collect proceeds normally.
-    // Note RootNodey::chance_nodes() stays FALSE — the capability describes POST-birth
-    // states, so a root-only-chance game keeps its tree-search compatibility.
-    assert!(!Game::chance_nodes(&RootNodey));
     let mut engine = Engine::new(
         RootNodey,
         Box::new(Enc),
@@ -1232,9 +1226,6 @@ fn start_distribution_restores_must_be_decision_states() {
         }
         fn action_count(&self) -> usize {
             2
-        }
-        fn chance_nodes(&self) -> bool {
-            true
         }
         fn actor(&self, s: &St) -> Actor {
             if s.tick >= 5 {

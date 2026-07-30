@@ -287,10 +287,6 @@ mod tests {
         let s2 = g.apply_chance_node(&s1, 1).next_state; // remaining {J, K}[1] = K
         assert_eq!(s2.cards, vec![1, 2]);
         assert!(matches!(g.actor(&s2), Actor::Agent(0)), "player 0 opens");
-        assert!(
-            !g.chance_nodes(),
-            "root-only chance: post-birth states never chance"
-        );
     }
 
     #[test]

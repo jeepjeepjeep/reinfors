@@ -79,9 +79,6 @@ impl Game for PayoutFan {
     fn action_count(&self) -> usize {
         1
     }
-    fn chance_nodes(&self) -> bool {
-        true
-    }
     fn actor(&self, s: &St) -> Actor {
         if s.tick == 1 {
             Actor::Chance
@@ -197,9 +194,6 @@ impl Game for ChainTick {
     fn action_count(&self) -> usize {
         1
     }
-    fn chance_nodes(&self) -> bool {
-        true
-    }
     fn actor(&self, s: &St) -> Actor {
         if (1..=2).contains(&s.tick) {
             Actor::Chance
@@ -285,9 +279,6 @@ impl Game for MixedFan {
     }
     fn action_count(&self) -> usize {
         1
-    }
-    fn chance_nodes(&self) -> bool {
-        true
     }
     fn actor(&self, s: &St) -> Actor {
         if s.tick == 1 {
@@ -394,9 +385,6 @@ impl Game for SimChance {
     fn action_count(&self) -> usize {
         2
     }
-    fn chance_nodes(&self) -> bool {
-        true
-    }
     fn actor(&self, s: &St) -> Actor {
         if s.tick == 1 {
             Actor::Chance
@@ -462,9 +450,6 @@ impl Game for TurnFlip {
     }
     fn action_count(&self) -> usize {
         1
-    }
-    fn chance_nodes(&self) -> bool {
-        true
     }
     fn actor(&self, s: &St) -> Actor {
         match s.tick {
@@ -551,9 +536,6 @@ impl Game for BranchChain {
     }
     fn action_count(&self) -> usize {
         1
-    }
-    fn chance_nodes(&self) -> bool {
-        true
     }
     fn actor(&self, s: &St) -> Actor {
         if (1..=2).contains(&s.tick) {
@@ -661,9 +643,6 @@ impl Game for WideChain {
     fn action_count(&self) -> usize {
         1
     }
-    fn chance_nodes(&self) -> bool {
-        true
-    }
     fn actor(&self, s: &St) -> Actor {
         if (1..=2).contains(&s.tick) {
             Actor::Chance
@@ -730,9 +709,6 @@ impl Game for Cycler {
     }
     fn action_count(&self) -> usize {
         1
-    }
-    fn chance_nodes(&self) -> bool {
-        true
     }
     fn actor(&self, s: &St) -> Actor {
         if s.tick >= 1 {

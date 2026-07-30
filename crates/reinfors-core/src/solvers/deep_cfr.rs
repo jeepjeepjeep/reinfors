@@ -398,7 +398,7 @@ impl<G: Game> DeepCfrSolver<G> {
                 let action = legal[sample_index(&sigma, &mut m.rng)];
                 let mut joint = vec![0; 2];
                 joint[who] = action;
-                let (edge, next) = self.realize_transition(&state, &joint, &mut m.rng, player);
+                let (edge, next) = self.realize_transition(&state, &joint, player);
                 m.stack.push(Frame::Edge { r: edge });
                 m.step = Some(match next {
                     Some(s) => Step::Descend(s),
@@ -543,7 +543,7 @@ impl<G: Game> DeepCfrSolver<G> {
         let mut joint = vec![0; 2];
         joint[player] = action;
         let state = state.clone();
-        let (edge, next) = self.realize_transition(&state, &joint, &mut m.rng, player);
+        let (edge, next) = self.realize_transition(&state, &joint, player);
         *pending_edge = edge;
         m.step = Some(match next {
             Some(s) => Step::Descend(s),
@@ -551,26 +551,18 @@ impl<G: Game> DeepCfrSolver<G> {
         });
     }
 
-    /// Apply one decision: the deterministic step plus any transition-attached chance draw
-    /// (outcome-invariant events, per the chance contract). Chance-NODE chains on the
-    /// resulting state are the descent loop's job.
-    // The framework serves the deprecated transition-chance seam until its removal PR.
-    #[allow(deprecated)]
+    /// Apply one decision: the deterministic step. Chance-node chains on the resulting state
+    /// are the descent loop's job.
     fn realize_transition(
         &self,
         state: &G::State,
         joint: &[usize],
-        rng: &mut SplitMix64,
         player: usize,
     ) -> (f64, Option<G::State>) {
         let t = self.game.step(state, joint);
         let r = crate::reward::edge_reward(&*self.reward, &t.events, player);
         if t.terminal {
             return (r, None);
-        }
-        if let Some(dist) = self.game.chance_outcomes(state, &t) {
-            let outcome = dist.draw(rng);
-            return (r, Some(self.game.apply_chance(state, &t, outcome)));
         }
         let Transition { next_state, .. } = t;
         (r, Some(next_state))

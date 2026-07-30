@@ -252,7 +252,7 @@ impl Game for Connect4 {
         }
     }
 
-    // Deterministic: no `chance_outcomes` declaration needed (the trait default suffices).
+    // Deterministic transitions: no chance states.
 }
 
 /// The default Connect-4 observation: two own/opponent piece planes from the mover's perspective.

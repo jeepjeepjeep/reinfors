@@ -143,7 +143,7 @@ impl Game for GridWorld {
         self.max_ticks
     }
 
-    // Deterministic: no `chance_outcomes` declaration needed (the trait default suffices).
+    // Deterministic transitions: no chance states.
 }
 
 /// The default GridWorld observation: an agent-position plane and a goal-position plane. Carries

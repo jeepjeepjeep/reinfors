@@ -76,7 +76,7 @@ fn build_arena<G: Game>(game: &G, reward: &dyn Reward<Event = G::Event>) -> Aren
                         let child = if t.terminal {
                             self.terminal()
                         } else {
-                            self.resolve_transition_chance(&t.next_state)
+                            self.add(&t.next_state)
                         };
                         outcomes.push((p, r, child));
                     }
@@ -94,20 +94,8 @@ fn build_arena<G: Game>(game: &G, reward: &dyn Reward<Event = G::Event>) -> Aren
                             crate::reward::edge_reward(self.reward, &t.events, 0),
                             crate::reward::edge_reward(self.reward, &t.events, 1),
                         ];
-                        // Transition-attached chance folds into an interposed chance node.
                         let child = if t.terminal {
                             self.terminal()
-                        } else if let Some(dist) = self.game.chance_outcomes(state, &t) {
-                            let probs: Vec<f64> = dist.iter_probs().collect();
-                            let mut outcomes = Vec::with_capacity(probs.len());
-                            for (i, p) in probs.into_iter().enumerate() {
-                                let cs = self.game.apply_chance(state, &t, i);
-                                let child = self.add(&cs);
-                                outcomes.push((p, [0.0, 0.0], child));
-                            }
-                            let idx = self.nodes.len();
-                            self.nodes.push(ArenaNode::Chance(outcomes));
-                            idx
                         } else {
                             self.add(&t.next_state)
                         };
@@ -119,10 +107,6 @@ fn build_arena<G: Game>(game: &G, reward: &dyn Reward<Event = G::Event>) -> Aren
             };
             self.nodes[idx] = node;
             idx
-        }
-
-        fn resolve_transition_chance(&mut self, state: &G::State) -> usize {
-            self.add(state)
         }
 
         fn terminal(&mut self) -> usize {
@@ -313,14 +297,7 @@ pub fn enumerate_infosets<G: Game>(game: &G) -> Vec<(Vec<u8>, G::State, usize)> 
                         if t.terminal {
                             continue;
                         }
-                        if let Some(dist) = self.game.chance_outcomes(state, &t) {
-                            for outcome in 0..dist.count() {
-                                let child = self.game.apply_chance(state, &t, outcome);
-                                self.go(&child);
-                            }
-                        } else {
-                            self.go(&t.next_state);
-                        }
+                        self.go(&t.next_state);
                     }
                 }
                 Actor::Simultaneous => panic!("a simultaneous decision was reached mid-game: solvers support uniformly SEQUENTIAL games (the framework assumes one dynamics per game; mixing violates that contract)"),
