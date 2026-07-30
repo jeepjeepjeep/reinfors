@@ -13,9 +13,9 @@ Convergence is measured EXACTLY on the small games: `solver.exploitability(polic
 enumerates every infoset and runs the exact best response (zero at Nash), so the curve here is
 directly comparable to tabular CFR's. On Kuhn the script also prints the learned strategy at
 the classic infosets — the point being the MIXED strategies (bluffing frequencies) that
-equilibrium play requires and plain self-play RL does not produce. Full heads-up hold'em runs
-the same loop at scale (no exploitability — the tree is not enumerable); evaluate with
---holdem-eval hands against scripted opponents instead.
+equilibrium play requires and plain self-play RL does not produce. Full hold'em (any table
+size via --players) runs the same loop at scale (no exploitability — the tree is not
+enumerable); evaluate with --holdem-eval hands against a table of scripted opponents instead.
 
     uv run --with torch python scripts/train_deep_cfr.py --game kuhn_poker --iterations 60
     uv run --with torch python scripts/train_deep_cfr.py --game leduc_poker --iterations 150
@@ -184,18 +184,16 @@ def kuhn_strategy_report(policy_infer: InferFn) -> str:
     return "\n".join(f"    {label}: {probs[i][action]:.3f}" for i, (label, _, action) in enumerate(probes))
 
 
-def holdem_eval(policy_infer: InferFn, hands: int, seed: int) -> dict[str, float]:
-    """Heads-up bb/hand for the policy net (rotating seats) vs scripted opponents."""
+def holdem_eval(policy_infer: InferFn, hands: int, seed: int, n_players: int) -> dict[str, float]:
+    """bb/hand for the policy net at one rotating seat vs a table of scripted opponents."""
     results: dict[str, float] = {}
     for opponent in ("random", "call"):
         rng = random.Random(seed)
         total = 0.0
         for hand in range(hands):
-            env = rf.Env(
-                rf.games.TexasHoldem(num_players=2), rf.Reward(), seed=rng.randrange(2**31)
-            )  # scripted eval stays heads-up
+            env = rf.Env(rf.games.TexasHoldem(num_players=n_players), rf.Reward(), seed=rng.randrange(2**31))
             env.reset()
-            seat = hand % 2
+            seat = hand % n_players
             while not env.done():
                 (agent,) = env.active_agents()
                 legal = env.legal_actions(agent)
@@ -282,7 +280,11 @@ def main() -> None:
     solver = rf.solvers.DeepCfr(handle, seed=args.seed)
     dim = int(np.prod(rf.Env(handle, rf.Reward(), seed=0).observation_space().shape))
     n_actions = {"kuhn_poker": 2, "leduc_poker": 3, "texas_holdem": 3}[args.game]
-    enumerable = args.game in ("kuhn_poker", "leduc_poker")
+    # Exact metrics enumerate the whole tree; Kuhn past 6 players exceeds the best-response
+    # arena cap (the binding raises ValueError there rather than crashing — measured: 6p fits).
+    enumerable = args.game == "leduc_poker" or (args.game == "kuhn_poker" and args.players <= 6)
+    if args.game == "kuhn_poker" and not enumerable:
+        print(f"exploitability unavailable at {args.players}p Kuhn: the tree exceeds the exact enumeration cap")
 
     if args.shared_advantage_net:
         # One net + one buffer pooled across every player: more data per parameter for
@@ -387,7 +389,7 @@ def main() -> None:
         print("learned strategy at the classic infosets (mixed = the point):")
         print(kuhn_strategy_report(policy_infer))
     if args.game == "texas_holdem" and args.holdem_eval:
-        results = holdem_eval(policy_infer, args.holdem_eval, seed=args.seed + 99)
+        results = holdem_eval(policy_infer, args.holdem_eval, seed=args.seed + 99, n_players=n_players)
         print(
             f"holdem eval ({args.holdem_eval} hands/opponent, bb/hand): "
             f"vs random {results['random']:+.2f}, vs always-call {results['call']:+.2f}"

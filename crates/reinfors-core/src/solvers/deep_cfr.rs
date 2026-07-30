@@ -581,7 +581,7 @@ impl<G: Game> DeepCfrSolver<G> {
     /// Exact exploitability of a policy given per-infoset action probabilities (aligned with
     /// each infoset's legal ids, as returned by [`infoset_features`](Self::infoset_features));
     /// unlisted infosets play uniform. Same instrument and definition as tabular CFR
-    /// (NashConv / 2, zero at Nash).
+    /// (NashConv / num_players, zero at Nash).
     pub fn exploitability_of(&self, probs: &HashMap<Vec<u8>, Vec<f64>>) -> f64 {
         best_response::exploitability(&self.game, &*self.reward, &|key, legal| {
             probs

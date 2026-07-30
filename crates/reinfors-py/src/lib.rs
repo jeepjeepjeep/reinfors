@@ -3964,6 +3964,20 @@ impl<G: Game + Send + Sync> ErasedCfr for reinfors_core::CfrSolver<G> {
     }
 }
 
+/// The exact metrics (best-response enumeration) walk the whole game tree and panic in core
+/// past the arena cap. A big-but-valid game is public input, so that must surface as
+/// ValueError, not a PanicException escaping the boundary.
+fn enumeration_result<T>(f: impl FnOnce() -> T) -> PyResult<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|e| {
+        let msg = e
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| e.downcast_ref::<&str>().copied())
+            .unwrap_or("exact enumeration failed");
+        pyo3::exceptions::PyValueError::new_err(msg.to_string())
+    })
+}
+
 /// `rf.solvers.Cfr` — counterfactual regret minimization over a sequential game with declared
 /// chance and information-state keys (the poker family, 2..=10 players; convergence to Nash
 /// is only guaranteed at 2-player zero-sum). Variants: "vanilla", "plus" (CFR+),
@@ -4072,19 +4086,19 @@ impl PyCfr {
     /// Exact exploitability of the average profile (pyspiel's definition:
     /// NashConv / num_players); zero exactly at Nash. For more than 2 players this measures
     /// distance from equilibrium with NO convergence guarantee — expect a fall to a plateau.
-    fn exploitability(&self, py: Python<'_>) -> f64 {
-        py.allow_threads(|| self.inner.exploitability())
+    fn exploitability(&self, py: Python<'_>) -> PyResult<f64> {
+        py.allow_threads(|| enumeration_result(|| self.inner.exploitability()))
     }
 
     /// NashConv of the average profile: `Σᵢ (brᵢ − vᵢ)` — every player's exact unilateral
     /// improvement, summed. Zero exactly at a Nash equilibrium.
-    fn nash_conv(&self, py: Python<'_>) -> f64 {
-        py.allow_threads(|| self.inner.nash_conv())
+    fn nash_conv(&self, py: Python<'_>) -> PyResult<f64> {
+        py.allow_threads(|| enumeration_result(|| self.inner.nash_conv()))
     }
 
     /// Each player's exact best-response value against the others' average profile.
-    fn best_response_values(&self, py: Python<'_>) -> Vec<f64> {
-        py.allow_threads(|| self.inner.best_response_values())
+    fn best_response_values(&self, py: Python<'_>) -> PyResult<Vec<f64>> {
+        py.allow_threads(|| enumeration_result(|| self.inner.best_response_values()))
     }
 
     /// Expected value for `player` when everyone plays the average profile.
@@ -4095,7 +4109,7 @@ impl PyCfr {
                 self.inner.num_players()
             )));
         }
-        Ok(py.allow_threads(|| self.inner.expected_value(player)))
+        py.allow_threads(|| enumeration_result(|| self.inner.expected_value(player)))
     }
 
     /// The average strategy at an `env.information_state_key(...)` key:
@@ -4451,7 +4465,7 @@ impl PyDeepCfr {
     /// action_count)` scores every reachable infoset in ONE batched call; rows are clamped
     /// non-negative and renormalized over the legal actions (uniform when degenerate).
     fn exploitability(&self, py: Python<'_>, policy_infer: &Bound<'_, PyAny>) -> PyResult<f64> {
-        let features = self.inner.infoset_features();
+        let features = enumeration_result(|| self.inner.infoset_features())?;
         let (dim, a) = (self.obs_dim, self.action_count);
         let mut obs_flat: Vec<f32> = Vec::with_capacity(features.len() * dim);
         for (_, obs, _) in &features {
@@ -4484,7 +4498,7 @@ impl PyDeepCfr {
             };
             probs.insert(key.clone(), sigma);
         }
-        Ok(py.allow_threads(|| self.inner.exploitability_of(&probs)))
+        py.allow_threads(|| enumeration_result(|| self.inner.exploitability_of(&probs)))
     }
 }
 

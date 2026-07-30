@@ -226,3 +226,11 @@ def test_multiplayer_holdem_collection_smoke() -> None:
         batch = solver.collect(player=players - 1, traversals=8, infer=net)
         assert batch.advantage_obs.shape[0] > 0
         assert set(batch.strategy_players.tolist()) <= set(range(players))
+
+
+def test_oversized_exact_metrics_raise_value_error_not_panic() -> None:
+    """7-player Kuhn is a valid game whose tree exceeds the exact best-response arena cap.
+    The boundary contract: that surfaces as ValueError, never a PanicException."""
+    solver = rf.solvers.DeepCfr(rf.games.KuhnPoker(players=7), seed=0)
+    with pytest.raises(ValueError, match="cap"):
+        solver.exploitability(lambda obs: np.full((obs.shape[0], 2), 0.5))
