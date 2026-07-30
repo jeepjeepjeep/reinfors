@@ -356,8 +356,7 @@ mod step_env_tests {
     use super::*;
 
     /// Action at tick 0, then a two-node chance chain (ticks 1, 2), terminal at 3 with the
-    /// payout decided by the FINAL chain step — the outcome-dependent shape transition chance
-    /// cannot express.
+    /// payout decided by the FINAL chain step.
     struct Chainy;
     impl Game for Chainy {
         type State = i32;

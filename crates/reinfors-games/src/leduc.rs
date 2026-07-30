@@ -6,8 +6,8 @@
 //! opens both rounds; FOLD is legal only when facing a raise. Showdown: a private card
 //! pairing the public card wins, otherwise higher rank, equal ranks split.
 //!
-//! Chance is fully declared (`all_chance_declared`): the two deals are root chance nodes and
-//! the public reveal is an interior chance node (`chance_nodes` = true). The state is minimal
+//! Chance is fully declared: the two deals are root chance nodes and
+//! the public reveal is an interior chance node. The state is minimal
 //! — cards, public card, per-round histories; pots, the actor, round, and terminal status are
 //! all derived, so decode validation is pure grammar checking.
 
