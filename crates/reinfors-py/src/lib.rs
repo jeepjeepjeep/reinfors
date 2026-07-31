@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use numpy::ndarray::{Array2, Array3, ArrayD, IxDyn};
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyArray3, PyArrayDyn, PyReadonlyArray3};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArray3, PyArrayDyn};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
@@ -79,66 +79,127 @@ fn validate_search_params(
 /// yield bit-identical evaluations downstream; returning the net's native f32 skips the
 /// producer-side up-conversion and halves the bytes crossing the boundary — measurable on
 /// GPU, where converting a full [rows x actions] policy per call is real work.
-fn infer_dtype_err(r: &Bound<'_, PyAny>, what: &str) -> PyErr {
-    use numpy::prelude::PyUntypedArrayMethods;
-    let got = r
-        .downcast::<numpy::PyUntypedArray>()
-        .map(|a| format!("dtype {}", a.dtype()))
-        .unwrap_or_else(|_| {
-            format!(
-                "type {}",
-                r.get_type()
-                    .name()
-                    .map(|n| n.to_string())
-                    .unwrap_or_default()
-            )
-        });
-    pyo3::exceptions::PyTypeError::new_err(format!(
-        "{what} must be a float64 or float32 ndarray; got {got}"
-    ))
+///
+/// Dispatch inspects rank and dtype ONCE (no failed-extract churn, and a wrong-rank array
+/// reports its rank rather than a misleading dtype complaint); the contiguous fast path
+/// widens from a slice (vectorizes), with the ndarray iterator kept for strided views
+/// (e.g. a `logits[:, :actions].numpy()` slice is strided).
+fn infer_array<'py, const N: usize>(
+    r: &Bound<'py, PyAny>,
+    what: &str,
+) -> PyResult<InferArray<'py, N>> {
+    use numpy::prelude::{PyArrayDescrMethods, PyUntypedArrayMethods};
+    let Ok(u) = r.downcast::<numpy::PyUntypedArray>() else {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "{what} must be a float64 or float32 ndarray; got type {}",
+            r.get_type()
+                .name()
+                .map(|n| n.to_string())
+                .unwrap_or_default()
+        )));
+    };
+    if u.ndim() != N {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "{what} must be a {N}-d ndarray; got {}-d",
+            u.ndim()
+        )));
+    }
+    let py = r.py();
+    if u.dtype().is_equiv_to(&numpy::dtype::<f64>(py)) {
+        Ok(InferArray::F64(r.extract()?))
+    } else if u.dtype().is_equiv_to(&numpy::dtype::<f32>(py)) {
+        Ok(InferArray::F32(r.extract()?))
+    } else {
+        Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "{what} must be a float64 or float32 ndarray; got dtype {}",
+            u.dtype()
+        )))
+    }
+}
+
+enum InferArray<'py, const N: usize> {
+    F64(numpy::PyReadonlyArrayDyn<'py, f64>),
+    F32(numpy::PyReadonlyArrayDyn<'py, f32>),
+}
+
+impl<const N: usize> InferArray<'_, N> {
+    fn shape(&self) -> [usize; N] {
+        let s = match self {
+            InferArray::F64(a) => a.as_array().shape().to_vec(),
+            InferArray::F32(a) => a.as_array().shape().to_vec(),
+        };
+        let mut out = [0usize; N];
+        out.copy_from_slice(&s);
+        out
+    }
+
+    /// Widen every element into `out` in row-major order: slice fast path when contiguous,
+    /// strided iterator otherwise.
+    fn widen_into(&self, out: &mut Vec<f64>) {
+        fn go<T: Copy>(v: &numpy::ndarray::ArrayViewD<'_, T>, out: &mut Vec<f64>)
+        where
+            f64: From<T>,
+        {
+            match v.as_slice() {
+                Some(s) => out.extend(s.iter().map(|&x| f64::from(x))),
+                None => out.extend(v.iter().map(|&x| f64::from(x))),
+            }
+        }
+        match self {
+            InferArray::F64(a) => go(&a.as_array(), out),
+            InferArray::F32(a) => go(&a.as_array(), out),
+        }
+    }
+
+    fn to_flat(&self) -> Vec<f64> {
+        let mut out = Vec::with_capacity(self.shape().iter().product());
+        self.widen_into(&mut out);
+        out
+    }
+
+    /// AlphaZero packing: one pass, one allocation — each row's `a` logits widened directly
+    /// into the final `[logits.., value]` layout with its value appended.
+    fn pack_policy_value(&self, values: &[f64], a: usize) -> Vec<f64> {
+        fn go<T: Copy>(v: &numpy::ndarray::ArrayViewD<'_, T>, values: &[f64], a: usize) -> Vec<f64>
+        where
+            f64: From<T>,
+        {
+            let mut out = Vec::with_capacity(values.len() * (a + 1));
+            match v.as_slice() {
+                Some(s) => {
+                    for (row, chunk) in s.chunks_exact(a).enumerate() {
+                        out.extend(chunk.iter().map(|&x| f64::from(x)));
+                        out.push(values[row]);
+                    }
+                }
+                None => {
+                    for (row, r) in v.rows().into_iter().enumerate() {
+                        out.extend(r.iter().map(|&x| f64::from(x)));
+                        out.push(values[row]);
+                    }
+                }
+            }
+            out
+        }
+        match self {
+            InferArray::F64(arr) => go(&arr.as_array(), values, a),
+            InferArray::F32(arr) => go(&arr.as_array(), values, a),
+        }
+    }
 }
 
 fn infer_rows_1d(r: &Bound<'_, PyAny>, what: &str) -> PyResult<Vec<f64>> {
-    if let Ok(a) = r.extract::<numpy::PyReadonlyArray1<f64>>() {
-        return Ok(a.as_array().iter().copied().collect());
-    }
-    if let Ok(a) = r.extract::<numpy::PyReadonlyArray1<f32>>() {
-        return Ok(a.as_array().iter().map(|&x| f64::from(x)).collect());
-    }
-    Err(infer_dtype_err(r, what))
+    Ok(infer_array::<1>(r, what)?.to_flat())
 }
 
 fn infer_rows_2d(r: &Bound<'_, PyAny>, what: &str) -> PyResult<([usize; 2], Vec<f64>)> {
-    if let Ok(a) = r.extract::<numpy::PyReadonlyArray2<f64>>() {
-        let v = a.as_array();
-        return Ok(([v.shape()[0], v.shape()[1]], v.iter().copied().collect()));
-    }
-    if let Ok(a) = r.extract::<numpy::PyReadonlyArray2<f32>>() {
-        let v = a.as_array();
-        return Ok((
-            [v.shape()[0], v.shape()[1]],
-            v.iter().map(|&x| f64::from(x)).collect(),
-        ));
-    }
-    Err(infer_dtype_err(r, what))
+    let a = infer_array::<2>(r, what)?;
+    Ok((a.shape(), a.to_flat()))
 }
 
 fn infer_rows_3d(r: &Bound<'_, PyAny>, what: &str) -> PyResult<([usize; 3], Vec<f64>)> {
-    if let Ok(a) = r.extract::<PyReadonlyArray3<f64>>() {
-        let v = a.as_array();
-        return Ok((
-            [v.shape()[0], v.shape()[1], v.shape()[2]],
-            v.iter().copied().collect(),
-        ));
-    }
-    if let Ok(a) = r.extract::<numpy::PyReadonlyArray3<f32>>() {
-        let v = a.as_array();
-        return Ok((
-            [v.shape()[0], v.shape()[1], v.shape()[2]],
-            v.iter().map(|&x| f64::from(x)).collect(),
-        ));
-    }
-    Err(infer_dtype_err(r, what))
+    let a = infer_array::<3>(r, what)?;
+    Ok((a.shape(), a.to_flat()))
 }
 
 /// The core's `infer` callback, wrapping the Python network forward. Obs arrive as one flat
@@ -231,12 +292,15 @@ where
         let extracted = infer.call1((arr,)).and_then(|r| {
             let (logits, values) = r.extract::<(Bound<'_, PyAny>, Bound<'_, PyAny>)>()?;
             // Each element dispatches on dtype independently (a mixed f32/f64 tuple is fine).
-            let logits = infer_rows_2d(&logits, "AlphaZero infer policy_logits")?;
+            // Shapes are validated from the VIEWS, so nothing is widened until they pass and
+            // the pack below is one pass into one final allocation.
+            let logits = infer_array::<2>(&logits, "AlphaZero infer policy_logits")?;
             let values = infer_rows_1d(&values, "AlphaZero infer values")?;
             Ok((logits, values))
         });
         match extracted {
-            Ok(((lshape, logits), values)) => {
+            Ok((logits, values)) => {
+                let lshape = logits.shape();
                 if lshape != [n, action_count] || values.len() != n {
                     callback_err.get_or_insert_with(|| {
                         pyo3::exceptions::PyValueError::new_err(format!(
@@ -247,12 +311,7 @@ where
                     });
                     return vec![0.0; n * stride];
                 }
-                let mut out = Vec::with_capacity(n * stride);
-                for row in 0..n {
-                    out.extend_from_slice(&logits[row * action_count..(row + 1) * action_count]);
-                    out.push(values[row]);
-                }
-                out
+                logits.pack_policy_value(&values, action_count)
             }
             Err(e) => {
                 *callback_err = Some(e);
