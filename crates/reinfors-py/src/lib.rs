@@ -157,24 +157,28 @@ impl<const N: usize> InferArray<'_, N> {
         out
     }
 
-    /// AlphaZero packing: one pass, one allocation — each row's `a` logits widened directly
-    /// into the final `[logits.., value]` layout with its value appended.
+    /// AlphaZero packing: one pass, one allocation — each row's FIRST `a` logits widened
+    /// directly into the final `[logits.., value]` layout with its value appended. Rows may
+    /// be WIDER than `a` (a padded head, e.g. chess 4674 over 4672 actions): the tail is
+    /// ignored, so producers can return the full contiguous tensor instead of slicing —
+    /// on GPU a pre-transfer slice costs a device-side contiguity gather per call.
     fn pack_policy_value(&self, values: &[f64], a: usize) -> Vec<f64> {
         fn go<T: Copy>(v: &numpy::ndarray::ArrayViewD<'_, T>, values: &[f64], a: usize) -> Vec<f64>
         where
             f64: From<T>,
         {
+            let width = v.shape()[1];
             let mut out = Vec::with_capacity(values.len() * (a + 1));
             match v.as_slice() {
                 Some(s) => {
-                    for (row, chunk) in s.chunks_exact(a).enumerate() {
-                        out.extend(chunk.iter().map(|&x| f64::from(x)));
+                    for (row, chunk) in s.chunks_exact(width).enumerate() {
+                        out.extend(chunk[..a].iter().map(|&x| f64::from(x)));
                         out.push(values[row]);
                     }
                 }
                 None => {
                     for (row, r) in v.rows().into_iter().enumerate() {
-                        out.extend(r.iter().map(|&x| f64::from(x)));
+                        out.extend(r.iter().take(a).map(|&x| f64::from(x)));
                         out.push(values[row]);
                     }
                 }
@@ -301,10 +305,12 @@ where
         match extracted {
             Ok((logits, values)) => {
                 let lshape = logits.shape();
-                if lshape != [n, action_count] || values.len() != n {
+                // Width may EXCEED action_count (padded head; extra columns ignored by the
+                // pack) — it must never be narrower.
+                if lshape[0] != n || lshape[1] < action_count || values.len() != n {
                     callback_err.get_or_insert_with(|| {
                         pyo3::exceptions::PyValueError::new_err(format!(
-                            "AlphaZero infer must return (policy_logits ({n}, {action_count}), \
+                            "AlphaZero infer must return (policy_logits ({n}, >={action_count}), \
                              values ({n},)); got logits {lshape:?} and values ({},)",
                             values.len()
                         ))

@@ -128,3 +128,25 @@ def test_exploitability_instrument_accepts_f32_exactly() -> None:
         return lambda obs: np.full((obs.shape[0], 2), 0.5, dtype=dtype)
 
     assert solver.exploitability(uniform(np.float32)) == solver.exploitability(uniform(np.float64))
+
+
+def test_padded_logits_are_accepted_and_identical() -> None:
+    """A wider-than-A head (chess: 4674 over 4672) may be returned whole — the tail is
+    ignored, so producers skip the pre-transfer slice (a device-side gather on GPU)."""
+
+    def padded(obs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        logits = _f32_logits(obs)
+        junk = np.full((obs.shape[0], 2), 1e9, dtype=np.float32)  # tail must be ignored
+        return np.concatenate([logits, junk], axis=1), np.tanh(logits.sum(axis=1) / 8.0, dtype=np.float32)
+
+    a = _az_engine().collect(60, _az_infer(np.float32))
+    b = _az_engine().collect(60, padded)
+    assert _sig(a) == _sig(b)
+
+
+def test_too_narrow_logits_still_error() -> None:
+    def narrow(obs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        return np.zeros((obs.shape[0], _A - 1), dtype=np.float32), np.zeros(obs.shape[0], dtype=np.float32)
+
+    with pytest.raises(ValueError, match="policy_logits"):
+        _az_engine().collect(20, narrow)
