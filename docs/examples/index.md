@@ -9,6 +9,7 @@ not a reinfors abstraction.
 | Example | What it demonstrates | Extra dependencies |
 | --- | --- | --- |
 | `examples/quickstart.py` | Synchronous MCTS collection with a NumPy callback | None |
+| `examples/train_gridworld.py` | Complete GridWorld DQN training loop | `reinfors[train]` |
 | `examples/streaming.py` | Bounded background collection and clean shutdown | None |
 | `examples/telemetry_tensorboard.py` | Structured telemetry written to TensorBoard | `reinfors[train]` and `tensorboard` |
 
@@ -16,6 +17,7 @@ From a source checkout:
 
 ```bash
 python examples/quickstart.py
+python examples/train_gridworld.py
 python examples/streaming.py
 python examples/telemetry_tensorboard.py --updates 10
 ```

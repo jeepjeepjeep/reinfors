@@ -1,55 +1,127 @@
 # Build a training loop
 
-An engine composition fixes the game, reward, policy, learner, and collection topology. Your
-Python loop supplies inference and consumes the typed batch produced by that learner.
+This example trains a small DQN on GridWorld. It is a complete, single-file program: install the
+training dependencies, copy the code into a file, and run it.
 
-## 1. Compose an engine
+```bash
+pip install "reinfors[train]"
+python train_gridworld.py
+```
 
 ```python
-import reinfors as rf
+"""Train a small DQN on GridWorld."""
 
-game = rf.games.Snake(grid_size=12, num_snakes=2, max_ticks=200)
+import copy
+
+import numpy as np
+import reinfors as rf
+import torch
+from torch import nn
+from torch.nn import functional as F
+
+UPDATES = 10
+RECORDS_PER_UPDATE = 256
+GAMMA = 0.99
+TARGET_SYNC = 5
+
+torch.manual_seed(0)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Configure reinfors
+game = rf.games.GridWorld(size=5, goal_row=0, goal_col=4, max_ticks=50)
+obs_size = int(np.prod(game.observation_space().shape))
+n_actions = game.action_space().n
 engine = rf.Engine(
     game=game,
-    reward=rf.Reward(food=1.0, loss=-10.0, win=10.0, draw=-5.0),
-    policy=rf.policies.SelectiveExpectimax(
-        expansion_budget=32,
-        top_k=4,
-        max_depth=6,
-        n_heads=8,
-        chance=rf.chance_modes.Committed(samples=1),
-    ),
-    learner=rf.learners.TreeStrap(gamma=0.99, outcome_weight=0.3),
-    n_games=32,
+    reward=rf.Reward(step=-0.01, goal=1.0),
+    policy=rf.policies.EpsilonGreedyQ(n_heads=1, epsilon=0.1),
+    learner=rf.learners.Dqn(),
+    n_games=8,
     seed=0,
 )
+
+# Build the network and inference callback
+net = nn.Sequential(
+    nn.Linear(obs_size, 64),
+    nn.ReLU(),
+    nn.Linear(64, n_actions),
+).to(device)
+target_net = copy.deepcopy(net).eval()
+optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
+
+
+def infer(obs_batch: np.ndarray) -> np.ndarray:
+    """Return one head of Q-values for each observation."""
+    net.eval()
+    with torch.no_grad():
+        obs = torch.from_numpy(np.ascontiguousarray(obs_batch)).to(device)
+        return net(obs).unsqueeze(1).cpu().double().numpy()
+
+
+for update in range(1, UPDATES + 1):
+    # Collect a batch of experience.
+    batch = engine.collect(n_records=RECORDS_PER_UPDATE, infer=infer)
+
+    obs = torch.as_tensor(batch.obs, device=device)
+    actions = torch.as_tensor(batch.actions, device=device)
+    rewards = torch.as_tensor(batch.rewards, dtype=torch.float32, device=device)
+    next_obs = torch.as_tensor(batch.next_obs, device=device)
+    can_bootstrap = torch.as_tensor(np.diff(batch.next_legal_offsets) > 0, device=device)
+
+    # Compute DQN targets.
+    net.train()
+    chosen_q = net(obs).gather(1, actions[:, None]).squeeze(1)
+    with torch.no_grad():
+        next_value = target_net(next_obs).max(dim=1).values
+        targets = rewards + GAMMA * torch.where(can_bootstrap, next_value, 0.0)
+
+    # Update the online network.
+    loss = F.smooth_l1_loss(chosen_q, targets)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    # Periodically sync the target network.
+    if update % TARGET_SYNC == 0:
+        target_net.load_state_dict(net.state_dict())
+
+    print(f"update={update} records={len(batch.obs)} loss={loss.item():.3f}")
 ```
 
-Constructors validate incompatible compositions before collection begins. Export
-`engine.resolved_config()` with experiment artifacts so defaults are recorded too.
+## What reinfors provides
 
-## 2. Adapt your network once
+The engine runs GridWorld episodes concurrently using the epsilon-greedy policy, batches calls to
+`infer`, and returns the transitions needed for the DQN update. The network, target network,
+optimizer, and loss remain ordinary PyTorch and can be replaced without changing the engine.
 
-The callback receives a contiguous or non-contiguous two-dimensional `float32` observation
-batch. Reshape according to `game.observation_space().shape`, run inference without gradients,
-and return the policy-specific `float64` output.
+The inference callback is the adapter between the two sides. Here the network produces one Q-value
+per action, and `unsqueeze(1)` adds the single ensemble-head dimension expected by
+`EpsilonGreedyQ(n_heads=1)`. The callback returns NumPy `float64` values; action legality stays
+inside the game and policy.
 
-Do not apply a dense argmax or max over illegal actions in your own loss. DQN batches provide
-sparse legal action ids for target calculation; search policies obtain legality directly from
-the game.
+Every GridWorld move is legal, so the target network can take a dense maximum over its four outputs.
+The batch's sparse next-action offsets still identify rows that should not bootstrap, such as
+terminal states. Games with variable legal actions must instead maximize over their provided legal
+action IDs; `scripts/train_dqn_holdem.py` demonstrates that general case.
 
-## 3. Collect and optimize
+`engine.collect()` returns at least `n_records`, rather than exactly that many records, because
+complete episodes are retained. Its `batch.telemetry` field contains collection timings, inference
+counts, and episode summaries; see [telemetry](telemetry.md) for reporting and TensorBoard output.
 
-```python
-for step in range(num_updates):
-    batch = engine.collect(n_records=records_per_update, infer=infer)
-    loss = train(batch)
-    engine.weights_updated()
-    report(batch.telemetry, loss)
-```
+## Taking the loop further
 
-Prefer named fields such as `batch.obs` and `batch.targets`. Positional unpacking remains for
-compatibility but makes algorithm-specific code less self-documenting.
+This first example deliberately trains directly on each collected batch. Typical experiments add a
+replay buffer, minibatching, checkpoints, evaluation, and concurrent collection. The maintained
+scripts build those pieces on the same interface:
+
+- `scripts/train_dqn_holdem.py`: replay, minibatching, sparse legality, evaluation, and ensemble DQN;
+- `scripts/train_alphazero_example.py`: AlphaZero search with policy and value heads;
+- `scripts/train_example.py`: TreeStrap with selective expectimax or UCT MCTS;
+- `scripts/train_deep_cfr.py`: caller-owned Deep CFR buffers and networks.
+
+Use `engine.resolved_config()` alongside checkpoints to record all constructor defaults. If you
+enable `infer_cache`, call `engine.weights_updated()` after an optimizer step so cached outputs from
+the previous weights are invalidated.
 
 ## Per-player models
 
@@ -59,18 +131,9 @@ Pass one callback per player when policies differ:
 batch = engine.collect(n_records=records_per_update, infer=[blue_infer, red_infer])
 ```
 
-The callback sequence length must match the game player count. Use `batch.players` to route
-records into the right optimizer or replay buffer. Set `learn_players=[0]` on `Engine` for a
-frozen-opponent experiment; all players still act, but only player 0 emits training rows.
+The callback sequence length must match the game player count. Use `batch.players` to route records
+to the corresponding optimizer or replay buffer. Set `learn_players=[0]` on `Engine` for a frozen
+opponent experiment: all players still act, but only player 0 emits training rows.
 
-## Framework examples
-
-The maintained PyTorch scripts demonstrate full losses rather than hiding them in the
-library:
-
-- `scripts/train_example.py`: TreeStrap with selective expectimax or UCT MCTS;
-- `scripts/train_alphazero_example.py`: policy/value loss, evaluation, and streaming;
-- `scripts/train_dqn_holdem.py`: sparse legal-action DQN targets;
-- `scripts/train_deep_cfr.py`: caller-owned Deep CFR buffers and networks.
-
-See [examples](../examples/index.md) for commands and learning objectives.
+See [examples](../examples/index.md) for runnable commands and [batch formats](../reference/batch-formats.md)
+for the fields produced by every learner.
