@@ -8,6 +8,13 @@ parallel Rust backend. Your inference callback is the boundary: it receives pool
 observations and returns model outputs, so the network, framework, optimizer, replay,
 hardware placement, and distributed topology remain yours.
 
+Direct measurements have found the Rust/Python inference boundary to be negligible beside
+the search and network-training work around it. Reinfors therefore deliberately does not
+provide a parallel all-Rust training interface: it would duplicate substantial ecosystem
+functionality while giving up arbitrary Python networks, frameworks, and deployment
+topologies for no meaningful measured end-to-end gain. See the
+[benchmark section](docs/benchmarks/index.md) for the publication and reproducibility plan.
+
 ```python
 import numpy as np
 import reinfors as rf
@@ -36,9 +43,13 @@ print(batch.obs.shape, batch.targets.shape, batch.telemetry)
 
 - Search and sampling are native, multithreaded, and batch network requests across games
   and search leaves.
-- `collect` supports a simple synchronous loop; `collect_stream` overlaps Rust collection
-  with Python training and exposes bounded backpressure.
+- `collect` supports a simple synchronous loop; `collect_stream` runs parallel Rust search
+  concurrently with Python training, with configurable queueing and bounded backpressure.
 - Networks are injectable per player and are not tied to a framework or device topology.
+- The pipeline is general and compositional: Rust traits separate games, encoders, rewards,
+  policies, learners, and solvers so new components can be added without redesigning the
+  engine. Rust's memory and thread safety, trait system, and tooling keep this native
+  extension surface safer and easier to maintain than comparable C++ infrastructure.
 - Games include deterministic, stochastic, simultaneous, N-player, and
   imperfect-information environments.
 - Algorithms cover value learning, MCTS/AlphaZero, CFR variants, and Deep CFR.
@@ -72,19 +83,6 @@ Reinfors is pre-1.0. Public contracts are documented, but breaking changes may s
 
 The benchmark area is being rebuilt with controlled, reproducible measurements. Results
 will be published only with their hardware, configuration, and methodology.
-
-## Development
-
-```bash
-python -m venv .venv
-. .venv/bin/activate
-pip install maturin
-maturin develop
-cargo test -p reinfors-core -p reinfors-games
-pytest
-```
-
-See the [development guide](docs/development/setup.md) for the full workflow.
 
 ## License
 
