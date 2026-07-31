@@ -244,7 +244,7 @@ def main() -> None:
         # Synchronous reference loop: collect and train take turns; one net, implicit weight sync.
         infer = make_infer(net, args.device)
         for it in range(1, args.iterations + 1):
-            batch = engine.collect(args.collect_size, infer)  # search with live weights
+            batch = engine.collect(n_records=args.collect_size, infer=infer)  # search with live weights
             assert isinstance(batch, rf._reinfors.AlphaZeroBatch)  # narrows the family union
             run_iteration(args, net, optimizer, it, batch)
     else:
@@ -261,7 +261,7 @@ def main() -> None:
             with sync_lock:
                 return base_infer(obs_batch)
 
-        with engine.collect_stream(args.collect_size, locked_infer, depth=depth) as stream:
+        with engine.collect_stream(collect_size=args.collect_size, infer=locked_infer, depth=depth) as stream:
             for it in range(1, args.iterations + 1):
                 batch = stream.next()
                 assert isinstance(batch, rf._reinfors.AlphaZeroBatch)  # narrows the family union

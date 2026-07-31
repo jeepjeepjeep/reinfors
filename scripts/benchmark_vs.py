@@ -163,7 +163,7 @@ class ReinforsBackend:
             out[:, 0, :] = v[:, None]
             return out
 
-        return _throughput(lambda: int(engine.collect(decisions, infer).obs.shape[0]), repeats)
+        return _throughput(lambda: int(engine.collect(n_records=decisions, infer=infer).obs.shape[0]), repeats)
 
 
 class PgxBackend:

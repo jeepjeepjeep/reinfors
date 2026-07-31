@@ -205,7 +205,7 @@ def main() -> None:
         print(f"eval[start] mean reward vs random: {eval_vs_random(net, args, args.eval_games, args.seed):+.2f}")
     t0 = time.perf_counter()
     for it in range(1, args.iterations + 1):
-        batch = engine.collect(args.collect_size, infer)
+        batch = engine.collect(n_records=args.collect_size, infer=infer)
         engine.weights_updated()  # about to train: cached rows from the old weights must not serve
         assert isinstance(batch, rf._reinfors.AlphaZeroBatch)
         policy_loss, value_loss = train_pass(net, optimizer, batch, args.batch_size, args.device, rng)

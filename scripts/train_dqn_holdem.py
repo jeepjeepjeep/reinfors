@@ -232,7 +232,7 @@ def main() -> None:
     t0 = time.perf_counter()
     print(f"DQN hold'em: {args.num_players} seats, {args.heads} heads, {args.n_games} games/collect")
     for it in range(1, args.iterations + 1):
-        batch = engine.collect(args.collect_size, infer)
+        batch = engine.collect(n_records=args.collect_size, infer=infer)
         assert isinstance(batch, DqnBatch)
         replay.push(batch, 3)
         loss = train_step(

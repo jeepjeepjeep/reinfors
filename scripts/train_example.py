@@ -150,7 +150,9 @@ def main() -> None:
 
     print(f"training on {args.device} — grid {args.grid}, {args.heads} heads, {args.n_games} games/collect")
     for it in range(args.iterations):
-        obs, target, mask, telemetry = engine.collect(args.collect_size, infer)  # search with live weights
+        obs, target, mask, telemetry = engine.collect(
+            n_records=args.collect_size, infer=infer
+        )  # search with live weights
         loss = train_step(net, optimizer, obs, target, mask, args.device)
         eps = telemetry["episodes"]
         mean_r = sum(sum(r) / len(r) for r, _len, _s in eps) / len(eps) if eps else float("nan")
