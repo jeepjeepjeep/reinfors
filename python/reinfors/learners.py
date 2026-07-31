@@ -1,9 +1,8 @@
 """``rf.learners`` — learning-algorithm handles for composing an ``Engine``.
 
 Each constructor returns an opaque learner handle. A learner pairs with the policy family that
-produces the evaluation it consumes (``TreeStrap`` ↔ ``SelectiveExpectimax``/``Mcts``, ``Dqn`` ↔
-``EpsilonGreedyQ``, ``AlphaZero`` ↔ ``AlphaZero``); ``Engine`` rejects an incompatible pairing.
-``make`` / ``registered`` are the name-addressable form.
+produces its evaluation type; ``Engine`` rejects incompatible pairings. The generated compatibility
+catalogue is the canonical built-in matrix. ``make`` / ``registered`` are the name-addressable form.
 """
 
 from __future__ import annotations

@@ -58,4 +58,4 @@ Batched external-sampling traversals with caller-owned buffers and training.
 
 **Sources:** [Deep CFR](https://proceedings.mlr.press/v97/brown19b.html).
 
-See [Sampling and training](../how-it-works/sampling-and-training.md) and the [inference contract](../reference/inference-contract.md).
+See [built-in compatibility](compatibility.md), [sampling and training](../how-it-works/sampling-and-training.md), and the [inference contract](../reference/inference-contract.md).

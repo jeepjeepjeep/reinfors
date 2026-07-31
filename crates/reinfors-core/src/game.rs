@@ -230,8 +230,8 @@ pub trait Game {
     /// the root without a private-sampling escape hatch.
     fn initial_state(&self) -> Self::State;
 
-    /// The episode-length cap after which the rollout truncates a still-running game, or `None` for a
-    /// game that always ends on its own (e.g. Connect-4). This is a property the game *declares* — the
+    /// The episode-length cap after which the rollout truncates a still-running game, or `None` when
+    /// the game declares no horizon. This is a property the game *declares* — the
     /// `Engine` does the tick-counting and enforces it, so the horizon never enters `State` or the
     /// search. Truncation is thus wholly a game concern (when *and*, via `mark_truncation`, what).
     fn truncation_horizon(&self) -> Option<usize> {

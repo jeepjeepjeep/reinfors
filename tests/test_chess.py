@@ -141,7 +141,7 @@ def test_env_rejects_illegal_action_at_the_boundary() -> None:
 
 
 def test_start_buffer_rejected() -> None:
-    with pytest.raises(ValueError, match="snake"):
+    with pytest.raises(ValueError, match=r"compatibility\.md"):
         rf.Engine(
             rf.games.Chess(),
             None,

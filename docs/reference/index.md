@@ -9,3 +9,4 @@ here only for shapes, fields, or edge cases.
 - [Telemetry fields](telemetry-fields.md): collection metrics and episode records.
 - [Python API](python-api.md): module map and source of signature truth.
 - [Current boundaries](limits.md): deliberately unsupported or bounded semantics.
+- [Built-in compatibility](../catalogue/compatibility.md): canonical game/algorithm compositions.

@@ -64,7 +64,8 @@ Reinfors is pre-1.0. Public contracts are documented, but breaking changes may s
 
 - [Get started](docs/getting-started.md)
 - [Understand sampling and injectable training](docs/how-it-works/sampling-and-training.md)
-- [Choose a game](docs/catalogue/games.md) or [algorithm](docs/catalogue/algorithms.md)
+- [Choose a game](docs/catalogue/games.md), [algorithm](docs/catalogue/algorithms.md), or
+  [built-in composition](docs/catalogue/compatibility.md)
 - [Run the examples](docs/examples/index.md)
 - [Add a Rust game or algorithm](docs/extending/index.md)
 - [Read the complete documentation](docs/index.md)

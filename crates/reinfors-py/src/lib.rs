@@ -9,7 +9,7 @@
 //!   * UNIFIED ENV (permanent) — the `Env` pyclass: a caller-driven single-game instance for play /
 //!     evaluation, mirroring the engine's type-erasure.
 //!   * PER-GAME CONFIG (permanent) — the `rf.games`/`rf.policies`/`rf.learners` handles: a game's /
-//!     algorithm's parameter surface. Adding one here + a factory arm is all a new composition needs.
+//!     algorithm's parameter surface. Adding one also requires a factory arm and catalogue metadata.
 
 use std::collections::HashMap;
 
@@ -2147,13 +2147,14 @@ fn check_max_agents<P: Policy, G: Game>(policy: &P, label: &str, game: &G) -> Py
 /// so the searcher's own width is not a factor). The searches still check the realized,
 /// state-dependent products as backstops.
 /// The hidden-information gate (no-panic contract): search policies branch on the true state
-/// and would be clairvoyant about hidden state (poker's hole cards) — a config error here,
-/// before `Engine::new`'s assert backstop. The DQN family is exempt (observation-only).
+/// and would be clairvoyant about hidden state — a config error here before `Engine::new`'s
+/// assert backstop. Compatible workflows are documented centrally rather than duplicated here.
 fn check_information<G: Game>(label: &str, game: &G) -> PyResult<()> {
     if !game.perfect_information() {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "the {label} policy searches the true state and would be clairvoyant on this \
-             hidden-information game; use the DQN family (EpsilonGreedyQ + Dqn)"
+             hidden-information game; see {}",
+            reinfors_core::COMPATIBILITY_DOCS
         )));
     }
     Ok(())
@@ -2240,7 +2241,9 @@ where
         ) => {
             validate_search_params(expansion_budget, top_k, max_depth, beta)?;
             if n_heads < 1 {
-                return Err(pyo3::exceptions::PyValueError::new_err("n_heads must be >= 1"));
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "n_heads must be >= 1",
+                ));
             }
             check_unit("epsilon", epsilon)?;
             check_unit("outcome_weight", outcome_weight)?;
@@ -2257,7 +2260,11 @@ where
             let policy = SelectiveExpectimax::new(cfg, n_heads, epsilon);
             check_information("SelectiveExpectimax", &game)?;
             check_max_agents(&policy, "SelectiveExpectimax", &game)?;
-            check_joint_space("SelectiveExpectimax", &game, game.num_agents().saturating_sub(1))?;
+            check_joint_space(
+                "SelectiveExpectimax",
+                &game,
+                game.num_agents().saturating_sub(1),
+            )?;
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
@@ -2302,10 +2309,14 @@ where
                 ));
             }
             if max_depth < 1 {
-                return Err(pyo3::exceptions::PyValueError::new_err("max_depth must be >= 1"));
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "max_depth must be >= 1",
+                ));
             }
             if uct_c < 0.0 {
-                return Err(pyo3::exceptions::PyValueError::new_err("uct_c must be >= 0"));
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "uct_c must be >= 0",
+                ));
             }
             if !(temperature >= 0.0 && temperature.is_finite()) {
                 return Err(pyo3::exceptions::PyValueError::new_err(
@@ -2373,10 +2384,14 @@ where
                 ));
             }
             if max_depth < 1 {
-                return Err(pyo3::exceptions::PyValueError::new_err("max_depth must be >= 1"));
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "max_depth must be >= 1",
+                ));
             }
             if c_puct < 0.0 {
-                return Err(pyo3::exceptions::PyValueError::new_err("c_puct must be >= 0"));
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "c_puct must be >= 0",
+                ));
             }
             check_unit("noise_epsilon", noise_epsilon)?;
             if !(noise_alpha > 0.0 && noise_alpha.is_finite()) {
@@ -2428,7 +2443,9 @@ where
         }
         (PolicySpec::EpsilonGreedyQ { n_heads, epsilon }, LearnerSpec::Dqn { bootstrap_p }) => {
             if n_heads < 1 {
-                return Err(pyo3::exceptions::PyValueError::new_err("n_heads must be >= 1"));
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "n_heads must be >= 1",
+                ));
             }
             check_unit("epsilon", epsilon)?;
             check_unit("bootstrap_p", bootstrap_p)?;
@@ -2455,10 +2472,10 @@ where
                 num_agents,
             }))
         }
-        _ => Err(pyo3::exceptions::PyValueError::new_err(
-            "incompatible policy/learner: TreeStrap pairs with SelectiveExpectimax or Mcts, Dqn with \
-             EpsilonGreedyQ, and AlphaZero (policy) with AlphaZero (learner)",
-        )),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "incompatible policy/learner composition; see {}",
+            reinfors_core::COMPATIBILITY_DOCS
+        ))),
     }
 }
 
@@ -2470,8 +2487,8 @@ struct StartBufferConfig {
 }
 
 /// Game axis: pick the concrete game from `GameSpec`, then dispatch to `build_for_game`. One arm per
-/// game; each instantly works with every family. The start distribution is wired here too, since only
-/// the snake arm has a cell key for the reached-state buffer (other games use `AlwaysInitialState`).
+/// game; each instantly works with every compatible family. The start distribution is wired here too;
+/// unsupported game/start-distribution combinations are reported against the compatibility catalogue.
 #[allow(clippy::too_many_arguments)]
 fn build_engine(
     game: GameSpec,
@@ -2484,11 +2501,12 @@ fn build_engine(
     learn_players: Option<Vec<usize>>,
 ) -> PyResult<Box<dyn ErasedEngine>> {
     let reward = build_reward(&game, reward)?;
-    // The reached-state buffer needs a game-specific cell key; only snake supplies one in v1.
+    // A reached-state buffer needs a game-specific cell key.
     if start_buffer.is_some() && !matches!(game, GameSpec::Snake { .. }) {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "start_buffer is only supported for the snake game",
-        ));
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "this game does not support start_buffer; see {}",
+            reinfors_core::COMPATIBILITY_DOCS
+        )));
     }
     match (game, reward) {
         (
@@ -3658,7 +3676,7 @@ fn space_to_py(py: Python<'_>, space: Space) -> PyResult<Bound<'_, PyAny>> {
     }
 }
 
-/// Game handle (`rf.games.Snake` / `.Connect4` / `.GridWorld`).
+/// Opaque game handle. See `rf.games` and the generated game catalogue for built-in constructors.
 #[pyclass]
 #[derive(Clone)]
 struct GameHandle {
@@ -3711,8 +3729,8 @@ impl GameHandle {
 
     #[staticmethod]
     // One episode = one hand at fresh stacks (chip-delta rewards, zero-sum); the button is
-    // drawn per episode so seats rotate positions across self-play. Hidden information: the
-    // search families reject this game — train with the DQN family.
+    // drawn per episode so seats rotate positions across self-play. See the compatibility catalogue
+    // for appropriate imperfect-information workflows.
     #[pyo3(signature = (num_players=6, stack=200, small_blind=5, big_blind=10))]
     #[pyo3(name = "TexasHoldem")]
     fn texas_holdem(
@@ -3741,8 +3759,7 @@ impl GameHandle {
 
     #[staticmethod]
     // The 3-card analytic testbed for imperfect-information algorithms (12 information sets,
-    // known Nash family). Hidden information: search families reject it; solve with
-    // rf.solvers or train with the DQN family.
+    // known Nash family). See the compatibility catalogue for supported workflows.
     #[pyo3(name = "KuhnPoker", signature = (players=2))]
     fn kuhn_poker(players: usize) -> PyResult<Self> {
         (KuhnPoker { players })
@@ -3754,9 +3771,8 @@ impl GameHandle {
     }
 
     #[staticmethod]
-    // The standard small imperfect-information benchmark: 6 cards, two betting rounds, a
-    // public card between them. Hidden information: search families reject it; solve with
-    // rf.solvers or train with the DQN family.
+    // A small imperfect-information benchmark: 6 cards, two betting rounds, and a public card
+    // between them. See the compatibility catalogue for supported workflows.
     #[pyo3(name = "LeducPoker")]
     fn leduc_poker() -> Self {
         GameHandle {
@@ -3844,9 +3860,8 @@ impl GameHandle {
         space_to_py(py, self.spec.spaces().1)
     }
 
-    /// The episode-length cap after which the rollout truncates a still-running game, or `None` for a
-    /// game that always ends on its own (Connect-4). Loop-prone games (snake, gridworld) default to a
-    /// finite cap so `Engine.collect` can't spin on a non-terminating episode.
+    /// The episode-length cap after which the rollout truncates a still-running game, or `None` when
+    /// the game declares no truncation horizon. Constructors choose safe defaults for loop-prone games.
     fn truncation_horizon(&self) -> Option<usize> {
         match self.spec {
             GameSpec::Snake { max_ticks, .. }
@@ -3981,12 +3996,12 @@ fn cap_err(e: reinfors_core::EnumerationCapExceeded) -> pyo3::PyErr {
     pyo3::exceptions::PyValueError::new_err(e.to_string())
 }
 
-/// `rf.solvers.Cfr` — counterfactual regret minimization over a sequential game with declared
-/// chance and information-state keys (the poker family, 2..=10 players; convergence to Nash
-/// is only guaranteed at 2-player zero-sum). Variants: "vanilla", "plus" (CFR+),
+/// `rf.solvers.Cfr` — counterfactual regret minimization over compatible sequential games with
+/// declared chance and information-state keys; convergence to Nash is guaranteed only at
+/// 2-player zero-sum. Variants: "vanilla", "plus" (CFR+),
 /// "external_mccfr". The output is the AVERAGE strategy (`average_strategy` by
 /// `env.information_state_key` bytes); `exploitability()` is the exact convergence metric
-/// (enumeration-capped: Kuhn/Leduc-sized games, not full hold'em).
+/// for enumerable trees. See the compatibility catalogue for built-in compositions.
 #[pyclass(name = "Cfr")]
 struct PyCfr {
     inner: Box<dyn ErasedCfr>,
@@ -4034,9 +4049,11 @@ impl PyCfr {
                 big_blind,
             } => {
                 if variant != CfrVariant::ExternalMccfr {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "full hold'em's chance fans are unenumerable: use variant=\"external_mccfr\"",
-                    ));
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "this game's chance fan is not supported by an exact CFR variant; \
+                             use variant=\"external_mccfr\" or see {}",
+                        reinfors_core::COMPATIBILITY_DOCS
+                    )));
                 }
                 Box::new(CfrSolver::new(
                     TexasHoldem {
@@ -4051,10 +4068,10 @@ impl PyCfr {
                 ))
             }
             _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "CFR requires a sequential game with declared chance and information-state \
-                     keys (KuhnPoker, LeducPoker, TexasHoldem)",
-                ))
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "this game is not compatible with CFR; see {}",
+                    reinfors_core::COMPATIBILITY_DOCS
+                )))
             }
         };
         let composition = json!({
@@ -4285,10 +4302,12 @@ impl PyDeepCfr {
                     3,
                 )
             }
-            _ => return Err(pyo3::exceptions::PyValueError::new_err(
-                "Deep CFR requires a supported 2-10-player sequential game with declared chance \
-                         and information-state keys (KuhnPoker, LeducPoker, TexasHoldem)",
-            )),
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "this game is not compatible with Deep CFR; see {}",
+                    reinfors_core::COMPATIBILITY_DOCS
+                )))
+            }
         };
         let config = json!({
             "schema": CONFIG_SCHEMA_VERSION,
@@ -4463,8 +4482,8 @@ impl PyDeepCfr {
     }
 
     /// Exact exploitability of the AVERAGE-POLICY network (NashConv / num_players, zero at
-    /// Nash; for more than 2 players a positive plateau is the expected outcome) —
-    /// enumerable games only (Kuhn/Leduc, not full hold'em). `policy_infer(obs) -> (M,
+    /// Nash; for more than 2 players a positive plateau is the expected outcome). Available only
+    /// when the game tree fits the exact-enumeration cap. `policy_infer(obs) -> (M,
     /// action_count)` scores every reachable infoset in ONE batched call; rows are clamped
     /// non-negative and renormalized over the legal actions (uniform when degenerate).
     fn exploitability(&self, py: Python<'_>, policy_infer: &Bound<'_, PyAny>) -> PyResult<f64> {
@@ -4617,8 +4636,9 @@ impl PolicyHandle {
         })
     }
 
-    /// AlphaZero (PUCT) planner; pairs with `rf.learners.AlphaZero`; sequential, single-agent,
-    /// and simultaneous (decoupled/DUCT) games. The net callback returns a `(policy_logits (N, A), values (N,))` tuple — one forward,
+    /// AlphaZero (PUCT) planner for compatible sequential, single-agent, and simultaneous
+    /// (decoupled/DUCT) compositions. See the compatibility catalogue for learner pairings. The net
+    /// callback returns a `(policy_logits (N, A), values (N,))` tuple — one forward,
     /// both heads. Root Dirichlet noise `(1-noise_epsilon)·P + noise_epsilon·Dir(noise_alpha)`
     /// supplies search-level exploration (drawn from the seeded stream — collects stay reproducible);
     /// the acting temperature (same semantics as `Mcts`) supplies move-level diversity. Acting is by

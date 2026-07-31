@@ -157,7 +157,8 @@ where
         assert!(
             game.perfect_information() || policy.supports_imperfect_information(),
             "this policy searches the true state and would be clairvoyant on a \
-             hidden-information game; use an observation-only (DQN-family) policy"
+             hidden-information game; see {}",
+            crate::COMPATIBILITY_DOCS
         );
         if let Some(cap) = policy.max_agents(sequential) {
             assert!(

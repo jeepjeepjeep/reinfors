@@ -21,6 +21,8 @@ class GameInfo:
     actions: str
     observation: str
     adapters: str
+    reached_state_starts: bool
+    algorithms: tuple[str, ...]
     summary: str
 
 
@@ -47,6 +49,8 @@ GAMES: dict[str, GameInfo] = {
         "1,352 discrete ids",
         "Fixed CHW tensor",
         "PettingZoo AEC",
+        False,
+        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero"),
         "Standard play without the doubling cube; win, gammon and backgammon outcomes.",
     ),
     "chess": GameInfo(
@@ -58,6 +62,8 @@ GAMES: dict[str, GameInfo] = {
         "AlphaZero 8x8x73",
         "Selectable fixed CHW encoder",
         "PettingZoo AEC",
+        False,
+        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero"),
         "Standard chess with minimal, relative, OpenSpiel and AlphaZero observation views.",
     ),
     "connect4": GameInfo(
@@ -69,6 +75,8 @@ GAMES: dict[str, GameInfo] = {
         "7 columns",
         "Fixed CHW tensor",
         "PettingZoo AEC",
+        False,
+        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero"),
         "Compact deterministic benchmark for value learning, MCTS and AlphaZero.",
     ),
     "gridworld": GameInfo(
@@ -80,6 +88,8 @@ GAMES: dict[str, GameInfo] = {
         "4 directions",
         "Fixed CHW tensor",
         "Gymnasium",
+        False,
+        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero"),
         "Small single-agent environment for checking basic training and integration loops.",
     ),
     "kuhn_poker": GameInfo(
@@ -91,6 +101,8 @@ GAMES: dict[str, GameInfo] = {
         "Pass / bet",
         "Fixed information-state tensor",
         "PettingZoo AEC",
+        False,
+        ("dqn", "cfr", "external_mccfr", "deep_cfr"),
         "OpenSpiel-compatible N-player Kuhn poker for CFR and Deep CFR experiments.",
     ),
     "leduc_poker": GameInfo(
@@ -102,6 +114,8 @@ GAMES: dict[str, GameInfo] = {
         "Fold / call / raise",
         "Fixed information-state tensor",
         "PettingZoo AEC",
+        False,
+        ("dqn", "cfr", "external_mccfr", "deep_cfr"),
         "Two-round imperfect-information benchmark between Kuhn and full Hold'em.",
     ),
     "snake": GameInfo(
@@ -113,6 +127,8 @@ GAMES: dict[str, GameInfo] = {
         "3 relative moves",
         "Egocentric fixed CHW tensor",
         "PettingZoo Parallel",
+        True,
+        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero"),
         "Simultaneous multiplayer game with dynamic bodies and explicit respawn chance.",
     ),
     "texas_holdem": GameInfo(
@@ -124,6 +140,8 @@ GAMES: dict[str, GameInfo] = {
         "Fold / call / raise",
         "Egocentric fixed CHW tensor",
         "PettingZoo AEC",
+        False,
+        ("dqn", "external_mccfr", "deep_cfr"),
         "Multiway no-limit-style poker surface with all-ins, side pots and chance runouts.",
     ),
 }

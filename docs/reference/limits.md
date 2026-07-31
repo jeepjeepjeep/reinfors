@@ -13,12 +13,10 @@ behavior.
 - Reinfors provides no built-in distributed cluster runtime. Remote callbacks and external
   actor/trainer orchestration are supported composition patterns, but provisioning, retry,
   discovery, and fault tolerance are caller responsibilities.
-- Plain UCT MCTS supports sequential games up to two players and simultaneous N-player games.
-  AlphaZero supports sequential N-player backup and simultaneous DUCT. Consult the generated
-  [algorithm catalogue](../catalogue/algorithms.md) for the current matrix.
-- Engine tree-search policies require perfect information. Imperfect-information planning is
-  provided by CFR, external-sampling MCCFR, and Deep CFR; observation-only DQN can also train
-  in imperfect-information games without belief-state search.
+- Player-count, dynamics, information, and chance constraints vary by algorithm. Consult the
+  generated [algorithm catalogue](../catalogue/algorithms.md) and
+  [built-in compatibility matrix](../catalogue/compatibility.md); these are checked against
+  construction rather than repeated here.
 - CFR-family exact metrics and exact chance enumeration have safety caps. Large games require
   sampling or approximate evaluation.
 - Snapshots are opaque continuation artifacts tied to a compatible composition and schema,

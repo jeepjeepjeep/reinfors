@@ -12,7 +12,7 @@ For a built-in component:
 3. Export the constructor from the matching module (`games`, `policies`, `learners`,
    `encoders`, `chance_modes`, or `noise`).
 4. Add its stable snake-case name to that module's `_REGISTRY`.
-5. Add catalogue metadata when it is a user-facing game or algorithm.
+5. Add catalogue metadata, including compatible workflows, when it is a user-facing game or algorithm.
 6. Test direct construction, `make(name, **kwargs)`, resolved-config reconstruction, and
    invalid input.
 

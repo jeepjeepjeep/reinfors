@@ -3,8 +3,7 @@
 //! The best responder maximizes per INFORMATION SET, not per state: at each of its infosets
 //! the chosen action must be the argmax of the counterfactual-reach-weighted sum over the
 //! member histories (the responder cannot act differently in states it cannot distinguish).
-//! Implementation: enumerate the full game tree once into an arena (fan-capped — this is an
-//! exact instrument for Kuhn/Leduc-sized games, not full hold'em), collect each responder
+//! Implementation: enumerate the full game tree once into a fan-capped arena, collect each responder
 //! infoset's members with their opponent-and-chance reach weights, then resolve values with
 //! the infoset argmax memoized (choices at deeper infosets resolve recursively).
 //!

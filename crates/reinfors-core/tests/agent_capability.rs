@@ -300,7 +300,7 @@ fn mcts_cfg() -> MctsConfig {
 }
 
 #[test]
-#[should_panic(expected = "value head")]
+#[should_panic(expected = "compatibility.md")]
 fn uct_rejects_sequential_three_agent_games() {
     // Q-derived (UCT) leaf values exist only at the evaluated agent's own decision points, which
     // a sequential game gives non-movers none of — N>2 sequential search needs PUCT.

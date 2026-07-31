@@ -14,22 +14,20 @@
 //! clamping after each pass and linear averaging) so exploitability trajectories are
 //! ITERATION-EXACT against pyspiel — the parity harness pins this.
 //!
-//! Requirements, asserted at construction: 2..=10 players; `Game::information_states` (tables are
+//! Requirements, asserted at construction: `2..=MAX_CFR_PLAYERS` players; `Game::information_states` (tables are
 //! keyed by information-set bytes — what forces the learned strategy to be measurable with
 //! respect to each player's information). Chance is consumed through declared chance nodes
 //! (root deals and interior states alike — `initial_state` is rng-free, so a game cannot
 //! sample privately):
-//! enumerated by the exact variants (fan-capped at [`MAX_ENUMERATED_OUTCOMES`]), sampled by
-//! MCCFR — full hold'em therefore runs only under MCCFR (the deal fan is astronomical), and
-//! at that scale nothing converges anyway; the solver's home ground is Kuhn/Leduc-sized
-//! games.
+//! enumerated by the exact variants (fan-capped at [`MAX_ENUMERATED_OUTCOMES`]) and sampled by
+//! MCCFR. Use the compatibility catalogue for built-in Python compositions.
 
 use std::collections::HashMap;
 
 use crate::game::{Actor, Game, Rng, Transition};
 
-/// The player-count ceiling for the tabular solvers (matches Kuhn's OpenSpiel range). Fixed
-/// stack arrays keep the hot recursion allocation-free at any supported N.
+/// The player-count ceiling for the tabular solvers. Fixed stack arrays keep the hot recursion
+/// allocation-free at any supported N.
 pub const MAX_CFR_PLAYERS: usize = 10;
 
 /// Per-player values; the first `num_agents` entries are live.

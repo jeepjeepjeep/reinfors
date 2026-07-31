@@ -54,9 +54,10 @@ class Discrete:
     n: int
 
 class Cfr:
-    """Counterfactual regret minimization over a 2-10-player sequential declared-chance game with
+    """Counterfactual regret minimization over compatible sequential declared-chance games with
     information-state keys. Variants: "vanilla", "plus" (CFR+), "external_mccfr". The output
-    is the AVERAGE strategy, keyed by `Env.information_state_key` bytes."""
+    is the AVERAGE strategy, keyed by `Env.information_state_key` bytes. See the generated
+    compatibility catalogue for built-in compositions."""
 
     def __init__(self, game: GameHandle, variant: str = ..., seed: int = ...) -> None: ...
     def iterate(self, n: int) -> None: ...
@@ -157,8 +158,7 @@ class GameHandle:
     ) -> GameHandle: ...
     def observation_space(self) -> Box: ...
     def action_space(self) -> Discrete: ...
-    # The truncation horizon (episode cap); None = never truncate (only for games that always end,
-    # like Connect-4). Loop-prone games default to a finite cap.
+    # The declared truncation horizon (episode cap), or None when the game declares no horizon.
     def truncation_horizon(self) -> int | None: ...
 
 class EncoderHandle:
@@ -216,8 +216,9 @@ class PolicyHandle:
     ) -> PolicyHandle: ...
     @staticmethod
     def EpsilonGreedyQ(n_heads: int = ..., epsilon: float = ...) -> PolicyHandle: ...
-    # MCTS (UCT); pairs with TreeStrap; sequential, single-agent, AND simultaneous (decoupled/DUCT
-    # per-agent statistics) games. act_by: "value" | "visits".
+    # MCTS (UCT) for compatible sequential, single-agent, and simultaneous (decoupled/DUCT
+    # per-agent statistics) compositions. See the compatibility catalogue for learner pairings.
+    # act_by: "value" | "visits".
     # temperature > 0 (AlphaZero-style) samples the first temperature_drop plies of each episode
     # ∝ visits^(1/temperature) for training self-play diversity (None = whole episode); 0 = greedy.
     # chance_mode (declared-chance games, explicit chance states being the canonical model): "always_resample"
@@ -234,8 +235,9 @@ class PolicyHandle:
         temperature_drop: int | None = ...,
         chance: ChanceModeHandle | None = ...,
     ) -> PolicyHandle: ...
-    # AlphaZero (PUCT); pairs with learners.AlphaZero; sequential, single-agent, and simultaneous
-    # (DUCT) games — noise_scope: "requester" (default) | "all" picks which root priors the
+    # AlphaZero (PUCT) for compatible sequential, single-agent, and simultaneous (DUCT)
+    # compositions; see the compatibility catalogue for learner pairings. noise_scope:
+    # "requester" (default) | "all" picks which root priors the
     # Dirichlet noise perturbs in a simultaneous tree. The infer
     # callback returns a (policy_logits (N, A) f64, values (N,) f64) tuple — one forward, both heads.
     # Root Dirichlet noise (noise_epsilon/noise_alpha) + acting temperature drive self-play diversity;

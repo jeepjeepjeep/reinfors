@@ -136,8 +136,9 @@ def test_start_buffer_is_off_by_default_snake_only_and_tags_seeded() -> None:
         _, _, _, telemetry = engine.collect(200, _dummy_infer(3))
         seeded_any |= any(seeded for _, _, seeded in telemetry["episodes"])
     assert seeded_any, "p_fresh=0 should seed some episodes once the buffer fills"
-    # No cell key for non-snake games -> enabling the buffer is rejected.
-    with pytest.raises(ValueError, match="only supported for the snake"):
+    # A game without reached-state-start support rejects the composition and points at the
+    # canonical capability matrix.
+    with pytest.raises(ValueError, match=r"compatibility\.md"):
         rf.Engine(
             rf.games.Connect4(),
             rf.Reward(win=1.0),

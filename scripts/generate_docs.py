@@ -55,7 +55,8 @@ def games_page() -> str:
         )
         + "\n\n## At a glance\n\n"
         + summaries
-        + "\n\nSee the [Python API](../reference/python-api.md) for constructor parameters.\n"
+        + "\n\nSee [built-in compatibility](compatibility.md) for supported workflows and the "
+        + "[Python API](../reference/python-api.md) for constructor parameters.\n"
     )
 
 
@@ -88,14 +89,43 @@ def algorithms_page() -> str:
         )
         + "\n\n## Algorithm families\n\n"
         + "\n\n".join(details)
-        + "\n\nSee [Sampling and training](../how-it-works/sampling-and-training.md) and the "
+        + "\n\nSee [built-in compatibility](compatibility.md), "
+        + "[sampling and training](../how-it-works/sampling-and-training.md), and the "
         + "[inference contract](../reference/inference-contract.md).\n"
+    )
+
+
+def compatibility_page() -> str:
+    games: dict[str, Any] = CATALOG["GAMES"]
+    algorithms: dict[str, Any] = CATALOG["ALGORITHMS"]
+    unknown = {key for game in games.values() for key in game.algorithms} - algorithms.keys()
+    if unknown:
+        raise ValueError(f"game catalogue references unknown algorithms: {sorted(unknown)}")
+    rows = ((game.label, *("Yes" if key in game.algorithms else "—" for key in algorithms)) for game in games.values())
+    return (
+        GENERATED
+        + "# Built-in compatibility\n\n"
+        + "This is the canonical compatibility matrix for Python's built-in handles. It is generated "
+        + "from metadata checked against the public registries and actual construction. A compatible composition may "
+        + "still reject particular parameters at construction; consult the algorithm and game tables for "
+        + "semantic limits.\n\n"
+        + table(("Game", *(info.label for info in algorithms.values())), rows)
+        + "\n\n## Optional engine capabilities\n\n"
+        + table(
+            ("Game", "Reached-state starts"),
+            ((game.label, "Yes" if game.reached_state_starts else "—") for game in games.values()),
+        )
+        + "\n\nExact CFR/CFR+ requires enumerable chance fans. Texas Hold'em therefore uses the "
+        + "external-sampling MCCFR variant shown separately.\n\n"
+        + "Downstream Rust components can add compositions beyond this built-in Python matrix when they "
+        + "satisfy the relevant core traits.\n"
     )
 
 
 OUTPUTS = {
     ROOT / "docs/catalogue/games.md": games_page,
     ROOT / "docs/catalogue/algorithms.md": algorithms_page,
+    ROOT / "docs/catalogue/compatibility.md": compatibility_page,
 }
 
 

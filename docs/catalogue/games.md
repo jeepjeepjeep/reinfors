@@ -49,4 +49,4 @@ Simultaneous multiplayer game with dynamic bodies and explicit respawn chance.
 
 Multiway no-limit-style poker surface with all-ins, side pots and chance runouts.
 
-See the [Python API](../reference/python-api.md) for constructor parameters.
+See [built-in compatibility](compatibility.md) for supported workflows and the [Python API](../reference/python-api.md) for constructor parameters.

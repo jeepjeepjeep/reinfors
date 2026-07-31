@@ -1,6 +1,6 @@
 //! Ensemble-TreeStrap record production: episode-end z-mixing of the realized return into the executed
 //! action, interior MAX-node targets, and a per-head bootstrap mask on every record. Consumes the
-//! expectimax family's `SearchEvaluation`, so it pairs with any expectimax policy (selective today).
+//! search family's `SearchEvaluation`; built-in pairings live in the compatibility catalogue.
 
 use crate::encoder::{head_permutation, ActionView};
 use crate::game::Rng;
