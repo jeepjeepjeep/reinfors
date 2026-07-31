@@ -355,7 +355,7 @@ fn game_cfg(spec: &GameSpec) -> Value {
             "small_blind": small_blind,
             "big_blind": big_blind,
         }),
-        GameSpec::KuhnPoker => json!({"name": "kuhn_poker"}),
+        GameSpec::KuhnPoker { players } => json!({"name": "kuhn_poker", "players": players}),
         GameSpec::LeducPoker => json!({"name": "leduc_poker"}),
         GameSpec::Chess { max_ticks, encoder } => {
             let enc = match encoder {
@@ -1811,7 +1811,9 @@ enum GameSpec {
         small_blind: u32,
         big_blind: u32,
     },
-    KuhnPoker,
+    KuhnPoker {
+        players: usize,
+    },
     LeducPoker,
     GridWorld {
         size: i32,
@@ -1826,10 +1828,10 @@ impl GameSpec {
         match *self {
             GameSpec::Snake { num_snakes, .. } => num_snakes,
             GameSpec::TexasHoldem { num_players, .. } => num_players,
+            GameSpec::KuhnPoker { players } => players,
             GameSpec::Connect4
             | GameSpec::Chess { .. }
             | GameSpec::Backgammon { .. }
-            | GameSpec::KuhnPoker
             | GameSpec::LeducPoker => 2,
             GameSpec::GridWorld { .. } => 1,
         }
@@ -1885,7 +1887,7 @@ impl GameSpec {
                 },
                 &HoldemEgocentric { num_players, stack },
             ),
-            GameSpec::KuhnPoker => of(KuhnPoker, &KuhnEncoder),
+            GameSpec::KuhnPoker { players } => of(KuhnPoker { players }, &KuhnEncoder { players }),
             GameSpec::LeducPoker => of(LeducPoker, &LeducEncoder),
             GameSpec::GridWorld {
                 size,
@@ -1926,7 +1928,7 @@ fn reward_schema(game: &GameSpec) -> &'static [(&'static str, f64)] {
         // The chip deltas ARE the reward (already zero-sum); `scale` converts chips into the
         // training unit (e.g. 1/big_blind for rewards in blinds).
         GameSpec::TexasHoldem { .. } => &[("scale", 1.0)],
-        GameSpec::KuhnPoker | GameSpec::LeducPoker => &[("scale", 1.0)],
+        GameSpec::KuhnPoker { .. } | GameSpec::LeducPoker => &[("scale", 1.0)],
     }
 }
 
@@ -1976,7 +1978,7 @@ fn build_reward(game: &GameSpec, reward: Option<PyReward>) -> PyResult<RewardBox
                 goal: r[1],
             })
         }
-        GameSpec::TexasHoldem { .. } | GameSpec::KuhnPoker | GameSpec::LeducPoker => {
+        GameSpec::TexasHoldem { .. } | GameSpec::KuhnPoker { .. } | GameSpec::LeducPoker => {
             let r = resolve_reward(reward, reward_schema(game))?;
             RewardBox::Holdem(HoldemReward { scale: r[0] })
         }
@@ -2607,12 +2609,12 @@ fn build_engine(
             infer_caches,
             learn_players,
         ),
-        (GameSpec::KuhnPoker, RewardBox::Holdem(reward)) => build_for_game(
-            KuhnPoker,
-            Box::new(KuhnEncoder),
+        (GameSpec::KuhnPoker { players }, RewardBox::Holdem(reward)) => build_for_game(
+            KuhnPoker { players },
+            Box::new(KuhnEncoder { players }),
             Box::new(reward),
             Box::new(AlwaysInitialState),
-            Some(Box::new(KuhnPoker)),
+            Some(Box::new(KuhnPoker { players })),
             policy,
             learner,
             engine_params,
@@ -3481,12 +3483,16 @@ fn build_env(game: GameSpec, reward: Option<PyReward>, seed: u64) -> PyResult<Bo
                 last_rewards: None,
             })
         }
-        GameSpec::KuhnPoker => {
-            let obs_shape = KuhnEncoder.obs_shape();
+        GameSpec::KuhnPoker { players } => {
+            let obs_shape = KuhnEncoder { players }.obs_shape();
             Box::new(EnvImpl {
-                inner: Env::new(KuhnPoker, Box::new(KuhnEncoder), seed),
+                inner: Env::new(
+                    KuhnPoker { players },
+                    Box::new(KuhnEncoder { players }),
+                    seed,
+                ),
                 obs_shape,
-                codec: Some(Box::new(KuhnPoker)),
+                codec: Some(Box::new(KuhnPoker { players })),
                 reward: reward.map(|rb| match rb {
                     RewardBox::Holdem(r) => Box::new(r) as Box<dyn Reward<Event = f64>>,
                     _ => unreachable!("build_reward returns the reward variant matching the game"),
@@ -3737,11 +3743,14 @@ impl GameHandle {
     // The 3-card analytic testbed for imperfect-information algorithms (12 information sets,
     // known Nash family). Hidden information: search families reject it; solve with
     // rf.solvers or train with the DQN family.
-    #[pyo3(name = "KuhnPoker")]
-    fn kuhn_poker() -> Self {
-        GameHandle {
-            spec: GameSpec::KuhnPoker,
-        }
+    #[pyo3(name = "KuhnPoker", signature = (players=2))]
+    fn kuhn_poker(players: usize) -> PyResult<Self> {
+        (KuhnPoker { players })
+            .validate()
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        Ok(GameHandle {
+            spec: GameSpec::KuhnPoker { players },
+        })
     }
 
     #[staticmethod]
@@ -3846,7 +3855,7 @@ impl GameHandle {
             | GameSpec::GridWorld { max_ticks, .. } => max_ticks,
             GameSpec::Connect4
             | GameSpec::TexasHoldem { .. }
-            | GameSpec::KuhnPoker
+            | GameSpec::KuhnPoker { .. }
             | GameSpec::LeducPoker => None,
         }
     }
@@ -3868,8 +3877,13 @@ trait ErasedDeepCfr: Send + Sync {
         reinfors_core::DeepCfrStats,
     );
     #[allow(clippy::type_complexity)]
-    fn infoset_features(&self) -> Vec<(Vec<u8>, Vec<f32>, Vec<usize>)>;
-    fn exploitability_of(&self, probs: &HashMap<Vec<u8>, Vec<f64>>) -> f64;
+    fn infoset_features(
+        &self,
+    ) -> Result<Vec<(Vec<u8>, Vec<f32>, Vec<usize>)>, reinfors_core::EnumerationCapExceeded>;
+    fn exploitability_of(
+        &self,
+        probs: &HashMap<Vec<u8>, Vec<f64>>,
+    ) -> Result<f64, reinfors_core::EnumerationCapExceeded>;
     fn rollback_collect(&mut self);
 }
 
@@ -3892,10 +3906,15 @@ impl<G: Game + Send + Sync> ErasedDeepCfr for reinfors_core::DeepCfrSolver<G> {
     ) {
         reinfors_core::DeepCfrSolver::collect(self, player, traversals, infer)
     }
-    fn infoset_features(&self) -> Vec<(Vec<u8>, Vec<f32>, Vec<usize>)> {
+    fn infoset_features(
+        &self,
+    ) -> Result<Vec<(Vec<u8>, Vec<f32>, Vec<usize>)>, reinfors_core::EnumerationCapExceeded> {
         reinfors_core::DeepCfrSolver::infoset_features(self)
     }
-    fn exploitability_of(&self, probs: &HashMap<Vec<u8>, Vec<f64>>) -> f64 {
+    fn exploitability_of(
+        &self,
+        probs: &HashMap<Vec<u8>, Vec<f64>>,
+    ) -> Result<f64, reinfors_core::EnumerationCapExceeded> {
         reinfors_core::DeepCfrSolver::exploitability_of(self, probs)
     }
     fn rollback_collect(&mut self) {
@@ -3909,7 +3928,10 @@ trait ErasedCfr: Send + Sync {
     fn iterate(&mut self, n: u64);
     fn iterations(&self) -> u64;
     fn num_infosets(&self) -> usize;
-    fn exploitability(&self) -> f64;
+    fn exploitability(&self) -> Result<f64, reinfors_core::EnumerationCapExceeded>;
+    fn nash_conv(&self) -> Result<f64, reinfors_core::EnumerationCapExceeded>;
+    fn best_response_values(&self) -> Result<Vec<f64>, reinfors_core::EnumerationCapExceeded>;
+    fn num_players(&self) -> usize;
     fn expected_value(&self, player: usize) -> f64;
     fn average_strategy(&self, key: &[u8]) -> Option<(Vec<usize>, Vec<f64>)>;
     fn save(&self) -> Vec<u8>;
@@ -3926,8 +3948,17 @@ impl<G: Game + Send + Sync> ErasedCfr for reinfors_core::CfrSolver<G> {
     fn num_infosets(&self) -> usize {
         reinfors_core::CfrSolver::num_infosets(self)
     }
-    fn exploitability(&self) -> f64 {
+    fn exploitability(&self) -> Result<f64, reinfors_core::EnumerationCapExceeded> {
         reinfors_core::CfrSolver::exploitability(self)
+    }
+    fn nash_conv(&self) -> Result<f64, reinfors_core::EnumerationCapExceeded> {
+        reinfors_core::CfrSolver::nash_conv(self)
+    }
+    fn best_response_values(&self) -> Result<Vec<f64>, reinfors_core::EnumerationCapExceeded> {
+        reinfors_core::CfrSolver::best_response_values(self)
+    }
+    fn num_players(&self) -> usize {
+        reinfors_core::CfrSolver::num_players(self)
     }
     fn expected_value(&self, player: usize) -> f64 {
         reinfors_core::CfrSolver::expected_value(self, player)
@@ -3943,8 +3974,16 @@ impl<G: Game + Send + Sync> ErasedCfr for reinfors_core::CfrSolver<G> {
     }
 }
 
-/// `rf.solvers.Cfr` — counterfactual regret minimization over a 2-player game with declared
-/// chance and information-state keys (the poker family). Variants: "vanilla", "plus" (CFR+),
+/// The exact metrics walk the whole game tree; past the arena cap core returns a typed
+/// error. A big-but-valid game is public input, so it surfaces as ValueError (genuine
+/// panics, by contrast, keep propagating as bugs).
+fn cap_err(e: reinfors_core::EnumerationCapExceeded) -> pyo3::PyErr {
+    pyo3::exceptions::PyValueError::new_err(e.to_string())
+}
+
+/// `rf.solvers.Cfr` — counterfactual regret minimization over a sequential game with declared
+/// chance and information-state keys (the poker family, 2..=10 players; convergence to Nash
+/// is only guaranteed at 2-player zero-sum). Variants: "vanilla", "plus" (CFR+),
 /// "external_mccfr". The output is the AVERAGE strategy (`average_strategy` by
 /// `env.information_state_key` bytes); `exploitability()` is the exact convergence metric
 /// (enumeration-capped: Kuhn/Leduc-sized games, not full hold'em).
@@ -3979,9 +4018,12 @@ impl PyCfr {
         };
         let reward = HoldemReward { scale: 1.0 }; // solver utilities are raw chip deltas
         let inner: Box<dyn ErasedCfr> = match game.spec {
-            GameSpec::KuhnPoker => {
-                Box::new(CfrSolver::new(KuhnPoker, Box::new(reward), variant, seed))
-            }
+            GameSpec::KuhnPoker { players } => Box::new(CfrSolver::new(
+                KuhnPoker { players },
+                Box::new(reward),
+                variant,
+                seed,
+            )),
             GameSpec::LeducPoker => {
                 Box::new(CfrSolver::new(LeducPoker, Box::new(reward), variant, seed))
             }
@@ -3991,11 +4033,6 @@ impl PyCfr {
                 small_blind,
                 big_blind,
             } => {
-                if num_players != 2 {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "CFR solves 2-player games only; construct TexasHoldem(num_players=2)",
-                    ));
-                }
                 if variant != CfrVariant::ExternalMccfr {
                     return Err(pyo3::exceptions::PyValueError::new_err(
                         "full hold'em's chance fans are unenumerable: use variant=\"external_mccfr\"",
@@ -4015,8 +4052,8 @@ impl PyCfr {
             }
             _ => {
                 return Err(pyo3::exceptions::PyValueError::new_err(
-                    "CFR requires a 2-player game with declared chance and information-state \
-                     keys (KuhnPoker, LeducPoker, heads-up TexasHoldem)",
+                    "CFR requires a sequential game with declared chance and information-state \
+                     keys (KuhnPoker, LeducPoker, TexasHoldem)",
                 ))
             }
         };
@@ -4044,18 +4081,38 @@ impl PyCfr {
         self.inner.num_infosets()
     }
 
-    /// Exact exploitability of the average profile (pyspiel's definition: NashConv / 2);
-    /// zero at Nash.
-    fn exploitability(&self, py: Python<'_>) -> f64 {
-        py.allow_threads(|| self.inner.exploitability())
+    #[getter]
+    fn num_players(&self) -> usize {
+        self.inner.num_players()
     }
 
-    /// Expected value for `player` when both play the average profile.
+    /// Exact exploitability of the average profile (pyspiel's definition:
+    /// NashConv / num_players); zero exactly at Nash. For more than 2 players this measures
+    /// distance from equilibrium with NO convergence guarantee — expect a fall to a plateau.
+    fn exploitability(&self, py: Python<'_>) -> PyResult<f64> {
+        py.allow_threads(|| self.inner.exploitability())
+            .map_err(cap_err)
+    }
+
+    /// NashConv of the average profile: `Σᵢ (brᵢ − vᵢ)` — every player's exact unilateral
+    /// improvement, summed. Zero exactly at a Nash equilibrium.
+    fn nash_conv(&self, py: Python<'_>) -> PyResult<f64> {
+        py.allow_threads(|| self.inner.nash_conv()).map_err(cap_err)
+    }
+
+    /// Each player's exact best-response value against the others' average profile.
+    fn best_response_values(&self, py: Python<'_>) -> PyResult<Vec<f64>> {
+        py.allow_threads(|| self.inner.best_response_values())
+            .map_err(cap_err)
+    }
+
+    /// Expected value for `player` when everyone plays the average profile.
     fn expected_value(&self, py: Python<'_>, player: usize) -> PyResult<f64> {
-        if player >= 2 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "player must be 0 or 1",
-            ));
+        if player >= self.inner.num_players() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "player must be below {}",
+                self.inner.num_players()
+            )));
         }
         Ok(py.allow_threads(|| self.inner.expected_value(player)))
     }
@@ -4144,12 +4201,13 @@ struct PyDeepCfr {
     inner: Box<dyn ErasedDeepCfr>,
     obs_dim: usize,
     action_count: usize,
+    num_players: usize,
     config: Value,
 }
 
 /// Resolve the polymorphic `infer` argument: a bare callable serves every player; a sequence
 /// must have one callable per player.
-fn deep_cfr_callbacks(infer: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
+fn deep_cfr_callbacks(infer: &Bound<'_, PyAny>, num_players: usize) -> PyResult<Vec<Py<PyAny>>> {
     if infer.is_callable() {
         return Ok(vec![infer.clone().unbind()]);
     }
@@ -4158,11 +4216,18 @@ fn deep_cfr_callbacks(infer: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
             "infer must be a callable or a sequence of per-player callables",
         )
     })?;
-    if callbacks.len() != 2 {
+    if callbacks.len() != num_players {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "expected 2 per-player infer callables, got {}",
+            "expected {num_players} per-player infer callables, got {}",
             callbacks.len()
         )));
+    }
+    for (player, cb) in callbacks.iter().enumerate() {
+        if !cb.bind(infer.py()).is_callable() {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "per-player infer element {player} is not callable"
+            )));
+        }
     }
     Ok(callbacks)
 }
@@ -4176,14 +4241,14 @@ impl PyDeepCfr {
         let reward = HoldemReward { scale: 1.0 }; // solver utilities are raw chip deltas
         let (inner, obs_dim, action_count): (Box<dyn ErasedDeepCfr>, usize, usize) = match game.spec
         {
-            GameSpec::KuhnPoker => (
+            GameSpec::KuhnPoker { players } => (
                 Box::new(DeepCfrSolver::new(
-                    KuhnPoker,
-                    Box::new(KuhnEncoder),
+                    KuhnPoker { players },
+                    Box::new(KuhnEncoder { players }),
                     Box::new(reward),
                     seed,
                 )),
-                6,
+                3 * players,
                 2,
             ),
             GameSpec::LeducPoker => (
@@ -4202,12 +4267,6 @@ impl PyDeepCfr {
                 small_blind,
                 big_blind,
             } => {
-                if num_players != 2 {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "Deep CFR solves 2-player games only; construct \
-                             TexasHoldem(num_players=2)",
-                    ));
-                }
                 let enc = HoldemEgocentric { num_players, stack };
                 let (c, h, w) = enc.obs_shape();
                 (
@@ -4229,7 +4288,7 @@ impl PyDeepCfr {
             _ => {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "Deep CFR requires a 2-player game with declared chance and \
-                         information-state keys (KuhnPoker, LeducPoker, heads-up TexasHoldem)",
+                         information-state keys (KuhnPoker::default(), LeducPoker, heads-up TexasHoldem)",
                 ))
             }
         };
@@ -4243,6 +4302,7 @@ impl PyDeepCfr {
             inner,
             obs_dim,
             action_count,
+            num_players: game.spec.num_agents(),
             config,
         })
     }
@@ -4273,17 +4333,18 @@ impl PyDeepCfr {
         traversals: usize,
         infer: &Bound<'py, PyAny>,
     ) -> PyResult<DeepCfrBatch> {
-        if player >= 2 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "player must be 0 or 1",
-            ));
+        if player >= self.num_players {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "player must be below {}",
+                self.num_players
+            )));
         }
         if self.inner.iteration() == 0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "call next_iteration() before collecting (samples are weighted by the iteration)",
             ));
         }
-        let callbacks = deep_cfr_callbacks(infer)?;
+        let callbacks = deep_cfr_callbacks(infer, self.num_players)?;
         let (dim, a) = (self.obs_dim, self.action_count);
         let mut callback_err: Option<PyErr> = None;
         let mut rust_infer = |who: usize, obs_flat: Vec<f32>, rows: usize| -> Vec<f64> {
@@ -4403,12 +4464,13 @@ impl PyDeepCfr {
         })
     }
 
-    /// Exact exploitability of the AVERAGE-POLICY network (NashConv / 2, zero at Nash) —
+    /// Exact exploitability of the AVERAGE-POLICY network (NashConv / num_players, zero at
+    /// Nash; for more than 2 players a positive plateau is the expected outcome) —
     /// enumerable games only (Kuhn/Leduc, not full hold'em). `policy_infer(obs) -> (M,
     /// action_count)` scores every reachable infoset in ONE batched call; rows are clamped
     /// non-negative and renormalized over the legal actions (uniform when degenerate).
     fn exploitability(&self, py: Python<'_>, policy_infer: &Bound<'_, PyAny>) -> PyResult<f64> {
-        let features = self.inner.infoset_features();
+        let features = self.inner.infoset_features().map_err(cap_err)?;
         let (dim, a) = (self.obs_dim, self.action_count);
         let mut obs_flat: Vec<f32> = Vec::with_capacity(features.len() * dim);
         for (_, obs, _) in &features {
@@ -4441,7 +4503,8 @@ impl PyDeepCfr {
             };
             probs.insert(key.clone(), sigma);
         }
-        Ok(py.allow_threads(|| self.inner.exploitability_of(&probs)))
+        py.allow_threads(|| self.inner.exploitability_of(&probs))
+            .map_err(cap_err)
     }
 }
 

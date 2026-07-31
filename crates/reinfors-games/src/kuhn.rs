@@ -1,8 +1,10 @@
-//! Kuhn poker — the 3-card analytic testbed for imperfect-information algorithms (12
-//! information sets; known Nash family with game value -1/18 for the first player). Rules and
-//! action ids match OpenSpiel's `kuhn_poker`: both players ante 1, each is dealt one card from
-//! {J, Q, K}, then player 0 acts first with PASS/BET (bet size 1); passing when facing a bet
-//! folds. Fully declared chance: the two deals are root chance nodes
+//! Kuhn poker for N players (default 2 — the 3-card analytic testbed with 12 information sets
+//! and first-player game value -1/18). Rules and action ids match OpenSpiel's
+//! `kuhn_poker(players=N)`: everyone antes 1, each player is dealt one card from a deck of
+//! N + 1, then players act cyclically from player 0 with PASS/BET (bet size 1). One bet total:
+//! after it, every OTHER player responds exactly once (PASS folds, BET calls); with no bet the
+//! round ends when everyone has passed. Showdown among the bettors (or everyone, if nobody
+//! bet); highest card takes the pot. Fully declared chance: the deals are root chance nodes
 //! realized at episode birth, so solvers can enumerate them. Hidden information
 //! (`perfect_information` = false): each player sees only its own card.
 //!
@@ -18,10 +20,10 @@ pub const BET: usize = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KuhnState {
-    /// Dealt private cards (0 = J, 1 = Q, 2 = K), player order; grows 0 -> 2 during the birth
-    /// chain.
+    /// Dealt private cards (ascending rank ids, 0 lowest), player order; grows 0 -> N during
+    /// the birth chain.
     pub cards: Vec<u8>,
-    /// Public action history (PASS/BET ids), player 0 first.
+    /// Public action history (PASS/BET ids), player 0 first, cycling.
     pub history: Vec<u8>,
 }
 
@@ -31,49 +33,87 @@ impl KuhnState {
         self.is_terminal()
     }
 
-    fn is_terminal(&self) -> bool {
-        matches!(
-            self.history.as_slice(),
-            [p, q] if !(*p == PASS as u8 && *q == BET as u8)
-        ) || self.history.len() == 3
+    /// Player count, derived (one card per player once dealt) — terminality is only queried on
+    /// realized states.
+    fn n(&self) -> usize {
+        self.cards.len()
     }
 
-    /// Per-player pot contribution: the ante plus 1 per BET made.
-    fn contribution(&self, player: usize) -> i64 {
-        1 + self
-            .history
+    fn first_bet(&self) -> Option<usize> {
+        self.history.iter().position(|&a| a == BET as u8)
+    }
+
+    /// Terminal when everyone passed (no bet), or when every other player has responded once
+    /// after the (single) bet.
+    fn is_terminal(&self) -> bool {
+        match self.first_bet() {
+            None => self.history.len() == self.n(),
+            Some(b) => self.history.len() == b + self.n(),
+        }
+    }
+
+    /// Whether `player` put a bet in (opened or called) — at most once by the grammar.
+    fn bet_by(&self, player: usize) -> bool {
+        self.history
             .iter()
             .enumerate()
-            .filter(|&(i, &a)| i % 2 == player && a == BET as u8)
-            .count() as i64
+            .any(|(i, &a)| i % self.n() == player && a == BET as u8)
+    }
+
+    /// Per-player pot contribution: the ante plus 1 if they bet/called.
+    fn contribution(&self, player: usize) -> i64 {
+        1 + i64::from(self.bet_by(player))
     }
 }
 
-pub struct KuhnPoker;
+pub struct KuhnPoker {
+    /// Player count (OpenSpiel `kuhn_poker(players=N)`): a deck of N + 1 cards, one bet round.
+    pub players: usize,
+}
+
+impl Default for KuhnPoker {
+    fn default() -> Self {
+        KuhnPoker { players: 2 }
+    }
+}
 
 impl KuhnPoker {
-    fn remaining(&self, state: &KuhnState) -> Vec<u8> {
-        (0..3).filter(|c| !state.cards.contains(c)).collect()
+    /// Construction-boundary invariants (the binding rejects before any panic path).
+    pub fn validate(&self) -> Result<(), String> {
+        if !(2..=10).contains(&self.players) {
+            return Err(format!(
+                "players must be in 2..=10 (OpenSpiel's kuhn_poker range), got {}",
+                self.players
+            ));
+        }
+        Ok(())
     }
 
-    /// Terminal chip deltas (zero-sum). A terminal history ending in PASS after a BET is a
-    /// fold; otherwise showdown, higher card wins.
+    fn remaining(&self, state: &KuhnState) -> Vec<u8> {
+        (0..(self.players + 1) as u8)
+            .filter(|c| !state.cards.contains(c))
+            .collect()
+    }
+
+    /// Terminal chip deltas (zero-sum): showdown among the bettors — or everyone, if nobody
+    /// bet — highest card takes the pot; a lone bettor everyone folded to wins it outright.
     fn payouts(&self, state: &KuhnState) -> Vec<f64> {
-        let h = &state.history;
-        let folder: Option<usize> = match h.as_slice() {
-            [b, p] if *b == BET as u8 && *p == PASS as u8 => Some(1),
-            [_, _, p] if *p == PASS as u8 => Some(0),
-            _ => None,
-        };
-        let winner = match folder {
-            Some(f) => 1 - f,
-            None => usize::from(state.cards[1] > state.cards[0]),
-        };
-        let loser = 1 - winner;
-        let mut deltas = vec![0.0; 2];
-        deltas[winner] = state.contribution(loser) as f64;
-        deltas[loser] = -(state.contribution(loser) as f64);
-        deltas
+        let n = state.n();
+        let any_bet = state.first_bet().is_some();
+        let winner = (0..n)
+            .filter(|&p| !any_bet || state.bet_by(p))
+            .max_by_key(|&p| state.cards[p])
+            .expect("the bettor is always eligible");
+        let pot: i64 = (0..n).map(|p| state.contribution(p)).sum();
+        (0..n)
+            .map(|p| {
+                if p == winner {
+                    (pot - state.contribution(p)) as f64
+                } else {
+                    -(state.contribution(p) as f64)
+                }
+            })
+            .collect()
     }
 }
 
@@ -82,7 +122,7 @@ impl Game for KuhnPoker {
     type Event = f64; // per-player chip delta at the terminal tick, 0 elsewhere
 
     fn num_agents(&self) -> usize {
-        2
+        self.players
     }
 
     fn action_count(&self) -> usize {
@@ -106,31 +146,34 @@ impl Game for KuhnPoker {
     }
 
     fn actor(&self, state: &KuhnState) -> Actor {
-        if state.cards.len() < 2 {
+        if state.cards.len() < self.players {
             return Actor::Chance; // the deal (birth chain)
         }
-        Actor::Agent(state.history.len() % 2)
+        Actor::Agent(state.history.len() % self.players)
     }
 
     fn chance_node(&self, state: &KuhnState) -> ChanceDist {
-        ChanceDist::Uniform(3 - state.cards.len())
+        ChanceDist::Uniform(self.players + 1 - state.cards.len())
     }
 
     fn apply_chance_node(&self, state: &KuhnState, outcome: usize) -> Transition<KuhnState, f64> {
         let mut next = state.clone();
         next.cards.push(self.remaining(state)[outcome]);
-        Transition::silent(next, 2)
+        Transition::silent(next, self.players)
     }
 
     fn legal_actions(&self, state: &KuhnState, agent: usize) -> Vec<usize> {
-        if state.cards.len() < 2 || state.is_terminal() || agent != state.history.len() % 2 {
+        if state.cards.len() < self.players
+            || state.is_terminal()
+            || agent != state.history.len() % self.players
+        {
             return Vec::new();
         }
         vec![PASS, BET]
     }
 
     fn step(&self, state: &KuhnState, actions: &[usize]) -> Transition<KuhnState, f64> {
-        let me = state.history.len() % 2;
+        let me = state.history.len() % self.players;
         let mut next = state.clone();
         // Backstop for direct core callers: both actions are always legal, so clamp.
         next.history.push(actions[me].min(BET) as u8);
@@ -138,7 +181,7 @@ impl Game for KuhnPoker {
         let events = if terminal {
             self.payouts(&next).into_iter().map(Some).collect()
         } else {
-            vec![None; 2]
+            vec![None; self.players]
         };
         Transition {
             next_state: next,
@@ -168,14 +211,22 @@ impl reinfors_core::StateCodec for KuhnPoker {
     }
 
     fn validate_decoded_state(&self, state: &KuhnState, done: bool) -> Result<(), String> {
-        if state.cards.len() != 2 {
-            return Err("both cards must be dealt (birth chains are transient)".to_string());
+        let n = self.players;
+        if state.cards.len() != n {
+            return Err("every card must be dealt (birth chains are transient)".to_string());
         }
-        if state.cards[0] >= 3 || state.cards[1] >= 3 || state.cards[0] == state.cards[1] {
-            return Err("cards must be two distinct ids below 3".to_string());
+        let deck = (n + 1) as u8;
+        let distinct = state
+            .cards
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        if state.cards.iter().any(|&c| c >= deck) || distinct != n {
+            return Err(format!("cards must be {n} distinct ids below {deck}"));
         }
-        // History grammar: every proper prefix is non-terminal, length capped by the rules.
-        if state.history.len() > 3 || state.history.iter().any(|&a| a > BET as u8) {
+        // History grammar: every proper prefix is non-terminal, length capped by the rules
+        // (all-pass = n actions; a bet at b adds n responses: at most 2n - 1).
+        if state.history.len() > 2 * n - 1 || state.history.iter().any(|&a| a > BET as u8) {
             return Err("malformed action history".to_string());
         }
         for cut in 0..state.history.len() {
@@ -198,10 +249,20 @@ impl reinfors_core::StateCodec for KuhnPoker {
 
 // ===================== Observation =====================
 
-/// `(6, 1, 1)`: own card one-hot (3) + one channel per history slot (3), holding
-/// `(action + 1) / 2` — 0 empty, 0.5 PASS, 1.0 BET. Together with the seat parity implied by
-/// slot count this is exactly the information set (pinned by test against the key).
-pub struct KuhnEncoder;
+/// `(3N, 1, 1)`: own card one-hot (N + 1) + one channel per possible history slot (2N - 1),
+/// holding `(action + 1) / 2` — 0 empty, 0.5 PASS, 1.0 BET. The seat is implicit (an agent is
+/// queried at its own decision points, where `history.len() % N` names it; per-player nets make
+/// it structural) — together with that this is exactly the information set (pinned by test
+/// against the key). At N = 2 the layout is byte-identical to the historical 6-slot one.
+pub struct KuhnEncoder {
+    pub players: usize,
+}
+
+impl Default for KuhnEncoder {
+    fn default() -> Self {
+        KuhnEncoder { players: 2 }
+    }
+}
 
 impl reinfors_core::ActionView for KuhnEncoder {}
 
@@ -209,20 +270,21 @@ impl reinfors_core::StateEncoder for KuhnEncoder {
     type State = KuhnState;
 
     fn encode(&self, s: &KuhnState, agent: usize) -> Vec<f32> {
-        let mut obs = vec![0.0f32; 6];
+        let cards = self.players + 1;
+        let mut obs = vec![0.0f32; cards + 2 * self.players - 1];
         obs[s.cards[agent] as usize] = 1.0;
         for (i, &a) in s.history.iter().enumerate() {
-            obs[3 + i] = (a + 1) as f32 / 2.0;
+            obs[cards + i] = (a + 1) as f32 / 2.0;
         }
         obs
     }
 
     fn obs_shape(&self) -> (usize, usize, usize) {
-        (6, 1, 1)
+        (3 * self.players, 1, 1)
     }
 
     fn observation_space(&self) -> reinfors_core::Space {
-        reinfors_core::Space::unit_box(vec![6, 1, 1])
+        reinfors_core::Space::unit_box(vec![3 * self.players, 1, 1])
     }
 }
 
@@ -240,7 +302,7 @@ mod tests {
 
     #[test]
     fn terminal_lines_pay_the_pyspiel_amounts() {
-        let g = KuhnPoker;
+        let g = KuhnPoker::default();
         // bet-fold: p0 wins the ante (+1/-1) — pinned against pyspiel.
         let t = g.step(&dealt(0, 2, &[BET as u8]), &[PASS, PASS]);
         assert!(t.terminal);
@@ -263,9 +325,62 @@ mod tests {
         assert_eq!(t.events, vec![Some(2.0), Some(-2.0)]);
     }
 
+    /// Three-player lines pinned VERBATIM from a pyspiel `kuhn_poker(players=3)` probe
+    /// (cards J=0, Q=1, K=2 dealt to players 0, 1, 2 in order; deck adds card 3).
+    #[test]
+    fn three_player_lines_pay_the_pyspiel_amounts() {
+        let g = KuhnPoker { players: 3 };
+        let dealt3 = |history: &[u8]| KuhnState {
+            cards: vec![0, 1, 2],
+            history: history.to_vec(),
+        };
+        let line = |history: &[u8]| {
+            let s = dealt3(history);
+            assert!(s.is_terminal(), "{history:?} must be terminal");
+            g.payouts(&s)
+        };
+        assert_eq!(line(&[0, 0, 0]), vec![-1.0, -1.0, 2.0]); // all pass: showdown for antes
+        assert_eq!(line(&[1, 0, 0]), vec![2.0, -1.0, -1.0]); // everyone folds to the bettor
+        assert_eq!(line(&[1, 1, 1]), vec![-2.0, -2.0, 4.0]); // bet, both call
+        assert_eq!(line(&[1, 0, 1]), vec![-2.0, -1.0, 3.0]); // p1 folds, p2 calls
+        assert_eq!(line(&[0, 1, 0, 0]), vec![-1.0, 2.0, -1.0]); // p1 bets, both fold
+        assert_eq!(line(&[0, 1, 1, 0]), vec![-1.0, -2.0, 3.0]); // p2 calls, p0 folds
+        assert_eq!(line(&[0, 1, 0, 1]), vec![-2.0, 3.0, -1.0]); // p2 folds, p0 calls
+        assert_eq!(line(&[0, 0, 1, 0, 0]), vec![-1.0, -1.0, 2.0]); // late bet, both fold
+        assert_eq!(line(&[0, 0, 1, 1, 1]), vec![-2.0, -2.0, 4.0]); // late bet, both call
+                                                                   // Non-terminal prefixes: a bet at b stays open until b + 3 actions.
+        assert!(!dealt3(&[0, 1, 0]).is_terminal());
+        assert!(!dealt3(&[0, 0, 1, 0]).is_terminal());
+        // Acting order cycles: after [0, 1] player 2 responds, then player 0.
+        assert!(matches!(g.actor(&dealt3(&[0, 1])), Actor::Agent(2)));
+        assert!(matches!(g.actor(&dealt3(&[0, 1, 0])), Actor::Agent(0)));
+    }
+
+    #[test]
+    fn three_player_deal_and_construction_bounds() {
+        let g = KuhnPoker { players: 3 };
+        assert!(g.validate().is_ok());
+        assert!(KuhnPoker { players: 1 }.validate().is_err());
+        assert!(KuhnPoker { players: 11 }.validate().is_err());
+        let root = g.initial_state();
+        assert!(matches!(g.actor(&root), Actor::Chance));
+        assert_eq!(g.chance_node(&root).count(), 4, "deck is players + 1");
+        let s1 = g.apply_chance_node(&root, 0).next_state;
+        assert_eq!(g.chance_node(&s1).count(), 3);
+        let s2 = g.apply_chance_node(&s1, 0).next_state;
+        let s3 = g.apply_chance_node(&s2, 0).next_state; // remaining ascending: 0,1,2 dealt
+        assert_eq!(s3.cards, vec![0, 1, 2]);
+        assert!(matches!(g.actor(&s3), Actor::Agent(0)), "player 0 opens");
+        // The 3p encoder: 4 card slots + 5 history slots = (9, 1, 1).
+        use reinfors_core::StateEncoder;
+        let enc = KuhnEncoder { players: 3 };
+        assert_eq!(enc.obs_shape(), (9, 1, 1));
+        assert_eq!(enc.encode(&s3, 2).len(), 9);
+    }
+
     #[test]
     fn the_deal_is_a_declared_root_chain() {
-        let g = KuhnPoker;
+        let g = KuhnPoker::default();
         let root = g.initial_state();
         assert!(matches!(g.actor(&root), Actor::Chance));
         assert_eq!(g.chance_node(&root).count(), 3);
@@ -278,8 +393,8 @@ mod tests {
 
     #[test]
     fn keys_and_observations_carry_the_same_information() {
-        let g = KuhnPoker;
-        let enc = KuhnEncoder;
+        let g = KuhnPoker::default();
+        let enc = KuhnEncoder::default();
         // Same public line, different opponent card: same key, same obs for agent 0...
         let a = dealt(1, 0, &[PASS as u8, BET as u8]);
         let b = dealt(1, 2, &[PASS as u8, BET as u8]);
@@ -305,7 +420,7 @@ mod tests {
 
     #[test]
     fn codec_round_trips_and_rejects_unsafe_states() {
-        let g = KuhnPoker;
+        let g = KuhnPoker::default();
         let s = dealt(0, 2, &[PASS as u8]);
         let back = g.decode(&g.encode(&s)).unwrap();
         assert_eq!(back, s);

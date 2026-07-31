@@ -73,7 +73,7 @@ def test_callback_errors_and_bad_shapes_propagate() -> None:
         solver.collect(player=0, traversals=4, infer=boom)
     with pytest.raises(ValueError, match="one row of 2 advantages"):
         solver.collect(player=0, traversals=4, infer=lambda obs: np.zeros((obs.shape[0], 5)))
-    with pytest.raises(ValueError, match="player must be 0 or 1"):
+    with pytest.raises(ValueError, match="player must be below 2"):
         solver.collect(player=2, traversals=1, infer=zeros2)
     fresh = rf.solvers.DeepCfr(rf.games.KuhnPoker(), seed=0)
     with pytest.raises(ValueError, match="next_iteration"):
@@ -116,8 +116,8 @@ def test_failed_collects_are_transactional() -> None:
 def test_construction_gates() -> None:
     with pytest.raises(ValueError, match="information-state"):
         rf.solvers.DeepCfr(rf.games.Connect4())
-    with pytest.raises(ValueError, match="2-player"):
-        rf.solvers.DeepCfr(rf.games.TexasHoldem(num_players=3))
+    # N-player hold'em now constructs (no Nash guarantee past 2 — documented at the gate).
+    rf.solvers.DeepCfr(rf.games.TexasHoldem(num_players=3))
 
 
 def test_exploitability_pins_the_uniform_values() -> None:
@@ -186,3 +186,52 @@ def test_table_emulated_deep_cfr_converges_on_kuhn() -> None:
 
     exploitability = solver.exploitability(policy_infer)
     assert exploitability < 0.15, f"table-emulated Deep CFR approaches Nash: {exploitability}"
+
+
+def test_three_player_kuhn_collects_and_measures() -> None:
+    """The N-player lift end to end: per-player infer list of 3, strategy samples from
+    player (traverser + 1) % 3 only (the simple average estimator), and the exact instrument
+    (NashConv / num_players) on the uniform policy."""
+    solver = rf.solvers.DeepCfr(rf.games.KuhnPoker(players=3), seed=0)
+    solver.next_iteration()
+
+    def net(obs: np.ndarray) -> np.ndarray:
+        return np.zeros((obs.shape[0], 2))
+
+    with pytest.raises(ValueError, match="expected 3 per-player"):
+        solver.collect(player=0, traversals=4, infer=[net, net])
+    with pytest.raises(ValueError, match="player must be below 3"):
+        solver.collect(player=3, traversals=4, infer=net)
+    seen: set[int] = set()
+    for player in range(3):
+        batch = solver.collect(player=player, traversals=32, infer=[net, net, net])
+        assert batch.advantage_obs.shape[1] == 9
+        others = set(batch.strategy_players.tolist())
+        assert others == {(player + 1) % 3}, "simple estimator: exactly the next player"
+        seen |= others
+    assert seen == {0, 1, 2}
+    # Uniform policy instrument: NashConv/3 for uniform 3p Kuhn, pinned from the tabular solver.
+    e = solver.exploitability(lambda obs: np.full((obs.shape[0], 2), 0.5))
+    assert abs(e - 2.0625 / 3) < 1e-9, e
+
+
+def test_multiplayer_holdem_collection_smoke() -> None:
+    """3- and 6-player hold'em: samples flow through the N-player traversal machinery."""
+    for players in (3, 6):
+        solver = rf.solvers.DeepCfr(rf.games.TexasHoldem(num_players=players), seed=1)
+        solver.next_iteration()
+
+        def net(obs: np.ndarray) -> np.ndarray:
+            return np.zeros((obs.shape[0], 3))
+
+        batch = solver.collect(player=players - 1, traversals=8, infer=net)
+        assert batch.advantage_obs.shape[0] > 0
+        assert set(batch.strategy_players.tolist()) <= set(range(players))
+
+
+def test_oversized_exact_metrics_raise_value_error_not_panic() -> None:
+    """7-player Kuhn is a valid game whose tree exceeds the exact best-response arena cap.
+    The boundary contract: that surfaces as ValueError, never a PanicException."""
+    solver = rf.solvers.DeepCfr(rf.games.KuhnPoker(players=7), seed=0)
+    with pytest.raises(ValueError, match="cap"):
+        solver.exploitability(lambda obs: np.full((obs.shape[0], 2), 0.5))

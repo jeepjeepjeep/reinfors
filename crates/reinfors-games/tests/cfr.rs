@@ -6,16 +6,21 @@ use reinfors_core::{best_response_value, exploitability, CfrSolver, CfrVariant};
 use reinfors_games::{HoldemReward, KuhnPoker, LeducPoker};
 
 fn kuhn_solver(variant: CfrVariant) -> CfrSolver<KuhnPoker> {
-    CfrSolver::new(KuhnPoker, Box::new(HoldemReward { scale: 1.0 }), variant, 7)
+    CfrSolver::new(
+        KuhnPoker::default(),
+        Box::new(HoldemReward { scale: 1.0 }),
+        variant,
+        7,
+    )
 }
 
 #[test]
 fn vanilla_cfr_approaches_the_kuhn_equilibrium() {
     let mut solver = kuhn_solver(CfrVariant::Vanilla);
     solver.iterate(20);
-    let coarse = solver.exploitability();
+    let coarse = solver.exploitability().unwrap();
     solver.iterate(980);
-    let fine = solver.exploitability();
+    let fine = solver.exploitability().unwrap();
     assert!(fine < coarse, "exploitability falls: {coarse} -> {fine}");
     assert!(fine < 2e-3, "near-Nash after 1000 iterations: {fine}");
     // The analytic game value: -1/18 for the first player at equilibrium.
@@ -28,11 +33,11 @@ fn vanilla_cfr_approaches_the_kuhn_equilibrium() {
 fn kuhn_equilibrium_has_the_known_structure() {
     let mut solver = kuhn_solver(CfrVariant::Plus);
     solver.iterate(2000);
-    assert!(solver.exploitability() < 1e-4);
+    assert!(solver.exploitability().unwrap() < 1e-4);
     // Known equilibrium facts (any alpha in [0, 1/3]): with the JACK facing a bet, player 1
     // always folds; with the KING facing a bet, player 1 always calls; player 1 having the
     // KING after player 0 checks always bets.
-    let g = KuhnPoker;
+    let g = KuhnPoker::default();
     let key = |cards: [u8; 2], hist: &[u8], agent: usize| {
         use reinfors_core::Game;
         let state = reinfors_games::KuhnState {
@@ -63,10 +68,10 @@ fn cfr_plus_converges_faster_than_vanilla() {
     vanilla.iterate(200);
     plus.iterate(200);
     assert!(
-        plus.exploitability() < vanilla.exploitability(),
+        plus.exploitability().unwrap() < vanilla.exploitability().unwrap(),
         "CFR+ {} vs vanilla {}",
-        plus.exploitability(),
-        vanilla.exploitability()
+        plus.exploitability().unwrap(),
+        vanilla.exploitability().unwrap()
     );
 }
 
@@ -79,9 +84,9 @@ fn leduc_exploitability_falls_toward_nash() {
         3,
     );
     solver.iterate(20);
-    let coarse = solver.exploitability();
+    let coarse = solver.exploitability().unwrap();
     solver.iterate(180);
-    let fine = solver.exploitability();
+    let fine = solver.exploitability().unwrap();
     assert!(fine < coarse / 3.0, "Leduc converges: {coarse} -> {fine}");
     assert!(fine < 0.05, "near-Nash after 200 CFR+ iterations: {fine}");
 }
@@ -90,7 +95,7 @@ fn leduc_exploitability_falls_toward_nash() {
 fn external_mccfr_converges_statistically() {
     let mut solver = kuhn_solver(CfrVariant::ExternalMccfr);
     solver.iterate(20_000);
-    let e = solver.exploitability();
+    let e = solver.exploitability().unwrap();
     assert!(e < 0.03, "sampled convergence: {e}");
 }
 
@@ -104,7 +109,7 @@ fn tables_round_trip_through_save_load() {
     assert_eq!(restored.iterations(), solver.iterations());
     assert_eq!(restored.num_infosets(), solver.num_infosets());
     assert_eq!(restored.save(), bytes, "canonical serialization");
-    assert!((restored.exploitability() - solver.exploitability()).abs() < 1e-15);
+    assert!((restored.exploitability().unwrap() - solver.exploitability().unwrap()).abs() < 1e-15);
     // Continuing the solve from the restored tables matches continuing the original.
     solver.iterate(10);
     restored.iterate(10);
@@ -154,22 +159,23 @@ fn best_response_exploits_a_uniform_profile() {
     // Uniform play is far from equilibrium; the exact best response must find real value, and
     // exploitability must be symmetric-positive.
     let uniform = |_key: &[u8], legal: usize| vec![1.0 / legal as f64; legal];
-    let g = KuhnPoker;
+    let g = KuhnPoker::default();
     let r = HoldemReward { scale: 1.0 };
-    let br0 = best_response_value(&g, &r, &uniform, 0);
-    let br1 = best_response_value(&g, &r, &uniform, 1);
+    let br0 = best_response_value(&g, &r, &uniform, 0).unwrap();
+    let br1 = best_response_value(&g, &r, &uniform, 1).unwrap();
     assert!(
         br0 > 0.0 && br1 > 0.0,
         "uniform is exploitable: {br0}, {br1}"
     );
-    let e = exploitability(&g, &r, &uniform);
+    let e = exploitability(&g, &r, &uniform).unwrap();
     assert!((e - (br0 + br1) / 2.0).abs() < 1e-15);
 }
 
 #[test]
-#[should_panic(expected = "2-player zero-sum")]
-fn the_solver_rejects_more_than_two_players() {
-    let _ = CfrSolver::new(
+fn the_solver_accepts_more_than_two_players() {
+    // N-player CFR: no Nash guarantee past 2 players (documented at the gate), but the solver
+    // runs — 3-player hold'em constructs and MCCFR iterates.
+    let mut solver = CfrSolver::new(
         reinfors_games::TexasHoldem {
             num_players: 3,
             stack: 200,
@@ -180,6 +186,8 @@ fn the_solver_rejects_more_than_two_players() {
         CfrVariant::ExternalMccfr,
         0,
     );
+    solver.iterate(2);
+    assert!(solver.num_infosets() > 0);
 }
 
 #[test]
@@ -198,7 +206,7 @@ fn the_solver_rejects_games_without_information_states() {
 }
 
 #[test]
-#[should_panic(expected = "sequential 2-player only")]
+#[should_panic(expected = "sequential turn-taking only")]
 fn chance_root_simultaneous_games_fail_at_construction() {
     // The stub lives in deep_cfr.rs; a minimal inline twin here keeps the two solver gates
     // independently pinned. Chance root -> simultaneous decisions: the raw-root probe used
@@ -283,4 +291,14 @@ fn mccfr_runs_on_heads_up_holdem() {
     );
     solver.iterate(200);
     assert!(solver.num_infosets() > 100, "tables fill under sampling");
+}
+
+#[test]
+#[should_panic(expected = "player 2 out of range")]
+fn expected_value_rejects_an_out_of_range_player() {
+    // A fixed-width Vals row exists for every slot up to MAX_CFR_PLAYERS; without the guard,
+    // expected_value(9) on a 2-player game silently returns 0.0.
+    let mut solver = kuhn_solver(CfrVariant::Vanilla);
+    solver.iterate(1);
+    solver.expected_value(2);
 }
