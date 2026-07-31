@@ -79,7 +79,8 @@ def make_infer(net: AlphaZeroNet, device: str) -> Callable[[np.ndarray], tuple[n
             x = torch.from_numpy(np.ascontiguousarray(obs_batch)).reshape(-1, c, h, w).to(device)
             logits, values = net(x)
         net.train(was_training)
-        return logits.cpu().double().numpy(), values.cpu().double().numpy()
+        # Native f32 out: the engine widens exactly; skips the f64 conversion (GPU fast path).
+        return logits.cpu().numpy(), values.cpu().numpy()
 
     return infer
 

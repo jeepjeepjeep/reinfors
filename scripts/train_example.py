@@ -59,7 +59,7 @@ def make_infer(net: ExampleNet, device: str = "cpu") -> Callable[[np.ndarray], n
             x = torch.from_numpy(np.ascontiguousarray(obs_batch)).reshape(-1, c, h, w).to(device)
             q = net(x)
         net.train(was_training)
-        out: np.ndarray = q.cpu().double().numpy()
+        out: np.ndarray = q.cpu().numpy()  # native f32; the engine widens exactly
         return out
 
     return infer

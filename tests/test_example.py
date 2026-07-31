@@ -36,7 +36,7 @@ def test_net_and_infer_shapes() -> None:
     net = ex.ExampleNet((5, _G, _G), _A, _K)
     assert net(torch.zeros(4, 5, _G, _G)).shape == (4, _K, _A)
     out = ex.make_infer(net)(np.zeros((6, 5 * _G * _G), dtype=np.float32))
-    assert out.shape == (6, _K, _A) and out.dtype == np.float64
+    assert out.shape == (6, _K, _A) and out.dtype == np.float32  # native f32; engine widens exactly
 
 
 def test_one_train_iteration_runs() -> None:
