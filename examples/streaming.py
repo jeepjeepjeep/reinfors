@@ -16,10 +16,10 @@ def main() -> None:
 
     game = rf.games.Connect4()
     engine = rf.Engine(
-        game,
-        rf.Reward(win=1.0, loss=-1.0),
-        rf.policies.Mcts(num_simulations=16),
-        rf.learners.TreeStrap(),
+        game=game,
+        reward=rf.Reward(win=1.0, loss=-1.0),
+        policy=rf.policies.Mcts(num_simulations=16),
+        learner=rf.learners.TreeStrap(),
         n_games=8,
         seed=0,
     )
@@ -28,7 +28,7 @@ def main() -> None:
     def infer(obs: np.ndarray) -> np.ndarray:
         return np.zeros((len(obs), 1, n_actions), dtype=np.float64)
 
-    with engine.collect_stream(args.records, infer, depth=1) as stream:
+    with engine.collect_stream(collect_size=args.records, infer=infer, depth=1) as stream:
         for update in range(args.updates):
             batch = next(stream)
             # Replace this line with optimization on the main Python thread.

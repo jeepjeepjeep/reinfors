@@ -10,16 +10,16 @@ import reinfors as rf
 
 game = rf.games.Snake(grid_size=12, num_snakes=2, max_ticks=200)
 engine = rf.Engine(
-    game,
-    rf.Reward(food=1.0, loss=-10.0, win=10.0, draw=-5.0),
-    rf.policies.SelectiveExpectimax(
+    game=game,
+    reward=rf.Reward(food=1.0, loss=-10.0, win=10.0, draw=-5.0),
+    policy=rf.policies.SelectiveExpectimax(
         expansion_budget=32,
         top_k=4,
         max_depth=6,
         n_heads=8,
         chance=rf.chance_modes.Committed(samples=1),
     ),
-    rf.learners.TreeStrap(gamma=0.99, outcome_weight=0.3),
+    learner=rf.learners.TreeStrap(gamma=0.99, outcome_weight=0.3),
     n_games=32,
     seed=0,
 )
@@ -42,7 +42,7 @@ the game.
 
 ```python
 for step in range(num_updates):
-    batch = engine.collect(records_per_update, infer)
+    batch = engine.collect(n_records=records_per_update, infer=infer)
     loss = train(batch)
     engine.weights_updated()
     report(batch.telemetry, loss)
@@ -56,7 +56,7 @@ compatibility but makes algorithm-specific code less self-documenting.
 Pass one callback per player when policies differ:
 
 ```python
-batch = engine.collect(records_per_update, [blue_infer, red_infer])
+batch = engine.collect(n_records=records_per_update, infer=[blue_infer, red_infer])
 ```
 
 The callback sequence length must match the game player count. Use `batch.players` to route

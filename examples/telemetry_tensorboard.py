@@ -21,10 +21,10 @@ def main() -> None:
 
     game = rf.games.Connect4()
     engine = rf.Engine(
-        game,
-        rf.Reward(win=1.0, loss=-1.0),
-        rf.policies.Mcts(num_simulations=24),
-        rf.learners.TreeStrap(),
+        game=game,
+        reward=rf.Reward(win=1.0, loss=-1.0),
+        policy=rf.policies.Mcts(num_simulations=24),
+        learner=rf.learners.TreeStrap(),
         n_games=8,
         seed=0,
     )
@@ -35,7 +35,7 @@ def main() -> None:
 
     with SummaryWriter(args.logdir) as writer:
         for update in range(args.updates):
-            telemetry = engine.collect(args.records, infer).telemetry
+            telemetry = engine.collect(n_records=args.records, infer=infer).telemetry
             for key in ("decisions", "infer_calls", "infer_rows", "infer_seconds", "max_depth"):
                 writer.add_scalar(f"sampling/{key}", telemetry[key], update)
 

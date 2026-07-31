@@ -17,10 +17,10 @@ import reinfors as rf
 
 game = rf.games.Connect4()
 engine = rf.Engine(
-    game,
-    rf.Reward(win=1.0, loss=-1.0),
-    rf.policies.Mcts(num_simulations=64),
-    rf.learners.TreeStrap(),
+    game=game,
+    reward=rf.Reward(win=1.0, loss=-1.0),
+    policy=rf.policies.Mcts(num_simulations=64),
+    learner=rf.learners.TreeStrap(),
     n_games=32,
     seed=0,
 )
@@ -31,7 +31,7 @@ def infer(obs: np.ndarray) -> np.ndarray:
     # Replace with PyTorch, JAX, an accelerator service, or any other backend.
     return np.zeros((len(obs), 1, actions), dtype=np.float64)
 
-batch = engine.collect(1024, infer)
+batch = engine.collect(n_records=1024, infer=infer)
 print(batch.obs.shape, batch.targets.shape, batch.telemetry)
 ```
 

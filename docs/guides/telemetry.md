@@ -7,7 +7,7 @@ or structured logs.
 ## Read a batch
 
 ```python
-batch = engine.collect(2048, infer)
+batch = engine.collect(n_records=2048, infer=infer)
 t = batch.telemetry
 
 print("inference rows:", t["infer_rows"])
@@ -28,7 +28,7 @@ from torch.utils.tensorboard import SummaryWriter
 writer = SummaryWriter("runs/experiment-001")
 
 for update in range(num_updates):
-    batch = engine.collect(2048, infer)
+    batch = engine.collect(n_records=2048, infer=infer)
     loss = train(batch)
     t = batch.telemetry
 

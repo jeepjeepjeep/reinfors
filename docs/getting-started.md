@@ -39,7 +39,7 @@ def infer(obs: np.ndarray) -> np.ndarray:
     """Return one action-value head for each observation."""
     return np.zeros((obs.shape[0], 1, n_actions), dtype=np.float64)
 
-batch = engine.collect(512, infer)
+batch = engine.collect(n_records=512, infer=infer)
 
 print(batch.obs.shape)       # flattened float32 observations
 print(batch.targets.shape)   # searched action-value targets

@@ -23,7 +23,7 @@ different callbacks by passing a sequence in player order:
 
 ```python
 callbacks = [infer_player_0, infer_player_1, infer_player_2]
-batch = engine.collect(4096, callbacks)
+batch = engine.collect(n_records=4096, infer=callbacks)
 ```
 
 Records include a `players` field, and `learn_players` can suppress records for frozen

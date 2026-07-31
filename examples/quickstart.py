@@ -16,10 +16,10 @@ def main() -> None:
 
     game = rf.games.Connect4()
     engine = rf.Engine(
-        game,
-        rf.Reward(win=1.0, loss=-1.0, draw=0.0),
-        rf.policies.Mcts(num_simulations=24),
-        rf.learners.TreeStrap(),
+        game=game,
+        reward=rf.Reward(win=1.0, loss=-1.0, draw=0.0),
+        policy=rf.policies.Mcts(num_simulations=24),
+        learner=rf.learners.TreeStrap(),
         n_games=args.games,
         seed=0,
     )
@@ -28,7 +28,7 @@ def main() -> None:
     def infer(obs: np.ndarray) -> np.ndarray:
         return np.zeros((len(obs), 1, n_actions), dtype=np.float64)
 
-    batch = engine.collect(args.records, infer)
+    batch = engine.collect(n_records=args.records, infer=infer)
     print(f"records={len(batch.obs)} obs={batch.obs.shape} targets={batch.targets.shape}")
     print(f"infer_calls={batch.telemetry['infer_calls']} infer_rows={batch.telemetry['infer_rows']}")
 

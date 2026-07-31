@@ -45,7 +45,7 @@ it doing so.
 Pass one callable to share a network, or a sequence indexed by player:
 
 ```python
-engine.collect(4096, [infer_0, infer_1, infer_2])
+engine.collect(n_records=4096, infer=[infer_0, infer_1, infer_2])
 ```
 
 Each callback receives only rows for its player perspective. The sequence length must equal
