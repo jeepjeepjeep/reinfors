@@ -19,7 +19,7 @@ what the probes measure (measured: eps 0.1-0.3 drift to ~0 bb/hand vs random, ep
 ~+5.8 across seeds). Principled self-play convergence for poker (NFSP/CFR-style) is out of scope
 for this example.
 
-    uv run --with torch python scripts/train_dqn_holdem.py --iterations 60
+    uv run --with torch python examples/train_dqn_holdem.py --iterations 60
 """
 
 from __future__ import annotations

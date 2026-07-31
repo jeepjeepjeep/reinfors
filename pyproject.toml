@@ -26,7 +26,7 @@ dynamic = ["version"]
 Repository = "https://github.com/jeepjeepjeep/reinfors"
 Issues = "https://github.com/jeepjeepjeep/reinfors/issues"
 
-# torch is needed only to run the example trainer (`scripts/train_example.py`) and its smoke test; the
+# torch is needed only to run the training examples (`examples/`) and their smoke tests; the
 # reinfors package itself (core/search/engine) needs just numpy. Install with `pip install reinfors[train]`.
 # `gym` pulls the standard-API adapters' backends (`reinfors.gym`), lazily imported so they're optional.
 [project.optional-dependencies]
@@ -84,12 +84,10 @@ python_version = "3.12"
 strict = true
 warn_unused_configs = true
 
-# Scope: the CI gate checks only the torch-free `python/` package, but the whole tree
-# (`python/` + `scripts/` + `tests/`) type-checks clean under strict mypy in a dev env with torch
-# installed — run `.venv/bin/python -m mypy python/reinfors scripts/ tests/` — and that is the
-# maintained bar. The overrides below exist for exactly that full-tree run: optional/stubless deps
-# are ignored when absent, and torch's few stub gaps (e.g. untyped `Tensor.backward`) carry targeted
-# `type: ignore[...]` comments at the call sites rather than a blanket relaxation.
+# Scope: the CI gate checks the torch-free `python/` package. Tests and repository tooling can also
+# be checked in a dev environment with their optional dependencies installed; runnable examples are
+# linted and smoke-tested instead, since `Engine.collect`'s family-union return cannot currently be
+# narrowed statically from its policy and learner handles without type-checker-only assertions.
 
 # Optional deps of the adapters (`reinfors.gym`) and the benchmark scripts, not installed in every
 # checking env: resolve to Any instead of erroring when missing.

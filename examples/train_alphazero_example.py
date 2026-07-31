@@ -21,8 +21,8 @@ weights to a concurrent search round. Python locks are GIL-aware; there is no de
 This is a deliberately tiny, self-contained reference, not a production trainer: no replay buffer,
 no checkpoints, no logging. It exists to show the wiring.
 
-    uv run --with torch python scripts/train_alphazero_example.py --iterations 40
-    uv run --with torch python scripts/train_alphazero_example.py --iterations 40 --depth 1
+    uv run --with torch python examples/train_alphazero_example.py --iterations 40
+    uv run --with torch python examples/train_alphazero_example.py --iterations 40 --depth 1
 """
 
 from __future__ import annotations

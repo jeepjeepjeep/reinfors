@@ -17,9 +17,9 @@ equilibrium play requires and plain self-play RL does not produce. Full hold'em 
 size via --players) runs the same loop at scale (no exploitability — the tree is not
 enumerable); evaluate with --holdem-eval hands against a table of scripted opponents instead.
 
-    uv run --with torch python scripts/train_deep_cfr.py --game kuhn_poker --iterations 60
-    uv run --with torch python scripts/train_deep_cfr.py --game leduc_poker --iterations 150
-    uv run --with torch python scripts/train_deep_cfr.py --game texas_holdem --iterations 3
+    uv run --with torch python examples/train_deep_cfr.py --game kuhn_poker --iterations 60
+    uv run --with torch python examples/train_deep_cfr.py --game leduc_poker --iterations 150
+    uv run --with torch python examples/train_deep_cfr.py --game texas_holdem --iterations 3
 """
 
 from __future__ import annotations

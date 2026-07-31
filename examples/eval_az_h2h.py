@@ -6,7 +6,7 @@ over the legal moves (the AZ opening-temperature convention), argmax after. Repo
 (win=1, draw=0.5). A search-free probe compares what the nets distilled, uncontaminated by
 search-budget noise.
 
-    uv run --with torch python scripts/eval_az_h2h.py a.pt b.pt --games 200
+    uv run --with torch python examples/eval_az_h2h.py a.pt b.pt --games 200
 """
 
 from __future__ import annotations

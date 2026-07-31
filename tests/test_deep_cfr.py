@@ -1,7 +1,7 @@
 """The `rf.solvers.DeepCfr` surface: batch shapes and CSR consistency, the polymorphic infer
 argument, determinism, callback error propagation, the exact exploitability instrument, and a
 numpy table-emulated convergence run (the no-torch stand-in for real networks; the torch
-reference lives in scripts/train_deep_cfr.py).
+reference lives in examples/train_deep_cfr.py).
 """
 
 from collections.abc import Callable

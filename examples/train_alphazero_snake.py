@@ -24,8 +24,8 @@ Differences from the connect4 reference, all snake-driven:
     primary training signal, and a search-backed eval (net + small-sim search vs random) is the
     right future probe.
 
-    uv run --with torch python scripts/train_alphazero_snake.py --iterations 30
-    uv run --with torch python scripts/train_alphazero_snake.py --chance-mode always_resample
+    uv run --with torch python examples/train_alphazero_snake.py --iterations 30
+    uv run --with torch python examples/train_alphazero_snake.py --chance-mode always_resample
 """
 
 from __future__ import annotations

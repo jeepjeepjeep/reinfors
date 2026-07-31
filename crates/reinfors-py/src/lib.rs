@@ -4211,7 +4211,7 @@ struct DeepCfrBatch {
 /// `rf.solvers.DeepCfr` — the Deep CFR data generator (Brown et al. 2019, external
 /// sampling): traversals query the CURRENT advantage networks through `infer` and emit the
 /// two training streams; buffers, iteration-weighted losses, and training are the caller's
-/// (see `scripts/train_deep_cfr.py`). `infer` is a single callable (shared network) or a
+/// (see `examples/train_deep_cfr.py`). `infer` is a single callable (shared network) or a
 /// per-player sequence, each `f(obs (M, dim) f32) -> (M, action_count) f64` advantages.
 #[pyclass(name = "DeepCfr")]
 struct PyDeepCfr {

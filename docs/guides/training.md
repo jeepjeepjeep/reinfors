@@ -102,7 +102,7 @@ inside the game and policy.
 Every GridWorld move is legal, so the target network can take a dense maximum over its four outputs.
 The batch's sparse next-action offsets still identify rows that should not bootstrap, such as
 terminal states. Games with variable legal actions must instead maximize over their provided legal
-action IDs; `scripts/train_dqn_holdem.py` demonstrates that general case.
+action IDs; `examples/train_dqn_holdem.py` demonstrates that general case.
 
 `engine.collect()` returns at least `n_records`, rather than exactly that many records, because
 complete episodes are retained. Its `batch.telemetry` field contains collection timings, inference
@@ -114,10 +114,10 @@ This first example deliberately trains directly on each collected batch. Typical
 replay buffer, minibatching, checkpoints, evaluation, and concurrent collection. The maintained
 scripts build those pieces on the same interface:
 
-- `scripts/train_dqn_holdem.py`: replay, minibatching, sparse legality, evaluation, and ensemble DQN;
-- `scripts/train_alphazero_example.py`: AlphaZero search with policy and value heads;
-- `scripts/train_example.py`: TreeStrap with selective expectimax or UCT MCTS;
-- `scripts/train_deep_cfr.py`: caller-owned Deep CFR buffers and networks.
+- `examples/train_dqn_holdem.py`: replay, minibatching, sparse legality, evaluation, and ensemble DQN;
+- `examples/train_alphazero_example.py`: AlphaZero search with policy and value heads;
+- `examples/train_example.py`: TreeStrap with selective expectimax or UCT MCTS;
+- `examples/train_deep_cfr.py`: caller-owned Deep CFR buffers and networks.
 
 Use `engine.resolved_config()` alongside checkpoints to record all constructor defaults. If you
 enable `infer_cache`, call `engine.weights_updated()` after an optimizer step so cached outputs from

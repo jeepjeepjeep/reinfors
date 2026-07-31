@@ -1,4 +1,4 @@
-"""A minimal smoke test for the example trainer (`scripts/train_example.py`).
+"""A minimal smoke test for the example trainer (`examples/train_example.py`).
 
 It does not test learning quality — only that the example still *runs against the current API*. The
 example is the one reference for the Python<->Rust `infer` contract, and that contract is what's most
@@ -20,7 +20,7 @@ torch = pytest.importorskip("torch")
 # `Any`: the example is loaded dynamically from a script path, so its members (ExampleNet, make_infer,
 # …) can't be statically known — this is a smoke test that the example runs against the current API.
 def _load_example() -> Any:
-    path = os.path.join(os.path.dirname(__file__), "..", "scripts", "train_example.py")
+    path = os.path.join(os.path.dirname(__file__), "..", "examples", "train_example.py")
     spec = importlib.util.spec_from_file_location("train_example", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

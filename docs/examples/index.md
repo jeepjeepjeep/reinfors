@@ -24,18 +24,36 @@ python examples/telemetry_tensorboard.py --updates 10
 
 ## End-to-end training
 
+<!-- TODO: Simplify the advanced examples below. Each should foreground one reinfors workflow;
+move experiment-specific evaluation, replay, CLI, and reporting machinery into separate reference
+scripts where needed. -->
+
 | Script | Composition | Concepts |
 | --- | --- | --- |
-| `scripts/train_example.py` | Snake + TreeStrap + selective expectimax or UCT | Ensemble Q-values, searched targets, PyTorch training |
-| `scripts/train_alphazero_example.py` | Connect 4 + AlphaZero | Policy/value heads, visit targets, concurrent collection, evaluation |
-| `scripts/train_dqn_holdem.py` | Hold'em + DQN | Imperfect observations, sparse legal-action targets |
-| `scripts/train_deep_cfr.py` | Poker + Deep CFR | Per-player advantage inference, caller-owned reservoirs |
+| `examples/train_example.py` | Snake + TreeStrap + selective expectimax or UCT | Ensemble Q-values, searched targets, PyTorch training |
+| `examples/train_alphazero_example.py` | Connect 4 + AlphaZero | Policy/value heads, visit targets, concurrent collection, evaluation |
+| `examples/train_alphazero_snake.py` | Snake + AlphaZero | Simultaneous actions, stochastic search, unbounded values |
+| `examples/train_dqn_holdem.py` | Hold'em + DQN | Imperfect observations, sparse legal-action targets |
+| `examples/train_deep_cfr.py` | Poker + Deep CFR | Per-player advantage inference, caller-owned reservoirs |
 
 ```bash
-python scripts/train_example.py --iterations 20
-python scripts/train_alphazero_example.py --iterations 40 --depth 1
-python scripts/train_dqn_holdem.py --help
-python scripts/train_deep_cfr.py --help
+python examples/train_example.py --iterations 20
+python examples/train_alphazero_example.py --iterations 40 --depth 1
+python examples/train_alphazero_snake.py --help
+python examples/train_dqn_holdem.py --help
+python examples/train_deep_cfr.py --help
+```
+
+## Solving and evaluation
+
+| Example | What it demonstrates |
+| --- | --- |
+| `examples/solve_leduc.py` | Tabular CFR variants and exact exploitability |
+| `examples/eval_az_h2h.py` | Head-to-head evaluation of saved AlphaZero networks |
+
+```bash
+python examples/solve_leduc.py --iterations 1000
+python examples/eval_az_h2h.py --help
 ```
 
 ## Adapters and validation
