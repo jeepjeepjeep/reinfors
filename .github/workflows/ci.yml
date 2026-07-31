@@ -6,6 +6,29 @@ on:
     branches: [main]
 
 jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: false
+
+      - name: Generated catalogue is current
+        run: python scripts/generate_docs.py --check
+
+      - name: Check local documentation links
+        run: python scripts/check_docs.py
+
+      - name: Build documentation
+        run: uvx --with mkdocs-material==9.7.7 mkdocs==1.6.1 build --strict
+
   rust:
     runs-on: ubuntu-latest
     steps:

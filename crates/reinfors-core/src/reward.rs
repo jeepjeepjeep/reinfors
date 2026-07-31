@@ -13,8 +13,8 @@
 //! Object-safe (no generic methods, no `Self` by value), so it is held as
 //! `Box<dyn Reward<Event = G::Event>>` — the reward equivalent of the boxed encoder. Only the training
 //! path needs it: the `Engine` (training-record rewards + the episode-end z-mix) and the search
-//! (immediate rewards in the backup). The caller-driven `Env` holds none — it surfaces game-specific
-//! events, and a game-aware consumer reads the outcome from those.
+//! (immediate rewards in the backup). The caller-driven `Env` can omit it for event-only play or hold
+//! one to expose per-agent scalar rewards for its most recent tick.
 
 pub trait Reward: Send + Sync {
     type Event;

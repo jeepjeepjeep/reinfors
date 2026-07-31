@@ -12,6 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import _reinfors
+from .catalog import ENCODERS
 
 MinimalChess = _reinfors.EncoderHandle.MinimalChess
 RelativeChess = _reinfors.EncoderHandle.RelativeChess
@@ -24,6 +25,7 @@ _REGISTRY: dict[str, Callable[..., Any]] = {
     "openspiel_chess": OpenSpielChess,
     "alphazero_chess": AlphaZeroChess,
 }
+assert _REGISTRY.keys() == ENCODERS, "encoder registry and documentation catalogue diverged"
 
 
 def registered() -> list[str]:

@@ -168,9 +168,10 @@ def eval_vs_random(net: AlphaZeroNet, device: str, games: int, seed: int) -> flo
             else:
                 action = rng.choice(env.legal_actions(agent))
             events = env.step({agent: action})
-        if events[net_side] == "win":
+        result = next((event for player, event in events if player == net_side), None)
+        if result == "win":
             score += 1.0
-        elif events[net_side] == "draw":
+        elif result == "draw":
             score += 0.5
     net.train(was_training)
     return score / games

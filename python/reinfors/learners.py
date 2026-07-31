@@ -12,6 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import _reinfors
+from .catalog import LEARNERS
 
 TreeStrap = _reinfors.LearnerHandle.TreeStrap
 Dqn = _reinfors.LearnerHandle.Dqn
@@ -22,6 +23,7 @@ _REGISTRY: dict[str, Callable[..., Any]] = {
     "dqn": Dqn,
     "alphazero": AlphaZero,
 }
+assert _REGISTRY.keys() == LEARNERS, "learner registry and documentation catalogue diverged"
 
 
 def registered() -> list[str]:

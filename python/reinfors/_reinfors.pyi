@@ -54,7 +54,7 @@ class Discrete:
     n: int
 
 class Cfr:
-    """Counterfactual regret minimization over a 2-player declared-chance game with
+    """Counterfactual regret minimization over a 2-10-player sequential declared-chance game with
     information-state keys. Variants: "vanilla", "plus" (CFR+), "external_mccfr". The output
     is the AVERAGE strategy, keyed by `Env.information_state_key` bytes."""
 

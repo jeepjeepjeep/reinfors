@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import _reinfors, chance_modes, encoders, games, gym, learners, noise, policies, solvers, spaces
+from . import _reinfors, catalog, chance_modes, encoders, games, gym, learners, noise, policies, solvers, spaces
 from ._reinfors import (
     Engine,
     EngineSnapshot,
@@ -135,6 +135,7 @@ __all__ = [
     "EnvSnapshot",
     "Reward",
     "_reinfors",
+    "catalog",
     "chance_modes",
     "chess_action_uci",
     "chess_uci_action",

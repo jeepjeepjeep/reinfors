@@ -32,6 +32,7 @@ Issues = "https://github.com/jeepjeepjeep/reinfors/issues"
 [project.optional-dependencies]
 train = ["torch"]
 gym = ["gymnasium", "pettingzoo"]
+docs = ["mkdocs==1.6.1", "mkdocs-material==9.7.7"]
 # `test` pulls everything the full test suite imports (both optional extras + pytest). It exists so a
 # dev/editor venv is reproducible from the same source CI uses — `uv pip install -e ".[test]"` — rather
 # than hand-populated (which drifts, leaving an editor's type checker unable to resolve test imports).

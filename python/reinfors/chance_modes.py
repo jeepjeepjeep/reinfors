@@ -16,6 +16,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import _reinfors
+from .catalog import CHANCE_MODES
 
 AlwaysResample = _reinfors.ChanceModeHandle.AlwaysResample
 Committed = _reinfors.ChanceModeHandle.Committed
@@ -26,6 +27,7 @@ _REGISTRY: dict[str, Callable[..., Any]] = {
     "committed": Committed,
     "expand_all": ExpandAll,
 }
+assert _REGISTRY.keys() == CHANCE_MODES, "chance registry and documentation catalogue diverged"
 
 
 def registered() -> list[str]:

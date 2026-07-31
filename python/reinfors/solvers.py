@@ -2,9 +2,9 @@
 
 A solver owns its own traversal of the game (no engine, no network) and produces a strategy
 artifact. ``Cfr`` covers counterfactual regret minimization (vanilla / CFR+ / external-sampling
-MCCFR) over 2-player games with fully declared chance and information-state keys — the poker
-family. Query the result with ``average_strategy(env.information_state_key(agent))``; measure
-convergence with ``exploitability()`` (exact, Kuhn/Leduc-sized games).
+MCCFR) over 2-10-player sequential games with declared chance and information-state keys — the
+poker family. Query the result with ``average_strategy(env.information_state_key(agent))``;
+measure convergence with exact metrics on small trees such as Kuhn and Leduc.
 """
 
 from __future__ import annotations

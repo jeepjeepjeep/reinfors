@@ -4285,12 +4285,10 @@ impl PyDeepCfr {
                     3,
                 )
             }
-            _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "Deep CFR requires a 2-player game with declared chance and \
-                         information-state keys (KuhnPoker::default(), LeducPoker, heads-up TexasHoldem)",
-                ))
-            }
+            _ => return Err(pyo3::exceptions::PyValueError::new_err(
+                "Deep CFR requires a supported 2-10-player sequential game with declared chance \
+                         and information-state keys (KuhnPoker, LeducPoker, TexasHoldem)",
+            )),
         };
         let config = json!({
             "schema": CONFIG_SCHEMA_VERSION,

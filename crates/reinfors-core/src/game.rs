@@ -116,8 +116,8 @@ impl ChanceDist {
     }
 }
 
-/// A finite-action, perfect-information game. Single-agent, sequential or simultaneous multi-agent,
-/// and N-player general-sum are all expressible via `actor` + the per-agent `Event`. The game owns
+/// A finite-action game. Single-agent, sequential or simultaneous multi-agent, imperfect-information,
+/// and N-player general-sum games are expressible via `actor` + the per-agent `Event`. The game owns
 /// only dynamics + outcomes; turning an `Event` into a scalar reward is the [`Reward`](crate::Reward)'s
 /// job, decoupled like the encoder.
 pub trait Game {

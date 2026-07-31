@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import _reinfors
+from .catalog import POLICIES
 
 SelectiveExpectimax = _reinfors.PolicyHandle.SelectiveExpectimax
 EpsilonGreedyQ = _reinfors.PolicyHandle.EpsilonGreedyQ
@@ -22,6 +23,7 @@ _REGISTRY: dict[str, Callable[..., Any]] = {
     "mcts": Mcts,
     "alphazero": AlphaZero,
 }
+assert _REGISTRY.keys() == POLICIES, "policy registry and documentation catalogue diverged"
 
 
 def registered() -> list[str]:

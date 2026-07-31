@@ -6,6 +6,7 @@ __pycache__/
 .venv/
 *.so
 /runs
+/site
 uv.lock
 runs_*.out
 runs/
