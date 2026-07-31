@@ -66,12 +66,19 @@ fn build_arena<G: Game>(
         nodes: Vec<ArenaNode>,
     }
     impl<G: Game> Builder<'_, G> {
-        fn add(&mut self, state: &G::State) -> Result<usize, EnumerationCapExceeded> {
+        /// Every arena node — interior AND terminal — charges the cap: it is a hard bound
+        /// on total construction work, so a wide terminal fan cannot slip past it.
+        fn ensure_capacity(&self) -> Result<(), EnumerationCapExceeded> {
             if self.nodes.len() >= MAX_TREE_NODES {
                 return Err(EnumerationCapExceeded(format!(
                     "game tree exceeds the exact best-response cap ({MAX_TREE_NODES} nodes)"
                 )));
             }
+            Ok(())
+        }
+
+        fn add(&mut self, state: &G::State) -> Result<usize, EnumerationCapExceeded> {
+            self.ensure_capacity()?;
             let idx = self.nodes.len();
             self.nodes.push(ArenaNode::Terminal); // placeholder, patched below
             let node = match self.game.actor(state) {
@@ -92,7 +99,7 @@ fn build_arena<G: Game>(
                             .map(|p| crate::reward::edge_reward(self.reward, &t.events, p))
                             .collect();
                         let child = if t.terminal {
-                            self.terminal()
+                            self.terminal()?
                         } else {
                             self.add(&t.next_state)?
                         };
@@ -113,7 +120,7 @@ fn build_arena<G: Game>(
                             .map(|p| crate::reward::edge_reward(self.reward, &t.events, p))
                             .collect();
                         let child = if t.terminal {
-                            self.terminal()
+                            self.terminal()?
                         } else {
                             self.add(&t.next_state)?
                         };
@@ -127,10 +134,11 @@ fn build_arena<G: Game>(
             Ok(idx)
         }
 
-        fn terminal(&mut self) -> usize {
+        fn terminal(&mut self) -> Result<usize, EnumerationCapExceeded> {
+            self.ensure_capacity()?;
             let idx = self.nodes.len();
             self.nodes.push(ArenaNode::Terminal);
-            idx
+            Ok(idx)
         }
     }
     let mut b = Builder {
@@ -253,15 +261,20 @@ pub fn best_response_value<G: Game>(
     br_player: usize,
 ) -> Result<f64, EnumerationCapExceeded> {
     let arena = build_arena(game, reward)?;
+    Ok(br_value_in(&arena, profile, br_player))
+}
+
+/// One player's best-response value on an already-built arena.
+fn br_value_in(arena: &Arena, profile: &Profile<'_>, br_player: usize) -> f64 {
     let mut pass = BrPass {
-        arena: &arena,
+        arena,
         profile,
         br_player,
         members: HashMap::new(),
         choice: HashMap::new(),
     };
     pass.collect(0, 1.0);
-    Ok(pass.value(0))
+    pass.value(0)
 }
 
 /// Every reachable information set, with one exemplar state and the acting agent — the
@@ -281,7 +294,9 @@ pub fn enumerate_infosets<G: Game>(
         visited: usize,
     }
     impl<G: Game> Walk<'_, G> {
-        fn go(&mut self, state: &G::State) -> Result<(), EnumerationCapExceeded> {
+        /// Every traversed transition charges the budget — terminal leaves included, so a
+        /// wide terminal fan is real work the cap must see.
+        fn charge(&mut self) -> Result<(), EnumerationCapExceeded> {
             self.visited += 1;
             if self.visited >= MAX_TREE_NODES {
                 return Err(EnumerationCapExceeded(format!(
@@ -289,12 +304,19 @@ pub fn enumerate_infosets<G: Game>(
                      exploitability instrument is for enumerable games"
                 )));
             }
+            Ok(())
+        }
+
+        fn go(&mut self, state: &G::State) -> Result<(), EnumerationCapExceeded> {
+            self.charge()?;
             match self.game.actor(state) {
                 Actor::Chance => {
                     let dist = self.game.chance_node(state);
                     for outcome in 0..dist.count() {
                         let t = self.game.apply_chance_node(state, outcome);
-                        if !t.terminal {
+                        if t.terminal {
+                            self.charge()?;
+                        } else {
                             self.go(&t.next_state)?;
                         }
                     }
@@ -310,6 +332,7 @@ pub fn enumerate_infosets<G: Game>(
                         joint[who] = a;
                         let t = self.game.step(state, &joint);
                         if t.terminal {
+                            self.charge()?;
                             continue;
                         }
                         self.go(&t.next_state)?;
@@ -337,9 +360,10 @@ pub fn best_response_values<G: Game>(
     reward: &dyn Reward<Event = G::Event>,
     profile: &Profile<'_>,
 ) -> Result<Vec<f64>, EnumerationCapExceeded> {
-    (0..game.num_agents())
-        .map(|p| best_response_value(game, reward, profile, p))
-        .collect()
+    let arena = build_arena(game, reward)?;
+    Ok((0..game.num_agents())
+        .map(|p| br_value_in(&arena, profile, p))
+        .collect())
 }
 
 /// Every player's expected value when EVERYONE plays `profile` (one arena walk).
@@ -349,6 +373,11 @@ pub fn profile_values<G: Game>(
     profile: &Profile<'_>,
 ) -> Result<Vec<f64>, EnumerationCapExceeded> {
     let arena = build_arena(game, reward)?;
+    Ok(profile_values_in(&arena, profile, game.num_agents()))
+}
+
+/// Every player's on-policy value on an already-built arena.
+fn profile_values_in(arena: &Arena, profile: &Profile<'_>, n: usize) -> Vec<f64> {
     fn go(arena: &Arena, profile: &Profile<'_>, idx: usize, n: usize) -> Vec<f64> {
         match &arena.nodes[idx] {
             ArenaNode::Terminal => vec![0.0; n],
@@ -375,7 +404,7 @@ pub fn profile_values<G: Game>(
             }
         }
     }
-    Ok(go(&arena, profile, 0, game.num_agents()))
+    go(arena, profile, 0, n)
 }
 
 /// NashConv: `Σᵢ (brᵢ − vᵢ)` — every player's exact unilateral improvement over `profile`,
@@ -386,11 +415,11 @@ pub fn nash_conv<G: Game>(
     reward: &dyn Reward<Event = G::Event>,
     profile: &Profile<'_>,
 ) -> Result<f64, EnumerationCapExceeded> {
-    let on_policy = profile_values(game, reward, profile)?;
-    Ok(best_response_values(game, reward, profile)?
-        .into_iter()
-        .zip(on_policy)
-        .map(|(br, v)| br - v)
+    let arena = build_arena(game, reward)?;
+    let n = game.num_agents();
+    let on_policy = profile_values_in(&arena, profile, n);
+    Ok((0..n)
+        .map(|p| br_value_in(&arena, profile, p) - on_policy[p])
         .sum())
 }
 
@@ -402,4 +431,90 @@ pub fn exploitability<G: Game>(
     profile: &Profile<'_>,
 ) -> Result<f64, EnumerationCapExceeded> {
     Ok(nash_conv(game, reward, profile)? / game.num_agents() as f64)
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+    use crate::game::Transition;
+    use crate::reward::Reward;
+
+    /// One decision node fanning straight into `fan` TERMINAL children — the shape that
+    /// creates arbitrarily many nodes/edges while barely creating interior states.
+    struct WideFan {
+        fan: usize,
+    }
+    impl Game for WideFan {
+        type State = u8;
+        type Event = f64;
+        fn num_agents(&self) -> usize {
+            2
+        }
+        fn action_count(&self) -> usize {
+            self.fan
+        }
+        fn actor(&self, _s: &u8) -> Actor {
+            Actor::Agent(0)
+        }
+        fn legal_actions(&self, _s: &u8, _agent: usize) -> Vec<usize> {
+            (0..self.fan).collect()
+        }
+        fn step(&self, _s: &u8, _actions: &[usize]) -> Transition<u8, f64> {
+            Transition {
+                next_state: 0,
+                events: vec![Some(0.0), None],
+                terminal: true,
+            }
+        }
+        fn information_states(&self) -> bool {
+            true
+        }
+        fn information_state_key(&self, _state: &u8, _agent: usize) -> Vec<u8> {
+            vec![0]
+        }
+        fn initial_state(&self) -> u8 {
+            0
+        }
+    }
+
+    struct NoReward;
+    impl Reward for NoReward {
+        type Event = f64;
+        fn step_reward(&self, _event: &f64, _agent: usize) -> f64 {
+            0.0
+        }
+    }
+
+    fn uniform(_key: &[u8], legal: usize) -> Vec<f64> {
+        vec![1.0 / legal as f64; legal]
+    }
+
+    #[test]
+    fn a_wide_terminal_fan_cannot_slip_past_the_arena_cap() {
+        let g = WideFan {
+            fan: MAX_TREE_NODES + 10,
+        };
+        let err = best_response_value(&g, &NoReward, &uniform, 0).unwrap_err();
+        assert!(err.to_string().contains("cap"), "{err}");
+    }
+
+    #[test]
+    fn a_wide_terminal_fan_cannot_slip_past_the_infoset_walk_cap() {
+        let g = WideFan {
+            fan: MAX_TREE_NODES + 10,
+        };
+        let err = enumerate_infosets(&g).unwrap_err();
+        assert!(err.to_string().contains("cap"), "{err}");
+    }
+
+    #[test]
+    fn a_fan_under_the_cap_still_enumerates() {
+        let g = WideFan { fan: 3 };
+        assert_eq!(enumerate_infosets(&g).unwrap().len(), 1);
+        let vals = nash_conv(&g, &NoReward, &uniform).unwrap();
+        assert!(
+            vals.abs() < 1e-12,
+            "one uniform node over zero payouts: {vals}"
+        );
+    }
 }
