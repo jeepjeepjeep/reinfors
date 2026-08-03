@@ -74,7 +74,8 @@ def make_infer(net: SnakeAzNet, device: str) -> Callable[[np.ndarray], tuple[np.
         with torch.no_grad():
             x = torch.from_numpy(np.ascontiguousarray(obs_batch)).reshape(-1, c, h, w).to(device)
             logits, values = net(x)
-        return logits.cpu().double().numpy(), values.cpu().double().numpy()
+        # Native f32 out: the engine widens exactly; skips the f64 conversion (GPU fast path).
+        return logits.cpu().numpy(), values.cpu().numpy()
 
     return infer
 

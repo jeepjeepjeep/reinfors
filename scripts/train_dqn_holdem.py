@@ -226,8 +226,7 @@ def main() -> None:
     def infer(arr: np.ndarray) -> np.ndarray:
         with torch.no_grad():
             x = torch.from_numpy(arr).to(args.device)
-            # .cpu() before .double(): MPS has no float64.
-            return np.asarray(net(x).cpu().double().numpy())
+            return np.asarray(net(x).cpu().numpy())  # native f32; the engine widens exactly
 
     t0 = time.perf_counter()
     print(f"DQN hold'em: {args.num_players} seats, {args.heads} heads, {args.n_games} games/collect")

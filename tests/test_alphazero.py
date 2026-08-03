@@ -231,7 +231,10 @@ def test_rejects_bad_noise_alpha_and_c_puct() -> None:
     "bad_infer",
     [
         lambda arr: np.zeros((arr.shape[0], 1, _A)),  # old value contract, not a tuple
-        lambda arr: (np.zeros((arr.shape[0], _A + 1)), np.zeros(arr.shape[0])),  # wrong A
+        lambda arr: (
+            np.zeros((arr.shape[0], _A - 1)),
+            np.zeros(arr.shape[0]),
+        ),  # too NARROW (wider = padded head, accepted)
         lambda arr: (np.zeros((arr.shape[0], _A)), np.zeros(arr.shape[0] + 1)),  # wrong N
     ],
 )

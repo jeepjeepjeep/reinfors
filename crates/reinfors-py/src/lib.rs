@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use numpy::ndarray::{Array2, Array3, ArrayD, IxDyn};
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyArray3, PyArrayDyn, PyReadonlyArray3};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArray3, PyArrayDyn};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
@@ -75,6 +75,137 @@ fn validate_search_params(
     Ok(())
 }
 
+/// Infer outputs may be float64 OR float32. f32 -> f64 widening is exact, so both dtypes
+/// yield bit-identical evaluations downstream; returning the net's native f32 skips the
+/// producer-side up-conversion and halves the bytes crossing the boundary — measurable on
+/// GPU, where converting a full [rows x actions] policy per call is real work.
+///
+/// Dispatch inspects rank and dtype ONCE (no failed-extract churn, and a wrong-rank array
+/// reports its rank rather than a misleading dtype complaint); the contiguous fast path
+/// widens from a slice (vectorizes), with the ndarray iterator kept for strided views
+/// (e.g. a `logits[:, :actions].numpy()` slice is strided).
+fn infer_array<'py, const N: usize>(
+    r: &Bound<'py, PyAny>,
+    what: &str,
+) -> PyResult<InferArray<'py, N>> {
+    use numpy::prelude::{PyArrayDescrMethods, PyUntypedArrayMethods};
+    let Ok(u) = r.downcast::<numpy::PyUntypedArray>() else {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "{what} must be a float64 or float32 ndarray; got type {}",
+            r.get_type()
+                .name()
+                .map(|n| n.to_string())
+                .unwrap_or_default()
+        )));
+    };
+    if u.ndim() != N {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "{what} must be a {N}-d ndarray; got {}-d",
+            u.ndim()
+        )));
+    }
+    let py = r.py();
+    if u.dtype().is_equiv_to(&numpy::dtype::<f64>(py)) {
+        Ok(InferArray::F64(r.extract()?))
+    } else if u.dtype().is_equiv_to(&numpy::dtype::<f32>(py)) {
+        Ok(InferArray::F32(r.extract()?))
+    } else {
+        Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "{what} must be a float64 or float32 ndarray; got dtype {}",
+            u.dtype()
+        )))
+    }
+}
+
+enum InferArray<'py, const N: usize> {
+    F64(numpy::PyReadonlyArrayDyn<'py, f64>),
+    F32(numpy::PyReadonlyArrayDyn<'py, f32>),
+}
+
+impl<const N: usize> InferArray<'_, N> {
+    fn shape(&self) -> [usize; N] {
+        let s = match self {
+            InferArray::F64(a) => a.as_array().shape().to_vec(),
+            InferArray::F32(a) => a.as_array().shape().to_vec(),
+        };
+        let mut out = [0usize; N];
+        out.copy_from_slice(&s);
+        out
+    }
+
+    /// Widen every element into `out` in row-major order: slice fast path when contiguous,
+    /// strided iterator otherwise.
+    fn widen_into(&self, out: &mut Vec<f64>) {
+        fn go<T: Copy>(v: &numpy::ndarray::ArrayViewD<'_, T>, out: &mut Vec<f64>)
+        where
+            f64: From<T>,
+        {
+            match v.as_slice() {
+                Some(s) => out.extend(s.iter().map(|&x| f64::from(x))),
+                None => out.extend(v.iter().map(|&x| f64::from(x))),
+            }
+        }
+        match self {
+            InferArray::F64(a) => go(&a.as_array(), out),
+            InferArray::F32(a) => go(&a.as_array(), out),
+        }
+    }
+
+    fn to_flat(&self) -> Vec<f64> {
+        let mut out = Vec::with_capacity(self.shape().iter().product());
+        self.widen_into(&mut out);
+        out
+    }
+
+    /// AlphaZero packing: one pass, one allocation — each row's FIRST `a` logits widened
+    /// directly into the final `[logits.., value]` layout with its value appended. Rows may
+    /// be WIDER than `a` (a padded head, e.g. chess 4674 over 4672 actions): the tail is
+    /// ignored, so producers can return the full contiguous tensor instead of slicing —
+    /// on GPU a pre-transfer slice costs a device-side contiguity gather per call.
+    fn pack_policy_value(&self, values: &[f64], a: usize) -> Vec<f64> {
+        fn go<T: Copy>(v: &numpy::ndarray::ArrayViewD<'_, T>, values: &[f64], a: usize) -> Vec<f64>
+        where
+            f64: From<T>,
+        {
+            let width = v.shape()[1];
+            let mut out = Vec::with_capacity(values.len() * (a + 1));
+            match v.as_slice() {
+                Some(s) => {
+                    for (row, chunk) in s.chunks_exact(width).enumerate() {
+                        out.extend(chunk[..a].iter().map(|&x| f64::from(x)));
+                        out.push(values[row]);
+                    }
+                }
+                None => {
+                    for (row, r) in v.rows().into_iter().enumerate() {
+                        out.extend(r.iter().take(a).map(|&x| f64::from(x)));
+                        out.push(values[row]);
+                    }
+                }
+            }
+            out
+        }
+        match self {
+            InferArray::F64(arr) => go(&arr.as_array(), values, a),
+            InferArray::F32(arr) => go(&arr.as_array(), values, a),
+        }
+    }
+}
+
+fn infer_rows_1d(r: &Bound<'_, PyAny>, what: &str) -> PyResult<Vec<f64>> {
+    Ok(infer_array::<1>(r, what)?.to_flat())
+}
+
+fn infer_rows_2d(r: &Bound<'_, PyAny>, what: &str) -> PyResult<([usize; 2], Vec<f64>)> {
+    let a = infer_array::<2>(r, what)?;
+    Ok((a.shape(), a.to_flat()))
+}
+
+fn infer_rows_3d(r: &Bound<'_, PyAny>, what: &str) -> PyResult<([usize; 3], Vec<f64>)> {
+    let a = infer_array::<3>(r, what)?;
+    Ok((a.shape(), a.to_flat()))
+}
+
 /// The core's `infer` callback, wrapping the Python network forward. Obs arrive as one flat
 /// row-major `[n, dim]` buffer (moved straight into a numpy array — no copy), and per-head values
 /// `[n, K, action_count]` come back as one flat row-major buffer. The first failure — a Python error, or (when
@@ -110,12 +241,11 @@ where
         let infer = callbacks[player.min(callbacks.len() - 1)].bind(py);
         match infer
             .call1((arr,))
-            .and_then(|r| r.extract::<PyReadonlyArray3<f64>>())
+            .and_then(|r| infer_rows_3d(&r, "infer output"))
         {
-            Ok(out) => {
+            Ok((shape, flat)) => {
                 // EXACT shape, not just element count: a transposed return has the right
                 // length and would be flattened into garbage evaluations.
-                let shape = out.as_array().shape().to_vec();
                 let bad = shape[0] != n
                     || shape[2] != action_count
                     || expected_heads.is_some_and(|k| shape[1] != k);
@@ -129,7 +259,7 @@ where
                     });
                     return vec![0.0; fallback];
                 }
-                out.as_array().iter().copied().collect() // flat [n, K, A]
+                flat // flat [n, K, A]
             }
             Err(e) => {
                 *callback_err = Some(e);
@@ -139,8 +269,8 @@ where
     }
 }
 
-/// The AlphaZero family's `infer` callback: the Python callable returns a `(policy_logits (N, A) f64,
-/// values (N,) f64)` tuple — no dummy priors for value-only families, no packed heads here — which is
+/// The AlphaZero family's `infer` callback: the Python callable returns a `(policy_logits (N, A),
+/// values (N,))` tuple, each float64 or float32 (f32 widens exactly — the GPU fast path) — no dummy priors for value-only families, no packed heads here — which is
 /// flattened to the core's `[N·(A+1)]` row layout (`A` logits then the value, per row). Same
 /// error-latching contract as `infer_closure`: the first failure (Python error or wrong shapes) is
 /// latched and neutral rows (uniform logits, value 0) unwind the in-flight search cheaply.
@@ -164,29 +294,30 @@ where
             .into_pyarray(py);
         let infer = callbacks[player.min(callbacks.len() - 1)].bind(py);
         let extracted = infer.call1((arr,)).and_then(|r| {
-            let (logits, values) =
-                r.extract::<(numpy::PyReadonlyArray2<f64>, numpy::PyReadonlyArray1<f64>)>()?;
-            Ok((logits.as_array().to_owned(), values.as_array().to_owned()))
+            let (logits, values) = r.extract::<(Bound<'_, PyAny>, Bound<'_, PyAny>)>()?;
+            // Each element dispatches on dtype independently (a mixed f32/f64 tuple is fine).
+            // Shapes are validated from the VIEWS, so nothing is widened until they pass and
+            // the pack below is one pass into one final allocation.
+            let logits = infer_array::<2>(&logits, "AlphaZero infer policy_logits")?;
+            let values = infer_rows_1d(&values, "AlphaZero infer values")?;
+            Ok((logits, values))
         });
         match extracted {
             Ok((logits, values)) => {
-                if logits.shape() != [n, action_count] || values.len() != n {
+                let lshape = logits.shape();
+                // Width may EXCEED action_count (padded head; extra columns ignored by the
+                // pack) — it must never be narrower.
+                if lshape[0] != n || lshape[1] < action_count || values.len() != n {
                     callback_err.get_or_insert_with(|| {
                         pyo3::exceptions::PyValueError::new_err(format!(
-                            "AlphaZero infer must return (policy_logits ({n}, {action_count}), \
-                             values ({n},)); got logits {:?} and values ({},)",
-                            logits.shape(),
+                            "AlphaZero infer must return (policy_logits ({n}, >={action_count}), \
+                             values ({n},)); got logits {lshape:?} and values ({},)",
                             values.len()
                         ))
                     });
                     return vec![0.0; n * stride];
                 }
-                let mut out = Vec::with_capacity(n * stride);
-                for row in 0..n {
-                    out.extend(logits.row(row).iter().copied());
-                    out.push(values[row]);
-                }
-                out
+                logits.pack_policy_value(&values, action_count)
             }
             Err(e) => {
                 *callback_err = Some(e);
@@ -4358,22 +4489,21 @@ impl PyDeepCfr {
             match target
                 .bind(py)
                 .call1((arr,))
-                .and_then(|r| r.extract::<numpy::PyReadonlyArray2<f64>>())
+                .and_then(|r| infer_rows_2d(&r, "infer output"))
             {
-                Ok(out) => {
+                Ok((shape, flat)) => {
                     // Exact shape, not just element count: a transposed (A, rows) return has
                     // the right length and would be flattened into garbage advantages.
-                    if out.as_array().shape() != [rows, a] {
+                    if shape != [rows, a] {
                         callback_err.get_or_insert_with(|| {
                             pyo3::exceptions::PyValueError::new_err(format!(
-                                "infer returned shape {:?} for {rows} rows; expected \
-                                 ({rows}, {a}) — one row of {a} advantages per query",
-                                out.as_array().shape()
+                                "infer returned shape {shape:?} for {rows} rows; expected \
+                                 ({rows}, {a}) — one row of {a} advantages per query"
                             ))
                         });
                         return vec![0.0; rows * a];
                     }
-                    out.as_array().iter().copied().collect()
+                    flat
                 }
                 Err(e) => {
                     callback_err = Some(e);
@@ -4479,18 +4609,14 @@ impl PyDeepCfr {
         let arr = Array2::from_shape_vec((features.len(), dim), obs_flat)
             .expect("obs shape")
             .into_pyarray(py);
-        let out = policy_infer
-            .call1((arr,))?
-            .extract::<numpy::PyReadonlyArray2<f64>>()?;
-        if out.as_array().shape() != [features.len(), a] {
+        let (oshape, flat) = infer_rows_2d(&policy_infer.call1((arr,))?, "policy_infer output")?;
+        if oshape != [features.len(), a] {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "policy_infer returned shape {:?} for {} infosets; expected ({}, {a})",
-                out.as_array().shape(),
+                "policy_infer returned shape {oshape:?} for {} infosets; expected ({}, {a})",
                 features.len(),
                 features.len()
             )));
         }
-        let flat: Vec<f64> = out.as_array().iter().copied().collect();
         let mut probs: HashMap<Vec<u8>, Vec<f64>> = HashMap::with_capacity(features.len());
         for (i, (key, _, legal)) in features.iter().enumerate() {
             let row = &flat[i * a..(i + 1) * a];

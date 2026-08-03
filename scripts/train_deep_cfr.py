@@ -105,7 +105,7 @@ def make_infer(net: Mlp, device: str) -> InferFn:
     def infer(obs: np.ndarray) -> np.ndarray:
         with torch.no_grad():
             x = torch.from_numpy(obs).to(device)
-            return np.asarray(net(x).cpu().double().numpy())
+            return np.asarray(net(x).cpu().numpy())  # native f32; the solver widens exactly
 
     return infer
 
@@ -117,7 +117,7 @@ def make_policy_infer(net: Mlp, device: str) -> InferFn:
     def infer(obs: np.ndarray) -> np.ndarray:
         with torch.no_grad():
             x = torch.from_numpy(obs).to(device)
-            return np.asarray(torch.softmax(net(x), dim=1).cpu().double().numpy())
+            return np.asarray(torch.softmax(net(x), dim=1).cpu().numpy())  # native f32
 
     return infer
 
