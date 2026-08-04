@@ -1499,6 +1499,20 @@ struct AlphaZeroBatch {
     value_targets: Py<PyArray1<f64>>, // (M,) — z, discounted realized return
     #[pyo3(get)]
     policy_weights: Py<PyArray1<f64>>, // (M,) — 1.0 acting rows, 0.0 value-only rows
+    /// Legality of each row's state, HEAD frame (π's frame), CSR: row i's ids =
+    /// legal_ids[legal_offsets[i]..legal_offsets[i+1]]. The mask for legal-only policy
+    /// losses (dense per minibatch:
+    ///   counts = np.diff(legal_offsets); rows = np.repeat(np.arange(M), counts)
+    ///   mask = np.zeros((M, A), bool); mask[rows, legal_ids] = True
+    /// then logits.masked_fill(~mask, torch.finfo(logits.dtype).min) before log_softmax
+    /// — finfo, not a constant: -2**16 overflows fp16). Empty rows are
+    /// value-only records (their policy term is already weighted out). Named-access only —
+    /// positional unpacking stays (obs, policy_targets, value_targets, policy_weights,
+    /// telemetry).
+    #[pyo3(get)]
+    legal_ids: Py<PyArray1<i64>>,
+    #[pyo3(get)]
+    legal_offsets: Py<PyArray1<i64>>, // (M + 1,)
     #[pyo3(get)]
     telemetry: Py<PyDict>,
 }
@@ -1541,12 +1555,17 @@ impl RecordBatch for AlphaZeroRecord {
         let mut z: Vec<f64> = Vec::with_capacity(m);
         let mut weights: Vec<f64> = Vec::with_capacity(m);
         let mut players: Vec<i64> = Vec::with_capacity(m);
-        for (obs, pi, zi, w, player) in records {
+        let mut legal_ids: Vec<i64> = Vec::new();
+        let mut legal_offsets: Vec<i64> = Vec::with_capacity(m + 1);
+        legal_offsets.push(0);
+        for (obs, pi, zi, w, player, legal) in records {
             obs_flat.extend(obs);
             pi_flat.extend(pi);
             z.push(zi);
             weights.push(w);
             players.push(player as i64);
+            legal_ids.extend(legal.iter().map(|&x| x as i64));
+            legal_offsets.push(legal_ids.len() as i64);
         }
         let obs_arr = Array2::from_shape_vec((m, dim), obs_flat)
             .expect("obs shape")
@@ -1562,6 +1581,8 @@ impl RecordBatch for AlphaZeroRecord {
                 policy_targets: pi_arr.unbind(),
                 value_targets: z.into_pyarray(py).unbind(),
                 policy_weights: weights.into_pyarray(py).unbind(),
+                legal_ids: legal_ids.into_pyarray(py).unbind(),
+                legal_offsets: legal_offsets.into_pyarray(py).unbind(),
                 telemetry: telemetry.unbind(),
             },
         )?
