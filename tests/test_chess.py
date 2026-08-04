@@ -111,7 +111,7 @@ def test_collect_is_deterministic_per_seed() -> None:
 
 
 def test_make_encoder_by_name() -> None:
-    assert rf.encoders.registered() == ["alphazero_chess", "minimal_chess", "openspiel_chess", "relative_chess"]
+    assert {"alphazero_chess", "minimal_chess", "openspiel_chess", "relative_chess"} <= set(rf.encoders.registered())
     enc = rf.encoders.make("alphazero_chess", history_length=4)
     assert tuple(rf.games.Chess(encoder=enc).observation_space().shape) == (63, 8, 8)  # 14*4+7
 

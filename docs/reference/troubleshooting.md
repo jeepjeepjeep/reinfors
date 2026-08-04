@@ -7,6 +7,7 @@ callback rather than corrupting search. Match a traceback fragment here first:
 | --- | --- | --- |
 | `unknown reward key` | The game does not emit that named reward event | [Construction is rejected](#construction-is-rejected) |
 | `incompatible policy/learner composition` | The policy and learner cannot form an Engine | [Construction is rejected](#construction-is-rejected) |
+| `incompatible encoder` | The encoder belongs to another game | [Construction is rejected](#construction-is-rejected) |
 | `not compatible with`, `would be clairvoyant`, or `supports at most` | The algorithm does not support that game's semantics | [Construction is rejected](#construction-is-rejected) |
 | `win_food_lead is a two-snake rule` | `win_food_lead` was combined with `num_snakes != 2` | [Construction is rejected](#construction-is-rejected) |
 | `expected … per-player infer callables` | The callback sequence does not match the player count | [Per-player callback count](#per-player-callback-count) |
@@ -25,6 +26,9 @@ from the [game catalogue](../catalogue/games.md); unknown names are never ignore
 `incompatible policy/learner composition` means the two handles do not share a training contract.
 Use an exact pairing from the [algorithm catalogue](../catalogue/algorithms.md) and confirm the game
 supports it in the [compatibility matrix](../catalogue/compatibility.md).
+
+`incompatible encoder` means the handle passed through `encoder=` belongs to a different game.
+Choose one from that game's rows in the [encoder catalogue](../catalogue/games.md#observation-encoders).
 
 Errors containing `not compatible with`, `would be clairvoyant`, or `supports at most` reject a
 game/algorithm pairing because of information, player-count, or dynamics requirements. Choose a

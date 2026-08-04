@@ -179,6 +179,20 @@ GAMES: dict[str, GameInfo] = {
 
 
 ENCODER_INFO: dict[str, EncoderInfo] = {
+    "snake": EncoderInfo(
+        "Snake",
+        "Snake",
+        "(5, grid_size, grid_size); (5, 20, 20) by default",
+        "rf.encoders.Snake()",
+        "Mover-relative body, opponent, food, and wall planes.",
+    ),
+    "connect4": EncoderInfo(
+        "Connect4",
+        "Connect 4",
+        "(2, 6, 7)",
+        "rf.encoders.Connect4()",
+        "Acting-player and opponent piece planes.",
+    ),
     "minimal_chess": EncoderInfo(
         "MinimalChess",
         "Chess",
@@ -207,6 +221,41 @@ ENCODER_INFO: dict[str, EncoderInfo] = {
         "rf.encoders.AlphaZeroChess(history_length=8)",
         "Uses `14 * history_length + 7` channels for history, repetition, side, move-count, "
         "castling and clock features.",
+    ),
+    "backgammon": EncoderInfo(
+        "Backgammon",
+        "Backgammon",
+        "(200, 1, 1)",
+        "rf.encoders.Backgammon()",
+        "Tesauro-style point, bar, borne-off, turn, and dice features.",
+    ),
+    "texas_holdem": EncoderInfo(
+        "TexasHoldem",
+        "Texas Hold'em",
+        "(2 * num_players + 19, 4, 13); (31, 4, 13) by default",
+        "rf.encoders.TexasHoldem()",
+        "Player-relative cards, betting state, stacks, and positions.",
+    ),
+    "kuhn_poker": EncoderInfo(
+        "KuhnPoker",
+        "Kuhn poker",
+        "(3 * players, 1, 1); (6, 1, 1) by default",
+        "rf.encoders.KuhnPoker()",
+        "Private card and public betting-history information state.",
+    ),
+    "leduc_poker": EncoderInfo(
+        "LeducPoker",
+        "Leduc poker",
+        "(21, 1, 1)",
+        "rf.encoders.LeducPoker()",
+        "Private/public cards and two-round betting information state.",
+    ),
+    "gridworld": EncoderInfo(
+        "GridWorld",
+        "GridWorld",
+        "(2, size, size); (2, 5, 5) by default",
+        "rf.encoders.GridWorld()",
+        "Agent-position and goal planes.",
     ),
 }
 
