@@ -68,15 +68,46 @@ def test_legal_csr_masks_the_policy_frame() -> None:
     m = batch.obs.shape[0]
     ids, offsets = batch.legal_ids, batch.legal_offsets
     assert offsets.shape == (m + 1,) and offsets[0] == 0 and offsets[-1] == len(ids)
-    assert (np.diff(offsets) >= 0).all()
-    # connect4 (reinfors rules): every column is always playable -> full legal rows
-    assert (np.diff(offsets) == _A).all()
+    # standard connect4 rules: full columns are masked, so rows carry 1..=7 legal actions
+    counts0 = np.diff(offsets)
+    assert (counts0 >= 1).all() and (counts0 <= _A).all()
     assert ids.min() >= 0 and ids.max() < _A
     # π's support is always inside the legal set
     counts = np.diff(offsets)
     rows = np.repeat(np.arange(m), counts)
     mask = np.zeros((m, _A), dtype=bool)
     mask[rows, ids] = True
+    assert (batch.policy_targets[~mask] == 0.0).all()
+
+
+def test_legal_csr_is_sparse_and_deterministic_on_chess() -> None:
+    # chess: the first emitted record of a single-game collect is the initial position —
+    # exactly 20 legal actions of the 4,672-wide space, a deterministic sparse row.
+    game = rf.games.Chess()
+    a = game.action_space().n
+    engine = rf.Engine(
+        game,
+        rf.Reward(win=1.0, loss=-1.0),
+        rf.policies.AlphaZero(num_simulations=8),
+        rf.learners.AlphaZero(gamma=1.0),
+        n_games=1,
+        seed=0,
+    )
+    batch = engine.collect(
+        1,
+        lambda obs, n=None: (
+            np.zeros((obs.shape[0], a), dtype=np.float32),
+            np.zeros(obs.shape[0], dtype=np.float32),
+        ),
+    )
+    first = batch.legal_ids[batch.legal_offsets[0] : batch.legal_offsets[1]]
+    assert len(first) == 20, "initial chess position has exactly 20 legal moves"
+    counts = np.diff(batch.legal_offsets)
+    assert counts.max() < 220, "chess rows are sparse in the 4,672-wide action space"
+    m = batch.obs.shape[0]
+    rows = np.repeat(np.arange(m), counts)
+    mask = np.zeros((m, a), dtype=bool)
+    mask[rows, batch.legal_ids] = True
     assert (batch.policy_targets[~mask] == 0.0).all()
 
 

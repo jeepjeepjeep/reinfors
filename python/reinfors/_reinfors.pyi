@@ -286,7 +286,8 @@ class AlphaZeroBatch:
     # (softmax over legal actions; densify per minibatch:
     #   counts = np.diff(legal_offsets); rows = np.repeat(np.arange(M), counts)
     #   mask = np.zeros((M, A), bool); mask[rows, legal_ids] = True
-    # then logits.masked_fill(~mask, -2**16) before log_softmax). Empty rows = value-only
+    # then logits.masked_fill(~mask, torch.finfo(logits.dtype).min) before log_softmax —
+    # finfo, not a constant: -2**16 overflows fp16). Empty rows = value-only
     # records. Named-access only; positional unpacking is unchanged.
     legal_ids: NDArray[np.int64]
     legal_offsets: NDArray[np.int64]

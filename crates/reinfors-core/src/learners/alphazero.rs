@@ -282,9 +282,11 @@ mod frame_tests {
     #[test]
     fn legal_maps_into_the_head_frame_with_pi() {
         let learner = AlphaZeroLearner::new(1.0);
-        let steps = vec![super::tests::step(vec![6.0, 2.0, 0.0], 0, 0.0)];
+        // a PROPER legal subset [0, 2]: the mapping must not depend on legal being full-width
+        let mut steps = vec![super::tests::step(vec![6.0, 0.0, 2.0], 0, 0.0)];
+        steps[0].evaluation.legal = vec![0, 2];
         let recs = learner.episode_records(&steps, &[], &Rot, 0, &mut SplitMix64::new(0));
-        // game-frame legal [0, 1, 2] through the same permutation -> heads [1, 2, 0]
-        assert_eq!(recs[0].5, vec![1, 2, 0]);
+        // game-frame [0, 2] through head = (game + 1) % 3 -> [1, 0]
+        assert_eq!(recs[0].5, vec![1, 0]);
     }
 }

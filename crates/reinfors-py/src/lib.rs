@@ -1504,7 +1504,8 @@ struct AlphaZeroBatch {
     /// losses (dense per minibatch:
     ///   counts = np.diff(legal_offsets); rows = np.repeat(np.arange(M), counts)
     ///   mask = np.zeros((M, A), bool); mask[rows, legal_ids] = True
-    /// then e.g. logits.masked_fill(~mask, -2**16) before log_softmax). Empty rows are
+    /// then logits.masked_fill(~mask, torch.finfo(logits.dtype).min) before log_softmax
+    /// — finfo, not a constant: -2**16 overflows fp16). Empty rows are
     /// value-only records (their policy term is already weighted out). Named-access only —
     /// positional unpacking stays (obs, policy_targets, value_targets, policy_weights,
     /// telemetry).
