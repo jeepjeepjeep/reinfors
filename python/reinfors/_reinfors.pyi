@@ -281,6 +281,15 @@ class AlphaZeroBatch:
     policy_targets: NDArray[np.float64]
     value_targets: NDArray[np.float64]
     policy_weights: NDArray[np.float64]
+    # Legality of each row's state, HEAD frame (π's frame), CSR: row i's ids =
+    # legal_ids[legal_offsets[i]:legal_offsets[i+1]] — the mask for legal-only policy losses
+    # (softmax over legal actions; densify per minibatch:
+    #   counts = np.diff(legal_offsets); rows = np.repeat(np.arange(M), counts)
+    #   mask = np.zeros((M, A), bool); mask[rows, legal_ids] = True
+    # then logits.masked_fill(~mask, -2**16) before log_softmax). Empty rows = value-only
+    # records. Named-access only; positional unpacking is unchanged.
+    legal_ids: NDArray[np.int64]
+    legal_offsets: NDArray[np.int64]
     telemetry: dict[str, Any]
     def __len__(self) -> int: ...
     def __getitem__(self, i: int) -> Any: ...

@@ -18,8 +18,11 @@ use crate::policies::tree::expectimax::SearchEvaluation;
 /// policy term: `(w * cross_entropy(logits, π)).sum() / w.sum()` — every row trains the value
 /// head, only weight-1 rows train the policy head. 2p-sequential and simultaneous games emit
 /// weight-1 rows only (supervised perspectives ≡ the perspectives their searches consume).
-/// `(obs, π, z, policy_weight, player)` — the player whose perspective the record supervises.
-pub type AlphaZeroRecord = (Vec<f32>, Vec<f64>, f64, f64, usize);
+/// `(obs, π, z, policy_weight, player, legal)` — the player whose perspective the record
+/// supervises, and the state's legal actions in the HEAD frame (π's frame): the mask for
+/// legal-only policy losses (softmax over legal actions, as the reference AlphaZero and
+/// open_spiel's model both train). Empty on value-only rows.
+pub type AlphaZeroRecord = (Vec<f32>, Vec<f64>, f64, f64, usize, Vec<usize>);
 
 /// The AlphaZero learner. Pairs with the `AlphaZero` (PUCT) policy: it reads the search's root visit
 /// counts as `π`, so the policy must produce visit-bearing evaluations.
@@ -123,7 +126,13 @@ impl Learner<SearchEvaluation> for AlphaZeroLearner {
                 }
                 pi
             };
-            out.push((step.obs.clone(), pi, z, weight, agent));
+            // legal travels in the head frame like π (it masks the same logits)
+            let legal: Vec<usize> = if identity {
+                step.evaluation.legal.clone()
+            } else {
+                step.evaluation.legal.iter().map(|&a| perm[a]).collect()
+            };
+            out.push((step.obs.clone(), pi, z, weight, agent, legal));
         }
         out.reverse();
         out
@@ -224,6 +233,15 @@ pub(crate) mod tests {
         assert_eq!(recs[1].1, vec![0.0; 3], "value-only pi is inert zeros");
         assert_eq!(recs[1].2, 2.0, "the value row carries its own return");
         assert_eq!(recs[0].2, 2.0, "gamma 1: the mover's z includes it");
+        assert_eq!(
+            recs[0].5,
+            vec![0, 1, 2],
+            "mover rows carry the state's legal set"
+        );
+        assert!(
+            recs[1].5.is_empty(),
+            "value-only rows have an empty legal set"
+        );
     }
 
     #[test]
@@ -259,5 +277,14 @@ mod frame_tests {
         let recs = learner.episode_records(&steps, &[], &Rot, 0, &mut SplitMix64::new(0));
         // game-frame π [0.75, 0.25, 0.0] lands at heads [1, 2, 0] -> [0.0, 0.75, 0.25]
         assert_eq!(recs[0].1, vec![0.0, 0.75, 0.25]);
+    }
+
+    #[test]
+    fn legal_maps_into_the_head_frame_with_pi() {
+        let learner = AlphaZeroLearner::new(1.0);
+        let steps = vec![super::tests::step(vec![6.0, 2.0, 0.0], 0, 0.0)];
+        let recs = learner.episode_records(&steps, &[], &Rot, 0, &mut SplitMix64::new(0));
+        // game-frame legal [0, 1, 2] through the same permutation -> heads [1, 2, 0]
+        assert_eq!(recs[0].5, vec![1, 2, 0]);
     }
 }

@@ -63,6 +63,23 @@ def test_collect_returns_named_alphazero_batch() -> None:
     assert "episodes" in batch.telemetry and batch.telemetry["decisions"] > 0
 
 
+def test_legal_csr_masks_the_policy_frame() -> None:
+    batch = _engine().collect(50, _uniform_infer)
+    m = batch.obs.shape[0]
+    ids, offsets = batch.legal_ids, batch.legal_offsets
+    assert offsets.shape == (m + 1,) and offsets[0] == 0 and offsets[-1] == len(ids)
+    assert (np.diff(offsets) >= 0).all()
+    # connect4 (reinfors rules): every column is always playable -> full legal rows
+    assert (np.diff(offsets) == _A).all()
+    assert ids.min() >= 0 and ids.max() < _A
+    # π's support is always inside the legal set
+    counts = np.diff(offsets)
+    rows = np.repeat(np.arange(m), counts)
+    mask = np.zeros((m, _A), dtype=bool)
+    mask[rows, ids] = True
+    assert (batch.policy_targets[~mask] == 0.0).all()
+
+
 def test_policy_targets_are_distributions() -> None:
     _, pi, _, _, _ = _engine().collect(80, _uniform_infer)
     assert (pi >= 0.0).all()
