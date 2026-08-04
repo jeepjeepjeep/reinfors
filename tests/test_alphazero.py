@@ -63,6 +63,19 @@ def test_collect_returns_named_alphazero_batch() -> None:
     assert "episodes" in batch.telemetry and batch.telemetry["decisions"] > 0
 
 
+@pytest.mark.parametrize("bad_value", [np.nan, np.inf, -np.inf])
+@pytest.mark.parametrize("output", ["logits", "values"])
+def test_collect_rejects_non_finite_inference_outputs(bad_value: float, output: str) -> None:
+    def infer(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        logits = np.zeros((arr.shape[0], _A))
+        values = np.zeros(arr.shape[0])
+        (logits if output == "logits" else values).flat[0] = bad_value
+        return logits, values
+
+    with pytest.raises(ValueError, match="finite"):
+        _engine(num_simulations=2).collect(1, infer)
+
+
 def test_policy_targets_are_distributions() -> None:
     _, pi, _, _, _ = _engine().collect(80, _uniform_infer)
     assert (pi >= 0.0).all()
@@ -238,6 +251,18 @@ def test_rejects_bad_noise_alpha_and_c_puct() -> None:
 def test_rejects_malformed_infer_output(bad_infer: Callable[[np.ndarray], object]) -> None:
     with pytest.raises((ValueError, TypeError)):
         _engine().collect(10, bad_infer)
+
+
+def test_rejects_wrong_alphazero_dtype_with_observed_arrays() -> None:
+    def bad_infer(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        return np.zeros((arr.shape[0], _A), dtype=np.float32), np.zeros(arr.shape[0])
+
+    with pytest.raises(TypeError) as error:
+        _engine().collect(10, bad_infer)
+    message = str(error.value)
+    assert "policy_logits as a float64 NumPy array with rank 2" in message
+    assert "ndarray(dtype=float32" in message
+    assert "ndarray(dtype=float64" in message
 
 
 def test_make_by_name() -> None:

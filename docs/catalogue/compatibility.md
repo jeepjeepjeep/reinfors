@@ -15,19 +15,8 @@ This is the canonical compatibility matrix for Python's built-in handles. It is 
 | Snake | Yes | Yes | Yes | Yes | — | — | — |
 | Texas Hold'em | Yes | — | — | — | — | Yes | Yes |
 
-## Optional engine capabilities
-
-| Game | Reached-state starts |
-| --- | --- |
-| Backgammon | — |
-| Chess | — |
-| Connect 4 | — |
-| GridWorld | — |
-| Kuhn poker | — |
-| Leduc poker | — |
-| Snake | Yes |
-| Texas Hold'em | — |
+**Reached-state starts:** Snake. See the optional [`Engine` start buffer](../guides/configuration-and-checkpoints.md#reached-state-starts).
 
 Exact CFR/CFR+ requires enumerable chance fans. Texas Hold'em therefore uses the external-sampling MCCFR variant shown separately.
 
-Downstream Rust components can add compositions beyond this built-in Python matrix when they satisfy the relevant core traits.
+Additional native components can add compositions beyond this built-in matrix when they satisfy the relevant core traits and the current [native component boundary](../reference/limits.md#native-component-boundary).

@@ -20,6 +20,7 @@ class GameInfo:
     information: str
     actions: str
     observation: str
+    reward_keys: tuple[tuple[str, float], ...]
     adapters: str
     reached_state_starts: bool
     algorithms: tuple[str, ...]
@@ -30,6 +31,11 @@ class GameInfo:
 class AlgorithmInfo:
     label: str
     workflow: str
+    policy_or_solver: str
+    learner: str | None
+    training_output: str
+    example_label: str
+    example_anchor: str
     players: str
     dynamics: str
     chance: str
@@ -37,6 +43,15 @@ class AlgorithmInfo:
     network: str
     summary: str
     references: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class EncoderInfo:
+    label: str
+    game: str
+    shape: str
+    constructor: str
+    summary: str
 
 
 GAMES: dict[str, GameInfo] = {
@@ -48,6 +63,7 @@ GAMES: dict[str, GameInfo] = {
         "Perfect",
         "1,352 discrete ids",
         "Fixed CHW tensor",
+        (("win", 1.0), ("gammon", 2.0), ("backgammon", 3.0)),
         "PettingZoo AEC",
         False,
         ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero"),
@@ -61,6 +77,7 @@ GAMES: dict[str, GameInfo] = {
         "Perfect",
         "AlphaZero 8x8x73",
         "Selectable fixed CHW encoder",
+        (("win", 1.0), ("loss", -1.0), ("draw", 0.0)),
         "PettingZoo AEC",
         False,
         ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero"),
@@ -74,6 +91,7 @@ GAMES: dict[str, GameInfo] = {
         "Perfect",
         "7 columns",
         "Fixed CHW tensor",
+        (("win", 1.0), ("loss", -1.0), ("draw", 0.0)),
         "PettingZoo AEC",
         False,
         ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero"),
@@ -87,6 +105,7 @@ GAMES: dict[str, GameInfo] = {
         "Perfect",
         "4 directions",
         "Fixed CHW tensor",
+        (("step", 0.0), ("goal", 1.0)),
         "Gymnasium",
         False,
         ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero"),
@@ -100,6 +119,7 @@ GAMES: dict[str, GameInfo] = {
         "Imperfect",
         "Pass / bet",
         "Fixed information-state tensor",
+        (("scale", 1.0),),
         "PettingZoo AEC",
         False,
         ("dqn", "cfr", "external_mccfr", "deep_cfr"),
@@ -113,6 +133,7 @@ GAMES: dict[str, GameInfo] = {
         "Imperfect",
         "Fold / call / raise",
         "Fixed information-state tensor",
+        (("scale", 1.0),),
         "PettingZoo AEC",
         False,
         ("dqn", "cfr", "external_mccfr", "deep_cfr"),
@@ -126,6 +147,15 @@ GAMES: dict[str, GameInfo] = {
         "Perfect",
         "3 relative moves",
         "Egocentric fixed CHW tensor",
+        (
+            ("step", 0.0),
+            ("food", 0.0),
+            ("loss", -1.0),
+            ("draw", 0.0),
+            ("kill", 0.0),
+            ("win", 1.0),
+            ("survival", 0.0),
+        ),
         "PettingZoo Parallel",
         True,
         ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero"),
@@ -139,6 +169,7 @@ GAMES: dict[str, GameInfo] = {
         "Imperfect",
         "Fold / call / raise",
         "Egocentric fixed CHW tensor",
+        (("scale", 1.0),),
         "PettingZoo AEC",
         False,
         ("dqn", "external_mccfr", "deep_cfr"),
@@ -147,10 +178,48 @@ GAMES: dict[str, GameInfo] = {
 }
 
 
+ENCODER_INFO: dict[str, EncoderInfo] = {
+    "minimal_chess": EncoderInfo(
+        "MinimalChess",
+        "Chess",
+        "(19, 8, 8)",
+        "rf.encoders.MinimalChess()",
+        "Absolute piece, turn, castling, en-passant and clock planes; the Chess default.",
+    ),
+    "relative_chess": EncoderInfo(
+        "RelativeChess",
+        "Chess",
+        "(19, 8, 8)",
+        "rf.encoders.RelativeChess()",
+        "Mover-relative board and matching action-head mapping.",
+    ),
+    "openspiel_chess": EncoderInfo(
+        "OpenSpielChess",
+        "Chess",
+        "(20, 8, 8)",
+        "rf.encoders.OpenSpielChess()",
+        "OpenSpiel-compatible observation for parity and benchmarking.",
+    ),
+    "alphazero_chess": EncoderInfo(
+        "AlphaZeroChess",
+        "Chess",
+        "(119, 8, 8) by default",
+        "rf.encoders.AlphaZeroChess(history_length=8)",
+        "Uses `14 * history_length + 7` channels for history, repetition, side, move-count, "
+        "castling and clock features.",
+    ),
+}
+
+
 ALGORITHMS: dict[str, AlgorithmInfo] = {
     "dqn": AlgorithmInfo(
         "DQN",
-        "Engine: EpsilonGreedyQ + Dqn",
+        "Engine",
+        "rf.policies.EpsilonGreedyQ",
+        "rf.learners.Dqn",
+        "DqnBatch",
+        "GridWorld DQN training example",
+        "train-gridworld",
         "Any N",
         "Sequential or simultaneous",
         "Sampled by the engine",
@@ -162,9 +231,14 @@ ALGORITHMS: dict[str, AlgorithmInfo] = {
     "treestrap_expectimax": AlgorithmInfo(
         "TreeStrap + selective expectimax",
         "Engine",
+        "rf.policies.SelectiveExpectimax",
+        "rf.learners.TreeStrap",
+        "TreeStrapBatch",
+        "TreeStrap training example",
+        "treestrap-snake",
         "Any N",
         "Sequential or simultaneous",
-        "Committed samples or expand-all",
+        "Committed or ExpandAll",
         "Perfect only",
         "Ensemble action values",
         "Best-first search whose backed-up values become supervised learning targets.",
@@ -178,28 +252,45 @@ ALGORITHMS: dict[str, AlgorithmInfo] = {
     "treestrap_mcts": AlgorithmInfo(
         "TreeStrap + UCT MCTS",
         "Engine",
+        "rf.policies.Mcts",
+        "rf.learners.TreeStrap",
+        "TreeStrapBatch",
+        "TreeStrap MCTS training example",
+        "treestrap-snake",
         "Sequential <=2; simultaneous N",
         "Sequential or simultaneous",
-        "Resample, committed or expand-all",
+        "AlwaysResample, Committed, or ExpandAll",
         "Perfect only",
-        "Single-head action values",
+        "One ensemble head of action values",
         "UCT for sequential games and decoupled UCT for simultaneous multiplayer games.",
         (("UCT", "https://doi.org/10.1007/11871842_29"),),
     ),
     "alphazero": AlgorithmInfo(
         "AlphaZero",
-        "Engine: AlphaZero policy + learner",
+        "Engine",
+        "rf.policies.AlphaZero",
+        "rf.learners.AlphaZero",
+        "AlphaZeroBatch",
+        "AlphaZero training example",
+        "alphazero-connect-4",
         "Any N",
         "Sequential or simultaneous",
-        "Resample, committed or expand-all",
+        "AlwaysResample, Committed, or ExpandAll",
         "Perfect only",
-        "Policy logits plus per-player values",
-        "PUCT self-play with policy targets, outcome values and sequential MaxN backup.",
+        "Policy logits (rows, actions) plus values (rows,)",
+        "PUCT self-play with policy targets and outcome values. For sequential games, "
+        '`sequential_backup="auto"` uses negamax at one or two players and MaxN above two; '
+        '`"maxn"` forces MaxN at two players.',
         (("AlphaZero", "https://doi.org/10.1126/science.aar6404"),),
     ),
     "cfr": AlgorithmInfo(
         "CFR / CFR+",
         "Standalone solver",
+        "rf.solvers.Cfr",
+        None,
+        "Internal strategy tables",
+        "CFR solving example",
+        "solve-leduc",
         "2-10",
         "Sequential",
         "Exact enumeration",
@@ -214,6 +305,11 @@ ALGORITHMS: dict[str, AlgorithmInfo] = {
     "external_mccfr": AlgorithmInfo(
         "External-sampling MCCFR",
         "Standalone solver",
+        'rf.solvers.Cfr(variant="external_mccfr")',
+        None,
+        "Internal strategy tables",
+        "MCCFR solving example",
+        "solve-leduc",
         "2-10",
         "Sequential",
         "Sampled",
@@ -230,7 +326,12 @@ ALGORITHMS: dict[str, AlgorithmInfo] = {
     "deep_cfr": AlgorithmInfo(
         "Deep CFR",
         "Standalone data-generating solver",
-        "2-10",
+        "rf.solvers.DeepCfr",
+        None,
+        "DeepCfrBatch",
+        "Deep CFR training example",
+        "deep-cfr-training",
+        "Kuhn 2-10; Leduc 2; Hold'em 2-9",
         "Sequential",
         "Sampled",
         "Imperfect-information native",
@@ -245,7 +346,7 @@ ALGORITHMS: dict[str, AlgorithmInfo] = {
 # Rust-free; runtime tests compare it with every actual `registered()` result.
 POLICIES = frozenset({"alphazero", "epsilon_greedy_q", "mcts", "selective_expectimax"})
 LEARNERS = frozenset({"alphazero", "dqn", "treestrap"})
-ENCODERS = frozenset({"alphazero_chess", "minimal_chess", "openspiel_chess", "relative_chess"})
+ENCODERS = frozenset(ENCODER_INFO)
 CHANCE_MODES = frozenset({"always_resample", "committed", "expand_all"})
 NOISE = frozenset({"dirichlet"})
 
@@ -254,10 +355,12 @@ __all__ = [
     "ALGORITHMS",
     "CHANCE_MODES",
     "ENCODERS",
+    "ENCODER_INFO",
     "GAMES",
     "LEARNERS",
     "NOISE",
     "POLICIES",
     "AlgorithmInfo",
+    "EncoderInfo",
     "GameInfo",
 ]

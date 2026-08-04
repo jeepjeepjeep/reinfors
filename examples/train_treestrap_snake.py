@@ -10,7 +10,7 @@ This is a deliberately tiny, self-contained reference, not a production trainer:
 checkpoints, no logging. It exists to show the wiring. For a real run (config, replay, TensorBoard,
 resume) see snake_RL's `scripts/train_reinfors.py`, which uses this same `Engine` + `infer` contract.
 
-    uv run --with torch python examples/train_example.py --iterations 20
+    uv run --with torch python examples/train_treestrap_snake.py --iterations 20
 """
 
 from __future__ import annotations

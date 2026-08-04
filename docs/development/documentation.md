@@ -36,10 +36,13 @@ tests keep metadata names aligned with exported constructors.
 
 ## Preview
 
+The catalogue generator and documentation checks do not import the native extension. Preview the
+site with an isolated MkDocs tool environment, without installing the package or compiling Rust:
+
 ```bash
-pip install ".[docs]"
-python scripts/generate_docs.py
-mkdocs serve
+python scripts/generate_docs.py --check
+python scripts/check_docs.py
+uvx --with mkdocs-material==9.7.7 mkdocs==1.6.1 serve
 ```
 
 Before committing:
@@ -47,5 +50,5 @@ Before committing:
 ```bash
 python scripts/generate_docs.py --check
 python scripts/check_docs.py
-mkdocs build --strict
+uvx --with mkdocs-material==9.7.7 mkdocs==1.6.1 build --strict
 ```

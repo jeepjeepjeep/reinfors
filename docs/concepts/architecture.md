@@ -12,8 +12,10 @@ Reinfors separates reusable rules, search, record generation, and user-owned lea
                                 │ NumPy in / NumPy out
 ┌───────────────────────────────┼────────────────────────────────┐
 │ Rust                          ▼                                │
-│ Game + Encoder + Reward → Policy + Learner → Engine → Batch   │
-│          rules/state       search/records    parallel games   │
+│ Game ───────┐                                                 │
+│ Encoder ────┼→ Policy + Learner → Engine → Batch              │
+│ Reward ─────┘   search/records    parallel games              │
+│ rules/state · representation · objective                      │
 └────────────────────────────────────────────────────────────────┘
 
 Env: caller-driven play and evaluation
@@ -47,7 +49,7 @@ returns samples for caller-owned buffers and optimization.
 | `Env` | Expose one caller-controlled game instance. |
 | `Solver` | Own algorithm-specific traversals and persistent state outside the policy/learner engine model. |
 
-The [Rust component guide](../extending/rust-components.md) describes the implementation
+The [native component contracts](../extending/component-contracts.md) describe the implementation
 contracts in detail.
 
 ## Why the inference boundary uses arrays
@@ -57,4 +59,12 @@ ABI at that boundary and lets callers wrap PyTorch, JAX, ONNX Runtime, a custom 
 or RPC. Legal actions remain a property of the game and are enforced around inference by
 search, selection, and loss construction; masks are not model inputs.
 
-This keeps the one hot seam small while leaving model architecture and deployment open.
+This keeps the single performance-critical seam small while leaving model architecture and
+deployment open.
+
+## Next steps
+
+- Put the components together in the [training-loop guide](../guides/training.md).
+- Read the mandatory callback shapes and validation rules in the
+  [inference contract](../reference/inference-contract.md).
+- Compare supported compositions in the [algorithm catalogue](../catalogue/algorithms.md).

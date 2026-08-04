@@ -4,49 +4,37 @@
 
 Game rules, rewards and encoders are separate components. The table describes the built-in defaults; constructors expose the configurable details.
 
-| Game | Players | Decisions | Chance | Information | Actions | Observation | Adapter |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Backgammon | 2 | Sequential | Dice | Perfect | 1,352 discrete ids | Fixed CHW tensor | PettingZoo AEC |
-| Chess | 2 | Sequential | No | Perfect | AlphaZero 8x8x73 | Selectable fixed CHW encoder | PettingZoo AEC |
-| Connect 4 | 2 | Sequential | No | Perfect | 7 columns | Fixed CHW tensor | PettingZoo AEC |
-| GridWorld | 1 | Sequential | No | Perfect | 4 directions | Fixed CHW tensor | Gymnasium |
-| Kuhn poker | 2-10 | Sequential | Card deal | Imperfect | Pass / bet | Fixed information-state tensor | PettingZoo AEC |
-| Leduc poker | 2 | Sequential | Card deal | Imperfect | Fold / call / raise | Fixed information-state tensor | PettingZoo AEC |
-| Snake | 2-8 | Simultaneous | Placement and respawn | Perfect | 3 relative moves | Egocentric fixed CHW tensor | PettingZoo Parallel |
-| Texas Hold'em | 2-9 | Sequential | Deal and board | Imperfect | Fold / call / raise | Egocentric fixed CHW tensor | PettingZoo AEC |
+| Game | Players | Decisions | Chance | Information | Actions | Observation | Reward arguments (defaults) | Adapter |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Backgammon | 2 | Sequential | Dice | Perfect | 1,352 discrete ids | Fixed CHW tensor | `win`=1, `gammon`=2, `backgammon`=3 | PettingZoo AEC |
+| Chess | 2 | Sequential | No | Perfect | AlphaZero 8x8x73 | Selectable fixed CHW encoder | `win`=1, `loss`=-1, `draw`=0 | PettingZoo AEC |
+| Connect 4 | 2 | Sequential | No | Perfect | 7 columns | Fixed CHW tensor | `win`=1, `loss`=-1, `draw`=0 | PettingZoo AEC |
+| GridWorld | 1 | Sequential | No | Perfect | 4 directions | Fixed CHW tensor | `step`=0, `goal`=1 | Gymnasium |
+| Kuhn poker | 2-10 | Sequential | Card deal | Imperfect | Pass / bet | Fixed information-state tensor | `scale`=1 | PettingZoo AEC |
+| Leduc poker | 2 | Sequential | Card deal | Imperfect | Fold / call / raise | Fixed information-state tensor | `scale`=1 | PettingZoo AEC |
+| Snake | 2-8 | Simultaneous | Placement and respawn | Perfect | 3 relative moves | Egocentric fixed CHW tensor | `step`=0, `food`=0, `loss`=-1, `draw`=0, `kill`=0, `win`=1, `survival`=0 | PettingZoo Parallel |
+| Texas Hold'em | 2-9 | Sequential | Deal and board | Imperfect | Fold / call / raise | Egocentric fixed CHW tensor | `scale`=1 | PettingZoo AEC |
 
-## At a glance
+The action interface is one fixed discrete vocabulary per game; continuous and parameterized actions are outside the current [action-space boundary](../reference/limits.md#fixed-observation-and-action-spaces). The Decisions column describes one game-wide mode: a game cannot currently switch between sequential and simultaneous [decision phases](../reference/limits.md#decision-phases).
 
-### Backgammon
+Reward arguments are the keyword weights accepted by `rf.Reward` for that game; unknown names are rejected at `Engine` construction. Poker's `scale` multiplies the native chip-delta event.
 
-Standard play without the doubling cube; win, gammon and backgammon outcomes.
+## Observation encoders
 
-### Chess
+Chess is currently the only built-in game with an `encoder=` constructor argument. It uses `MinimalChess` when the argument is omitted; select another Chess view by passing its handle and size a network from `game.observation_space().shape` after construction.
 
-Standard chess with minimal, relative, OpenSpiel and AlphaZero observation views.
+```python
+game = rf.games.Chess(encoder=rf.encoders.RelativeChess())
+obs_shape = game.observation_space().shape  # (19, 8, 8)
+```
 
-### Connect 4
+| Encoder | Game | Observation shape | Constructor | Purpose |
+| --- | --- | --- | --- | --- |
+| MinimalChess | Chess | (19, 8, 8) | `rf.encoders.MinimalChess()` | Absolute piece, turn, castling, en-passant and clock planes; the Chess default. |
+| RelativeChess | Chess | (19, 8, 8) | `rf.encoders.RelativeChess()` | Mover-relative board and matching action-head mapping. |
+| OpenSpielChess | Chess | (20, 8, 8) | `rf.encoders.OpenSpielChess()` | OpenSpiel-compatible observation for parity and benchmarking. |
+| AlphaZeroChess | Chess | (119, 8, 8) by default | `rf.encoders.AlphaZeroChess(history_length=8)` | Uses `14 * history_length + 7` channels for history, repetition, side, move-count, castling and clock features. |
 
-Compact deterministic benchmark for value learning, MCTS and AlphaZero.
-
-### GridWorld
-
-Small single-agent environment for checking basic training and integration loops.
-
-### Kuhn poker
-
-OpenSpiel-compatible N-player Kuhn poker for CFR and Deep CFR experiments.
-
-### Leduc poker
-
-Two-round imperfect-information benchmark between Kuhn and full Hold'em.
-
-### Snake
-
-Simultaneous multiplayer game with dynamic bodies and explicit respawn chance.
-
-### Texas Hold'em
-
-Multiway no-limit-style poker surface with all-ins, side pots and chance runouts.
+Before moving action ids between a network and `Env`, read the [action-frame contract](../reference/glossary.md#action-frames).
 
 See [built-in compatibility](compatibility.md) for supported workflows and the [Python API](../reference/python-api.md) for constructor parameters.

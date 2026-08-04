@@ -2,17 +2,33 @@
 
 # Algorithms
 
-Choose a workflow first: Engine algorithms emit training records while standalone solvers own their traversal. Python always owns neural-network training.
+Choose a workflow first: Engine algorithms emit training records while standalone solvers own their traversal. Python always owns neural-network training. In the search rows, `AlwaysResample`, `Committed`, and `ExpandAll` name handles from [`rf.chance_modes`](../reference/glossary.md#chance-modes); DQN and solver rows describe their own chance treatment. The glossary also defines records, ensemble heads, and MaxN.
+
+## Composition and training output
+
+| Algorithm | Execution | Policy or solver | Learner | Training output | Example |
+| --- | --- | --- | --- | --- | --- |
+| DQN | Engine | `rf.policies.EpsilonGreedyQ` | `rf.learners.Dqn` | [`DqnBatch`](../reference/batch-formats.md#dqnbatch) | [GridWorld DQN training example](../examples/index.md#train-gridworld) |
+| TreeStrap + selective expectimax | Engine | `rf.policies.SelectiveExpectimax` | `rf.learners.TreeStrap` | [`TreeStrapBatch`](../reference/batch-formats.md#treestrapbatch) | [TreeStrap training example](../examples/index.md#treestrap-snake) |
+| TreeStrap + UCT MCTS | Engine | `rf.policies.Mcts` | `rf.learners.TreeStrap` | [`TreeStrapBatch`](../reference/batch-formats.md#treestrapbatch) | [TreeStrap MCTS training example](../examples/index.md#treestrap-snake) |
+| AlphaZero | Engine | `rf.policies.AlphaZero` | `rf.learners.AlphaZero` | [`AlphaZeroBatch`](../reference/batch-formats.md#alphazerobatch) | [AlphaZero training example](../examples/index.md#alphazero-connect-4) |
+| CFR / CFR+ | Standalone solver | `rf.solvers.Cfr` | — | Internal strategy tables | [CFR solving example](../examples/index.md#solve-leduc) |
+| External-sampling MCCFR | Standalone solver | `rf.solvers.Cfr(variant="external_mccfr")` | — | Internal strategy tables | [MCCFR solving example](../examples/index.md#solve-leduc) |
+| Deep CFR | Standalone data-generating solver | `rf.solvers.DeepCfr` | — | [`DeepCfrBatch`](../reference/batch-formats.md#deepcfrbatch) | [Deep CFR training example](../examples/index.md#deep-cfr-training) |
+
+Engine rows name the exact policy/learner handles passed to `rf.Engine`. Standalone solvers own their traversal; tabular CFR updates internal tables, while Deep CFR emits a caller-trained batch.
+
+## Supported semantics
 
 | Algorithm | Workflow | Players | Decisions | Chance | Information | Network output |
 | --- | --- | --- | --- | --- | --- | --- |
-| DQN | Engine: EpsilonGreedyQ + Dqn | Any N | Sequential or simultaneous | Sampled by the engine | Perfect or imperfect | Q values: (rows, heads, actions) |
-| TreeStrap + selective expectimax | Engine | Any N | Sequential or simultaneous | Committed samples or expand-all | Perfect only | Ensemble action values |
-| TreeStrap + UCT MCTS | Engine | Sequential <=2; simultaneous N | Sequential or simultaneous | Resample, committed or expand-all | Perfect only | Single-head action values |
-| AlphaZero | Engine: AlphaZero policy + learner | Any N | Sequential or simultaneous | Resample, committed or expand-all | Perfect only | Policy logits plus per-player values |
+| DQN | Engine | Any N | Sequential or simultaneous | Sampled by the engine | Perfect or imperfect | Q values: (rows, heads, actions) |
+| TreeStrap + selective expectimax | Engine | Any N | Sequential or simultaneous | Committed or ExpandAll | Perfect only | Ensemble action values |
+| TreeStrap + UCT MCTS | Engine | Sequential <=2; simultaneous N | Sequential or simultaneous | AlwaysResample, Committed, or ExpandAll | Perfect only | One ensemble head of action values |
+| AlphaZero | Engine | Any N | Sequential or simultaneous | AlwaysResample, Committed, or ExpandAll | Perfect only | Policy logits (rows, actions) plus values (rows,) |
 | CFR / CFR+ | Standalone solver | 2-10 | Sequential | Exact enumeration | Imperfect-information native | No network |
 | External-sampling MCCFR | Standalone solver | 2-10 | Sequential | Sampled | Imperfect-information native | No network |
-| Deep CFR | Standalone data-generating solver | 2-10 | Sequential | Sampled | Imperfect-information native | Per-player advantage networks; average-policy samples |
+| Deep CFR | Standalone data-generating solver | Kuhn 2-10; Leduc 2; Hold'em 2-9 | Sequential | Sampled | Imperfect-information native | Per-player advantage networks; average-policy samples |
 
 ## Algorithm families
 
@@ -36,7 +52,7 @@ UCT for sequential games and decoupled UCT for simultaneous multiplayer games.
 
 ### AlphaZero
 
-PUCT self-play with policy targets, outcome values and sequential MaxN backup.
+PUCT self-play with policy targets and outcome values. For sequential games, `sequential_backup="auto"` uses negamax at one or two players and MaxN above two; `"maxn"` forces MaxN at two players.
 
 **Sources:** [AlphaZero](https://doi.org/10.1126/science.aar6404).
 
@@ -58,4 +74,4 @@ Batched external-sampling traversals with caller-owned buffers and training.
 
 **Sources:** [Deep CFR](https://proceedings.mlr.press/v97/brown19b.html).
 
-See [built-in compatibility](compatibility.md), [sampling and training](../how-it-works/sampling-and-training.md), and the [inference contract](../reference/inference-contract.md).
+See [built-in compatibility](compatibility.md), [sampling and training](../concepts/sampling-and-training.md), and the [inference contract](../reference/inference-contract.md).

@@ -48,9 +48,15 @@ for update in range(num_updates):
     if episodes:
         mean_length = sum(length for _returns, length, _seeded in episodes) / len(episodes)
         writer.add_scalar("episodes/mean_length", mean_length, update)
+        for player in range(len(episodes[0][0])):
+            mean_return = sum(
+                returns[player] for returns, _length, _seeded in episodes
+            ) / len(episodes)
+            writer.add_scalar(f"episodes/mean_return_player_{player}", mean_return, update)
 ```
 
-The complete runnable version is `examples/telemetry_tensorboard.py`.
+The complete runnable version is
+[`examples/telemetry_tensorboard.py`](../examples/index.md#tensorboard-telemetry).
 
 ## Useful derived measurements
 
@@ -67,3 +73,11 @@ configuration, hardware, build profile, model, callback batch sizes, and episode
 quality metrics together.
 
 See the [telemetry field reference](../reference/telemetry-fields.md) for definitions.
+
+## Next steps
+
+- Apply the same metrics to an overlapped actor–learner loop with
+  [concurrent collection](streaming.md).
+- Persist the resolved configuration beside logs using
+  [configuration and checkpoints](configuration-and-checkpoints.md).
+- Follow the [benchmark methodology](../benchmarks/methodology.md) before publishing throughput.

@@ -34,6 +34,7 @@ theme:
 markdown_extensions:
   - admonition
   - attr_list
+  - md_in_html
   - pymdownx.details
   - pymdownx.highlight:
       anchor_linenums: true
@@ -47,34 +48,41 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Getting started: getting-started.md
-  - How it works:
-      - Architecture: how-it-works/architecture.md
-      - Sampling and training: how-it-works/sampling-and-training.md
   - Guides:
+      - guides/index.md
       - Training loop: guides/training.md
-      - Concurrent collection: guides/streaming.md
       - Telemetry and TensorBoard: guides/telemetry.md
-      - Evaluation: guides/evaluation.md
+      - Concurrent collection: guides/streaming.md
       - Configuration and checkpoints: guides/configuration-and-checkpoints.md
-  - Coverage:
+      - Evaluation: guides/evaluation.md
+      - Gymnasium and PettingZoo: guides/adapters.md
+  - Concepts:
+      - concepts/index.md
+      - Architecture: concepts/architecture.md
+      - Sampling and training: concepts/sampling-and-training.md
+  - Catalogue:
+      - catalogue/index.md
       - Games: catalogue/games.md
       - Algorithms: catalogue/algorithms.md
       - Compatibility: catalogue/compatibility.md
   - Examples: examples/index.md
   - Extending reinfors:
-      - Overview: extending/index.md
-      - Rust components: extending/rust-components.md
+      - extending/index.md
+      - Component contracts: extending/component-contracts.md
+      - Add a game: extending/rust-components.md
       - Python bindings: extending/python-bindings.md
   - Benchmarks:
-      - Status: benchmarks/index.md
+      - benchmarks/index.md
       - Methodology: benchmarks/methodology.md
       - Reproducing: benchmarks/reproducing.md
   - Reference:
-      - Overview: reference/index.md
+      - reference/index.md
       - Inference contract: reference/inference-contract.md
       - Batch formats: reference/batch-formats.md
+      - Glossary: reference/glossary.md
       - Telemetry fields: reference/telemetry-fields.md
       - Python API: reference/python-api.md
+      - Troubleshooting: reference/troubleshooting.md
       - Current boundaries: reference/limits.md
   - Development:
       - Setup: development/setup.md

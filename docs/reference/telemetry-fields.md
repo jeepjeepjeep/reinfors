@@ -1,32 +1,58 @@
 # Telemetry fields
 
-Engine batch telemetry is a plain dictionary scoped to one collection call. A field may be
-zero when the selected policy does not use that mechanism.
+Engine batch telemetry is a plain dictionary scoped to one collection call. The keys are uniform
+across policies; **Applies to** identifies which policies populate a mechanism rather than leaving
+its counters at zero. This distinction prevents, for example, interpreting zero ensemble
+disagreement from `EpsilonGreedyQ` as measured agreement.
 
-| Field | Meaning |
-| --- | --- |
-| `episodes` | Completed `(returns, length, seeded)` tuples. `returns` is one scalar per player; `seeded` marks reached-state-buffer starts. |
-| `decisions` | Policy decisions completed during collection. |
-| `max_depth` | Maximum search depth observed. |
-| `mean_leaves` | Mean leaf count over measured searches. |
-| `mean_rounds` | Mean pooled inference/search rounds. |
-| `mean_expansions` | Mean expanded nodes. |
-| `mean_sigma` | Mean ensemble uncertainty statistic where defined. |
-| `mean_disagreement` | Mean ensemble action disagreement where defined. |
-| `infer_seconds` | Wall time observed inside inference callbacks. |
-| `infer_calls` | Number of pooled callback invocations. |
-| `infer_rows` | Total observation rows sent to callbacks. |
-| `cache_lookups` | Evaluation-cache lookup count. |
-| `cache_hits` | Successful evaluation-cache lookups. |
-| `terminal_sims` | Simulations ending at terminal state. |
-| `depthcap_sims` | Simulations ending at the configured depth cap. |
-| `shared_rows` | Rows shared by more than one request within batching/search reuse. |
-| `fresh_rows` | Newly evaluated rows. |
-| `hit_rows` | Rows served from the persistent inference cache. |
-| `extra_eval_rows` | Additional perspectives evaluated for an algorithmic backup. |
+| Field | Type / unit | Applies to | Meaning |
+| --- | --- | --- | --- |
+| `episodes` | `list[tuple[list[float], int, bool]]` | All engine policies | Completed `(returns, length, seeded)` tuples. Returns contain one scalar per player; length is in ticks. |
+| `decisions` | `int` decisions | All engine policies | Policy decisions completed during collection. |
+| `max_depth` | `int` tree depth | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Maximum search depth observed. |
+| `mean_leaves` | `float` leaves / decision | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Mean leaf count over completed searches. |
+| `mean_rounds` | `float` rounds / decision | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Mean pooled inference/search rounds. |
+| `mean_expansions` | `float` nodes / decision | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Mean expanded-node count. |
+| `mean_sigma` | `float` value units | `SelectiveExpectimax`, `n_heads >= 2` | Mean epistemic uncertainty across searched leaves; reported as `0.0` with one head. |
+| `mean_disagreement` | `float` value units | `SelectiveExpectimax`, `n_heads >= 2` | Mean root action-value disagreement across ensemble heads; reported as `0.0` with one head. |
+| `infer_seconds` | `float` seconds | All engine policies | Wall time observed inside inference callbacks. |
+| `infer_calls` | `int` calls | All engine policies | Pooled callback invocations. |
+| `infer_rows` | `int` rows | All engine policies | Observation rows actually sent to callbacks. |
+| `cache_lookups` | `int` rows | Any policy with `infer_cache` enabled | Persistent evaluation-cache lookups. |
+| `cache_hits` | `int` rows | Any policy with `infer_cache` enabled | Successful persistent evaluation-cache lookups. |
+| `terminal_sims` | `int` simulations | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Simulations ending at a terminal state. |
+| `depthcap_sims` | `int` simulations | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Simulations ending at the configured depth cap. |
+| `shared_rows` | `int` rows | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Evaluation rows shared by multiple requests within one search. |
+| `fresh_rows` | `int` rows | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Search rows requiring a new evaluation. |
+| `hit_rows` | `int` rows | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Search rows served from the persistent inference cache. |
+| `extra_eval_rows` | `int` rows | `Mcts`, `AlphaZero` | Rows beyond one per simulation, from multi-perspective leaf evaluation or an `ExpandAll` chance fan. |
 
-Deep CFR batch telemetry includes `player`, `traversals`, advantage and strategy sample
-counts, inference calls/rows/seconds, total collection seconds, and cache statistics.
+The preceding Engine cache counters apply only when the engine was constructed with `infer_cache`;
+they remain zero when it is disabled. See the
+[cache lifecycle guide](../guides/configuration-and-checkpoints.md#inference-cache-lifecycle).
+The `seeded` episode flag is relevant only when
+[reached-state starts](../guides/configuration-and-checkpoints.md#reached-state-starts) are enabled.
+
+## Deep CFR
+
+`rf.solvers.DeepCfr.collect` returns a separate telemetry dictionary:
+
+| Field | Type / unit | Applies to | Meaning |
+| --- | --- | --- | --- |
+| `player` | `int` player id | Every Deep CFR collect | Traversing player for this collection. |
+| `traversals` | `int` traversals | Every Deep CFR collect | External-sampling traversals completed. |
+| `advantage_samples` | `int` records | Every Deep CFR collect | Advantage records produced. |
+| `strategy_samples` | `int` records | Every Deep CFR collect | Average-strategy records produced. |
+| `infer_calls` | `int` calls | Every Deep CFR collect | Pooled advantage-network callback invocations. |
+| `infer_rows` | `int` rows | Every Deep CFR collect | Information-state rows sent to callbacks. |
+| `infer_seconds` | `float` seconds | Every Deep CFR collect | Wall time observed inside inference callbacks. |
+| `collect_seconds` | `float` seconds | Every Deep CFR collect | Total collection wall time. |
+| `cache_lookups` | `int` rows | Every Deep CFR collect | Advantage-cache lookups within this collection. |
+| `cache_hits` | `int` rows | Every Deep CFR collect | Successful advantage-cache lookups within this collection. |
+
+Deep CFR's per-player caches are unconditional implementation machinery rather than a constructor
+option. They reuse rows within one `collect` call and are force-cleared at the start of the next
+call, allowing networks to be retrained between calls without explicit invalidation.
 
 Treat the dictionary as extensible. Read known keys and preserve unknown keys when forwarding
 structured logs. See [telemetry and TensorBoard](../guides/telemetry.md) for aggregation.

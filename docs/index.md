@@ -33,16 +33,15 @@ service without changing the engine.
     ---
 
     Connect an arbitrary network, choose synchronous or concurrent collection, and consume
-    learner-shaped records.
+    learner-shaped training records (rows).
 
-    [Sampling and training →](how-it-works/sampling-and-training.md)
+    [Architecture →](concepts/architecture.md) · [Training guide →](guides/training.md)
 
 -   **Choose components**
 
     ---
 
-    Compare the currently registered games and algorithm compositions without relying on a
-    hard-coded count.
+    Browse the supported games and algorithm compositions.
 
     [Games →](catalogue/games.md) · [Algorithms →](catalogue/algorithms.md)
 
@@ -66,21 +65,24 @@ service without changing the engine.
 - **Two collection modes.** `Engine.collect` is a direct request/response loop.
   `Engine.collect_stream` overlaps a background Rust collector with Python training and
   provides bounded backpressure.
-- **Broad game semantics.** The core represents deterministic and explicit chance nodes,
-  sequential and simultaneous decisions, N-player rewards, and information-state keys for
-  imperfect-information algorithms.
-- **Experiment lifecycle.** Resolved configurations, composition fingerprints, exact engine
+- **Broad game semantics.** The core represents explicit chance, sequential or simultaneous
+  decisions, N-player rewards, and imperfect information.
+- **Native simulation, flexible models.** Games and search components run in Rust while Python
+  supplies networks, optimization, replay, and deployment logic.
+- **Direct play and game-theoretic solving.** `Env` supports caller-driven evaluation and
+  interactive play; CFR-family solvers cover tabular and deep imperfect-information workflows.
+- **Experiment lifecycle.** Resolved configurations, configuration fingerprints, exact engine
   snapshots, environment forks, structured telemetry, and per-player record routing are
   part of the public surface.
 - **Ecosystem adapters.** Supported games expose Gymnasium or PettingZoo adapters where
-  those standards fit their interaction model.
+  those standards fit their interaction model; see the [adapter guide](guides/adapters.md).
 
 ## Scope
 
-Reinfors is an orchestration and data-generation library, not a prescribed training stack.
-It intentionally does not provide a distributed cluster manager, a universal replay
-service, or framework-specific model classes. Those systems can sit behind or around the
-inference seam while the Rust engine remains unchanged.
-
-The project is pre-1.0. See [current boundaries](reference/limits.md) before committing to
-an experiment design.
+Reinfors owns native simulation, search, and batched data generation; the caller owns model training
+and deployment. Games currently use
+[fixed discrete action and observation spaces](reference/limits.md#fixed-observation-and-action-spaces),
+one [decision phase](reference/limits.md#decision-phases), and native Rust
+[component implementations](reference/limits.md#native-component-boundary). The project is pre-1.0,
+so review the canonical [current boundaries](reference/limits.md) before committing to an experiment
+design.

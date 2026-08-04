@@ -33,6 +33,7 @@ import random
 import threading
 import time
 from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import reinfors as rf
@@ -154,7 +155,7 @@ def eval_vs_random(net: AlphaZeroNet, device: str, games: int, seed: int) -> flo
     for g in range(games):
         env = rf.Env(rf.games.Connect4(), seed=rng.randrange(2**31))
         net_side = g % 2
-        events = ["", ""]
+        events: list[tuple[int, Any]] = []
         while not env.done():
             agent = env.active_agents()[0]
             if agent == net_side:
@@ -182,7 +183,7 @@ def run_iteration(
     net: AlphaZeroNet,
     optimizer: torch.optim.Optimizer,
     it: int,
-    batch: rf._reinfors.AlphaZeroBatch,
+    batch: rf.AlphaZeroBatch,
 ) -> None:
     obs, pi, z = batch.obs, batch.policy_targets, batch.value_targets
     weights = batch.policy_weights
@@ -245,7 +246,7 @@ def main() -> None:
         infer = make_infer(net, args.device)
         for it in range(1, args.iterations + 1):
             batch = engine.collect(n_records=args.collect_size, infer=infer)  # search with live weights
-            assert isinstance(batch, rf._reinfors.AlphaZeroBatch)  # narrows the family union
+            assert isinstance(batch, rf.AlphaZeroBatch)  # narrows the family union
             run_iteration(args, net, optimizer, it, batch)
     else:
         # Overlapped loop: the worker collects batch t+1 (reading the collector net) while we train
@@ -264,7 +265,7 @@ def main() -> None:
         with engine.collect_stream(collect_size=args.collect_size, infer=locked_infer, depth=depth) as stream:
             for it in range(1, args.iterations + 1):
                 batch = stream.next()
-                assert isinstance(batch, rf._reinfors.AlphaZeroBatch)  # narrows the family union
+                assert isinstance(batch, rf.AlphaZeroBatch)  # narrows the family union
                 with sync_lock:
                     collector_net.load_state_dict(net.state_dict())
                 run_iteration(args, net, optimizer, it, batch)

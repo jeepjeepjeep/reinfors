@@ -31,7 +31,7 @@ import time
 import numpy as np
 import reinfors as rf
 import torch
-from reinfors._reinfors import DqnBatch
+from reinfors import DqnBatch
 from torch import nn
 
 

@@ -21,7 +21,7 @@ engine = rf.Engine(
     reward=rf.Reward(win=1.0, loss=-1.0),
     policy=rf.policies.Mcts(num_simulations=64),
     learner=rf.learners.TreeStrap(),
-    n_games=32,
+    n_games=32,  # parallel episode slots
     seed=0,
 )
 
@@ -68,7 +68,7 @@ Reinfors is pre-1.0. Public contracts are documented, but breaking changes may s
 ## Where next?
 
 - [Get started](docs/getting-started.md)
-- [Understand sampling and injectable training](docs/how-it-works/sampling-and-training.md)
+- [Understand sampling and injectable training](docs/concepts/sampling-and-training.md)
 - [Choose a game](docs/catalogue/games.md), [algorithm](docs/catalogue/algorithms.md), or
   [built-in composition](docs/catalogue/compatibility.md)
 - [Run the examples](docs/examples/index.md)

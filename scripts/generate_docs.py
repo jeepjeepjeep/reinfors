@@ -30,6 +30,8 @@ def table(headers: Iterable[str], rows: Iterable[Iterable[str]]) -> str:
 
 def games_page() -> str:
     games: dict[str, Any] = CATALOG["GAMES"]
+    encoders: dict[str, Any] = CATALOG["ENCODER_INFO"]
+
     rows = (
         (
             info.label,
@@ -39,22 +41,54 @@ def games_page() -> str:
             info.information,
             info.actions,
             info.observation,
+            ", ".join(f"`{name}`={default:g}" for name, default in info.reward_keys),
             info.adapters,
         )
         for info in games.values()
     )
-    summaries = "\n\n".join(f"### {info.label}\n\n{info.summary}" for info in games.values())
+    encoder_rows = (
+        (info.label, info.game, info.shape, f"`{info.constructor}`", info.summary) for info in encoders.values()
+    )
     return (
         GENERATED
         + "# Games\n\n"
         + "Game rules, rewards and encoders are separate components. The table describes the "
         + "built-in defaults; constructors expose the configurable details.\n\n"
         + table(
-            ("Game", "Players", "Decisions", "Chance", "Information", "Actions", "Observation", "Adapter"),
+            (
+                "Game",
+                "Players",
+                "Decisions",
+                "Chance",
+                "Information",
+                "Actions",
+                "Observation",
+                "Reward arguments (defaults)",
+                "Adapter",
+            ),
             rows,
         )
-        + "\n\n## At a glance\n\n"
-        + summaries
+        + "\n\nThe action interface is one fixed discrete vocabulary per game; continuous and "
+        + "parameterized actions are outside the current "
+        + "[action-space boundary](../reference/limits.md#fixed-observation-and-action-spaces). "
+        + "The Decisions column describes one game-wide mode: a game cannot currently switch "
+        + "between sequential and simultaneous "
+        + "[decision phases](../reference/limits.md#decision-phases).\n\n"
+        + "Reward arguments are the keyword weights accepted by `rf.Reward` for that game; "
+        + "unknown names are rejected at `Engine` construction. Poker's `scale` multiplies the "
+        + "native chip-delta event.\n\n"
+        + "## Observation encoders\n\n"
+        + "Chess is currently the only built-in game with an `encoder=` constructor argument. "
+        + "It uses `MinimalChess` when the argument is omitted; select another Chess view by "
+        + "passing its handle and size a network from "
+        + "`game.observation_space().shape` after construction.\n\n"
+        + "```python\n"
+        + "game = rf.games.Chess(encoder=rf.encoders.RelativeChess())\n"
+        + "obs_shape = game.observation_space().shape  # (19, 8, 8)\n"
+        + "```\n\n"
+        + table(("Encoder", "Game", "Observation shape", "Constructor", "Purpose"), encoder_rows)
+        + "\n\nBefore moving action ids between a network and `Env`, read the "
+        + "[action-frame contract](../reference/glossary.md#action-frames)."
         + "\n\nSee [built-in compatibility](compatibility.md) for supported workflows and the "
         + "[Python API](../reference/python-api.md) for constructor parameters.\n"
     )
@@ -62,6 +96,24 @@ def games_page() -> str:
 
 def algorithms_page() -> str:
     algorithms: dict[str, Any] = CATALOG["ALGORITHMS"]
+    batch_types = {"TreeStrapBatch", "DqnBatch", "AlphaZeroBatch", "DeepCfrBatch"}
+
+    def output_link(name: str) -> str:
+        if name not in batch_types:
+            return name
+        return f"[`{name}`](../reference/batch-formats.md#{name.lower()})"
+
+    composition_rows = (
+        (
+            info.label,
+            info.workflow,
+            f"`{info.policy_or_solver}`",
+            "—" if info.learner is None else f"`{info.learner}`",
+            output_link(info.training_output),
+            f"[{info.example_label}](../examples/index.md#{info.example_anchor})",
+        )
+        for info in algorithms.values()
+    )
     rows = (
         (
             info.label,
@@ -82,7 +134,20 @@ def algorithms_page() -> str:
         GENERATED
         + "# Algorithms\n\n"
         + "Choose a workflow first: Engine algorithms emit training records while standalone "
-        + "solvers own their traversal. Python always owns neural-network training.\n\n"
+        + "solvers own their traversal. Python always owns neural-network training. In the search "
+        + "rows, `AlwaysResample`, `Committed`, and `ExpandAll` name handles from "
+        + "[`rf.chance_modes`](../reference/glossary.md#chance-modes); DQN and solver rows describe "
+        + "their own chance treatment. The glossary also defines records, ensemble heads, "
+        + "and MaxN.\n\n"
+        + "## Composition and training output\n\n"
+        + table(
+            ("Algorithm", "Execution", "Policy or solver", "Learner", "Training output", "Example"),
+            composition_rows,
+        )
+        + "\n\nEngine rows name the exact policy/learner handles passed to `rf.Engine`. Standalone "
+        + "solvers own their traversal; tabular CFR updates internal tables, while Deep CFR emits "
+        + "a caller-trained batch.\n\n"
+        + "## Supported semantics\n\n"
         + table(
             ("Algorithm", "Workflow", "Players", "Decisions", "Chance", "Information", "Network output"),
             rows,
@@ -90,7 +155,7 @@ def algorithms_page() -> str:
         + "\n\n## Algorithm families\n\n"
         + "\n\n".join(details)
         + "\n\nSee [built-in compatibility](compatibility.md), "
-        + "[sampling and training](../how-it-works/sampling-and-training.md), and the "
+        + "[sampling and training](../concepts/sampling-and-training.md), and the "
         + "[inference contract](../reference/inference-contract.md).\n"
     )
 
@@ -102,6 +167,7 @@ def compatibility_page() -> str:
     if unknown:
         raise ValueError(f"game catalogue references unknown algorithms: {sorted(unknown)}")
     rows = ((game.label, *("Yes" if key in game.algorithms else "—" for key in algorithms)) for game in games.values())
+    reached_state_games = ", ".join(game.label for game in games.values() if game.reached_state_starts) or "None"
     return (
         GENERATED
         + "# Built-in compatibility\n\n"
@@ -110,15 +176,15 @@ def compatibility_page() -> str:
         + "still reject particular parameters at construction; consult the algorithm and game tables for "
         + "semantic limits.\n\n"
         + table(("Game", *(info.label for info in algorithms.values())), rows)
-        + "\n\n## Optional engine capabilities\n\n"
-        + table(
-            ("Game", "Reached-state starts"),
-            ((game.label, "Yes" if game.reached_state_starts else "—") for game in games.values()),
-        )
-        + "\n\nExact CFR/CFR+ requires enumerable chance fans. Texas Hold'em therefore uses the "
+        + "\n\n**Reached-state starts:** "
+        + reached_state_games
+        + ". See the optional "
+        + "[`Engine` start buffer](../guides/configuration-and-checkpoints.md#reached-state-starts).\n\n"
+        + "Exact CFR/CFR+ requires enumerable chance fans. Texas Hold'em therefore uses the "
         + "external-sampling MCCFR variant shown separately.\n\n"
-        + "Downstream Rust components can add compositions beyond this built-in Python matrix when they "
-        + "satisfy the relevant core traits.\n"
+        + "Additional native components can add compositions beyond this built-in matrix when they "
+        + "satisfy the relevant core traits and the current "
+        + "[native component boundary](../reference/limits.md#native-component-boundary).\n"
     )
 
 

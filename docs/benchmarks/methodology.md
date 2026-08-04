@@ -39,3 +39,8 @@ as like-for-like.
 - [ ] Warm-up excluded consistently
 - [ ] Charts generated from checked-in analysis
 - [ ] Limitations and non-equivalent semantics disclosed
+
+## Next steps
+
+- Use the commands and harness descriptions in [reproducing benchmarks](reproducing.md).
+- Return to [benchmark status](index.md) for the current publication state.

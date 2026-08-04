@@ -95,6 +95,13 @@ warn_unused_configs = true
 module = ["gymnasium.*", "pettingzoo.*", "jax.*", "pgx.*", "mctx.*", "pyspiel", "open_spiel.*", "torch.*"]
 ignore_missing_imports = true
 
+# Keep the first copyable training example free of type-checker-only assignments and ignores.
+# These two relaxations cover gaps in PyTorch's Tensor.numpy/backward stubs, not reinfors values.
+[[tool.mypy.overrides]]
+module = ["train_gridworld"]
+warn_return_any = false
+disallow_untyped_calls = false
+
 [[tool.mypy.overrides]]
 module = ["reinfors.gym"]
 disallow_subclassing_any = false

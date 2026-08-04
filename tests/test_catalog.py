@@ -7,6 +7,11 @@ import pytest
 import reinfors as rf
 
 
+def test_documented_runtime_types_are_top_level_exports() -> None:
+    assert rf.CollectStream is rf._reinfors.CollectStream
+    assert rf.DeepCfrBatch is rf._reinfors.DeepCfrBatch
+
+
 def test_catalogue_names_match_runtime_registries() -> None:
     assert set(rf.games.registered()) == set(rf.catalog.GAMES)
     assert set(rf.policies.registered()) == set(rf.catalog.POLICIES)
@@ -14,6 +19,21 @@ def test_catalogue_names_match_runtime_registries() -> None:
     assert set(rf.encoders.registered()) == set(rf.catalog.ENCODERS)
     assert set(rf.chance_modes.registered()) == set(rf.catalog.CHANCE_MODES)
     assert set(rf.noise.registered()) == set(rf.catalog.NOISE)
+
+
+@pytest.mark.parametrize("game_name", rf.catalog.GAMES)
+def test_catalogue_reward_defaults_match_runtime_schema(game_name: str) -> None:
+    game = GAME_FACTORIES[game_name]()
+    engine = rf.Engine(game, None, rf.policies.EpsilonGreedyQ(), rf.learners.Dqn(), n_games=1)
+    assert engine.resolved_config()["reward"] == dict(rf.catalog.GAMES[game_name].reward_keys)
+
+
+@pytest.mark.parametrize("encoder_name", rf.catalog.ENCODER_INFO)
+def test_catalogue_encoder_default_shapes_match_runtime(encoder_name: str) -> None:
+    info = rf.catalog.ENCODER_INFO[encoder_name]
+    encoder = getattr(rf.encoders, info.label)()
+    shape = rf.games.Chess(encoder=encoder).observation_space().shape
+    assert str(shape) in info.shape
 
 
 GAME_FACTORIES: dict[str, Callable[[], Any]] = {

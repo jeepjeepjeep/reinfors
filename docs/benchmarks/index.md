@@ -17,5 +17,7 @@ Results will link to the exact commit, resolved configurations, command lines, r
 analysis code. Until those artifacts are ready, treat performance as an implementation goal,
 not a documented guarantee.
 
-See [methodology](methodology.md) and [reproducing](reproducing.md) for the planned reporting
-contract.
+## Next steps
+
+- Read the required [methodology and publication checklist](methodology.md).
+- Run the existing harnesses from the [reproduction guide](reproducing.md).

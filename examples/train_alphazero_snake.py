@@ -104,7 +104,7 @@ def build_engine(args: argparse.Namespace) -> rf.Engine:
 def train_pass(
     net: SnakeAzNet,
     optimizer: torch.optim.Optimizer,
-    batch: rf._reinfors.AlphaZeroBatch,
+    batch: rf.AlphaZeroBatch,
     batch_size: int,
     device: str,
     rng: np.random.Generator,
@@ -207,7 +207,7 @@ def main() -> None:
     for it in range(1, args.iterations + 1):
         batch = engine.collect(n_records=args.collect_size, infer=infer)
         engine.weights_updated()  # about to train: cached rows from the old weights must not serve
-        assert isinstance(batch, rf._reinfors.AlphaZeroBatch)
+        assert isinstance(batch, rf.AlphaZeroBatch)
         policy_loss, value_loss = train_pass(net, optimizer, batch, args.batch_size, args.device, rng)
         episodes = batch.telemetry["episodes"]
         mean_reward = float(np.mean([np.mean(r) for r, _len, _seeded in episodes])) if episodes else float("nan")

@@ -17,15 +17,15 @@ torch.manual_seed(0)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Configure reinfors
-game = rf.games.GridWorld(size=5, goal_row=0, goal_col=4, max_ticks=50)
+game = rf.games.GridWorld(size=5, goal_row=0, goal_col=4, max_ticks=50)  # 50 game-time action boundaries
 obs_size = int(np.prod(game.observation_space().shape))
 n_actions = game.action_space().n
 engine = rf.Engine(
     game=game,
-    reward=rf.Reward(step=-0.01, goal=1.0),
-    policy=rf.policies.EpsilonGreedyQ(n_heads=1, epsilon=0.1),
-    learner=rf.learners.Dqn(),
-    n_games=8,
+    reward=rf.Reward(step=-0.01, goal=1.0),  # Weight the events emitted by GridWorld.
+    policy=rf.policies.EpsilonGreedyQ(n_heads=1, epsilon=0.1),  # Explore on 10% of decisions.
+    learner=rf.learners.Dqn(),  # Emit one-step transition records for the DQN loss.
+    n_games=8,  # Advance eight independent episode slots in parallel.
     seed=0,
 )
 
@@ -40,7 +40,7 @@ optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
 
 
 def infer(obs_batch: np.ndarray) -> np.ndarray:
-    """Return one head of Q-values for each observation."""
+    """Return one ensemble head's Q-values for each observation."""
     net.eval()
     with torch.no_grad():
         obs = torch.from_numpy(np.ascontiguousarray(obs_batch)).to(device)
@@ -55,7 +55,7 @@ for update in range(1, UPDATES + 1):
     actions = torch.as_tensor(batch.actions, device=device)
     rewards = torch.as_tensor(batch.rewards, dtype=torch.float32, device=device)
     next_obs = torch.as_tensor(batch.next_obs, device=device)
-    can_bootstrap = torch.as_tensor(np.diff(batch.next_legal_offsets) > 0, device=device)
+    can_bootstrap = torch.as_tensor(batch.can_bootstrap, device=device)
 
     # Compute DQN targets.
     net.train()
@@ -74,4 +74,7 @@ for update in range(1, UPDATES + 1):
     if update % TARGET_SYNC == 0:
         target_net.load_state_dict(net.state_dict())
 
-    print(f"update={update} records={len(batch.obs)} loss={loss.item():.3f}")
+    # Report completed-episode return beside the optimization signal.
+    episode_returns = [returns[0] for returns, _length, _seeded in batch.telemetry["episodes"]]
+    mean_return = np.mean(episode_returns) if episode_returns else float("nan")
+    print(f"update={update} records={len(batch.obs)} loss={loss.item():.3f} mean_return={mean_return:.3f}")

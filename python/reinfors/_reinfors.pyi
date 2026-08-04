@@ -96,7 +96,8 @@ class DeepCfrBatch:
 class DeepCfr:
     """Deep CFR data generator (external sampling): traversals query the current advantage
     networks through `infer` (one callable, or a per-player sequence) and emit advantage and
-    strategy training samples; buffers, weighting, and training are the caller's."""
+    strategy training samples. Each callback maps float32 `(rows, observation_size)` to float64
+    advantages `(rows, actions)`. Buffers, weighting, and training are the caller's."""
 
     def __init__(self, game: GameHandle, seed: int = ...) -> None: ...
     def next_iteration(self) -> None: ...
@@ -162,8 +163,8 @@ class GameHandle:
     def truncation_horizon(self) -> int | None: ...
 
 class EncoderHandle:
-    # Observation-encoder handles, passed to a game handle's `encoder=` kwarg. Game-specific; any
-    # state bookkeeping a view needs is enabled in the game automatically when selected.
+    # Observation-encoder handles. Chess currently exposes the `encoder=` game kwarg; any state
+    # bookkeeping a selected view needs is enabled in the game automatically.
     @staticmethod
     def MinimalChess() -> EncoderHandle: ...
     # Mover-relative chess view (19, 8, 8): board seen from the mover's side, action head indexed
@@ -198,60 +199,58 @@ class NoiseHandle:
     def Dirichlet(epsilon: float = ..., alpha: float = ..., scope: str = ...) -> NoiseHandle: ...
 
 class PolicyHandle:
-    # Best-first selective expectimax (expand-once). chance_mode: "committed" (default; the
-    # historical food_samples estimator) | "expand_all" (exact fan). "always_resample" is rejected —
+    # Best-first selective expectimax (expand-once). Pass `chance=rf.chance_modes.Committed(samples=...)`
+    # (default samples=1) or `chance=rf.chance_modes.ExpandAll()`. AlwaysResample is rejected because
     # an expand-once search has no traversal event to redraw on.
     @staticmethod
     def SelectiveExpectimax(
-        expansion_budget: int = ...,
-        top_k: int = ...,
-        max_depth: int = ...,
-        beta: float = ...,
-        chance: ChanceModeHandle | None = ...,
-        n_heads: int = ...,
-        epsilon: float = ...,
-        opponent: str = ...,
-        opp_temperature: float = ...,
-        opp_floor: float = ...,
+        expansion_budget: int = 64,
+        top_k: int = 8,
+        max_depth: int = 12,
+        beta: float = 1.0,
+        chance: ChanceModeHandle | None = None,
+        n_heads: int = 1,
+        epsilon: float = 0.0,
+        opponent: str = "uniform",
+        opp_temperature: float = 1.0,
+        opp_floor: float = 0.0,
     ) -> PolicyHandle: ...
     @staticmethod
-    def EpsilonGreedyQ(n_heads: int = ..., epsilon: float = ...) -> PolicyHandle: ...
+    def EpsilonGreedyQ(n_heads: int = 1, epsilon: float = 0.1) -> PolicyHandle: ...
     # MCTS (UCT) for compatible sequential, single-agent, and simultaneous (decoupled/DUCT
-    # per-agent statistics) compositions. See the compatibility catalogue for learner pairings.
+    # per-agent statistics) compositions. See the algorithm catalogue for its learner pairing.
     # act_by: "value" | "visits".
     # temperature > 0 (AlphaZero-style) samples the first temperature_drop plies of each episode
     # ∝ visits^(1/temperature) for training self-play diversity (None = whole episode); 0 = greedy.
-    # chance_mode (declared-chance games, explicit chance states being the canonical model): "always_resample"
-    # (fresh draw ∝ p per descent, unbiased default) | "committed" (freeze chance_samples draws
-    # per edge — food_samples-style, for wide fans) | "expand_all" (evaluate every outcome at
-    # expansion — exact, narrow fans).
+    # `chance=` accepts AlwaysResample() (fresh draw per descent; unbiased default),
+    # Committed(samples=...) (freeze that many draws per edge for depth on wide fans), or
+    # ExpandAll() (evaluate every outcome; exact for narrow fans).
     @staticmethod
     def Mcts(
-        num_simulations: int = ...,
-        uct_c: float = ...,
-        max_depth: int = ...,
-        act_by: str = ...,
-        temperature: float = ...,
-        temperature_drop: int | None = ...,
-        chance: ChanceModeHandle | None = ...,
+        num_simulations: int = 64,
+        uct_c: float = 2.0,
+        max_depth: int = 64,
+        act_by: str = "value",
+        temperature: float = 0.0,
+        temperature_drop: int | None = None,
+        chance: ChanceModeHandle | None = None,
     ) -> PolicyHandle: ...
     # AlphaZero (PUCT) for compatible sequential, single-agent, and simultaneous (DUCT)
-    # compositions; see the compatibility catalogue for learner pairings. noise_scope:
-    # "requester" (default) | "all" picks which root priors the
-    # Dirichlet noise perturbs in a simultaneous tree. The infer
+    # compositions; see the algorithm catalogue for its learner pairing. `noise=` accepts an
+    # rf.noise.Dirichlet(epsilon=..., alpha=..., scope="requester" | "all") handle or None. The infer
     # callback returns a (policy_logits (N, A) f64, values (N,) f64) tuple — one forward, both heads.
-    # Root Dirichlet noise (noise_epsilon/noise_alpha) + acting temperature drive self-play diversity;
+    # Root Dirichlet noise plus acting temperature drive self-play diversity;
     # acting is by visit count. temperature_drop=None applies the temperature to whole episodes.
     @staticmethod
     def AlphaZero(
-        num_simulations: int = ...,
-        c_puct: float = ...,
-        max_depth: int = ...,
-        temperature: float = ...,
-        temperature_drop: int | None = ...,
-        chance: ChanceModeHandle | None = ...,
+        num_simulations: int = 64,
+        c_puct: float = 1.5,
+        max_depth: int = 64,
+        temperature: float = 1.0,
+        temperature_drop: int | None = 8,
+        chance: ChanceModeHandle | None = None,
         noise: NoiseHandle | None = ...,
-        sequential_backup: str = ...,
+        sequential_backup: str = "auto",
     ) -> PolicyHandle: ...
 
 class LearnerHandle:
@@ -310,6 +309,8 @@ class DqnBatch:
     rewards: NDArray[np.float64]
     next_obs: NDArray[np.float32]
     dones: NDArray[np.bool_]
+    # Authoritative TD bootstrap rule: false at terminals and no-successor truncation tails.
+    can_bootstrap: NDArray[np.bool_]
     masks: NDArray[np.float32]
     # Legality in CSR form (record i's ids = ids[offsets[i]:offsets[i+1]]) — sparse because dense
     # (M, A) masks dwarf the observations on wide action spaces (~37 GB per 1M chess transitions).
@@ -365,7 +366,9 @@ class Engine:
     def restore(self, snapshot: EngineSnapshot, expect_policy_version: str | None = ...) -> None: ...
     # The batch is learner-shaped: the TreeStrap family yields a `TreeStrapBatch`, the DQN family a
     # `DqnBatch`. Both expose named fields and also unpack positionally (back-compat with the old tuple).
-    def collect(self, n_records: int, infer: Any) -> TreeStrapBatch | DqnBatch | AlphaZeroBatch: ...
+    # The concrete batch family is selected by the runtime learner handle. This remains Any until
+    # LearnerHandle and Engine can carry that relationship as a generic type parameter.
+    def collect(self, n_records: int, infer: Any) -> Any: ...
     # Continuous background collection: a worker thread runs collect after collect into a bounded
     # queue of `depth` finished batches (None = unbounded, the continuous-actor topology). The engine
     # is held by the stream until stop(); collect() errors meanwhile. Weight staleness is the
@@ -379,10 +382,12 @@ class CollectStream:
 
     Single-consumer: one thread loops `next()` and owns `stop()`. Other threads run freely during
     the wait but must not touch the stream object (a concurrent `stop()` raises RuntimeError
-    "Already borrowed" and could not interrupt a blocked `next()` anyway). A stream dropped without
-    `stop()` permanently forfeits its engine — prefer the `with` form."""
+    "Already borrowed" and could not interrupt a blocked `next()` anyway). If the stream is dropped
+    without `stop()`, the engine remains unavailable for the rest of the process: it cannot collect,
+    snapshot, restore, or start another stream. Prefer the `with` form."""
 
-    def next(self) -> TreeStrapBatch | DqnBatch | AlphaZeroBatch: ...
+    # Like Engine.collect, the concrete batch family is selected by the runtime learner handle.
+    def next(self) -> Any: ...
     def pending(self) -> int: ...
     # Lossless checkpoint barrier: stops new collects, finishes the in-flight one with real
     # inference, returns every remaining batch; the engine (returned to its Engine) then matches
@@ -390,7 +395,7 @@ class CollectStream:
     def pause(self) -> list[Any]: ...
     def stop(self) -> None: ...
     def __iter__(self) -> CollectStream: ...
-    def __next__(self) -> TreeStrapBatch | DqnBatch | AlphaZeroBatch: ...
+    def __next__(self) -> Any: ...
     def __enter__(self) -> CollectStream: ...
     def __exit__(self, *args: Any) -> None: ...
 

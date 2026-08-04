@@ -73,6 +73,16 @@ def test_callback_errors_and_bad_shapes_propagate() -> None:
         solver.collect(player=0, traversals=4, infer=boom)
     with pytest.raises(ValueError, match="one row of 2 advantages"):
         solver.collect(player=0, traversals=4, infer=lambda obs: np.zeros((obs.shape[0], 5)))
+    with pytest.raises(ValueError, match="finite"):
+        solver.collect(player=0, traversals=4, infer=lambda obs: np.full((obs.shape[0], 2), np.nan))
+    with pytest.raises(TypeError) as error:
+        solver.collect(
+            player=0,
+            traversals=4,
+            infer=lambda obs: np.zeros((obs.shape[0], 2), dtype=np.float32),
+        )
+    assert "float64 NumPy array with rank 2" in str(error.value)
+    assert "dtype=float32" in str(error.value)
     with pytest.raises(ValueError, match="player must be below 2"):
         solver.collect(player=2, traversals=1, infer=zeros2)
     fresh = rf.solvers.DeepCfr(rf.games.KuhnPoker(), seed=0)
@@ -89,6 +99,8 @@ def test_transposed_infer_shapes_are_rejected() -> None:
         solver.collect(player=0, traversals=8, infer=lambda obs: np.zeros((2, obs.shape[0])))
     with pytest.raises(ValueError, match="policy_infer returned shape"):
         solver.exploitability(lambda obs: np.full((2, obs.shape[0]), 0.5))
+    with pytest.raises(TypeError, match=r"float64 NumPy array with rank 2.*dtype=float32"):
+        solver.exploitability(lambda obs: np.full((obs.shape[0], 2), 0.5, dtype=np.float32))
 
 
 def test_failed_collects_are_transactional() -> None:

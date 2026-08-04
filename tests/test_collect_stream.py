@@ -128,6 +128,19 @@ def test_callback_error_surfaces_and_engine_recovers() -> None:
     assert eng.collect(10, _az_infer).obs.shape[0] >= 10
 
 
+def test_stream_reports_infer_dtype_and_rank() -> None:
+    def bad_infer(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        return np.zeros((arr.shape[0], _A), dtype=np.float32), np.zeros(arr.shape[0])
+
+    eng = _az_engine()
+    stream = eng.collect_stream(20, bad_infer, depth=1)
+    try:
+        with pytest.raises(TypeError, match=r"float64 NumPy array with rank 2.*dtype=float32"):
+            stream.next()
+    finally:
+        stream.stop()
+
+
 def test_unbounded_depth_runs_ahead() -> None:
     eng = _az_engine()
     stream = eng.collect_stream(30, _az_infer, depth=None)

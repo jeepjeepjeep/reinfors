@@ -75,6 +75,42 @@ fn validate_search_params(
     Ok(())
 }
 
+/// Compact, non-copying description for callback-output errors. PyO3's default ndarray extraction
+/// error omits the returned dtype and rank, which makes a simple float32/rank mistake opaque.
+fn py_output_description(value: &Bound<'_, PyAny>) -> String {
+    let type_name = value
+        .get_type()
+        .name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let dtype = value
+        .getattr("dtype")
+        .and_then(|item| item.str())
+        .map(|text| text.to_string_lossy().into_owned())
+        .ok();
+    let shape = value
+        .getattr("shape")
+        .and_then(|item| item.repr())
+        .map(|text| text.to_string_lossy().into_owned())
+        .ok();
+    match (dtype, shape) {
+        (Some(dtype), Some(shape)) => format!("{type_name}(dtype={dtype}, shape={shape})"),
+        _ => type_name,
+    }
+}
+
+fn az_output_description(value: &Bound<'_, PyAny>) -> String {
+    let Ok(tuple) = value.downcast::<PyTuple>() else {
+        return py_output_description(value);
+    };
+    let items = (0..tuple.len())
+        .filter_map(|index| tuple.get_item(index).ok())
+        .map(|item| py_output_description(&item))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("tuple({items})")
+}
+
 /// The core's `infer` callback, wrapping the Python network forward. Obs arrive as one flat
 /// row-major `[n, dim]` buffer (moved straight into a numpy array — no copy), and per-head values
 /// `[n, K, action_count]` come back as one flat row-major buffer. The first failure — a Python error, or (when
@@ -106,31 +142,53 @@ where
         let arr = Array2::from_shape_vec((n, dim), obs_flat)
             .expect("obs batch shape")
             .into_pyarray(py);
-        // Shared form = one callback for every player; per-player form = one per player.
-        let infer = callbacks[player.min(callbacks.len() - 1)].bind(py);
-        match infer
-            .call1((arr,))
-            .and_then(|r| r.extract::<PyReadonlyArray3<f64>>())
-        {
-            Ok(out) => {
-                // EXACT shape, not just element count: a transposed return has the right
-                // length and would be flattened into garbage evaluations.
-                let shape = out.as_array().shape().to_vec();
-                let bad = shape[0] != n
-                    || shape[2] != action_count
-                    || expected_heads.is_some_and(|k| shape[1] != k);
-                if n > 0 && bad {
-                    callback_err.get_or_insert_with(|| {
-                        pyo3::exceptions::PyValueError::new_err(format!(
-                            "infer returned shape {shape:?} for {n} rows; expected ({n}, \
+        // `engine_callbacks` admits exactly one shared callback or one callback per player.
+        // Index directly in the per-player form: silently clamping here could hide a routing bug.
+        let callback = if callbacks.len() == 1 {
+            &callbacks[0]
+        } else {
+            &callbacks[player]
+        };
+        let infer = callback.bind(py);
+        match infer.call1((arr,)) {
+            Ok(result) => match result.extract::<PyReadonlyArray3<f64>>() {
+                Ok(out) => {
+                    // EXACT shape, not just element count: a transposed return has the right
+                    // length and would be flattened into garbage evaluations.
+                    let shape = out.as_array().shape().to_vec();
+                    let bad = shape[0] != n
+                        || shape[2] != action_count
+                        || expected_heads.is_some_and(|k| shape[1] != k);
+                    if n > 0 && bad {
+                        callback_err.get_or_insert_with(|| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "infer returned shape {shape:?} for {n} rows; expected ({n}, \
                              n_heads{}, {action_count})",
-                            expected_heads.map_or(String::new(), |k| format!(" = {k}"))
-                        ))
-                    });
-                    return vec![0.0; fallback];
+                                expected_heads.map_or(String::new(), |k| format!(" = {k}"))
+                            ))
+                        });
+                        return vec![0.0; fallback];
+                    }
+                    if out.as_array().iter().any(|value| !value.is_finite()) {
+                        callback_err.get_or_insert_with(|| {
+                            pyo3::exceptions::PyValueError::new_err(
+                                "infer outputs must contain only finite values",
+                            )
+                        });
+                        return vec![0.0; fallback];
+                    }
+                    out.as_array().iter().copied().collect() // flat [n, K, A]
                 }
-                out.as_array().iter().copied().collect() // flat [n, K, A]
-            }
+                Err(_) => {
+                    *callback_err = Some(pyo3::exceptions::PyTypeError::new_err(format!(
+                        "infer output must be a float64 NumPy array with rank 3 and shape \
+                         ({n}, {}, {action_count}); got {}",
+                        expected_heads.unwrap_or(1),
+                        py_output_description(&result)
+                    )));
+                    vec![0.0; fallback]
+                }
+            },
             Err(e) => {
                 *callback_err = Some(e);
                 vec![0.0; fallback]
@@ -162,12 +220,27 @@ where
         let arr = Array2::from_shape_vec((n, dim), obs_flat)
             .expect("obs batch shape")
             .into_pyarray(py);
-        let infer = callbacks[player.min(callbacks.len() - 1)].bind(py);
-        let extracted = infer.call1((arr,)).and_then(|r| {
-            let (logits, values) =
-                r.extract::<(numpy::PyReadonlyArray2<f64>, numpy::PyReadonlyArray1<f64>)>()?;
-            Ok((logits.as_array().to_owned(), values.as_array().to_owned()))
-        });
+        let callback = if callbacks.len() == 1 {
+            &callbacks[0]
+        } else {
+            &callbacks[player]
+        };
+        let infer = callback.bind(py);
+        let extracted = match infer.call1((arr,)) {
+            Ok(result) => match result
+                .extract::<(numpy::PyReadonlyArray2<f64>, numpy::PyReadonlyArray1<f64>)>()
+            {
+                Ok((logits, values)) => {
+                    Ok((logits.as_array().to_owned(), values.as_array().to_owned()))
+                }
+                Err(_) => Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                    "AlphaZero infer output must be a tuple of policy_logits as a float64 NumPy \
+                     array with rank 2 and values as a float64 NumPy array with rank 1; got {}",
+                    az_output_description(&result)
+                ))),
+            },
+            Err(error) => Err(error),
+        };
         match extracted {
             Ok((logits, values)) => {
                 if logits.shape() != [n, action_count] || values.len() != n {
@@ -178,6 +251,18 @@ where
                             logits.shape(),
                             values.len()
                         ))
+                    });
+                    return vec![0.0; n * stride];
+                }
+                if logits
+                    .iter()
+                    .chain(values.iter())
+                    .any(|value| !value.is_finite())
+                {
+                    callback_err.get_or_insert_with(|| {
+                        pyo3::exceptions::PyValueError::new_err(
+                            "AlphaZero infer outputs must contain only finite values",
+                        )
                     });
                     return vec![0.0; n * stride];
                 }
@@ -1278,6 +1363,10 @@ struct DqnBatch {
     next_obs: Py<PyArray2<f32>>, // (M, dim)
     #[pyo3(get)]
     dones: Py<PyArray1<bool>>, // (M,)
+    /// Whether each row has a valid next-state bootstrap. False at terminals and at any
+    /// truncation tail whose next observation has no actions for this agent.
+    #[pyo3(get)]
+    can_bootstrap: Py<PyArray1<bool>>, // (M,)
     #[pyo3(get)]
     masks: Py<PyArray2<f32>>, // (M, K)
     // Legality in CSR form — record i's legal ids are `ids[offsets[i]..offsets[i+1]]`. Sparse on
@@ -1506,6 +1595,7 @@ impl RecordBatch for DqnRecord {
         let mut players: Vec<i64> = Vec::with_capacity(m);
         let mut rewards: Vec<f64> = Vec::with_capacity(m);
         let mut dones: Vec<bool> = Vec::with_capacity(m);
+        let mut can_bootstrap: Vec<bool> = Vec::with_capacity(m);
         let mut legal_ids: Vec<i64> = Vec::new();
         let mut legal_offsets: Vec<i64> = Vec::with_capacity(m + 1);
         let mut next_legal_ids: Vec<i64> = Vec::new();
@@ -1520,6 +1610,7 @@ impl RecordBatch for DqnRecord {
             legal_offsets.push(legal_ids.len() as i64);
             next_legal_ids.extend(t.next_legal.iter().map(|&a| a as i64));
             next_legal_offsets.push(next_legal_ids.len() as i64);
+            can_bootstrap.push(!t.next_legal.is_empty());
             actions.push(t.action as i64);
             players.push(t.player as i64);
             rewards.push(t.reward);
@@ -1543,6 +1634,7 @@ impl RecordBatch for DqnRecord {
                 rewards: rewards.into_pyarray(py).unbind(),
                 next_obs: next_arr.unbind(),
                 dones: dones.into_pyarray(py).unbind(),
+                can_bootstrap: can_bootstrap.into_pyarray(py).unbind(),
                 masks: mask_arr.unbind(),
                 legal_ids: legal_ids.into_pyarray(py).unbind(),
                 legal_offsets: legal_offsets.into_pyarray(py).unbind(),
@@ -1915,10 +2007,10 @@ fn reward_schema(game: &GameSpec) -> &'static [(&'static str, f64)] {
         GameSpec::Snake { .. } => &[
             ("step", 0.0),
             ("food", 0.0),
-            ("loss", 0.0),
+            ("loss", -1.0),
             ("draw", 0.0),
             ("kill", 0.0),
-            ("win", 0.0),
+            ("win", 1.0),
             ("survival", 0.0),
         ],
         GameSpec::Connect4 => &[("win", 1.0), ("loss", -1.0), ("draw", 0.0)],
@@ -4368,30 +4460,48 @@ impl PyDeepCfr {
             if callback_err.is_some() {
                 return vec![0.0; rows * a]; // argmax fallback keeps the unwind cheap
             }
-            let target = &callbacks[who.min(callbacks.len() - 1)];
+            let target = if callbacks.len() == 1 {
+                &callbacks[0]
+            } else {
+                &callbacks[who]
+            };
             let arr = Array2::from_shape_vec((rows, dim), obs_flat)
                 .expect("obs batch shape")
                 .into_pyarray(py);
-            match target
-                .bind(py)
-                .call1((arr,))
-                .and_then(|r| r.extract::<numpy::PyReadonlyArray2<f64>>())
-            {
-                Ok(out) => {
-                    // Exact shape, not just element count: a transposed (A, rows) return has
-                    // the right length and would be flattened into garbage advantages.
-                    if out.as_array().shape() != [rows, a] {
-                        callback_err.get_or_insert_with(|| {
-                            pyo3::exceptions::PyValueError::new_err(format!(
-                                "infer returned shape {:?} for {rows} rows; expected \
+            match target.bind(py).call1((arr,)) {
+                Ok(result) => match result.extract::<numpy::PyReadonlyArray2<f64>>() {
+                    Ok(out) => {
+                        // Exact shape, not just element count: a transposed (A, rows) return has
+                        // the right length and would be flattened into garbage advantages.
+                        if out.as_array().shape() != [rows, a] {
+                            callback_err.get_or_insert_with(|| {
+                                pyo3::exceptions::PyValueError::new_err(format!(
+                                    "infer returned shape {:?} for {rows} rows; expected \
                                  ({rows}, {a}) — one row of {a} advantages per query",
-                                out.as_array().shape()
-                            ))
-                        });
-                        return vec![0.0; rows * a];
+                                    out.as_array().shape()
+                                ))
+                            });
+                            return vec![0.0; rows * a];
+                        }
+                        if out.as_array().iter().any(|value| !value.is_finite()) {
+                            callback_err.get_or_insert_with(|| {
+                                pyo3::exceptions::PyValueError::new_err(
+                                    "Deep CFR infer outputs must contain only finite values",
+                                )
+                            });
+                            return vec![0.0; rows * a];
+                        }
+                        out.as_array().iter().copied().collect()
                     }
-                    out.as_array().iter().copied().collect()
-                }
+                    Err(_) => {
+                        callback_err = Some(pyo3::exceptions::PyTypeError::new_err(format!(
+                            "Deep CFR infer output must be a float64 NumPy array with rank 2 and \
+                             shape ({rows}, {a}); got {}",
+                            py_output_description(&result)
+                        )));
+                        vec![0.0; rows * a]
+                    }
+                },
                 Err(e) => {
                     callback_err = Some(e);
                     vec![0.0; rows * a]
@@ -4496,9 +4606,17 @@ impl PyDeepCfr {
         let arr = Array2::from_shape_vec((features.len(), dim), obs_flat)
             .expect("obs shape")
             .into_pyarray(py);
-        let out = policy_infer
-            .call1((arr,))?
-            .extract::<numpy::PyReadonlyArray2<f64>>()?;
+        let result = policy_infer.call1((arr,))?;
+        let out = result
+            .extract::<numpy::PyReadonlyArray2<f64>>()
+            .map_err(|_| {
+                pyo3::exceptions::PyTypeError::new_err(format!(
+                    "Deep CFR policy_infer output must be a float64 NumPy array with rank 2 and \
+                     shape ({}, {a}); got {}",
+                    features.len(),
+                    py_output_description(&result)
+                ))
+            })?;
         if out.as_array().shape() != [features.len(), a] {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "policy_infer returned shape {:?} for {} infosets; expected ({}, {a})",
@@ -4637,7 +4755,7 @@ impl PolicyHandle {
     }
 
     /// AlphaZero (PUCT) planner for compatible sequential, single-agent, and simultaneous
-    /// (decoupled/DUCT) compositions. See the compatibility catalogue for learner pairings. The net
+    /// (decoupled/DUCT) compositions. See the algorithm catalogue for its learner pairing. The net
     /// callback returns a `(policy_logits (N, A), values (N,))` tuple — one forward,
     /// both heads. Root Dirichlet noise `(1-noise_epsilon)·P + noise_epsilon·Dir(noise_alpha)`
     /// supplies search-level exploration (drawn from the seeded stream — collects stay reproducible);

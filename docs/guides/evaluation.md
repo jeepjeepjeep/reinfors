@@ -1,7 +1,90 @@
 # Evaluation and interactive play
 
-Use `Env` when the caller, rather than an engine policy, chooses actions. It is the small
-surface for arenas, scripted opponents, debugging, and adapters.
+Use the evaluation path that matches the trained object:
+
+| What you have | Evaluation path | Maintained example |
+| --- | --- | --- |
+| Policy or network | Referee games through `Env` | [AlphaZero head-to-head example](../examples/index.md#alphazero-head-to-head) |
+| Tabular CFR strategy | Solver value and best-response metrics | [CFR solving example](../examples/index.md#solve-leduc) |
+| Scripted or human agent | Direct action selection through `Env` | Snippet below |
+
+## Compare trained policies
+
+`Env` is the referee: it owns one game and its chance stream, while the caller chooses each action.
+The maintained AlphaZero example loads two checkpoints, alternates their seats, samples several
+opening moves for diversity, and reports the first model's win/draw score:
+
+```bash
+python examples/train_alphazero_example.py --iterations 40 --seed 0 --save a.pt
+python examples/train_alphazero_example.py --iterations 40 --seed 1 --save b.pt
+python examples/eval_az_h2h.py a.pt b.pt --games 200 --opening-plies 4
+```
+
+The two 40-iteration training commands are real CPU search workloads: expect minutes rather than
+seconds on a typical laptop, with the exact time printed at completion. The search-free referee is
+usually much faster. For a quick plumbing check, use fewer training iterations and `--games 20`;
+those settings are not enough for a meaningful strength comparison.
+
+The referee deliberately uses the networks' raw policy heads. If the deployed agent includes search,
+adapt the same loop to choose actions through that search policy and report its budget with the
+result.
+
+## Evaluate a DQN greedily
+
+For a DQN, evaluate by taking the highest-Q legal action through `Env`. Network outputs use the
+encoder's head frame, while `Env` uses game-action ids. Follow the
+[action-frame contract](../reference/glossary.md#action-frames) when an encoder transforms actions:
+
+```python
+encoder = rf.encoders.RelativeChess()
+game = rf.games.Chess(encoder=encoder)
+env = rf.Env(game, reward=rf.Reward(win=1.0, loss=-1.0, draw=0.0), seed=0)
+env.reset()
+
+while not env.done():
+    (agent,) = env.active_agents()
+    q_values = evaluate_q_network(env.observe(agent))  # One value per encoder-head action.
+    legal_game_actions = env.legal_actions(agent)
+    action = max(
+        legal_game_actions,
+        key=lambda game_id: q_values[encoder.head_index(game_id, agent)],
+    )
+    env.step({agent: action})
+```
+
+`evaluate_q_network` represents the caller's checkpoint loading, tensor conversion, and forward
+pass. For an ensemble, choose or aggregate its heads before the legal argmax.
+
+For credible comparisons:
+
+- alternate or randomize seats from a recorded seed;
+- disable self-play exploration noise unless it is part of the evaluated agent;
+- report draws and uncertainty, not only a mean score;
+- record the resolved game configuration, model identifiers, and seeds;
+- introduce controlled opening diversity for deterministic games.
+
+`env.fork()` creates an independent environment at the same state. With no seed it preserves the
+future chance stream; with a new seed it explores a different future. This supports paired action
+comparisons and counterfactual probes.
+
+## Evaluate CFR strategies
+
+Tabular CFR exposes its average strategy, expected values, best-response values, NashConv, and
+exploitability directly. Run the complete Leduc/Kuhn workflow with:
+
+```bash
+python examples/solve_leduc.py --game leduc_poker --variant plus --iterations 1000
+```
+
+The script trains the solver, prints exploitability checkpoints and the average-profile value, and
+can persist the tables with `--save`. Exact metrics are subject to the canonical
+[enumeration limits](../reference/limits.md#enumeration-limits). For N-player games, NashConv
+remains a distance-from-equilibrium diagnostic, but the two-player exploitability interpretation
+does not carry over unchanged.
+
+## Drive an environment directly
+
+For debugging, scripted opponents, or interactive play, choose legal actions yourself:
 
 ```python
 import random
@@ -20,34 +103,19 @@ while not env.done():
         print(events)
 ```
 
-Sequential games expose one active agent; simultaneous games can expose several. One call to
-`step` is a tick and returns the ordered event trace across its action and any following
-chance chain. When the environment has a reward mapping, `env.rewards` gives per-agent
-rewards for the most recent tick.
-
-## Fair comparisons
-
-- alternate player seats or randomize them from a recorded seed;
-- evaluate without self-play exploration noise unless noise is part of the policy being
-  measured;
-- report confidence intervals and draws, not only a mean score;
-- record the resolved game configuration, model identifier, and seeds;
-- use enough opening diversity to avoid replaying one deterministic trajectory.
-
-`env.fork()` creates an independent environment at the same state. With no seed it has an
-identical future chance stream; with a new seed it explores a different future. This is useful
-for paired action comparisons and counterfactual evaluation.
+Sequential games expose one active agent; simultaneous games may expose several. One `step` is a
+tick and returns the ordered event trace from its action and any following chance chain. If the
+environment has a reward mapping, `env.rewards` contains the most recent tick's per-agent rewards.
 
 ## Standard adapters
 
-Install `reinfors[gym]` and use `reinfors.gym` for the supported Gymnasium,
-PettingZoo AEC, and PettingZoo Parallel surfaces. The [game catalogue](../catalogue/games.md)
-lists the adapter matching each game. Adapters have official compliance tests in the test
-suite.
+The [adapter guide](adapters.md) covers Gymnasium, PettingZoo AEC, and PettingZoo Parallel
+construction, rewards, action masks, and truncation behavior.
 
-## Imperfect-information metrics
+## Next steps
 
-Tabular CFR exposes average strategies, expected values, best-response values, NashConv, and
-exploitability. Exact metrics enumerate the game tree and reject games beyond the safety cap.
-For N-player games, NashConv is a distance-from-equilibrium diagnostic; the two-player
-exploitability interpretation does not carry over unchanged.
+- Find the maintained referee and solver scripts in the [examples catalogue](../examples/index.md).
+- Preserve evaluated model/configuration pairs with
+  [configuration and checkpoints](configuration-and-checkpoints.md).
+- Log arena returns, lengths, seeds, and model versions in the caller. `Env` does not produce Engine
+  telemetry.
