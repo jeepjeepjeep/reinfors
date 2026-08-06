@@ -5,7 +5,7 @@ Reinfors keeps the public composition surface small and typed.
 | Module or type | Purpose |
 | --- | --- |
 | `reinfors.games` | Typed and name-addressable game constructors |
-| `reinfors.encoders` | Alternative observation/action views |
+| `reinfors.encoders` | Per-game observation/action views and defaults |
 | `reinfors.policies` | Search and action-selection handles |
 | `reinfors.learners` | Training-record producers |
 | `reinfors.chance_modes` | Search treatment of explicit chance nodes |

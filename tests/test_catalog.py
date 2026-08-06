@@ -32,8 +32,35 @@ def test_catalogue_reward_defaults_match_runtime_schema(game_name: str) -> None:
 def test_catalogue_encoder_default_shapes_match_runtime(encoder_name: str) -> None:
     info = rf.catalog.ENCODER_INFO[encoder_name]
     encoder = getattr(rf.encoders, info.label)()
-    shape = rf.games.Chess(encoder=encoder).observation_space().shape
+    game_name = ENCODER_GAMES[encoder_name]
+    shape = GAME_FACTORIES[game_name](encoder=encoder).observation_space().shape
     assert str(shape) in info.shape
+
+
+@pytest.mark.parametrize("game_name", rf.catalog.GAMES)
+def test_every_game_resolves_and_exposes_its_encoder(game_name: str) -> None:
+    encoder_name = DEFAULT_ENCODERS[game_name]
+    encoder_info = rf.catalog.ENCODER_INFO[encoder_name]
+    explicit = GAME_FACTORIES[game_name](encoder=getattr(rf.encoders, encoder_info.label)())
+    implicit = GAME_FACTORIES[game_name]()
+
+    assert rf.Env(implicit).resolved_config()["game"]["encoder"] == {"name": encoder_name}
+    assert explicit.observation_space().shape == implicit.observation_space().shape
+    assert explicit.encoder.name == encoder_name
+    assert explicit.encoder.head_index(0, 0) == 0
+    assert explicit.encoder.game_action(0, 0) == 0
+
+    engine = rf.Engine(implicit, None, rf.policies.EpsilonGreedyQ(), rf.learners.Dqn(), n_games=1)
+    explicit_engine = rf.Engine(explicit, None, rf.policies.EpsilonGreedyQ(), rf.learners.Dqn(), n_games=1)
+    assert explicit_engine.resolved_config() == engine.resolved_config()
+    assert explicit_engine.config_fingerprint() == engine.config_fingerprint()
+    rebuilt = rf.engine_from_config(engine.resolved_config())
+    assert rebuilt.resolved_config() == engine.resolved_config()
+
+
+def test_game_rejects_an_encoder_for_another_game() -> None:
+    with pytest.raises(ValueError, match="incompatible encoder"):
+        rf.games.Connect4(encoder=rf.encoders.Snake())
 
 
 GAME_FACTORIES: dict[str, Callable[[], Any]] = {
@@ -45,6 +72,25 @@ GAME_FACTORIES: dict[str, Callable[[], Any]] = {
     "leduc_poker": rf.games.LeducPoker,
     "snake": rf.games.Snake,
     "texas_holdem": rf.games.TexasHoldem,
+}
+
+DEFAULT_ENCODERS = {
+    "backgammon": "backgammon",
+    "chess": "minimal_chess",
+    "connect4": "connect4",
+    "gridworld": "gridworld",
+    "kuhn_poker": "kuhn_poker",
+    "leduc_poker": "leduc_poker",
+    "snake": "snake",
+    "texas_holdem": "texas_holdem",
+}
+
+ENCODER_GAMES = {
+    "minimal_chess": "chess",
+    "relative_chess": "chess",
+    "openspiel_chess": "chess",
+    "alphazero_chess": "chess",
+    **{name: name for name in DEFAULT_ENCODERS if name != "chess"},
 }
 
 

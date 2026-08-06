@@ -18,7 +18,8 @@ rg -n "GameSpec::GridWorld|fn gridworld" crates/reinfors-py/src/lib.rs
 In `crates/reinfors-py/src/lib.rs`:
 
 1. Import the game, encoder, event, and reward from `reinfors-games`.
-2. Add its validated configuration to `GameSpec` and handle it in `num_agents` and `spaces`.
+2. Add its validated configuration to `GameSpec`, its representation to `EncoderSpec`, and handle
+   both in the compatibility/default helpers, `num_agents`, and `spaces`.
 3. Add it to `game_cfg`, `reward_schema`, `build_reward`, and `RewardBox`.
 4. Add concrete arms to `build_engine` and `build_env`, including its codec when snapshots are
    supported.
@@ -30,13 +31,14 @@ the spec and is the pattern to copy:
 
 ```rust
 #[staticmethod]
-#[pyo3(signature = (size=5, goal_row=None, goal_col=None, max_ticks=1000))]
+#[pyo3(signature = (size=5, goal_row=None, goal_col=None, max_ticks=1000, encoder=None))]
 #[pyo3(name = "GridWorld")]
 fn gridworld(
     size: i32,
     goal_row: Option<i32>,
     goal_col: Option<i32>,
     max_ticks: Option<usize>,
+    encoder: Option<EncoderHandle>,
 ) -> PyResult<Self> {
     check_max_ticks(max_ticks)?;
     let corner = size.saturating_sub(1);
@@ -44,24 +46,25 @@ fn gridworld(
     GridWorld { size, goal, max_ticks }
         .validate()
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
-    Ok(GameHandle {
-        spec: GameSpec::GridWorld { size, goal, max_ticks },
-    })
+    game_handle(GameSpec::GridWorld { size, goal, max_ticks }, encoder)
 }
 ```
 
 Keeping the configuration in `GameSpec` allows the binding to reconstruct the concrete generic
 composition only when an `Engine` or `Env` is built. Constructor failures must become Python
-exceptions rather than Rust panics.
+exceptions rather than Rust panics. Add the default encoder constructor to `EncoderHandle`; every
+game constructor exposes the same optional `encoder=` seam even when only one view exists.
 
 ### 2. Add the Python surface
 
-Update these three files:
+Update these four files:
 
-- `python/reinfors/_reinfors.pyi`: add the typed `GameHandle` static constructor;
+- `python/reinfors/_reinfors.pyi`: add the typed `GameHandle` and `EncoderHandle` constructors;
 - `python/reinfors/games.py`: export the constructor and add its stable snake-case name to
   `_REGISTRY`;
-- `python/reinfors/catalog.py`: add compatibility and user-facing metadata to `GAMES`.
+- `python/reinfors/encoders.py`: export and register the default encoder;
+- `python/reinfors/catalog.py`: add game metadata to `GAMES` and encoder metadata to
+  `ENCODER_INFO`.
 
 The registry supplies both `rf.games.GridWorld(...)` and config-driven construction through
 `rf.games.make("gridworld", ...)`. Its import-time assertion against the catalogue prevents a
@@ -83,6 +86,7 @@ Replace `my_game` with the stable registry name.
 At minimum, test:
 
 - direct construction and invalid arguments;
+- default/explicit encoder equivalence and rejection of an encoder for another game;
 - `rf.games.make(name, **kwargs)` and `registered()`;
 - `Engine` and `Env` composition;
 - resolved-config reconstruction;

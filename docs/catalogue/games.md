@@ -21,7 +21,7 @@ Reward arguments are the keyword weights accepted by `rf.Reward` for that game; 
 
 ## Observation encoders
 
-Chess is currently the only built-in game with an `encoder=` constructor argument. It uses `MinimalChess` when the argument is omitted; select another Chess view by passing its handle and size a network from `game.observation_space().shape` after construction.
+Every game constructor accepts an `encoder=` handle and otherwise selects its registered default. The encoder owns the network-facing observation and action frame, while the game owns rules and state transitions. Chess currently offers multiple views; the other built-in games each expose one. Size a network from `game.observation_space().shape` after construction.
 
 ```python
 game = rf.games.Chess(encoder=rf.encoders.RelativeChess())
@@ -30,10 +30,17 @@ obs_shape = game.observation_space().shape  # (19, 8, 8)
 
 | Encoder | Game | Observation shape | Constructor | Purpose |
 | --- | --- | --- | --- | --- |
+| Snake | Snake | (5, grid_size, grid_size); (5, 20, 20) by default | `rf.encoders.Snake()` | Mover-relative body, opponent, food, and wall planes. |
+| Connect4 | Connect 4 | (2, 6, 7) | `rf.encoders.Connect4()` | Acting-player and opponent piece planes. |
 | MinimalChess | Chess | (19, 8, 8) | `rf.encoders.MinimalChess()` | Absolute piece, turn, castling, en-passant and clock planes; the Chess default. |
 | RelativeChess | Chess | (19, 8, 8) | `rf.encoders.RelativeChess()` | Mover-relative board and matching action-head mapping. |
 | OpenSpielChess | Chess | (20, 8, 8) | `rf.encoders.OpenSpielChess()` | OpenSpiel-compatible observation for parity and benchmarking. |
 | AlphaZeroChess | Chess | (119, 8, 8) by default | `rf.encoders.AlphaZeroChess(history_length=8)` | Uses `14 * history_length + 7` channels for history, repetition, side, move-count, castling and clock features. |
+| Backgammon | Backgammon | (200, 1, 1) | `rf.encoders.Backgammon()` | Tesauro-style point, bar, borne-off, turn, and dice features. |
+| TexasHoldem | Texas Hold'em | (2 * num_players + 19, 4, 13); (31, 4, 13) by default | `rf.encoders.TexasHoldem()` | Player-relative cards, betting state, stacks, and positions. |
+| KuhnPoker | Kuhn poker | (3 * players, 1, 1); (6, 1, 1) by default | `rf.encoders.KuhnPoker()` | Private card and public betting-history information state. |
+| LeducPoker | Leduc poker | (21, 1, 1) | `rf.encoders.LeducPoker()` | Private/public cards and two-round betting information state. |
+| GridWorld | GridWorld | (2, size, size); (2, 5, 5) by default | `rf.encoders.GridWorld()` | Agent-position and goal planes. |
 
 Before moving action ids between a network and `Env`, read the [action-frame contract](../reference/glossary.md#action-frames).
 

@@ -1,9 +1,10 @@
 """``rf.encoders`` — observation-encoder handles, passed to a game handle's ``encoder=`` kwarg.
 
 An encoder is a configurable *view* of a game's state — the game owns dynamics, the encoder owns
-representation (the decoupling the ``StateEncoder`` seam exists for). Encoders are game-specific;
-any state bookkeeping a view needs (e.g. the AlphaZero chess history ring) is enabled in the game
-automatically when that encoder is selected. ``make`` / ``registered`` are the name-addressable form.
+representation (the decoupling the ``StateEncoder`` seam exists for). Every game constructor accepts
+one and defaults to its registered standard view. Encoders are game-specific; any state bookkeeping
+a view needs (e.g. the AlphaZero chess history ring) is enabled in the game automatically when that
+encoder is selected. ``make`` / ``registered`` are the name-addressable form.
 """
 
 from __future__ import annotations
@@ -14,16 +15,30 @@ from typing import Any
 from . import _reinfors
 from .catalog import ENCODERS
 
+Snake = _reinfors.EncoderHandle.Snake
+Connect4 = _reinfors.EncoderHandle.Connect4
 MinimalChess = _reinfors.EncoderHandle.MinimalChess
 RelativeChess = _reinfors.EncoderHandle.RelativeChess
 OpenSpielChess = _reinfors.EncoderHandle.OpenSpielChess
 AlphaZeroChess = _reinfors.EncoderHandle.AlphaZeroChess
+Backgammon = _reinfors.EncoderHandle.Backgammon
+TexasHoldem = _reinfors.EncoderHandle.TexasHoldem
+KuhnPoker = _reinfors.EncoderHandle.KuhnPoker
+LeducPoker = _reinfors.EncoderHandle.LeducPoker
+GridWorld = _reinfors.EncoderHandle.GridWorld
 
 _REGISTRY: dict[str, Callable[..., Any]] = {
+    "snake": Snake,
+    "connect4": Connect4,
     "minimal_chess": MinimalChess,
     "relative_chess": RelativeChess,
     "openspiel_chess": OpenSpielChess,
     "alphazero_chess": AlphaZeroChess,
+    "backgammon": Backgammon,
+    "texas_holdem": TexasHoldem,
+    "kuhn_poker": KuhnPoker,
+    "leduc_poker": LeducPoker,
+    "gridworld": GridWorld,
 }
 assert _REGISTRY.keys() == ENCODERS, "encoder registry and documentation catalogue diverged"
 
