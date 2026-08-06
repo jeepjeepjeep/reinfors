@@ -5225,7 +5225,15 @@ impl EncoderHandle {
                 let (_, enc) = chess_parts(None, chess);
                 Ok(enc.head_index(action, agent))
             }
-            _ => Ok(action),
+            // Keep this exhaustive: a new encoder must explicitly declare whether its Python-facing
+            // action frame is identity or route through its concrete `ActionView` implementation.
+            EncoderSpec::Snake
+            | EncoderSpec::Connect4
+            | EncoderSpec::Backgammon
+            | EncoderSpec::TexasHoldem
+            | EncoderSpec::KuhnPoker
+            | EncoderSpec::LeducPoker
+            | EncoderSpec::GridWorld => Ok(action),
         }
     }
 
@@ -5243,7 +5251,14 @@ impl EncoderHandle {
                 let (_, enc) = chess_parts(None, chess);
                 Ok(enc.game_action(head, agent))
             }
-            _ => Ok(head),
+            // Deliberately mirrors the exhaustive `head_index` decision above.
+            EncoderSpec::Snake
+            | EncoderSpec::Connect4
+            | EncoderSpec::Backgammon
+            | EncoderSpec::TexasHoldem
+            | EncoderSpec::KuhnPoker
+            | EncoderSpec::LeducPoker
+            | EncoderSpec::GridWorld => Ok(head),
         }
     }
 
