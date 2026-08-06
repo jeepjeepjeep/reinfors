@@ -19,22 +19,23 @@ Reinfors separates reusable rules, search, record generation, and user-owned lea
 └────────────────────────────────────────────────────────────────┘
 
 Env: caller-driven play and evaluation
-Solver: algorithm-owned traversal for CFR and Deep CFR
+Solver: algorithm-owned traversal outside episode collection
 ```
 
 ## The two primary execution surfaces
 
 `Engine` owns many active episodes. A policy asks for evaluations, the engine pools those
 requests, and a learner converts completed decisions or trajectories into training records.
-Use it for DQN, TreeStrap/MCTS/expectimax, and AlphaZero data generation.
+Use it for policy-driven, learner-shaped data generation, including direct value learning and
+search-guided methods (for example, DQN, TreeStrap, and AlphaZero).
 
 `Env` owns one game instance and lets the caller supply each decision. Use it for evaluation,
 interactive play, custom agents, and Gymnasium/PettingZoo adapters. It exposes observations,
 legal actions, active agents, event traces, rewards, snapshots, and forks.
 
-CFR-family algorithms use standalone solvers because the solver owns the traversal and its
-state. Tabular CFR trains internally; Deep CFR calls per-player advantage inference and
-returns samples for caller-owned buffers and optimization.
+Algorithms whose traversal does not fit policy-driven episode collection use standalone solvers.
+The current solver implementations are CFR-based: tabular CFR trains internally, while Deep CFR calls
+per-player advantage inference and returns samples for caller-owned buffers and optimization.
 
 ## Component responsibilities
 

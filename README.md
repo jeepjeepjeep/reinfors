@@ -46,7 +46,9 @@ print(batch.obs.shape, batch.targets.shape, batch.telemetry)
   simpler native extension than comparable C++ infrastructure.
 - Games include deterministic, stochastic, simultaneous, N-player, and
   imperfect-information environments.
-- Algorithms cover value learning, MCTS/AlphaZero, CFR variants, and Deep CFR.
+- Algorithms span policy-driven value learning, search-guided learning, and standalone
+  game-theoretic solving; see the [algorithm catalogue](docs/catalogue/algorithms.md) for current
+  implementations.
 - Resolved configurations, snapshots, structured batches, and telemetry support
   reproducible experiments.
 

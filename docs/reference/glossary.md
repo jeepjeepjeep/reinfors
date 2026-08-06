@@ -36,7 +36,7 @@ These terms describe reinfors' public data and execution model.
 
 **Solver**
 : A standalone algorithm that owns its traversal and persistent state instead of using the
-  Policy/Learner/Engine collection pipeline. CFR and Deep CFR use this surface.
+  Policy/Learner/Engine collection pipeline. Current examples include CFR and Deep CFR.
 
 ## Collection
 

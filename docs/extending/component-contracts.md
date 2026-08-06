@@ -53,9 +53,10 @@ than add algorithm-specific runtime branches.
 
 ## Solvers
 
-A solver owns a traversal that does not fit policy-driven episode collection. CFR and Deep CFR are
-concrete families under `crates/reinfors-core/src/solvers`; there is no shared `Solver` trait or
-generic Python registry. Follow the [solver binding path](python-bindings.md#solvers-are-different).
+A solver owns a traversal that does not fit policy-driven episode collection. Current
+implementations are CFR-based and live under `crates/reinfors-core/src/solvers`; there is no shared
+`Solver` trait or generic Python registry. Follow the
+[solver binding path](python-bindings.md#solvers-are-different).
 
 ## Validation boundaries
 

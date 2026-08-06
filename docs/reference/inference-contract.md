@@ -1,8 +1,8 @@
 # Inference contract
 
-`Engine` policies and Deep CFR both call caller-owned Python networks, but they use distinct
-contracts. Engine inference is synchronous for each pooled search round. Deep CFR inference is
-synchronous within one solver traversal batch.
+`Engine` policies and network-backed solvers can both call caller-owned Python networks, but each
+execution surface defines its own contract. Engine inference is synchronous for each pooled search
+round. The current Deep CFR solver performs synchronous inference within one traversal batch.
 
 ## Input
 
