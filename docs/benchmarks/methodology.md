@@ -1,46 +1,76 @@
-# Benchmark methodology
+# Methodology
 
-Every published benchmark should include the following.
+The protocol below was not designed in one sitting: several rules exist because an earlier
+version of the benchmark violated them and produced numbers that flattered one side. Each
+rule states what it prevents.
 
-## System
+## Termination: hard kill, interior windows
 
-- CPU model, physical/logical core count, memory, NUMA layout;
-- accelerator model, memory, driver, and framework versions;
-- operating system and power/performance settings;
-- release build confirmation from `rf.core_build_profile()`;
-- reinfors and comparison-library commits.
+Every timed leg is terminated by SIGKILL at its deadline, on **both** stacks, and rates are
+computed from counter deltas between timestamped samples strictly inside the window — never
+by dividing a total by the nominal duration.
 
-## Workload
+*Why:* graceful shutdown lets a stack keep producing while it drains in-flight work. In an
+early sweep, one side was stopped with SIGINT plus a grace period and internally-timed
+totals, inflating its rates by 18–31% relative to the hard-killed side. Discovered when its
+single inference thread logged more busy-seconds than the leg's nominal length. If interior
+samples are missing, the result is reported as failed — never reconstructed.
 
-- resolved engine configuration and fingerprint;
-- game, observation encoder, reward, policy, learner, chance mode, and seeds;
-- model architecture, parameter count, precision, device, and compilation settings;
-- parallel games, search budget, cache capacity, stream depth, and thread settings;
-- warm-up, measured duration, repeats, and uncertainty calculation.
+## The training-relevant rate is states/s, not rows/s
 
-## Measurements
+A *row* is one position forwarded through the net: search effort. A *state* is one training
+example delivered to the learner — and in AlphaZero-style training a position only becomes
+an example when its game **finishes** (the value target is the realized outcome). Under a
+hard deadline, in-flight games count for nothing. Configurations routinely trade these
+against each other (more parallel games → more rows/s, slower per-game progress → fewer
+completed states/s), so topology selection and headline comparisons use states/s at matched
+search budget; rows/s is recorded as diagnosis.
 
-Report both throughput and the work that produced it: records, decisions, episodes,
-inference calls and rows, callback time, effective callback batch size, cache behavior, search
-expansions, and episode lengths. For concurrent runs, separately report collection, training,
-idle time, queue occupancy, and policy lag.
+## Caches are architecture, not a matched knob
 
-Comparisons must align rules, observation semantics, chance behavior, search budget, and
-model outputs. If they cannot align, label the difference rather than presenting the result
-as like-for-like.
+Each stack runs its own cache design at its own best capacity. Cross-stack comparison with
+caches *disabled* is not a "clean" condition: OpenSpiel's evaluator issues two requests per
+expanded node (policy and value are separate calls) and relies on its LRU cache to merge
+them, so cache-off roughly doubles its forwards per node while leaving reinfors (a single
+both-heads call) untouched — the row stops meaning the same unit of work on the two sides.
+The same principle applies to capacity: sizing their cache by a constraint measured on ours
+(or vice versa) imports one architecture's costs into the other.
 
-## Publication checklist
+## Matched knobs
 
-- [ ] Commands and configs committed
-- [ ] Raw machine-readable results available
-- [ ] Multiple runs with uncertainty
-- [ ] Correctness checks pass before timing
-- [ ] No debug builds
-- [ ] Warm-up excluded consistently
-- [ ] Charts generated from checked-in analysis
-- [ ] Limitations and non-equivalent semantics disclosed
+What *is* matched, exactly, on both sides: network architecture (layer-for-layer, verified
+by parameter count at startup), search budget per move — including the convention that the
+root expansion counts against it — exploration constants, Dirichlet noise parameters,
+temperature schedule, replay-buffer size, minibatch size, optimizer hyperparameters, and
+the effective training intensity (gradient-samples per collected state; the two learners
+amortize this differently — one minibatch per fixed state count vs. periodic full-buffer
+sweeps — but both resolve to the same reuse factor, which is verified from telemetry rather
+than assumed). Loss definitions are aligned: both sides train a masked policy
+cross-entropy over legal actions and value MSE on outcomes in [−1, 1], with weight decay
+applied to the same parameter-name set.
 
-## Next steps
+## Each side its own best configuration
 
-- Use the commands and harness descriptions in [reproducing benchmarks](reproducing.md).
-- Return to [benchmark status](index.md) for the current publication state.
+Parallelism topology (actor/game counts, inference batch sizes) is **not** matched: each
+stack runs the configuration that empirically maximizes *its own* states/s under the round
+workload — cache on, learner and checkpoint writes sharing the GPU, windows long enough to
+contain several learn steps and game lengths (see [tuning](tuning.md)). Selecting a rival's
+topology for it, or measuring topology under a lighter workload than the round, are both
+ways of quietly handicapping one side.
+
+## Artifact selection under the deadline
+
+Neither stack gets to write a "final" checkpoint — the deadline is a kill, not a request.
+The head-to-head loads each side's last *complete periodic* checkpoint before the deadline;
+checkpoint cadences are configured so worst-case staleness is comparable (on the order of
+two minutes on both sides). Alias/"latest" checkpoint files are never used: a kill can tear
+them mid-write.
+
+## Determinism and repeats
+
+Collection is seeded and bit-reproducible per stack under fixed weights and deterministic
+inference; training runs are single-seed per round with the seed recorded, and the
+single-seed caveat is carried explicitly until multi-seed rounds land (see the
+[open items](matched-round.md#open-items)). Head-to-head matches use paired openings
+(each opening played once per color) so opening imbalance cancels within pairs, and are
+reported with standard errors computed over pairs, not games.

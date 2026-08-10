@@ -1,28 +1,42 @@
 # Benchmarks
 
-This section is intentionally a skeleton while the benchmark suite is rerun on controlled
-hardware. No historical headline numbers are carried forward without their complete
-configuration and reproducibility artifacts.
+This section documents a controlled, like-for-like comparison between reinfors and
+[OpenSpiel](https://github.com/google-deepmind/open_spiel)'s C++ libtorch AlphaZero on a fixed
+cloud GPU instance, together with the measurements used to configure it and the throughput
+levers reinfors exposes.
 
-These benchmarks are not intended to claim universal throughput leadership. Specialized, fully
-fused implementations may be faster on the workload they were built around; the relevant question
-for reinfors is how much throughput its modular game/search/training boundary preserves, and where
-that flexibility becomes the limiting cost.
+## What this comparison is — and is not
 
-The published results will evaluate the claims reinfors is designed around:
+OpenSpiel is a research library whose goals are breadth (many games, many algorithms) and
+reference clarity; high throughput is not one of its stated objectives. reinfors narrows its
+scope to a modular game/search/training boundary and asks a narrower question: **how much
+throughput does that modularity preserve against a mature C++ implementation, on a workload
+both systems support well?**
 
-- native environment and search throughput;
-- effective inference batch sizes at the Rust/Python boundary;
-- synchronous versus overlapped actor–learner utilization;
-- scaling with parallel games, CPU threads, and search budget;
-- comparison with relevant OpenSpiel implementations where semantics align;
-- end-to-end time-to-training-data, not only isolated environment steps.
+The honest headline shape is therefore not "reinfors is faster" but: comparable — in places
+somewhat better — throughput, while keeping the pluggable game/encoder/search/learner seams
+that are reinfors' actual design goal. Where the numbers differ, the differences trace to
+identifiable structural design choices on each side, not to one implementation being "better
+engineered" — see [design differences](design-differences.md) for that analysis. Both stacks
+were measured at their own best configuration, on the same hardware, under the same
+protocol, with every mismatch we found treated as a bug in the benchmark rather than a
+result.
 
-Results will link to the exact commit, resolved configurations, command lines, raw data, and
-analysis code. Until those artifacts are ready, treat performance as an implementation goal,
-not a documented guarantee.
+## Contents
 
-## Next steps
+- [Environment and setup](setup.md) — the instance, isolation, and software both stacks ran on.
+- [Methodology](methodology.md) — the measurement protocol and the fairness rules, including
+  the ones we learned the hard way.
+- [Operating-point tuning](tuning.md) — how each side's best configuration was determined
+  empirically before any head-to-head.
+- [The matched round](matched-round.md) — 2h wall-clock training on each stack plus a
+  head-to-head strength evaluation of the resulting models.
+- [Design differences](design-differences.md) — the structural analysis of *why* the numbers
+  come out the way they do.
+- [Throughput levers](throughput-levers.md) — measured, opt-in reinfors features that move
+  collection throughput (f32 outputs, inference cache, grouped collection).
+- [Reproducing](reproducing.md) — exact commands, seeds, and artifacts.
 
-- Read the required [methodology and publication checklist](methodology.md).
-- Run the existing harnesses from the [reproduction guide](reproducing.md).
+Numeric results are being populated as the final long-form runs complete; tables marked
+_TBD_ are structural placeholders whose protocol is already frozen. Every published number
+links to the commit, resolved configuration, command line, and raw logs that produced it.

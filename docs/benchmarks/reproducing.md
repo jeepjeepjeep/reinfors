@@ -1,45 +1,61 @@
-# Reproducing benchmarks
+# Reproducing
 
-The repository already contains two benchmark harnesses. Published A10G results and downloadable
-artifacts are still pending.
+All harnesses, patches, raw logs, and analysis scripts live in the companion benchmark
+repository (`reinfors-benchmarks`); this page summarizes the run surface so results can be
+audited against exact commands. Every published table links to the commit and resolved
+configuration that produced it.
 
-## Native throughput
-
-`scripts/benchmark.py` measures native environment stepping, records per second from synchronous
-collection, inference-cost sweeps, and scaling across parallel games:
-
-```bash
-# Build or install reinfors in release mode first.
-python scripts/benchmark.py --quick
-python scripts/benchmark.py
-```
-
-The harness warns when `rf.core_build_profile()` reports a debug build. Use `--help` for workload,
-repeat, and scaling controls. `tests/test_benchmark.py` smoke-tests the harness with a tiny workload.
-
-## Cross-framework comparison
-
-`scripts/benchmark_vs.py` is the manually run Connect 4 comparison with OpenSpiel and Pgx/Mctx. Its
-optional dependencies are intentionally not part of the normal development environment; unavailable
-backends are reported and skipped.
+## One-time setup (per instance)
 
 ```bash
-python scripts/benchmark_vs.py --help
+# OpenSpiel from source with CUDA libtorch (restores build glue, applies the
+# instrumentation + device patches, builds trainer and head-to-head binaries)
+bash scripts/setup_openspiel_cpp.sh
+
+# reinfors: release wheel into the measurement venv (a debug build is refused at runtime)
+maturin develop --release -m crates/reinfors-py/Cargo.toml
 ```
 
-Read the script's module documentation before running it: raw stepping, Python-network MCTS,
-OpenSpiel's native rollout reference, and accelerator-resident Pgx/Mctx are separate tracks rather
-than one interchangeable throughput number. `tests/test_benchmark_vs.py` smoke-tests the reinfors
-backend.
+Per-boot: disable SMT (guarded by every script), pull, rebuild the wheel.
+
+## Operating-point measurements
+
+```bash
+# kernel ceiling + engine sweeps (batch curve, per-row costs)
+python benchmarks/openspiel/phase0_gpu_sweep.py ...
+
+# topology selection under the round workload (cache on, learner + checkpoints active,
+# 20-minute interior windows, hard-kill protocol)
+CORES=0-3 GAME=chess WIDTH=256 DEPTH=8 ACTORS="16 32 64 64:32" bash scripts/measure_states.sh
+CORES=0-3 WIDTH=256 DEPTH=8 NGAMES="64 128" MINUTES=20 bash scripts/measure_states_rf.sh
+```
+
+## The matched round and head-to-head
+
+```bash
+# two sequential 2h legs (OpenSpiel then reinfors), hard-killed at the deadline,
+# post-run listing of each side's checkpoint artifacts
+MINUTES=120 OS_ACTORS=<selected> bash scripts/run_round_chess_gpu.sh
+
+# head-to-head: paired openings, both colors, matched simulations, solver off,
+# PGN export with run metadata for every game
+python benchmarks/openspiel/eval_h2h_chess.py <rf_ckpt> <os_dir> --os-checkpoint <N> \
+    --games 50 --sims 64 --device cuda --az-device /cuda:0
+
+# telemetry comparison panels from both learners' structured logs
+python scripts/plot_round.py <rf_round_dir> <os_round_dir> -o round_panels.png
+```
+
+## Grouped-collection grid
+
+```bash
+CORES=0-3 WIDTH=256 DEPTH=8 NGAMES="64 128" NGROUPS=1 MINUTES=20 bash scripts/measure_states_rf.sh
+CORES=0-3 WIDTH=256 DEPTH=8 NGAMES="64 128" NGROUPS=2 MINUTES=20 bash scripts/measure_states_rf.sh
+```
 
 ## Publication artifacts
 
-The pending benchmark publication will pin the commit, release wheel, dependencies, machine
-metadata, resolved configurations, seeds, command lines, and raw JSON/CSV. This page will then link
-to those artifacts and exact reproduction commands; until then, the harnesses are available but no
-headline result is documented.
-
-## Next steps
-
-- Check every run against the [benchmark methodology](methodology.md).
-- Return to [benchmark status](index.md) for published-artifact availability.
+Per published number: reinfors and benchmark-repo commits, `resolved_config()` /
+`config_fingerprint()` of every engine, full command line, raw interior-window samples,
+learner logs from both stacks, head-to-head PGNs, and the analysis notebook or script that
+reduced them.

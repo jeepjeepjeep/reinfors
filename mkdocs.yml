@@ -67,7 +67,12 @@ nav:
       - Python bindings: extending/python-bindings.md
   - Benchmarks:
       - benchmarks/index.md
+      - Environment and setup: benchmarks/setup.md
       - Methodology: benchmarks/methodology.md
+      - Operating-point tuning: benchmarks/tuning.md
+      - The matched round: benchmarks/matched-round.md
+      - Design differences: benchmarks/design-differences.md
+      - Throughput levers: benchmarks/throughput-levers.md
       - Reproducing: benchmarks/reproducing.md
   - Reference:
       - reference/index.md
