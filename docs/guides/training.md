@@ -154,30 +154,38 @@ By default the engine's collect loop alternates between tree work on the CPU and
 callback: while the accelerator runs a batch, the engine waits, and vice versa. With
 `n_groups=2` the games split into two fixed groups whose search rounds alternate — one group's
 tree work runs while the other group's batch is inside the callback (which moves to a
-dedicated submitter thread). The cycle time drops from `engine + infer` to roughly
-`max(engine, infer)`.
+dedicated submitter thread).
 
-When it pays, and how to size it:
+With per-group search time `S` and inference time `I`, steady-state throughput improves from
+one group-round per `S + I` to one per `max(S, I)` — a gain of `(S + I) / max(S, I)`, largest
+when the two stages are *balanced* (up to 2x at `S ≈ I`) and small when either stage
+dominates. Per-game decision latency moves from `S + I` to roughly `2 · max(S, I)`: similar
+when balanced, approaching 2x when one stage dominates. Measure your own split before
+reaching for this knob: `telemetry["infer_seconds"]` against wall time gives `I`'s share.
 
-- The win requires keeping each *group* at your accelerator's batch sweet spot. Double
-  `n_games` rather than splitting it: if batch 64 is your device's best operating point, run
-  `n_games=128, n_groups=2` (two 64-row groups), not `n_games=64, n_groups=2` (two 32-row
-  groups, which usually loses more to smaller kernels than the overlap saves).
-- The gain is bounded by the engine's share of the cycle — worthwhile for GPU-bound
-  compositions, negligible when inference is cheap.
-- Per-game latency roughly doubles (each group gets the accelerator half the time), so
-  episodes take longer in wall-clock while total throughput rises.
+Sizing: keep each *group's* callback batches near your accelerator's sweet spot, which
+usually means doubling `n_games` rather than splitting it. Note that games-per-group only
+approximates rows-per-callback — simultaneous and MaxN searches evaluate multiple
+perspectives per node, exhaustive chance fans stage every outcome, and cache hits, in-batch
+deduplication, and terminal simulations all remove rows. Check the realized mean with
+`telemetry["infer_rows"] / telemetry["infer_calls"]` rather than assuming it; a
+`n_games=128, n_groups=2` starting point for a sequential game at a batch-64 sweet spot is a
+workload-specific example, not a rule.
 
-Collects remain bit-reproducible for a fixed seed: group membership is static, rounds
-alternate strictly, and rows keep game-index order. Digests differ from `n_groups=1` — it is
-a different composition, and `resolved_config()`/`config_fingerprint()` record it. On a
-weight refresh (`weights_updated()`), rows already in flight finish their round but never
-enter the inference cache, so the cache never serves entries from superseded weights.
+Collects are bit-reproducible for a fixed seed *given deterministic inference and fixed
+weights* (accelerator kernels are not always deterministic, and under streaming the timing
+of weight refreshes decides which version serves a round): group membership is static,
+rounds alternate strictly, and rows keep game-index order. Digests differ from `n_groups=1`
+— it is a different composition, and `resolved_config()`/`config_fingerprint()` record it.
+On a weight refresh (`weights_updated()`), rows already in flight finish their round; the
+cache never *serves* rows computed under superseded weights, because every batch
+synchronizes generations (clearing stale entries) before its first lookup.
 
-v1 supports `policies.Mcts` and `policies.AlphaZero` with a single shared callback, and
-excludes truncation-tail bootstrapping (an `AlphaZero` learner — or `TreeStrap` with an
-outcome weight — combined with a truncating game); the constructor raises `ValueError` for
-unsupported compositions.
+v1 supports `policies.Mcts` and `policies.AlphaZero`, and excludes truncation-tail
+bootstrapping (an `AlphaZero` learner — or `TreeStrap` with an outcome weight — combined
+with a truncating game); the constructor raises `ValueError` for those. The remaining
+restriction — a single shared callback, not per-player routing — is checked when a collect
+or stream begins, since the callback shape is only known then.
 
 ## Per-player models
 

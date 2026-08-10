@@ -224,6 +224,7 @@ def main() -> None:
         "--n-groups",
         type=int,
         default=1,
+        choices=[1, 2],
         help="2 = double-buffered collect: tree work overlaps inference (size n-games so each "
         "group stays at your accelerator's batch sweet spot)",
     )
@@ -257,6 +258,8 @@ def main() -> None:
     engine = build_engine(args.n_games, args.seed, args.sequential_backup, args.n_groups)
 
     mode = "sync" if args.depth is None else f"depth={args.depth}"
+    if args.n_groups == 2:
+        mode += ", n_groups=2"
     print(
         f"training on {args.device} — connect4, {args.n_games} games/collect, 48 sims/move, width {args.width}, {mode}"
     )
