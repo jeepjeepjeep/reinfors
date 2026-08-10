@@ -55,9 +55,13 @@ throughput, realized rows per call, inference share, and decision latency):
 | n128 × 2 groups | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
 | n64 × 2 groups | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
 
-Predicted for this operating point: the measured inference share ≈ 0.92 puts the ceiling
-at ≈ +9% (`1/0.92`), with a favorable batch term: two 64-row groups sit at the A10G
-sweet spot, while a single 128-row batch pays a measured kernel regression. Boundary costs
+The ceiling prediction uses the inference share measured **in the target condition**,
+from the same telemetry the grid reports (per-round wall against callback time). Shares
+derived from isolated component probes understate the overlappable engine-side work —
+record emission, batch packing, and runtime interplay with a concurrent learner all sit on
+the engine side of the cycle — and therefore understate the gain. The batch term at this
+operating point is favorable: two 64-row groups sit at the A10G sweet spot, while a single
+128-row batch pays a measured kernel regression. Boundary costs
 (submitter spawn per collect, one discarded in-flight batch at the record floor) are
 amortized at round-scale collection and measured separately at small collection sizes
 before any general recommendation.
