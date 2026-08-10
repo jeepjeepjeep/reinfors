@@ -41,6 +41,7 @@ fn gridworld(
     encoder: Option<EncoderHandle>,
 ) -> PyResult<Self> {
     check_max_ticks(max_ticks)?;
+    // Invalid negative sizes must reach validate() as errors, not overflow here.
     let corner = size.saturating_sub(1);
     let goal = (goal_row.unwrap_or(corner), goal_col.unwrap_or(corner));
     GridWorld { size, goal, max_ticks }
@@ -54,6 +55,17 @@ Keeping the configuration in `GameSpec` allows the binding to reconstruct the co
 composition only when an `Engine` or `Env` is built. Constructor failures must become Python
 exceptions rather than Rust panics. Add the default encoder constructor to `EncoderHandle`; every
 game constructor exposes the same optional `encoder=` seam even when only one view exists.
+
+Several dispatch details are correctness constraints:
+
+- `reward_schema` is the single source used by both concrete reward construction and resolved
+  configuration; do not repeat reward defaults elsewhere.
+- Handles store parameters before a game/policy/learner composition is known, so validate composed
+  parameters in `build_for_game`.
+- Simultaneous joint-space checks use every agent for MCTS/AlphaZero but only the co-movers for
+  expectimax. Changing that exponent can defer an invalid fan to a large mid-collection allocation.
+- AlphaZero needs at least two simulations because the first evaluates the root; MCTS accepts one.
+  MCTS emits only root records, so TreeStrap's `interior_targets` is intentionally ignored there.
 
 ### 2. Add the Python surface
 

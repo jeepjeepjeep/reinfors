@@ -345,6 +345,7 @@ fn infer_closure_gil<'a>(
     }
 }
 
+// The worker cannot marshal Python objects safely; next() runs this under the GIL.
 type BatchThunk = Box<dyn FnOnce(Python<'_>) -> PyResult<PyObject> + Send>;
 
 fn parse_opponent(opponent: &str, opp_temperature: f64, opp_floor: f64) -> PyResult<Opponent> {
@@ -371,6 +372,7 @@ fn value_to_py<'py>(py: Python<'py>, v: &Value) -> PyResult<Bound<'py, PyAny>> {
             if let Some(i) = n.as_i64() {
                 i.into_bound_py_any(py)?
             } else if let Some(u) = n.as_u64() {
+                // Preserve seeds above i64::MAX as exact Python integers.
                 u.into_bound_py_any(py)?
             } else {
                 n.as_f64()
@@ -540,6 +542,7 @@ fn policy_cfg(spec: &PolicySpec) -> Value {
             noise_scope,
             sequential_backup,
         } => {
+            // Epsilon zero and noise=None are behaviorally identical and canonicalize to null.
             let noise = if *noise_epsilon == 0.0 {
                 Value::Null
             } else {
@@ -591,6 +594,9 @@ fn learner_cfg(spec: &LearnerSpec) -> Value {
 }
 
 fn canonical_config_bytes(v: &Value) -> Vec<u8> {
+    // Fingerprints depend on serde_json's default BTreeMap ordering and ryu
+    // float formatting. Enabling its transitive `preserve_order` feature is a
+    // persisted-format change and requires a schema migration.
     serde_json::to_vec(v).expect("config values contain no non-serializable data")
 }
 
@@ -701,6 +707,8 @@ struct PyEngine {
     inner: Option<Box<dyn ErasedEngine>>,
     config: Value,
     snapshot_fp: String,
+    // These stay outside the engine moved to the stream worker, making
+    // weights_updated() safe from the consumer thread.
     weights_generations: Vec<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     weights_version: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
@@ -765,6 +773,8 @@ impl PyEngine {
             "engine": {
                 "n_games": n_games,
                 "seed": seed,
+                // Disabled knobs canonicalize to null so ignored arguments do
+                // not split fingerprints of behaviorally identical engines.
                 "start_buffer": start_buffer.as_ref().map_or(Value::Null, |sb| json!({
                     "capacity": sb.capacity,
                     "p_fresh": sb.p_fresh,
@@ -775,6 +785,7 @@ impl PyEngine {
         });
         let engine_params = EngineParams { n_games, seed };
         let num_agents = game.spec.num_agents();
+        // Slot 0 serves a shared callback; slots 1..=N serve per-player callbacks.
         let weights_generations: Vec<std::sync::Arc<std::sync::atomic::AtomicU64>> = (0
             ..=num_agents)
             .map(|_| std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)))
@@ -820,6 +831,7 @@ impl PyEngine {
                 }
             }
             Some(p) => {
+                // Avoid `p + 1 >= len`: p may be usize::MAX.
                 if p >= self.weights_generations.len() - 1 {
                     return Err(pyo3::exceptions::PyValueError::new_err(format!(
                         "player {p} out of range (this game has {} players)",
@@ -1190,6 +1202,7 @@ impl CollectStream {
 
     fn stop(&mut self, py: Python<'_>) -> PyResult<()> {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        // Dropping the receiver releases a worker blocked on a full bounded queue.
         self.rx.take();
         if let Some(handle) = self.handle.take() {
             let engine = py
@@ -1918,6 +1931,8 @@ impl GameSpec {
     }
 }
 
+// Single source for concrete rewards and resolved configs; duplicating defaults
+// would let runtime behavior and fingerprints diverge.
 fn reward_schema(game: &GameSpec) -> &'static [(&'static str, f64)] {
     match game {
         GameSpec::Snake { .. } => &[
@@ -2081,6 +2096,7 @@ fn check_unit(name: &str, v: f64) -> PyResult<()> {
     Ok(())
 }
 
+// Construction probes use an isolated RNG so they cannot perturb collection determinism.
 struct ProbeRng(u64);
 impl reinfors_core::Rng for ProbeRng {
     fn below(&mut self, n: usize) -> usize {
@@ -2136,6 +2152,9 @@ fn check_information<G: Game>(label: &str, game: &G) -> PyResult<()> {
 }
 
 fn check_joint_space<G: Game>(label: &str, game: &G, movers: usize) -> PyResult<()> {
+    // `movers` is family-specific: all agents for dense MCTS/AZ tables, but
+    // only co-movers for expectimax's per-MAX-edge product. A wrong exponent
+    // turns a construction error into a possible mid-collect allocation blow-up.
     if !game_is_sequential(game) {
         let worst = (game.action_count() as u128).saturating_pow(movers as u32);
         if worst > reinfors_core::MAX_JOINT_SLOTS as u128 {
@@ -2174,6 +2193,7 @@ fn build_for_game<G: Game + Send + Sync + 'static>(
 where
     G::State: Send + Sync,
 {
+    // Handles intentionally store unchecked params; composition validates them here.
     let (c, h, w) = enc.obs_shape();
     let dim = c * h * w;
     let action_count = game.action_count();
@@ -2270,7 +2290,7 @@ where
                 gamma,
                 outcome_weight,
                 bootstrap_p,
-                interior_targets: _,
+                interior_targets: _, // MCTS produces root records only.
             },
         ) => {
             if num_simulations < 1 {
@@ -2346,6 +2366,7 @@ where
             },
             LearnerSpec::AlphaZero { gamma },
         ) => {
+            // Simulation one evaluates the root; a visit-policy target needs another.
             if num_simulations < 2 {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "num_simulations must be >= 2",
@@ -3690,6 +3711,7 @@ impl GameHandle {
         encoder: Option<EncoderHandle>,
     ) -> PyResult<Self> {
         check_max_ticks(max_ticks)?;
+        // Invalid negative sizes must reach validate() as errors, not overflow here.
         let corner = size.saturating_sub(1);
         let goal = (goal_row.unwrap_or(corner), goal_col.unwrap_or(corner));
         GridWorld {
@@ -3979,6 +4001,8 @@ impl PyCfr {
         let mut out = Vec::new();
         out.extend_from_slice(CFR_SNAPSHOT_MAGIC);
         out.push(CFR_SNAPSHOT_SCHEMA);
+        // Deliberately no length prefix: SHA-256 hex is fixed at 64 bytes, and
+        // load's [5..69] offsets are part of this schema.
         out.extend_from_slice(self.fingerprint.as_bytes());
         out.extend_from_slice(&self.inner.save());
         pyo3::types::PyBytes::new(py, &out)

@@ -12,7 +12,8 @@ from numpy.typing import NDArray
 def core_version() -> str: ...
 
 # Chess interop (pure; for referees/tools): standard-UCI <-> 8x8x73 action ids, grounded in a
-# FEN so castling/promotions disambiguate exactly. ValueError on bad FEN / illegal move.
+# FEN so castling/promotions disambiguate exactly. Castling uses standard UCI (`e1g1`, not
+# cozy-chess's internal king-takes-rook form). ValueError on bad FEN / illegal move.
 def chess_uci_action(uci: str, fen: str) -> int: ...
 def chess_action_uci(action: int, fen: str) -> str: ...
 def core_build_profile() -> str: ...  # "debug" | "release"; perf numbers are only valid on "release"
@@ -57,7 +58,8 @@ class Cfr:
     """Counterfactual regret minimization over compatible sequential declared-chance games with
     information-state keys. Variants: "vanilla", "plus" (CFR+), "external_mccfr". The output
     is the AVERAGE strategy, keyed by `Env.information_state_key` bytes. See the generated
-    compatibility catalogue for built-in compositions."""
+    compatibility catalogue for built-in compositions. Solver values and exact metrics use the
+    game's native utility (raw chips for poker), independent of any `rf.Reward` scaling."""
 
     def __init__(self, game: GameHandle, variant: str = ..., seed: int = ...) -> None: ...
     def iterate(self, n: int) -> None: ...
@@ -75,6 +77,7 @@ class Cfr:
     # Each player's exact best-response value vs the others' average profile.
     def best_response_values(self) -> list[float]: ...
     def expected_value(self, player: int) -> float: ...
+    # None means the infoset was unvisited; callers playing an MCCFR profile should use uniform legal play.
     def average_strategy(self, key: bytes) -> tuple[list[int], list[float]] | None: ...
     def save(self) -> bytes: ...
     def load(self, bytes: bytes) -> None: ...
@@ -100,17 +103,24 @@ class DeepCfr:
     float64 advantages `(rows, actions)`. Buffers, weighting, and training are the caller's."""
 
     def __init__(self, game: GameHandle, seed: int = ...) -> None: ...
+    # Call exactly once before every iteration's per-player collect calls; the resulting iteration
+    # number is the linear-CFR sample weight.
     def next_iteration(self) -> None: ...
     @property
     def iteration(self) -> int: ...
     def resolved_config(self) -> dict[str, Any]: ...
     # infer/policy_infer outputs may be float64 or float32 (exact widening).
     def collect(self, player: int, traversals: int, infer: Any) -> DeepCfrBatch: ...
-    # Enumerable games only; raises ValueError past the exact-enumeration cap.
+    # Enumerable games only; raises ValueError past the exact-enumeration cap. Rows are scores:
+    # negatives are clamped, legal entries renormalized, and degenerate rows become uniform.
+    # Results use native game utility (raw chips for poker), not an rf.Reward scale.
     def exploitability(self, policy_infer: Any) -> float: ...
 
 # Opaque composition handles, built via the staticmethod constructors and passed to `Engine`.
 class GameHandle:
+    # One episode is one hand at fresh stacks. Events are zero-sum per-seat chip deltas; `scale`
+    # converts units (for example, `rf.Reward(scale=1 / big_blind)` reports rewards in blinds).
+    # Hidden information: search policies reject it; use an observation-only or solver workflow.
     @staticmethod
     def TexasHoldem(
         num_players: int = ...,
@@ -119,8 +129,6 @@ class GameHandle:
         big_blind: int = ...,
         encoder: EncoderHandle | None = ...,
     ) -> GameHandle: ...
-    # One episode = one hand at fresh stacks; chip-delta rewards (zero-sum), reward key: scale.
-    # Hidden information: search policies reject it; train with EpsilonGreedyQ + Dqn.
     @staticmethod
     def KuhnPoker(players: int = ..., encoder: EncoderHandle | None = ...) -> GameHandle: ...
     # 3-card analytic testbed (12 infosets); hidden information; reward key: scale.
@@ -183,7 +191,8 @@ class EncoderHandle:
     # under the same symmetry (role equivariance; the AlphaZero paper's convention).
     @staticmethod
     def RelativeChess() -> EncoderHandle: ...
-    # OpenSpiel's chess observation replicated exactly (20, 8, 8) — the interop/benchmark view.
+    # OpenSpiel's chess observation replicated exactly (20, 8, 8), including its omission of
+    # en-passant rights — positions differing only by those rights encode identically.
     @staticmethod
     def OpenSpielChess() -> EncoderHandle: ...
     # The encoder's action map (identity for absolute encoders) — for driving a net outside the
@@ -216,7 +225,8 @@ class ChanceModeHandle:
 
 class NoiseHandle:
     # Root exploration noise (rf.noise.*; AlphaZero `noise=` kwarg — None disables, omitted = the
-    # self-play default Dirichlet(0.25, 0.3, "requester")). scope: "requester" | "all".
+    # self-play default Dirichlet(0.25, 0.3, "requester")). In simultaneous trees, "requester"
+    # perturbs only the requesting player's root prior; "all" perturbs every player's root prior.
     @staticmethod
     def Dirichlet(epsilon: float = ..., alpha: float = ..., scope: str = ...) -> NoiseHandle: ...
 
@@ -446,6 +456,8 @@ class Env:
     def legal_actions(self, agent: int) -> list[int]: ...
     def observe(self, agent: int) -> NDArray[np.float32]: ...
     def observation_space(self) -> Box: ...
+    # Trusted inspection state, not an agent observation: hidden cards are included. Never feed it
+    # to a poker agent. Connect4's board is [row][column] with row 0 at the bottom.
     def state(self) -> dict[str, Any]: ...
     def information_state_key(self, agent: int) -> bytes: ...
     # Composition (game incl. encoder + resolved reward) and its fingerprint (embedded in
@@ -461,7 +473,8 @@ class Env:
     def fork(self, seed: int | None = ...) -> Env: ...
     # The tick's ordered (agent, event) trace: every emission across the tick's edges (events are
     # per-edge and incremental — an edge emits only what it causally determines, so quiet ticks
-    # return []). Event payloads are game-specific (snake → dict, connect4 → str, gridworld → dict).
+    # return []). Event payloads are game-specific. Backgammon's `margin` is 1 plain, 2 gammon,
+    # 3 backgammon; poker events are per-seat chip deltas.
     # The Env holds no reward; a game-aware caller reads the outcome from these.
     def step(self, actions: dict[int, int]) -> list[tuple[int, Any]]: ...
     # Per-agent scalar rewards for the most recent `step`, or None if built without a `reward` (the
