@@ -1,5 +1,3 @@
-# reinfors
-
 <p align="center">
   <img src="assets/reinfors-banner.svg" alt="Animated reinfors logo" width="100%">
 </p>
