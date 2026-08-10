@@ -53,8 +53,9 @@ print(batch.obs.shape, batch.targets.shape, batch.telemetry)
 - Networks are injectable per player and are not tied to a framework or device topology.
 - Composable Rust traits make new games and algorithms straightforward to add, with safer,
   simpler native extension than comparable C++ infrastructure.
-- Games include deterministic, stochastic, simultaneous, N-player, and
-  imperfect-information environments.
+- [Game semantics](docs/catalogue/games.md) cover single- and multi-agent, zero-sum,
+  cooperative, and general-sum tasks; one-shot and multi-step environments; turn-taking or
+  simultaneous decisions; explicit chance; and perfect or imperfect information.
 - Algorithms span policy-driven value learning, search-guided learning, and standalone
   game-theoretic solving; see the [algorithm catalogue](docs/catalogue/algorithms.md) for current
   implementations.
