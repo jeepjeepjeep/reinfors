@@ -70,14 +70,38 @@ rows/s) is the selection metric throughout.
 
 ## What reinfors pays for its choices
 
-Symmetry requires the reverse list. Lockstep pooling assumes a homogeneous search across
-games — OpenSpiel's per-actor independence generalizes to heterogeneous bots, evaluators,
-and games without touching a scheduler. The single both-heads contract assumes a network
-with both heads — the separate-query interface serves rollout evaluators and solvers
-uniformly. reinfors' per-game decision latency at its throughput-optimal configuration is
-higher (many games share each round), where a small-actor OpenSpiel configuration produces
-individual games faster. And reinfors' Python-side learner means the training loop
-lives in a runtime OpenSpiel's all-C++ learner never has to share.
+Symmetry requires the reverse list, stated at the same precision as the forward one.
+
+**Heterogeneous compositions are first-class inside their run infrastructure.** Any object
+satisfying their `Bot` interface slots into an actor loop per seat: their trainer runs
+concurrent *evaluation actors* (current net vs. reference baselines, producing live
+strength curves) during training; mixed-bot matches reuse the identical loop; and a
+no-network rollout evaluator ships in-library. reinfors handles heterogeneity at a
+different layer — the caller-driven `Env` expresses arbitrary bot mixes (this benchmark's
+own head-to-head bridge and referee bots are built on it), and per-player inference with
+`learn_players` covers frozen opponents and per-seat *networks* inside the engine — but
+anything beyond homogeneous self-play forfeits the engine's batching, cache, and telemetry
+machinery. Concretely missing in-engine: concurrent evaluation actors, per-seat *search*
+heterogeneity, and an in-library rollout baseline.
+
+**New search families pay an integration cost for throughput.** In their model, a new bot
+type never touches the run loop; in reinfors, a search that wants the engine's machinery
+must integrate with the pooled round staging, and features like grouped collection extend
+to search families individually. The symmetric caveat that keeps this honest: their free
+scheduling is not free *batching* — a custom OpenSpiel bot wanting their inference
+service's batches must integrate with the evaluator queue just the same. Generality with
+free scheduling is not generality with free throughput on either side.
+
+**Per-game latency.** At its throughput-optimal configuration, reinfors' games share each
+search round, so individual games progress slower than under a small-actor OpenSpiel
+configuration that finishes single games faster — a real difference for interactive or
+latency-sensitive uses, immaterial for bulk collection.
+
+**The learner shares a Python runtime.** reinfors' caller-owned training loop lives in
+Python beside collection; OpenSpiel's all-C++ learner never shares a runtime with user
+code. The flip side is flexibility — the training loop being caller-owned is a reinfors
+design goal, not an accident — but the cost is real in workloads with heavy Python-side
+work between collects.
 
 ## Reading the gap honestly
 
