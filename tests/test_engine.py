@@ -242,8 +242,14 @@ def test_engine_rejects_non_finite_inference_outputs(bad_value: float) -> None:
 @pytest.mark.parametrize(
     ("bad_infer", "observed"),
     [
-        (lambda arr: np.zeros((arr.shape[0], _K, 3), dtype=np.float32), "dtype=float32"),
-        (lambda arr: np.zeros((arr.shape[0], 3), dtype=np.float64), "shape="),
+        (
+            lambda arr: np.zeros((arr.shape[0], _K, 3), dtype=np.int32),
+            "must be a float64 or float32 ndarray; got dtype int32",
+        ),
+        (
+            lambda arr: np.zeros((arr.shape[0], 3), dtype=np.float64),
+            "must be a 3-d ndarray; got 2-d",
+        ),
     ],
 )
 def test_engine_reports_infer_dtype_and_rank(
@@ -253,7 +259,6 @@ def test_engine_reports_infer_dtype_and_rank(
     with pytest.raises(TypeError) as error:
         _engine(0, interior=False).collect(10, bad_infer)
     message = str(error.value)
-    assert "float64 NumPy array with rank 3" in message
     assert observed in message
 
 

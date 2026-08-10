@@ -76,6 +76,54 @@ def test_collect_rejects_non_finite_inference_outputs(bad_value: float, output: 
         _engine(num_simulations=2).collect(1, infer)
 
 
+def test_legal_csr_masks_the_policy_frame() -> None:
+    batch = _engine().collect(50, _uniform_infer)
+    m = batch.obs.shape[0]
+    ids, offsets = batch.legal_ids, batch.legal_offsets
+    assert offsets.shape == (m + 1,) and offsets[0] == 0 and offsets[-1] == len(ids)
+    # standard connect4 rules: full columns are masked, so rows carry 1..=7 legal actions
+    counts0 = np.diff(offsets)
+    assert (counts0 >= 1).all() and (counts0 <= _A).all()
+    assert ids.min() >= 0 and ids.max() < _A
+    # π's support is always inside the legal set
+    counts = np.diff(offsets)
+    rows = np.repeat(np.arange(m), counts)
+    mask = np.zeros((m, _A), dtype=bool)
+    mask[rows, ids] = True
+    assert (batch.policy_targets[~mask] == 0.0).all()
+
+
+def test_legal_csr_is_sparse_and_deterministic_on_chess() -> None:
+    # chess: the first emitted record of a single-game collect is the initial position —
+    # exactly 20 legal actions of the 4,672-wide space, a deterministic sparse row.
+    game = rf.games.Chess()
+    a = game.action_space().n
+    engine = rf.Engine(
+        game,
+        rf.Reward(win=1.0, loss=-1.0),
+        rf.policies.AlphaZero(num_simulations=8),
+        rf.learners.AlphaZero(gamma=1.0),
+        n_games=1,
+        seed=0,
+    )
+    batch = engine.collect(
+        1,
+        lambda obs, n=None: (
+            np.zeros((obs.shape[0], a), dtype=np.float32),
+            np.zeros(obs.shape[0], dtype=np.float32),
+        ),
+    )
+    first = batch.legal_ids[batch.legal_offsets[0] : batch.legal_offsets[1]]
+    assert len(first) == 20, "initial chess position has exactly 20 legal moves"
+    counts = np.diff(batch.legal_offsets)
+    assert counts.max() < 220, "chess rows are sparse in the 4,672-wide action space"
+    m = batch.obs.shape[0]
+    rows = np.repeat(np.arange(m), counts)
+    mask = np.zeros((m, a), dtype=bool)
+    mask[rows, batch.legal_ids] = True
+    assert (batch.policy_targets[~mask] == 0.0).all()
+
+
 def test_policy_targets_are_distributions() -> None:
     _, pi, _, _, _ = _engine().collect(80, _uniform_infer)
     assert (pi >= 0.0).all()
@@ -244,7 +292,10 @@ def test_rejects_bad_noise_alpha_and_c_puct() -> None:
     "bad_infer",
     [
         lambda arr: np.zeros((arr.shape[0], 1, _A)),  # old value contract, not a tuple
-        lambda arr: (np.zeros((arr.shape[0], _A + 1)), np.zeros(arr.shape[0])),  # wrong A
+        lambda arr: (
+            np.zeros((arr.shape[0], _A - 1)),
+            np.zeros(arr.shape[0]),
+        ),  # too NARROW (wider = padded head, accepted)
         lambda arr: (np.zeros((arr.shape[0], _A)), np.zeros(arr.shape[0] + 1)),  # wrong N
     ],
 )
@@ -253,16 +304,15 @@ def test_rejects_malformed_infer_output(bad_infer: Callable[[np.ndarray], object
         _engine().collect(10, bad_infer)
 
 
-def test_rejects_wrong_alphazero_dtype_with_observed_arrays() -> None:
+def test_rejects_unsupported_alphazero_dtype_with_observed_array() -> None:
     def bad_infer(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        return np.zeros((arr.shape[0], _A), dtype=np.float32), np.zeros(arr.shape[0])
+        return np.zeros((arr.shape[0], _A), dtype=np.int32), np.zeros(arr.shape[0])
 
     with pytest.raises(TypeError) as error:
         _engine().collect(10, bad_infer)
     message = str(error.value)
-    assert "policy_logits as a float64 NumPy array with rank 2" in message
-    assert "ndarray(dtype=float32" in message
-    assert "ndarray(dtype=float64" in message
+    assert "policy_logits must be a float64 or float32 ndarray" in message
+    assert "dtype int32" in message
 
 
 def test_make_by_name() -> None:

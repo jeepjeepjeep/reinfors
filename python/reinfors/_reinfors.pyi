@@ -104,6 +104,7 @@ class DeepCfr:
     @property
     def iteration(self) -> int: ...
     def resolved_config(self) -> dict[str, Any]: ...
+    # infer/policy_infer outputs may be float64 or float32 (exact widening).
     def collect(self, player: int, traversals: int, infer: Any) -> DeepCfrBatch: ...
     # Enumerable games only; raises ValueError past the exact-enumeration cap.
     def exploitability(self, policy_infer: Any) -> float: ...
@@ -302,6 +303,16 @@ class AlphaZeroBatch:
     policy_targets: NDArray[np.float64]
     value_targets: NDArray[np.float64]
     policy_weights: NDArray[np.float64]
+    # Legality of each row's state, HEAD frame (π's frame), CSR: row i's ids =
+    # legal_ids[legal_offsets[i]:legal_offsets[i+1]] — the mask for legal-only policy losses
+    # (softmax over legal actions; densify per minibatch:
+    #   counts = np.diff(legal_offsets); rows = np.repeat(np.arange(M), counts)
+    #   mask = np.zeros((M, A), bool); mask[rows, legal_ids] = True
+    # then logits.masked_fill(~mask, torch.finfo(logits.dtype).min) before log_softmax —
+    # finfo, not a constant: -2**16 overflows fp16). Empty rows = value-only
+    # records. Named-access only; positional unpacking is unchanged.
+    legal_ids: NDArray[np.int64]
+    legal_offsets: NDArray[np.int64]
     telemetry: dict[str, Any]
     def __len__(self) -> int: ...
     def __getitem__(self, i: int) -> Any: ...
@@ -387,8 +398,10 @@ class Engine:
     def restore(self, snapshot: EngineSnapshot, expect_policy_version: str | None = ...) -> None: ...
     # The batch is learner-shaped: the TreeStrap family yields a `TreeStrapBatch`, the DQN family a
     # `DqnBatch`. Both expose named fields and also unpack positionally (back-compat with the old tuple).
-    # The concrete batch family is selected by the runtime learner handle. This remains Any until
-    # LearnerHandle and Engine can carry that relationship as a generic type parameter.
+    # infer outputs may be float64 or float32 (f32 widens exactly -> bit-identical batches;
+    # f32 skips the producer-side conversion — the GPU fast path). The concrete batch family is
+    # selected by the runtime learner handle, so this remains Any until Engine carries that
+    # relationship as a generic type parameter.
     def collect(self, n_records: int, infer: Any) -> Any: ...
     # Continuous background collection: a worker thread runs collect after collect into a bounded
     # queue of `depth` finished batches (None = unbounded, the continuous-actor topology). The engine

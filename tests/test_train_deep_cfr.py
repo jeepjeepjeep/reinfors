@@ -46,7 +46,7 @@ def test_infer_adapters_have_the_contract_shapes() -> None:
     ex = _load()
     net = ex.Mlp(6, 2, 16)
     out = ex.make_infer(net, "cpu")(np.zeros((5, 6), dtype=np.float32))
-    assert out.shape == (5, 2) and out.dtype == np.float64
+    assert out.shape == (5, 2) and out.dtype == np.float32  # native f32; solver widens exactly
     probs = ex.make_policy_infer(net, "cpu")(np.zeros((5, 6), dtype=np.float32))
     assert probs.shape == (5, 2)
     assert np.allclose(probs.sum(axis=1), 1.0), "policy adapter emits probabilities"

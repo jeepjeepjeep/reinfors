@@ -130,12 +130,12 @@ def test_callback_error_surfaces_and_engine_recovers() -> None:
 
 def test_stream_reports_infer_dtype_and_rank() -> None:
     def bad_infer(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        return np.zeros((arr.shape[0], _A), dtype=np.float32), np.zeros(arr.shape[0])
+        return np.zeros((arr.shape[0], _A), dtype=np.int32), np.zeros(arr.shape[0])
 
     eng = _az_engine()
     stream = eng.collect_stream(20, bad_infer, depth=1)
     try:
-        with pytest.raises(TypeError, match=r"float64 NumPy array with rank 2.*dtype=float32"):
+        with pytest.raises(TypeError, match=r"float64 or float32 ndarray.*dtype int32"):
             stream.next()
     finally:
         stream.stop()

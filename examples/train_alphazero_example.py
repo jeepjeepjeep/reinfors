@@ -80,19 +80,28 @@ def make_infer(net: AlphaZeroNet, device: str) -> Callable[[np.ndarray], tuple[n
             x = torch.from_numpy(np.ascontiguousarray(obs_batch)).reshape(-1, c, h, w).to(device)
             logits, values = net(x)
         net.train(was_training)
-        return logits.cpu().double().numpy(), values.cpu().double().numpy()
+        # Native f32 out: the engine widens exactly; skips the f64 conversion (GPU fast path).
+        return logits.cpu().numpy(), values.cpu().numpy()
 
     return infer
 
 
 def alphazero_loss(
-    logits: torch.Tensor, values: torch.Tensor, pi: torch.Tensor, z: torch.Tensor, w: torch.Tensor
+    logits: torch.Tensor,
+    values: torch.Tensor,
+    pi: torch.Tensor,
+    z: torch.Tensor,
+    w: torch.Tensor,
+    legal: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The paper's two terms, policy-weighted: cross-entropy of the policy head against the
     search's visit distribution on acting rows (`w` = batch.policy_weights, 0 on value-only
     non-mover rows — their pi is inert zeros), MSE of the value head against the realized
-    outcome on every row."""
-    ce = -(pi * F.log_softmax(logits, dim=-1)).sum(dim=-1)
+    outcome on every row. Illegal logits are masked out before the softmax (`legal` densified
+    from batch.legal_ids/legal_offsets) so the policy distributes over legal actions only —
+    unmasked, early training spends its gradient suppressing illegal actions instead."""
+    masked = logits.masked_fill(~legal, torch.finfo(logits.dtype).min)
+    ce = -(pi * F.log_softmax(masked, dim=-1)).sum(dim=-1)
     policy_loss = (w * ce).sum() / w.sum().clamp(min=1.0)
     value_loss = F.mse_loss(values, z)
     return policy_loss, value_loss
@@ -120,6 +129,7 @@ def train_pass(
     pi: np.ndarray,
     z: np.ndarray,
     weights: np.ndarray,
+    legal: np.ndarray,
     batch_size: int,
     device: str,
 ) -> tuple[float, float]:
@@ -129,12 +139,13 @@ def train_pass(
     p = torch.from_numpy(pi).float().to(device)
     v = torch.from_numpy(z).float().to(device)
     pw = torch.from_numpy(weights).float().to(device)
+    lg = torch.from_numpy(legal).to(device)
     perm = torch.randperm(o.shape[0])
     p_sum, v_sum, batches = 0.0, 0.0, 0
     for start in range(0, o.shape[0], batch_size):
         idx = perm[start : start + batch_size]
         logits, values = net(o[idx])
-        policy_loss, value_loss = alphazero_loss(logits, values, p[idx], v[idx], pw[idx])
+        policy_loss, value_loss = alphazero_loss(logits, values, p[idx], v[idx], pw[idx], lg[idx])
         optimizer.zero_grad()
         (policy_loss + value_loss).backward()  # type: ignore[no-untyped-call]  # torch stub gap
         optimizer.step()
@@ -187,9 +198,14 @@ def run_iteration(
 ) -> None:
     obs, pi, z = batch.obs, batch.policy_targets, batch.value_targets
     weights = batch.policy_weights
+    # densify the legality CSR once per collected batch; rows shuffle with it in train_pass
+    counts = np.diff(batch.legal_offsets)
+    rows = np.repeat(np.arange(obs.shape[0]), counts)
+    legal = np.zeros((obs.shape[0], pi.shape[1]), dtype=bool)
+    legal[rows, batch.legal_ids] = True
     policy_loss = value_loss = float("nan")  # --train-passes 0 = collect-only; nothing to report
     for _ in range(args.train_passes):
-        policy_loss, value_loss = train_pass(net, optimizer, obs, pi, z, weights, args.batch_size, args.device)
+        policy_loss, value_loss = train_pass(net, optimizer, obs, pi, z, weights, legal, args.batch_size, args.device)
     print(
         f"  iter {it:3d}  records {obs.shape[0]:4d}  policy_loss {policy_loss:.4f}  "
         f"value_loss {value_loss:.4f}  episodes {len(batch.telemetry['episodes'])}"
