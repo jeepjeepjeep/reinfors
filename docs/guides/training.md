@@ -148,6 +148,37 @@ Use `engine.resolved_config()` alongside checkpoints to record all constructor d
 workflow. If the experiment enables inference caching, follow the
 [cache lifecycle guide](configuration-and-checkpoints.md#inference-cache-lifecycle).
 
+## Overlapping search and inference (`n_groups`)
+
+By default the engine's collect loop alternates between tree work on the CPU and your `infer`
+callback: while the accelerator runs a batch, the engine waits, and vice versa. With
+`n_groups=2` the games split into two fixed groups whose search rounds alternate — one group's
+tree work runs while the other group's batch is inside the callback (which moves to a
+dedicated submitter thread). The cycle time drops from `engine + infer` to roughly
+`max(engine, infer)`.
+
+When it pays, and how to size it:
+
+- The win requires keeping each *group* at your accelerator's batch sweet spot. Double
+  `n_games` rather than splitting it: if batch 64 is your device's best operating point, run
+  `n_games=128, n_groups=2` (two 64-row groups), not `n_games=64, n_groups=2` (two 32-row
+  groups, which usually loses more to smaller kernels than the overlap saves).
+- The gain is bounded by the engine's share of the cycle — worthwhile for GPU-bound
+  compositions, negligible when inference is cheap.
+- Per-game latency roughly doubles (each group gets the accelerator half the time), so
+  episodes take longer in wall-clock while total throughput rises.
+
+Collects remain bit-reproducible for a fixed seed: group membership is static, rounds
+alternate strictly, and rows keep game-index order. Digests differ from `n_groups=1` — it is
+a different composition, and `resolved_config()`/`config_fingerprint()` record it. On a
+weight refresh (`weights_updated()`), rows already in flight finish their round but never
+enter the inference cache, so the cache never serves entries from superseded weights.
+
+v1 supports `policies.Mcts` and `policies.AlphaZero` with a single shared callback, and
+excludes truncation-tail bootstrapping (an `AlphaZero` learner — or `TreeStrap` with an
+outcome weight — combined with a truncating game); the constructor raises `ValueError` for
+unsupported compositions.
+
 ## Per-player models
 
 For a separate two-player experiment—for example, Connect 4 with a frozen opponent—pass one
