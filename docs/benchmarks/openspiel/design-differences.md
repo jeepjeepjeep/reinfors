@@ -34,8 +34,9 @@ configuration therefore sits at a modest actor count with correspondingly small 
 batches, paying the small-batch region of the kernel curve. reinfors' lockstep makes batch
 size *equal* to game count while all games advance at one shared rate, so it can sit at
 the device's kernel sweet spot without a completion penalty. This coupling difference is
-the single largest contributor to the measured throughput gap — and it is a scheduling
-choice, not an implementation-quality difference: per-actor threading is the natural design
+hypothesized to be the largest contributor to any measured throughput gap (the published
+ablations quantify it) — and it is a scheduling choice, not an implementation-quality
+difference: per-actor threading is the natural design
 for a library whose algorithms and games vary widely; lockstep pooling is available to
 reinfors because its search contract is narrower.
 

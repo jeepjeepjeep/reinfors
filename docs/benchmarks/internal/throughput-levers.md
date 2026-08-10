@@ -36,8 +36,8 @@ kernel batch curve for its per-call row count. Two comparisons matter:
 - **matched game count** (does splitting my current games help?): usually not — halving
   rows per call costs kernel efficiency;
 - **matched rows per call** (should I double my games into two groups?): the deployment
-  question; gains approach the full `1/infer_share` ceiling when the scheduler is
-  saturated.
+  question; with inference share `p`, gains approach the `1 / max(p, 1 - p)` ceiling when
+  the scheduler is saturated.
 
 Mechanism validation (local Apple-silicon grid; illustrative of the model, not of absolute
 throughput): at a near-balanced operating point the matched-rows comparison realized ×1.70
@@ -55,8 +55,8 @@ throughput, realized rows per call, inference share, and decision latency):
 | n128 × 2 groups | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
 | n64 × 2 groups | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
 
-Predicted for this operating point: inference share ≈ 0.9 caps the gain near +9%, with the
-batch term favorable (two 64-row groups sit at the A10G sweet spot; a single 128-row batch
+Predicted for this operating point: the measured inference share ≈ 0.92 puts the ceiling
+at ≈ +9% (`1/0.92`), with the batch term favorable (two 64-row groups sit at the A10G sweet spot; a single 128-row batch
 pays a measured kernel regression). Boundary costs (submitter spawn per collect, one
 discarded in-flight batch at the record floor) are amortized at round-scale collection and
 measured separately at small collection sizes before any general recommendation.

@@ -20,9 +20,15 @@ against each other (more parallel games → more rows/s, slower per-game progres
 completed states/s), so topology selection and headline comparisons use states/s at matched
 search budget; rows/s is recorded as diagnosis.
 
-## Determinism and repeats
+## Determinism, repeats, and uncertainty
 
 Collection is seeded and bit-reproducible per configuration under fixed weights and
-deterministic inference; every run records its seed and resolved configuration, and
-single-seed results carry that caveat explicitly rather than implying run-to-run
-generality.
+deterministic inference; every run records its seed and resolved configuration.
+
+Repeats are tiered by cost: tuning and characterization measurements (kernel curves,
+sweep legs) are repeated — at least three legs, reported as median with the spread — while
+the two-hour rounds are explicitly **single-seed per side**, stated as such wherever their
+results appear. Match results report a standard error (computed over opening pairs);
+sweep-derived selections state the margin between the chosen configuration and the
+runner-up. No published number appears without either a repeat-derived spread or a
+single-run label.

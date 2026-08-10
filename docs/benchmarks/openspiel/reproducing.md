@@ -6,8 +6,13 @@ machinery and its documented patches, the measurement and round-orchestration sc
 head-to-head bridge, and the raw logs and artifacts of every published run. That material
 is deliberately not vendored into reinfors — third-party patches, training loops, and
 cloud tooling are outside the library's scope, and a drifting copy would be worse than a
-pointer. The commands below are the companion repo's run surface, so published results can
-be audited against exact invocations.
+pointer.
+
+The blocks below are **command templates**, not verbatim invocations: they run from the
+companion repository's root (except where noted), and angle-bracket values come from the
+tuning tables. Every published result links a pinned companion-repo commit whose run
+manifest contains the exact commands, resolved configurations, and seeds — audit against
+the manifest, not this page.
 
 ## One-time setup (per instance)
 
@@ -16,7 +21,8 @@ be audited against exact invocations.
 # instrumentation + device patches, builds trainer and head-to-head binaries)
 bash scripts/setup_openspiel_cpp.sh
 
-# reinfors: release wheel into the measurement venv (a debug build is refused at runtime)
+# from the reinfors checkout: release wheel into the measurement venv (a debug build is
+# refused at runtime)
 maturin develop --release -m crates/reinfors-py/Cargo.toml
 ```
 
@@ -26,7 +32,7 @@ Per-boot: disable SMT (guarded by every script), pull, rebuild the wheel.
 
 ```bash
 # kernel ceiling + engine sweeps (batch curve, per-row costs)
-python benchmarks/openspiel/phase0_gpu_sweep.py ...
+python benchmarks/openspiel/phase0_gpu_sweep.py  # modes and grids per --help
 
 # topology selection under the round workload (cache on, learner + checkpoints active,
 # 20-minute interior windows, hard-kill protocol)
@@ -39,7 +45,7 @@ CORES=0-3 WIDTH=256 DEPTH=8 NGAMES="64 128" MINUTES=20 bash scripts/measure_stat
 ```bash
 # two sequential 2h legs (OpenSpiel then reinfors), hard-killed at the deadline,
 # post-run listing of each side's checkpoint artifacts
-MINUTES=120 OS_ACTORS=<selected> bash scripts/run_round_chess_gpu.sh
+MINUTES=120 OS_ACTORS=<from tuning> bash scripts/run_round_chess_gpu.sh
 
 # head-to-head: paired openings, both colors, matched simulations, solver off,
 # PGN export with run metadata for every game

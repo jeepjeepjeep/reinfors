@@ -41,12 +41,11 @@ reinfors (parallel games):
 | n_games 64 | _TBD_ | _TBD_ | _TBD_ |
 | n_games 128 | _TBD_ | _TBD_ | _TBD_ |
 
-Two findings from these grids shape the interpretation and are discussed in
-[design differences](design-differences.md): OpenSpiel's completed-game rate falls as its
-actor count rises even as its rows/s climbs (its batch size is coupled to actor count, so
-GPU efficiency and game completion pull against each other), while reinfors' grid is
-decided almost entirely by the kernel batch curve (its batch size equals its game count by
-construction, decoupled from per-game progress).
+The grids are designed to expose two structural hypotheses, analyzed in
+[design differences](design-differences.md) and quantified when the tables publish:
+that OpenSpiel's completed-game rate and its rows/s move in opposite directions as actors
+rise (batch size coupled to actor count), and that reinfors' grid is decided by the kernel
+batch curve alone (batch size equal to game count, decoupled from per-game progress).
 
 ## Selected operating points
 

@@ -12,9 +12,9 @@ its scope to a modular game/search/training boundary and asks a narrower questio
 much throughput does that modularity preserve against a mature C++ implementation, on a
 workload both systems support well?**
 
-The headline shape is therefore not "reinfors is faster" but: comparable — in places
-somewhat better — throughput, while keeping the pluggable game/encoder/search/learner
-seams that are reinfors' design goal. Where the numbers differ, the
+The claim under test is therefore not "reinfors is faster" but whether throughput
+remains comparable while keeping the pluggable game/encoder/search/learner seams that are
+reinfors' design goal — the published tables decide it. Where the numbers differ, the
 differences trace to identifiable structural design choices on each side, not to one
 implementation being "better engineered" — see [design differences](design-differences.md).
 Both stacks were measured at their own best configuration, on the same hardware, under the

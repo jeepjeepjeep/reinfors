@@ -18,10 +18,12 @@ uv run --with torch python examples/train_alphazero_example.py --n-games 128 --n
 The CUDA grids behind the [throughput levers](throughput-levers.md) tables (f32 outputs,
 cache capacity, the `n_groups` grid) run through the companion benchmark repository's
 trainer, on the same instance and under the same protocol as the cross-framework
-comparison:
+comparison. As on the [comparison reproduction page](../openspiel/reproducing.md), these
+are command templates; published results link a pinned companion-repo commit with the
+exact run manifest:
 
 ```bash
-# in the companion repository
+# from the companion repository root
 CORES=0-3 WIDTH=256 DEPTH=8 NGAMES="64 128" NGROUPS=1 MINUTES=20 bash scripts/measure_states_rf.sh
 CORES=0-3 WIDTH=256 DEPTH=8 NGAMES="64 128" NGROUPS=2 MINUTES=20 bash scripts/measure_states_rf.sh
 ```
