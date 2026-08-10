@@ -49,15 +49,6 @@ def test_one_train_iteration_runs() -> None:
     assert np.isfinite(loss)
 
 
-def _load_az_example() -> Any:
-    path = os.path.join(os.path.dirname(__file__), "..", "examples", "train_alphazero_example.py")
-    spec = importlib.util.spec_from_file_location("train_alphazero_example", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def test_alphazero_example_grouped_streaming_wiring() -> None:
     # n_groups=2 + --depth is the distinct grouped streaming path (collect_thunk branch).
     import subprocess

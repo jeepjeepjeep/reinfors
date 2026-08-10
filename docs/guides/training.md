@@ -177,9 +177,11 @@ weights* (accelerator kernels are not always deterministic, and under streaming 
 of weight refreshes decides which version serves a round): group membership is static,
 rounds alternate strictly, and rows keep game-index order. Digests differ from `n_groups=1`
 — it is a different composition, and `resolved_config()`/`config_fingerprint()` record it.
-On a weight refresh (`weights_updated()`), rows already in flight finish their round; the
-cache never *serves* rows computed under superseded weights, because every batch
-synchronizes generations (clearing stale entries) before its first lookup.
+On a weight refresh (`weights_updated()`), rows already in flight finish their round. Once
+a round observes the new generation (each round syncs at its boundary, before any lookup),
+older entries are cleared and no longer served; a refresh landing *mid-round* takes effect
+at the next boundary, so that round's remaining lookups may still see pre-refresh entries —
+the same one-round staleness window the ungrouped collect has.
 
 v1 supports `policies.Mcts` and `policies.AlphaZero`, and excludes truncation-tail
 bootstrapping (an `AlphaZero` learner — or `TreeStrap` with an outcome weight — combined
