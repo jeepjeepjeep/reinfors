@@ -16,11 +16,9 @@ uv run --with torch python examples/train_alphazero_example.py --n-games 128 --n
 ## GPU lever grids
 
 The CUDA grids behind the [throughput levers](throughput-levers.md) tables (f32 outputs,
-cache capacity, the `n_groups` grid) currently run through the companion benchmark
-repository's trainer, on the same instance and under the same protocol as the
-cross-framework comparison. A self-contained in-repo runner (torch example net + engine +
-the grid loop) is planned so this family never requires the companion repo; until it
-lands, the exact invocations are:
+cache capacity, the `n_groups` grid) run through the companion benchmark repository's
+trainer, on the same instance and under the same protocol as the cross-framework
+comparison:
 
 ```bash
 # in the companion repository

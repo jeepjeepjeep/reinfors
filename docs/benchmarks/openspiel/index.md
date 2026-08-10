@@ -12,9 +12,9 @@ its scope to a modular game/search/training boundary and asks a narrower questio
 much throughput does that modularity preserve against a mature C++ implementation, on a
 workload both systems support well?**
 
-The honest headline shape is therefore not "reinfors is faster" but: comparable — in
-places somewhat better — throughput, while keeping the pluggable game/encoder/search/
-learner seams that are reinfors' actual design goal. Where the numbers differ, the
+The headline shape is therefore not "reinfors is faster" but: comparable — in places
+somewhat better — throughput, while keeping the pluggable game/encoder/search/learner
+seams that are reinfors' design goal. Where the numbers differ, the
 differences trace to identifiable structural design choices on each side, not to one
 implementation being "better engineered" — see [design differences](design-differences.md).
 Both stacks were measured at their own best configuration, on the same hardware, under the
@@ -33,9 +33,8 @@ in force is recorded with every result. Two documented,
 content-preserving interventions were required — restoring build glue that master deletes
 while still referencing (the libtorch path does not build as shipped), and measurement
 instrumentation in its evaluator plus a device flag in its example game runner. All patches
-ship with the benchmark harness and are applied idempotently. Torch and libtorch are pinned
-to the same kernel generation on both sides (a generation skew was measured at 1.29–1.4×
-on this workload — larger than any real difference).
+ship with the benchmark harness and are applied idempotently. Torch/libtorch version pinning is
+covered in [setup](../setup.md).
 
 ## Contents
 

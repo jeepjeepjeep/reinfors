@@ -32,8 +32,8 @@ Parallelism topology (actor/game counts, inference batch sizes) is **not** match
 stack runs the configuration that empirically maximizes *its own* states/s under the round
 workload — cache on, learner and checkpoint writes sharing the GPU, windows long enough to
 contain several learn steps and game lengths (see [tuning](tuning.md)). Selecting a rival's
-topology for it, or measuring topology under a lighter workload than the round, are both
-ways of quietly handicapping one side.
+topology for it, or measuring topology under a lighter workload than the round, both bias
+the comparison.
 
 ## Artifact selection under the deadline
 

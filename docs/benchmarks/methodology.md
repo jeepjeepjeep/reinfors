@@ -1,22 +1,14 @@
 # Methodology
 
-The measurement discipline shared by every benchmark family — internal grids and the
-cross-framework comparison alike. Several rules exist because an earlier version of
-the benchmark violated them and produced numbers that flattered one configuration;
-each states what it prevents. Rules specific to comparing *two frameworks* fairly
-live with the [OpenSpiel comparison protocol](openspiel/protocol.md).
+The measurement discipline shared by every benchmark family. Rules specific to comparing
+two frameworks live in the [comparison protocol](openspiel/protocol.md).
 
 ## Termination: hard kill, interior windows
 
-Every timed leg is terminated by SIGKILL at its deadline, on **both** stacks, and rates are
-computed from counter deltas between timestamped samples strictly inside the window — never
-by dividing a total by the nominal duration.
-
-*Why:* graceful shutdown lets a stack keep producing while it drains in-flight work. In an
-early sweep, one side was stopped with SIGINT plus a grace period and internally-timed
-totals, inflating its rates by 18–31% relative to the hard-killed side. Discovered when its
-single inference thread logged more busy-seconds than the leg's nominal length. If interior
-samples are missing, the result is reported as failed — never reconstructed.
+Each leg is killed (SIGKILL) at its deadline, on both stacks. Rates use counter deltas
+between timestamped interior samples; runs with fewer than two interior samples fail
+rather than fall back to totals. This avoids counting work completed while draining after
+the deadline, which inflated one side by 18–31% in an early sweep.
 
 ## The training-relevant rate is states/s, not rows/s
 

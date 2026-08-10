@@ -45,4 +45,4 @@ the required build interventions and patches are documented with the
 
 Settings that silently reset on instance stop/start, re-verified before every session: SMT
 off; branches pulled; reinfors release wheel rebuilt into the measurement venv; OpenSpiel
-binaries rebuilt if any patch changed. The public IP also changes per boot (no elastic IP).
+binaries rebuilt if any patch changed.

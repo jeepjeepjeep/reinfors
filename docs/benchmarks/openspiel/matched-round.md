@@ -37,28 +37,14 @@ the deadline kill; every game is exported as PGN with full run metadata.
 | score ± SE (paired) | _TBD_ |
 | implied Elo difference (95% CI) | _TBD_ |
 
-Interpretation guardrails, fixed in advance: with the throughput difference measured at the
-scale it is, the expected strength edge after 2 hours is small relative to 50–100-game
-match resolution, so a near-parity score is an expected outcome, not a null result; the
-claim under test is "throughput preserved by the modular boundary", and the match's job is
-to bound the strength cost of whatever differences remain, not to crown a winner.
-
-## Strength over time
-
-Both stacks checkpoint on comparable cadences throughout the round, so strength-vs-time
-curves (each intermediate checkpoint against a fixed reference opponent, and/or
-cross-stack at matched wall-clock) are recoverable from the same artifacts:
-
-_TBD — planned; artifacts already collected per round._
+Interpretation, fixed in advance: the expected strength edge from a throughput difference
+of this scale after 2 hours is small relative to 50–100-game match resolution, so a
+near-parity score is an expected outcome, not a null result. The match bounds the strength
+cost of the remaining differences.
 
 ## Open items
 
-Carried caveats, stated rather than hidden:
-
-- **single seed per side** — training-run variance in AlphaZero-style setups is real;
-  multi-seed rounds are the planned fix and the reason match-level precision is not
-  over-interpreted;
-- match length: ~50 games resolves ~±0.05 in score; extended matches (fresh opening seeds
-  pool cleanly with earlier games) are queued for tighter intervals;
-- one game (chess) at one net size; a second, cheaper game (connect4) is planned as a
-  calibration point where both stacks' dynamics differ substantially from chess.
+- **single seed per side** — training-run variance in AlphaZero-style setups is real, and
+  match-level precision is not over-interpreted because of it;
+- match length: ~50 games resolves ~±0.05 in score;
+- one game (chess) at one net size.

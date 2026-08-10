@@ -2,9 +2,9 @@
 
 Where the two stacks' numbers differ, the causes are identifiable structural choices — each
 sensible for its system's goals. This page describes both architectures and traces each
-measured difference to its design origin. It is the opposite of a scorecard: several of
-OpenSpiel's choices are the right ones for a reference research library, and reinfors'
-choices cost it elsewhere (generality, per-game latency) in ways this page also names.
+measured difference to its design origin, in both directions: several of OpenSpiel's
+choices are the right ones for a reference research library, and reinfors' choices cost
+it elsewhere (generality, per-game latency).
 
 ## The two architectures
 
@@ -47,11 +47,11 @@ serves rollout-based evaluators without networks — and relies on its cache to 
 pair. With the cache on (its intended condition) the merge works and the difference mostly
 vanishes; the structural residue is cache-shaped rather than compute-shaped (entries,
 lookups, and eviction pressure per node differ). This is also why cache-off cross-stack
-comparisons are invalid rather than "clean" — see [methodology](../methodology.md).
+comparisons are invalid rather than "clean" — see the [comparison protocol](protocol.md).
 
 ## Consequence 3: continuous versus burst training
 
-reinfors's learner trains continuously beside collection; self-play always runs against
+The reinfors learner trains continuously beside collection; self-play always runs against
 near-current weights, and GPU time interleaves at fine grain. OpenSpiel's learner trains in
 periodic sweeps during which the device prioritizes training; its actors play against
 weights up to one sweep stale, then jump. Neither profile is free — and neither is
@@ -65,9 +65,8 @@ mistaken for a difference in how much learning happens.
 ## Consequence 4: what a deadline does to in-flight work
 
 Both stacks lose in-flight games at the hard kill; how much is in flight is a design
-consequence — proportional to concurrent games and per-game latency. This is measured and
-reported rather than argued about, and it is one reason completed-game states/s (not
-rows/s) is the selection metric throughout.
+consequence — proportional to concurrent games and per-game latency. See the shared
+[methodology](../methodology.md) for why completed-game states/s is the selection metric.
 
 ## What reinfors pays for its choices
 
@@ -88,7 +87,7 @@ heterogeneity, and an in-library rollout baseline.
 **New search families pay an integration cost for throughput.** In their model, a new bot
 type never touches the run loop; in reinfors, a search that wants the engine's machinery
 must integrate with the pooled round staging, and features like grouped collection extend
-to search families individually. The symmetric caveat that keeps this honest: their free
+to search families individually. The symmetric caveat: their free
 scheduling is not free *batching* — a custom OpenSpiel bot wanting their inference
 service's batches must integrate with the evaluator queue just the same. Generality with
 free scheduling is not generality with free throughput on either side.
@@ -104,7 +103,7 @@ code. The flip side is flexibility — the training loop being caller-owned is a
 design goal, not an accident — but the cost is real in workloads with heavy Python-side
 work between collects.
 
-## Reading the gap honestly
+## Scope of the claim
 
 The measured gap is the sum of scheduling and interface choices, each of which OpenSpiel
 could adopt at the cost of generality it deliberately keeps, and each of which reinfors
