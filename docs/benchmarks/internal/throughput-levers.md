@@ -20,13 +20,13 @@ past the action space return whole tensors without a device-side slice.
 Position-keyed reuse of network rows across the search, cleared on weight refresh. Effect
 depends on the game's transposition structure (measured hit rates: chess low-teens percent
 and *rising* as the net strengthens; small-board connect-style games far higher) and on
-capacity only up to a saturation point — see [tuning](tuning.md) for the capacity curve.
+capacity only up to a saturation point — see the [capacity curve](index.md).
 
 ## Grouped collection (`n_groups=2`)
 
 Splits the games into two fixed groups whose search rounds alternate, so one group's tree
 work overlaps the other's inference (which runs on a dedicated submitter thread). Full
-semantics in the [training guide](../guides/training.md#overlapping-search-and-inference-n_groups).
+semantics in the [training guide](../../guides/training.md#overlapping-search-and-inference-n_groups).
 
 The model, validated empirically: with per-round search time `S` and inference time `I`,
 throughput improves by up to `(S + I) / max(S, I)` — maximized when the stages are

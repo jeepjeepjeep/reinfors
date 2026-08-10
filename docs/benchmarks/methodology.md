@@ -54,7 +54,7 @@ applied to the same parameter-name set.
 Parallelism topology (actor/game counts, inference batch sizes) is **not** matched: each
 stack runs the configuration that empirically maximizes *its own* states/s under the round
 workload — cache on, learner and checkpoint writes sharing the GPU, windows long enough to
-contain several learn steps and game lengths (see [tuning](tuning.md)). Selecting a rival's
+contain several learn steps and game lengths (see [tuning](openspiel/tuning.md)). Selecting a rival's
 topology for it, or measuring topology under a lighter workload than the round, are both
 ways of quietly handicapping one side.
 
@@ -71,6 +71,6 @@ them mid-write.
 Collection is seeded and bit-reproducible per stack under fixed weights and deterministic
 inference; training runs are single-seed per round with the seed recorded, and the
 single-seed caveat is carried explicitly until multi-seed rounds land (see the
-[open items](matched-round.md#open-items)). Head-to-head matches use paired openings
+[open items](openspiel/matched-round.md#open-items)). Head-to-head matches use paired openings
 (each opening played once per color) so opening imbalance cancels within pairs, and are
 reported with standard errors computed over pairs, not games.

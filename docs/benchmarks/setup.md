@@ -37,21 +37,9 @@ difference.
 
 ### The OpenSpiel build
 
-The comparison targets OpenSpiel **as maintained today**, which required two documented
-interventions, both content-preserving:
-
-- current master cannot build the libtorch path as shipped (the libtorch/libnop CMake glue
-  was deleted upstream while still referenced); the build restores that glue verbatim from
-  the parent commit — build wiring only, zero behavior change;
-- the as-shipped release era carried a long-standing GPU tensor-staging inefficiency that
-  upstream has since fixed on master; benchmarking the fixed master (rather than the slower
-  pinned release) is deliberate — measuring a known-fixed bug would flatter reinfors and
-  say nothing.
-
-One additional patch adds instrumentation counters to their evaluator (requests, cache
-hits, forwards, forward time) and a device flag to their example game runner — measurement
-and evaluation surface only, no algorithmic change. All patches ship in the benchmark
-repository and are applied idempotently by its setup script.
+The comparison targets a recorded master snapshot built from source with CUDA libtorch;
+the required build interventions and patches are documented with the
+[comparison itself](openspiel/index.md#the-comparison-target).
 
 ## Per-boot checklist
 

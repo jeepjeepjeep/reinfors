@@ -23,7 +23,7 @@ policy and value from one forward. The inference cache is position-keyed and ind
 call structure. The learner is caller-owned Python running concurrently (records stream out
 per collected batch); weight refreshes are explicit and clear the cache at round
 boundaries. Optionally, games split into two groups whose rounds alternate so tree work
-overlaps inference ([grouped collection](throughput-levers.md)).
+overlaps inference ([grouped collection](../internal/throughput-levers.md)).
 
 ## Consequence 1: batch size coupled to — or decoupled from — game count
 
@@ -47,7 +47,7 @@ serves rollout-based evaluators without networks — and relies on its cache to 
 pair. With the cache on (its intended condition) the merge works and the difference mostly
 vanishes; the structural residue is cache-shaped rather than compute-shaped (entries,
 lookups, and eviction pressure per node differ). This is also why cache-off cross-stack
-comparisons are invalid rather than "clean" — see [methodology](methodology.md).
+comparisons are invalid rather than "clean" — see [methodology](../methodology.md).
 
 ## Consequence 3: continuous versus burst training
 
