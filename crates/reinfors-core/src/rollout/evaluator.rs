@@ -33,6 +33,18 @@ pub struct EvalBatch<'e, 'a, F> {
     staged: std::collections::HashMap<u128, usize>,
     n: usize,
     dim: usize,
+    generation: u64,
+}
+
+/// A batch detached from its evaluator: rows to forward elsewhere (e.g. on a submitter
+/// thread), then hand back through [`Evaluator::ingest`].
+pub struct StagedBatch {
+    pub players: Vec<usize>,
+    pub obs_flat: Vec<f32>,
+    pub n: usize,
+    pub dim: usize,
+    keys: Vec<u128>,
+    generation: u64,
 }
 
 pub struct CommittedRows {
@@ -82,6 +94,10 @@ where
                 cache.sync_generation();
             }
         }
+        let generation = match self.caches.as_deref() {
+            Some(caches) => caches.first().map_or(0, InferCache::seen_generation),
+            None => 0,
+        };
         EvalBatch {
             eval: self,
             obs_flat: Vec::new(),
@@ -90,6 +106,7 @@ where
             staged: std::collections::HashMap::new(),
             n: 0,
             dim: 0,
+            generation,
         }
     }
 
@@ -120,6 +137,44 @@ where
         out
     }
 
+    /// Account and cache rows forwarded elsewhere for a batch detached via `into_staged`.
+    /// Rows staged under a superseded weights generation are used for their search round but
+    /// never enter the cache — the no-stale-entries contract without a pipeline stall.
+    pub fn ingest(
+        &mut self,
+        staged: StagedBatch,
+        out: Vec<f64>,
+        seconds: f64,
+        calls: usize,
+    ) -> CommittedRows {
+        if staged.n == 0 {
+            return CommittedRows {
+                out: Vec::new(),
+                stride: 0,
+            };
+        }
+        self.seconds += seconds;
+        self.calls += calls;
+        self.rows += staged.n;
+        let stride = out.len() / staged.n;
+        let fresh = match self.caches.as_deref() {
+            Some(caches) => caches
+                .first()
+                .is_some_and(|c| c.seen_generation() == staged.generation),
+            None => false,
+        };
+        if fresh {
+            for i in 0..staged.keys.len() {
+                let (key, player) = (staged.keys[i], staged.players[i]);
+                let row = out[i * stride..(i + 1) * stride].to_vec();
+                self.cache_slot(player)
+                    .expect("caches present")
+                    .insert(key, &row);
+            }
+        }
+        CommittedRows { out, stride }
+    }
+
     pub fn cache_lookups(&self) -> usize {
         self.caches
             .as_deref()
@@ -130,6 +185,73 @@ where
         self.caches
             .as_deref()
             .map_or(0, |c| c.iter().map(|x| x.hits).sum())
+    }
+}
+
+/// Forward `n` staged rows through `infer`, honoring the routing mode; returns rows in
+/// ticket order plus the number of callback invocations made.
+pub fn run_infer<F>(
+    infer: &mut F,
+    mode: InferMode,
+    players: &[usize],
+    obs_flat: Vec<f32>,
+    n: usize,
+    dim: usize,
+) -> (Vec<f64>, usize)
+where
+    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+{
+    match mode {
+        InferMode::Shared => (infer(0, obs_flat, n), 1),
+        InferMode::PerPlayer => {
+            // Preserve first-seen player order so routed calls remain deterministic.
+            let mut order: Vec<usize> = Vec::new();
+            let mut groups: std::collections::HashMap<usize, Vec<usize>> =
+                std::collections::HashMap::new();
+            for (ticket, &player) in players.iter().enumerate() {
+                groups.entry(player).or_insert_with(|| {
+                    order.push(player);
+                    Vec::new()
+                });
+                groups.get_mut(&player).expect("just inserted").push(ticket);
+            }
+            let mut calls = 0;
+            let mut out: Vec<f64> = Vec::new();
+            let mut scattered: Vec<(usize, Vec<f64>)> = Vec::with_capacity(n);
+            let mut group_stride: Option<usize> = None;
+            for player in order {
+                let tickets = &groups[&player];
+                let mut obs: Vec<f32> = Vec::with_capacity(tickets.len() * dim);
+                for &t in tickets {
+                    obs.extend_from_slice(&obs_flat[t * dim..(t + 1) * dim]);
+                }
+                let rows = infer(player, obs, tickets.len());
+                calls += 1;
+                // A single stride is used below, so routed row widths must agree.
+                assert!(
+                    rows.len().is_multiple_of(tickets.len()),
+                    "player {player} infer returned {} values for {} rows (not divisible)",
+                    rows.len(),
+                    tickets.len()
+                );
+                let stride = rows.len() / tickets.len();
+                if let Some(expected) = group_stride {
+                    assert_eq!(
+                        stride, expected,
+                        "player {player} infer row width differs from another player's"
+                    );
+                }
+                group_stride = Some(stride);
+                for (i, &t) in tickets.iter().enumerate() {
+                    scattered.push((t, rows[i * stride..(i + 1) * stride].to_vec()));
+                }
+            }
+            scattered.sort_by_key(|(t, _)| *t);
+            for (_, row) in scattered {
+                out.extend(row);
+            }
+            (out, calls)
+        }
     }
 }
 
@@ -174,68 +296,18 @@ where
                 stride: 0,
             };
         }
-        let out = match self.eval.mode {
-            InferMode::Shared => {
-                let t = std::time::Instant::now();
-                let out = (self.eval.infer)(0, self.obs_flat, self.n);
-                self.eval.seconds += t.elapsed().as_secs_f64();
-                self.eval.calls += 1;
-                self.eval.rows += self.n;
-                out
-            }
-            InferMode::PerPlayer => {
-                // Preserve first-seen player order so routed calls remain deterministic.
-                let mut order: Vec<usize> = Vec::new();
-                let mut groups: std::collections::HashMap<usize, Vec<usize>> =
-                    std::collections::HashMap::new();
-                for (ticket, &player) in self.players.iter().enumerate() {
-                    groups.entry(player).or_insert_with(|| {
-                        order.push(player);
-                        Vec::new()
-                    });
-                    groups.get_mut(&player).expect("just inserted").push(ticket);
-                }
-                let dim = self.dim;
-                let mut out: Vec<f64> = Vec::new();
-                let mut scattered: Vec<(usize, Vec<f64>)> = Vec::with_capacity(self.n);
-                let mut group_stride: Option<usize> = None;
-                for player in order {
-                    let tickets = &groups[&player];
-                    let mut obs: Vec<f32> = Vec::with_capacity(tickets.len() * dim);
-                    for &t in tickets {
-                        obs.extend_from_slice(&self.obs_flat[t * dim..(t + 1) * dim]);
-                    }
-                    let started = std::time::Instant::now();
-                    let rows = (self.eval.infer)(player, obs, tickets.len());
-                    self.eval.seconds += started.elapsed().as_secs_f64();
-                    self.eval.calls += 1;
-                    self.eval.rows += tickets.len();
-                    // A single stride is used below, so routed row widths must agree.
-                    assert!(
-                        rows.len().is_multiple_of(tickets.len()),
-                        "player {player} infer returned {} values for {} rows (not divisible)",
-                        rows.len(),
-                        tickets.len()
-                    );
-                    let stride = rows.len() / tickets.len();
-                    if let Some(expected) = group_stride {
-                        assert_eq!(
-                            stride, expected,
-                            "player {player} infer row width differs from another player's"
-                        );
-                    }
-                    group_stride = Some(stride);
-                    for (i, &t) in tickets.iter().enumerate() {
-                        scattered.push((t, rows[i * stride..(i + 1) * stride].to_vec()));
-                    }
-                }
-                scattered.sort_by_key(|(t, _)| *t);
-                for (_, row) in scattered {
-                    out.extend(row);
-                }
-                out
-            }
-        };
+        let t = std::time::Instant::now();
+        let (out, calls) = run_infer(
+            self.eval.infer,
+            self.eval.mode,
+            &self.players,
+            self.obs_flat,
+            self.n,
+            self.dim,
+        );
+        self.eval.seconds += t.elapsed().as_secs_f64();
+        self.eval.calls += calls;
+        self.eval.rows += self.n;
         let stride = out.len() / self.n;
         if self.eval.caches.is_some() {
             for i in 0..self.keys.len() {
@@ -248,6 +320,18 @@ where
             }
         }
         CommittedRows { out, stride }
+    }
+
+    /// Detach the staged rows from the evaluator without forwarding them.
+    pub fn into_staged(self) -> StagedBatch {
+        StagedBatch {
+            players: self.players,
+            obs_flat: self.obs_flat,
+            n: self.n,
+            dim: self.dim,
+            keys: self.keys,
+            generation: self.generation,
+        }
     }
 }
 

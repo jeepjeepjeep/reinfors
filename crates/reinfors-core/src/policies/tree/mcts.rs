@@ -14,6 +14,7 @@ use crate::rollout::engine::CollectStats;
 use crate::rollout::evaluator::{CommittedRows, EvalBatch, Evaluator, Resolve};
 
 /// Search guidance and leaf-output contract.
+#[derive(Clone)]
 pub(crate) enum Guidance {
     Uct {
         c: f64,
@@ -1265,7 +1266,7 @@ where
         num_simulations,
         gamma,
         max_depth,
-        guidance,
+        guidance.clone(),
         chance,
         seed,
         requests,
@@ -1283,14 +1284,14 @@ where
 /// A pooled search whose round loop is owned by the caller: `stage_round` drives every tree
 /// until it stages rows (or finishes), the caller commits the batch however it likes, and
 /// `apply_rows` distributes the results. Schedulers can interleave rounds of several pools.
-pub(crate) struct PooledSearch<'c, G: Game> {
+pub struct PooledSearch<'c, G: Game> {
     game: &'c G,
     enc: &'c dyn StateEncoder<State = G::State>,
     reward: &'c dyn Reward<Event = G::Event>,
     num_simulations: usize,
     gamma: f64,
     max_depth: i32,
-    guidance: &'c Guidance,
+    guidance: Guidance,
     chance: ChanceMode,
     a: usize,
     trees: Vec<Tree<G::State>>,
@@ -1307,7 +1308,7 @@ impl<'c, G: Game> PooledSearch<'c, G> {
         num_simulations: usize,
         gamma: f64,
         max_depth: i32,
-        guidance: &'c Guidance,
+        guidance: Guidance,
         chance: ChanceMode,
         seed: u64,
         requests: Vec<(G::State, usize)>,
@@ -1336,7 +1337,7 @@ impl<'c, G: Game> PooledSearch<'c, G> {
         assert!(
             // Q-derived UCT leaf values exist only at the evaluated agent's own turns. Sequential MaxN
             // needs every perspective; simultaneous search gives every agent its own table instead.
-            !(matches!(guidance, Guidance::Uct { .. })
+            !(matches!(&guidance, Guidance::Uct { .. })
                 && trees.iter().any(|t| t.mode == TreeMode::SeqMaxN)),
             "UCT does not support this sequential player count; see {}",
             crate::COMPATIBILITY_DOCS
@@ -1384,7 +1385,7 @@ impl<'c, G: Game> PooledSearch<'c, G> {
             self.chance,
             self.a,
         );
-        let guidance = self.guidance;
+        let guidance = &self.guidance;
 
         for (ti, tree) in self.trees.iter_mut().enumerate() {
             while tree.sims < num_simulations {
@@ -1516,7 +1517,7 @@ impl<'c, G: Game> PooledSearch<'c, G> {
                     node,
                     slot,
                     rows.row(ticket),
-                    self.guidance,
+                    &self.guidance,
                     self.gamma,
                     self.a,
                     ti,
@@ -1735,6 +1736,38 @@ impl Policy for Mcts {
         F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
         mcts_many(game, enc, reward, &self.cfg, requests, seed, eval)
+    }
+
+    fn begin_pooled<'c, G>(
+        &self,
+        game: &'c G,
+        enc: &'c dyn StateEncoder<State = G::State>,
+        reward: &'c dyn Reward<Event = G::Event>,
+        requests: Vec<(G::State, usize)>,
+        seed: u64,
+        _collect_interior: bool,
+    ) -> Option<PooledSearch<'c, G>>
+    where
+        G: Game + Sync,
+        G::State: Send,
+    {
+        Some(PooledSearch::new(
+            game,
+            enc,
+            reward,
+            self.cfg.num_simulations,
+            self.cfg.gamma,
+            self.cfg.max_depth,
+            Guidance::Uct { c: self.cfg.uct_c },
+            self.cfg.chance,
+            seed,
+            requests,
+            false,
+        ))
+    }
+
+    fn pooled_into_evals(&self, evals: Vec<SearchEvaluation>) -> Vec<SearchEvaluation> {
+        evals
     }
 
     fn select(&self, eval: &SearchEvaluation, state: &mut u32, rng: &mut dyn Rng) -> usize {
