@@ -723,7 +723,7 @@ struct PyEngine {
 #[pymethods]
 impl PyEngine {
     #[new]
-    #[pyo3(signature = (game, reward, policy, learner, n_games, seed=0, start_buffer=false, start_buffer_capacity=1000, p_fresh=0.05, infer_cache=0, learn_players=None))]
+    #[pyo3(signature = (game, reward, policy, learner, n_games, seed=0, start_buffer=false, start_buffer_capacity=1000, p_fresh=0.05, infer_cache=0, learn_players=None, n_groups=1))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         game: GameHandle,
@@ -737,10 +737,21 @@ impl PyEngine {
         p_fresh: f64,
         infer_cache: usize,
         learn_players: Option<Vec<usize>>,
+        n_groups: usize,
     ) -> PyResult<Self> {
         if n_games < 1 {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "n_games must be >= 1",
+            ));
+        }
+        if !matches!(n_groups, 1 | 2) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "n_groups must be 1 or 2",
+            ));
+        }
+        if n_groups == 2 && n_games < 2 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "n_groups=2 needs n_games >= 2 to split into groups",
             ));
         }
         let start_buffer = if start_buffer {
@@ -780,6 +791,7 @@ impl PyEngine {
             "engine": {
                 "n_games": n_games,
                 "seed": seed,
+                "n_groups": n_groups,
                 // Disabled knobs canonicalize to null so ignored arguments do
                 // not split fingerprints of behaviorally identical engines.
                 "start_buffer": start_buffer.as_ref().map_or(Value::Null, |sb| json!({
@@ -790,7 +802,11 @@ impl PyEngine {
                 "learn_players": learn_players,
             },
         });
-        let engine_params = EngineParams { n_games, seed };
+        let engine_params = EngineParams {
+            n_games,
+            seed,
+            n_groups,
+        };
         let num_agents = game.spec.num_agents();
         // Slot 0 serves a shared callback; slots 1..=N serve per-player callbacks.
         let weights_generations: Vec<std::sync::Arc<std::sync::atomic::AtomicU64>> = (0
@@ -946,12 +962,15 @@ impl PyEngine {
         // Validate before moving the engine into the worker so bad input cannot forfeit it.
         let (infer, mode) = {
             let borrow = slf.borrow();
-            let num_agents = borrow
-                .inner
-                .as_ref()
-                .ok_or_else(stream_active_err)?
-                .routing();
-            Python::with_gil(|py| engine_callbacks(infer.bind(py), num_agents))?
+            let engine = borrow.inner.as_ref().ok_or_else(stream_active_err)?;
+            let num_agents = engine.routing();
+            let pair = Python::with_gil(|py| engine_callbacks(infer.bind(py), num_agents))?;
+            if engine.n_groups() == 2 && matches!(pair.1, InferMode::PerPlayer) {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "n_groups=2 supports a single shared infer callback",
+                ));
+            }
+            pair
         };
         let mut engine = slf
             .borrow_mut()
@@ -1269,6 +1288,8 @@ trait ErasedEngine: Send + Sync {
     ) -> PyResult<BatchThunk>;
 
     fn routing(&self) -> usize;
+
+    fn n_groups(&self) -> usize;
 }
 
 trait RecordBatch: Sized {
@@ -1704,6 +1725,7 @@ struct EngineImpl<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     n_heads: usize,
     layout: InferLayout,
     num_agents: usize,
+    n_groups: usize,
 }
 
 impl<G, P, L> ErasedEngine for EngineImpl<G, P, L>
@@ -1751,7 +1773,16 @@ where
             stop,
             callback_err.clone(),
         );
-        let (records, stats) = self.inner.collect_routed(n_records, mode, &mut infer_fn);
+        let (records, stats) = if self.n_groups == 2 {
+            if matches!(mode, InferMode::PerPlayer) {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "n_groups=2 supports a single shared infer callback",
+                ));
+            }
+            self.inner.collect_grouped(n_records, mode, &mut infer_fn)
+        } else {
+            self.inner.collect_routed(n_records, mode, &mut infer_fn)
+        };
         if let Some(e) = callback_err.lock().unwrap().take() {
             return Err(e);
         }
@@ -1768,6 +1799,33 @@ where
         n_records: usize,
         infer: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if self.n_groups == 2 {
+            let (callbacks, mode) = engine_callbacks(infer, self.num_agents)?;
+            if matches!(mode, InferMode::PerPlayer) {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "n_groups=2 supports a single shared infer callback",
+                ));
+            }
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let callback_err = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let mut infer_fn = infer_closure_gil(
+                &callbacks,
+                self.dim,
+                self.action_count,
+                self.n_heads,
+                self.layout,
+                stop,
+                callback_err.clone(),
+            );
+            let inner = &mut self.inner;
+            let (records, stats) =
+                py.allow_threads(|| inner.collect_grouped(n_records, mode, &mut infer_fn));
+            if let Some(e) = callback_err.lock().unwrap().take() {
+                return Err(e);
+            }
+            let telemetry = build_telemetry(py, &stats)?;
+            return L::Record::into_py_batch(records, py, self.dim, self.n_heads, telemetry);
+        }
         let (records, telemetry) = run_collect(
             &mut self.inner,
             py,
@@ -1784,6 +1842,10 @@ where
 
     fn routing(&self) -> usize {
         self.num_agents
+    }
+
+    fn n_groups(&self) -> usize {
+        self.n_groups
     }
 }
 
@@ -2229,6 +2291,27 @@ where
             )));
         }
     }
+    if engine_params.n_groups == 2 {
+        if !matches!(
+            policy,
+            PolicySpec::Mcts { .. } | PolicySpec::AlphaZero { .. }
+        ) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "n_groups=2 requires a pooled-search policy (policies.Mcts or policies.AlphaZero)",
+            ));
+        }
+        let uses_tail = match &learner {
+            LearnerSpec::AlphaZero { .. } => true,
+            LearnerSpec::TreeStrap { outcome_weight, .. } => *outcome_weight > 0.0,
+            _ => false,
+        };
+        if uses_tail && game.truncation_horizon().is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "n_groups=2 does not support truncation-tail bootstrapping: this learner \
+                 seeds returns from the net at the horizon; drop max_ticks or use n_groups=1",
+            ));
+        }
+    }
     match (policy, learner) {
         (
             PolicySpec::SelectiveExpectimax {
@@ -2277,6 +2360,7 @@ where
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
+                n_groups: engine_params.n_groups,
                 inner: {
                     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
                         .with_start_distribution(start_dist);
@@ -2352,6 +2436,7 @@ where
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, false);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
+                n_groups: engine_params.n_groups,
                 inner: {
                     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
                         .with_start_distribution(start_dist);
@@ -2431,6 +2516,7 @@ where
             let learner = AlphaZeroLearner::new(gamma);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
+                n_groups: engine_params.n_groups,
                 inner: {
                     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
                         .with_start_distribution(start_dist);
@@ -2462,6 +2548,7 @@ where
             let learner = Dqn::new(n_heads, bootstrap_p);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
+                n_groups: engine_params.n_groups,
                 inner: {
                     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
                         .with_start_distribution(start_dist);

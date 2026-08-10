@@ -50,6 +50,10 @@ pub struct CollectStats {
 pub struct EngineParams {
     pub n_games: usize,
     pub seed: u64,
+    /// 1 = the classic lockstep collect; 2 = double-buffered collect (two fixed game groups
+    /// alternating rounds so tree work overlaps inference). Gated by the binding on policies
+    /// with a pooled search.
+    pub n_groups: usize,
 }
 
 pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
@@ -67,6 +71,7 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     // Returns cannot be derived from steps: an agent may be rewarded before ever acting.
     episode_returns: Vec<Vec<f64>>,
     sequential: bool,
+    n_groups: usize,
     buffer_rng: SplitMix64,
     seeded: Vec<bool>,
     policy_states: Vec<P::PolicyState>,
@@ -88,6 +93,15 @@ where
     ) -> Self {
         let n = game.num_agents();
         assert!(n >= 1, "a game must have at least one agent");
+        assert!(
+            matches!(params.n_groups, 1 | 2),
+            "n_groups must be 1 or 2 (got {})",
+            params.n_groups
+        );
+        assert!(
+            params.n_groups == 1 || params.n_games >= 2,
+            "n_groups=2 needs at least 2 games to split"
+        );
         let mut episodes: Vec<Episode<G>> = (0..params.n_games)
             .map(|i| {
                 Episode::new(
@@ -138,6 +152,7 @@ where
             learn_mask: vec![true; num_agents],
             episode_returns: vec![vec![0.0; num_agents]; params.n_games],
             sequential,
+            n_groups: params.n_groups,
             buffer_rng,
             seeded,
             policy_states,
@@ -242,128 +257,269 @@ where
                 &mut evaluator,
             );
 
-            let mut acted: Vec<Vec<Option<usize>>> =
-                vec![vec![None; num_agents]; self.episodes.len()];
-            for (mut eval, &(gi, si)) in evals.into_iter().zip(meta.iter()) {
-                stats.decisions += 1;
-                self.policy.fold_telemetry(&eval, &mut stats);
-                if !self.learn_mask[si] {
-                    let rel = self.policy.select(
-                        &eval,
-                        &mut self.policy_states[gi],
-                        &mut self.episodes[gi].rng,
-                    );
-                    acted[gi][si] = Some(rel);
-                    continue;
-                }
-                out.extend(self.learner.eval_records(
-                    &mut eval,
-                    &*self.encoder,
-                    si,
-                    &mut self.episodes[gi].rng,
-                ));
-                let rel = self.policy.select(
-                    &eval,
-                    &mut self.policy_states[gi],
-                    &mut self.episodes[gi].rng,
-                );
-                acted[gi][si] = Some(rel);
-                self.traj[gi][si].push(Step {
-                    obs: self.episodes[gi].observe(&*self.encoder, si),
-                    evaluation: eval,
-                    action: rel,
-                    reward: 0.0,
-                    next_obs: Vec::new(),
-                    next_legal: Vec::new(),
-                    terminal: false,
-                });
-            }
-
-            // MaxN consumers require value supervision for non-mover perspectives too.
-            if self
-                .policy
-                .evaluates_all_perspectives(self.sequential, num_agents)
-            {
-                let action_count = self.game.action_count();
-                for (gi, agents) in acted.iter().enumerate() {
-                    if agents.iter().all(|s| s.is_none()) {
-                        continue;
-                    }
-                    for (si, slot) in agents.iter().enumerate() {
-                        if slot.is_none() && self.learn_mask[si] {
-                            if let Some(evaluation) =
-                                self.learner.value_only_evaluation(action_count)
-                            {
-                                self.traj[gi][si].push(Step {
-                                    obs: self.episodes[gi].observe(&*self.encoder, si),
-                                    evaluation,
-                                    action: 0,
-                                    reward: 0.0,
-                                    next_obs: Vec::new(),
-                                    next_legal: Vec::new(),
-                                    terminal: false,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-
-            let horizon = self.game.truncation_horizon();
-            let mut finished: Vec<(usize, bool)> = Vec::new();
-            for (gi, agents) in acted.into_iter().enumerate() {
-                let joint: Vec<usize> = agents.iter().map(|a| a.unwrap_or(0)).collect();
-                let (mut trace, terminal) = self.episodes[gi].advance(&self.game, &joint);
-                self.ticks[gi] += 1;
-                let truncated = horizon.is_some_and(|h| self.ticks[gi] >= h) && !terminal;
-                if truncated {
-                    self.game
-                        .mark_truncation(&self.episodes[gi].state, &mut trace);
-                    assert!(
-                        trace.iter().all(|(agent, _)| *agent < num_agents),
-                        "mark_truncation pushed an event for an out-of-range agent"
-                    );
-                }
-                let mut tick_rewards = vec![0.0; num_agents];
-                for (agent, e) in &trace {
-                    tick_rewards[*agent] += self.reward.step_reward(e, *agent);
-                }
-                let needs_next_obs = self.learner.needs_next_obs();
-                for (si, action) in agents.iter().enumerate() {
-                    let reward = tick_rewards[si];
-                    self.episode_returns[gi][si] += reward;
-                    if action.is_some() {
-                        let (next_obs, next_legal) = if needs_next_obs {
-                            (
-                                self.episodes[gi].observe(&*self.encoder, si),
-                                self.game.legal_actions(&self.episodes[gi].state, si),
-                            )
-                        } else {
-                            (Vec::new(), Vec::new())
-                        };
-                        if let Some(step) = self.traj[gi][si].last_mut() {
-                            step.reward = reward;
-                            step.next_obs = next_obs;
-                            step.next_legal = next_legal;
-                            step.terminal = terminal;
-                        }
-                    } else if let Some(step) = self.traj[gi][si].last_mut() {
-                        // Sequential terminal events may reward an agent that did not act this tick.
-                        step.reward += reward;
-                        step.terminal |= terminal;
-                    }
-                }
-                if !terminal {
-                    self.start_dist
-                        .observe(&self.episodes[gi].state, &mut self.buffer_rng);
-                }
-                if terminal || truncated {
-                    finished.push((gi, terminal));
-                }
-            }
-
+            let finished = process_tick(
+                &self.game,
+                &*self.encoder,
+                &*self.reward,
+                &self.policy,
+                &self.learner,
+                &self.learn_mask,
+                self.sequential,
+                0..self.episodes.len(),
+                evals,
+                &meta,
+                &mut self.episodes,
+                &mut self.traj,
+                &mut self.ticks,
+                &mut self.policy_states,
+                &mut self.episode_returns,
+                &mut *self.start_dist,
+                &mut self.buffer_rng,
+                &mut out,
+                &mut stats,
+            );
             self.flush_finished(&finished, &mut out, &mut stats, &mut evaluator);
         }
+        (stats.infer_seconds, stats.infer_calls, stats.infer_rows) =
+            (evaluator.seconds, evaluator.calls, evaluator.rows);
+        (stats.cache_lookups, stats.cache_hits) =
+            (evaluator.cache_lookups(), evaluator.cache_hits());
+        self.infer_caches = caches;
+        (out, stats)
+    }
+
+    /// Double-buffered collect: games split into two fixed groups whose search rounds
+    /// alternate, so one group's tree work overlaps the other's inference (which runs on a
+    /// submitter thread owning the callback). Deterministic: static membership, strict
+    /// alternation, game-index row order. Once a batch boundary observes a new weights
+    /// generation, older rows are cleared and never served (see [`Evaluator::ingest`]).
+    /// Requires a policy with a pooled search (binding-gated; panics
+    /// here as the backstop), shared inference, and no truncation-tail bootstrapping.
+    pub fn collect_grouped<F>(
+        &mut self,
+        n_records: usize,
+        mode: InferMode,
+        infer: F,
+    ) -> (Vec<L::Record>, CollectStats)
+    where
+        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64> + Send,
+    {
+        assert_eq!(self.n_groups, 2, "collect_grouped requires n_groups=2");
+        assert!(
+            matches!(mode, InferMode::Shared),
+            "grouped collect supports shared inference only"
+        );
+        assert!(
+            self.game.truncation_horizon().is_none() || !self.learner.uses_episode_tail(),
+            "grouped collect does not support truncation-tail bootstrapping"
+        );
+        if n_records == 0 {
+            return (Vec::new(), CollectStats::default());
+        }
+        let n_games = self.episodes.len();
+        let half = n_games / 2;
+        let ranges = [0..half, half..n_games];
+
+        let mut out: Vec<L::Record> = Vec::new();
+        let mut stats = CollectStats::default();
+        let collect_interior = self.learner.needs_interior();
+        let mut caches = self.infer_caches.take();
+        if let Some(c) = caches.as_mut() {
+            for cache in c.iter_mut() {
+                cache.begin_collect();
+            }
+        }
+        let cache_slice = caches.as_mut().map(|c| &mut c[..1]);
+        let mut noop_infer = |_: usize, _: Vec<f32>, _: usize| -> Vec<f64> {
+            unreachable!("grouped collect forwards through the submitter thread")
+        };
+        let mut evaluator = Evaluator::new(&mut noop_infer, mode, cache_slice);
+
+        let Engine {
+            game,
+            encoder,
+            reward,
+            policy,
+            learner,
+            episodes,
+            search_rng,
+            start_dist,
+            learn_mask,
+            episode_returns,
+            sequential,
+            buffer_rng,
+            seeded,
+            policy_states,
+            ticks,
+            traj,
+            ..
+        } = self;
+        let game: &G = game;
+        let encoder: &dyn StateEncoder<State = G::State> = &**encoder;
+        let reward: &dyn Reward<Event = G::Event> = &**reward;
+        let policy: &P = &*policy;
+        let learner: &L = &*learner;
+        let learn_mask: &[bool] = learn_mask;
+        let sequential = *sequential;
+        let num_agents = game.num_agents();
+        let no_tails: HashMap<(usize, usize), Vec<f64>> = HashMap::new();
+
+        std::thread::scope(|scope| {
+            let (job_tx, job_rx) =
+                std::sync::mpsc::channel::<(usize, crate::rollout::evaluator::StagedBatch)>();
+            let (res_tx, res_rx) = std::sync::mpsc::channel::<(
+                usize,
+                crate::rollout::evaluator::StagedBatch,
+                Vec<f64>,
+                f64,
+                usize,
+            )>();
+            let mut infer = infer;
+            scope.spawn(move || {
+                while let Ok((gid, mut staged)) = job_rx.recv() {
+                    let obs = std::mem::take(&mut staged.obs_flat);
+                    let t = std::time::Instant::now();
+                    let (rows, calls) = crate::rollout::evaluator::run_infer(
+                        &mut infer,
+                        InferMode::Shared,
+                        &staged.players,
+                        obs,
+                        staged.n,
+                        staged.dim,
+                    );
+                    let secs = t.elapsed().as_secs_f64();
+                    if res_tx.send((gid, staged, rows, secs, calls)).is_err() {
+                        break;
+                    }
+                }
+            });
+
+            type Slot<'c, G> = Option<(
+                crate::policies::tree::mcts::PooledSearch<'c, G>,
+                Vec<(usize, usize)>,
+            )>;
+            let mut slots: [Slot<'_, G>; 2] = [None, None];
+            let mut pending: std::collections::VecDeque<usize> = [0usize, 1].into();
+            let mut inflight = 0usize;
+
+            'outer: loop {
+                while let Some(gid) = pending.pop_front() {
+                    loop {
+                        if slots[gid].is_none() {
+                            let mut requests: Vec<(G::State, usize)> = Vec::new();
+                            let mut meta: Vec<(usize, usize)> = Vec::new();
+                            for gi in ranges[gid].clone() {
+                                for si in 0..num_agents {
+                                    if episodes[gi].agent_active(game, si) {
+                                        requests.push((episodes[gi].state.clone(), si));
+                                        meta.push((gi, si));
+                                    }
+                                }
+                            }
+                            if requests.is_empty() {
+                                break;
+                            }
+                            let seed = search_rng.next_u64();
+                            let pool = policy
+                                .begin_pooled(
+                                    game,
+                                    encoder,
+                                    reward,
+                                    requests,
+                                    seed,
+                                    collect_interior,
+                                )
+                                .expect("grouped collect needs a pooled-search policy");
+                            slots[gid] = Some((pool, meta));
+                        }
+                        let (pool, _) = slots[gid].as_mut().expect("slot filled above");
+                        if pool.finished() {
+                            let (pool, meta) = slots[gid].take().expect("slot filled above");
+                            let evals = policy.pooled_into_evals(pool.into_evaluations());
+                            let finished = process_tick(
+                                game,
+                                encoder,
+                                reward,
+                                policy,
+                                learner,
+                                learn_mask,
+                                sequential,
+                                ranges[gid].clone(),
+                                evals,
+                                &meta,
+                                episodes,
+                                traj,
+                                ticks,
+                                policy_states,
+                                episode_returns,
+                                &mut **start_dist,
+                                buffer_rng,
+                                &mut out,
+                                &mut stats,
+                            );
+                            flush_finished_parts(
+                                &finished,
+                                &no_tails,
+                                game,
+                                policy,
+                                learner,
+                                encoder,
+                                episodes,
+                                traj,
+                                ticks,
+                                policy_states,
+                                episode_returns,
+                                seeded,
+                                &mut **start_dist,
+                                buffer_rng,
+                                &mut out,
+                                &mut stats,
+                            );
+                            if out.len() >= n_records {
+                                break 'outer;
+                            }
+                            continue;
+                        }
+                        let mut batch = evaluator.batch();
+                        pool.stage_round(&mut batch);
+                        let staged = batch.into_staged();
+                        if staged.n == 0 {
+                            let rows = evaluator.ingest(staged, Vec::new(), 0.0, 0);
+                            let (pool, _) = slots[gid].as_mut().expect("slot filled above");
+                            pool.apply_rows(&rows);
+                            continue;
+                        }
+                        if job_tx.send((gid, staged)).is_err() {
+                            break 'outer;
+                        }
+                        inflight += 1;
+                        break;
+                    }
+                }
+                if inflight == 0 {
+                    break;
+                }
+                let (gid, staged, rows_out, secs, calls) =
+                    res_rx.recv().expect("submitter alive while jobs in flight");
+                inflight -= 1;
+                let rows = evaluator.ingest(staged, rows_out, secs, calls);
+                if let Some((pool, _)) = slots[gid].as_mut() {
+                    pool.apply_rows(&rows);
+                }
+                pending.push_back(gid);
+            }
+            drop(job_tx);
+            while inflight > 0 {
+                match res_rx.recv() {
+                    Ok((_, staged, rows_out, secs, calls)) => {
+                        let _ = evaluator.ingest(staged, rows_out, secs, calls);
+                        inflight -= 1;
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
         (stats.infer_seconds, stats.infer_calls, stats.infer_rows) =
             (evaluator.seconds, evaluator.calls, evaluator.rows);
         (stats.cache_lookups, stats.cache_hits) =
@@ -382,44 +538,24 @@ where
         F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
         let tails = self.tail_values(finished, evaluator);
-        let num_agents = self.game.num_agents();
-
-        for &(gi, _) in finished {
-            let mut ep_reward = vec![0.0; num_agents];
-            for (si, ep_slot) in ep_reward.iter_mut().enumerate() {
-                let steps = std::mem::take(&mut self.traj[gi][si]);
-                *ep_slot = std::mem::take(&mut self.episode_returns[gi][si]);
-                if steps.is_empty() {
-                    continue;
-                }
-                let tail = tails.get(&(gi, si)).cloned().unwrap_or_default();
-                out.extend(self.learner.episode_records(
-                    &steps,
-                    &tail,
-                    &*self.encoder,
-                    si,
-                    &mut self.episodes[gi].rng,
-                ));
-            }
-            stats.episodes.push(EpisodeSummary {
-                reward: ep_reward,
-                length: self.ticks[gi],
-                seeded: self.seeded[gi],
-            });
-            match self.start_dist.choose(&mut self.buffer_rng) {
-                Start::Restore(state) => {
-                    Episode::assert_decision_state(&self.game, &state);
-                    self.episodes[gi].state = state;
-                    self.seeded[gi] = true;
-                }
-                Start::Fresh => {
-                    self.episodes[gi].reset(&self.game);
-                    self.seeded[gi] = false;
-                }
-            }
-            self.ticks[gi] = 0;
-            self.policy_states[gi] = self.policy.begin_episode(&mut self.episodes[gi].rng);
-        }
+        flush_finished_parts(
+            finished,
+            &tails,
+            &self.game,
+            &self.policy,
+            &self.learner,
+            &*self.encoder,
+            &mut self.episodes,
+            &mut self.traj,
+            &mut self.ticks,
+            &mut self.policy_states,
+            &mut self.episode_returns,
+            &mut self.seeded,
+            &mut *self.start_dist,
+            &mut self.buffer_rng,
+            out,
+            stats,
+        );
     }
 
     fn tail_values<F>(
@@ -676,5 +812,199 @@ where
             }
         }
         Ok(())
+    }
+}
+
+/// One decision tick for `games`: record emission, action selection, stepping, and
+/// reward attribution. Field-split from `Engine` so grouped collects can run it while
+/// pooled searches hold shared borrows of the game context. Returns finished episodes.
+#[allow(clippy::too_many_arguments)]
+fn process_tick<G, P, L>(
+    game: &G,
+    encoder: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
+    policy: &P,
+    learner: &L,
+    learn_mask: &[bool],
+    sequential: bool,
+    games: std::ops::Range<usize>,
+    evals: Vec<P::Evaluation>,
+    meta: &[(usize, usize)],
+    episodes: &mut [Episode<G>],
+    traj: &mut [Vec<Vec<Step<P::Evaluation>>>],
+    ticks: &mut [usize],
+    policy_states: &mut [P::PolicyState],
+    episode_returns: &mut [Vec<f64>],
+    start_dist: &mut dyn StartDistribution<G::State>,
+    buffer_rng: &mut SplitMix64,
+    out: &mut Vec<L::Record>,
+    stats: &mut CollectStats,
+) -> Vec<(usize, bool)>
+where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
+{
+    let num_agents = game.num_agents();
+    let mut acted: Vec<Vec<Option<usize>>> = vec![vec![None; num_agents]; episodes.len()];
+    for (mut eval, &(gi, si)) in evals.into_iter().zip(meta.iter()) {
+        stats.decisions += 1;
+        policy.fold_telemetry(&eval, stats);
+        if !learn_mask[si] {
+            let rel = policy.select(&eval, &mut policy_states[gi], &mut episodes[gi].rng);
+            acted[gi][si] = Some(rel);
+            continue;
+        }
+        out.extend(learner.eval_records(&mut eval, encoder, si, &mut episodes[gi].rng));
+        let rel = policy.select(&eval, &mut policy_states[gi], &mut episodes[gi].rng);
+        acted[gi][si] = Some(rel);
+        traj[gi][si].push(Step {
+            obs: episodes[gi].observe(encoder, si),
+            evaluation: eval,
+            action: rel,
+            reward: 0.0,
+            next_obs: Vec::new(),
+            next_legal: Vec::new(),
+            terminal: false,
+        });
+    }
+
+    // MaxN consumers require value supervision for non-mover perspectives too.
+    if policy.evaluates_all_perspectives(sequential, num_agents) {
+        let action_count = game.action_count();
+        for (gi, agents) in acted.iter().enumerate() {
+            if agents.iter().all(|s| s.is_none()) {
+                continue;
+            }
+            for (si, slot) in agents.iter().enumerate() {
+                if slot.is_none() && learn_mask[si] {
+                    if let Some(evaluation) = learner.value_only_evaluation(action_count) {
+                        traj[gi][si].push(Step {
+                            obs: episodes[gi].observe(encoder, si),
+                            evaluation,
+                            action: 0,
+                            reward: 0.0,
+                            next_obs: Vec::new(),
+                            next_legal: Vec::new(),
+                            terminal: false,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let horizon = game.truncation_horizon();
+    let mut finished: Vec<(usize, bool)> = Vec::new();
+    for gi in games.clone() {
+        let agents = std::mem::take(&mut acted[gi]);
+        let joint: Vec<usize> = agents.iter().map(|a| a.unwrap_or(0)).collect();
+        let (mut trace, terminal) = episodes[gi].advance(game, &joint);
+        ticks[gi] += 1;
+        let truncated = horizon.is_some_and(|h| ticks[gi] >= h) && !terminal;
+        if truncated {
+            game.mark_truncation(&episodes[gi].state, &mut trace);
+            assert!(
+                trace.iter().all(|(agent, _)| *agent < num_agents),
+                "mark_truncation pushed an event for an out-of-range agent"
+            );
+        }
+        let mut tick_rewards = vec![0.0; num_agents];
+        for (agent, e) in &trace {
+            tick_rewards[*agent] += reward.step_reward(e, *agent);
+        }
+        let needs_next_obs = learner.needs_next_obs();
+        for (si, action) in agents.iter().enumerate() {
+            let reward = tick_rewards[si];
+            episode_returns[gi][si] += reward;
+            if action.is_some() {
+                let (next_obs, next_legal) = if needs_next_obs {
+                    (
+                        episodes[gi].observe(encoder, si),
+                        game.legal_actions(&episodes[gi].state, si),
+                    )
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+                if let Some(step) = traj[gi][si].last_mut() {
+                    step.reward = reward;
+                    step.next_obs = next_obs;
+                    step.next_legal = next_legal;
+                    step.terminal = terminal;
+                }
+            } else if let Some(step) = traj[gi][si].last_mut() {
+                // Sequential terminal events may reward an agent that did not act this tick.
+                step.reward += reward;
+                step.terminal |= terminal;
+            }
+        }
+        if !terminal {
+            start_dist.observe(&episodes[gi].state, &mut *buffer_rng);
+        }
+        if terminal || truncated {
+            finished.push((gi, terminal));
+        }
+    }
+
+    finished
+}
+
+/// Emit episode records and respawn finished games. Field-split like [`process_tick`].
+#[allow(clippy::too_many_arguments)]
+fn flush_finished_parts<G, P, L>(
+    finished: &[(usize, bool)],
+    tails: &HashMap<(usize, usize), Vec<f64>>,
+    game: &G,
+    policy: &P,
+    learner: &L,
+    encoder: &dyn StateEncoder<State = G::State>,
+    episodes: &mut [Episode<G>],
+    traj: &mut [Vec<Vec<Step<P::Evaluation>>>],
+    ticks: &mut [usize],
+    policy_states: &mut [P::PolicyState],
+    episode_returns: &mut [Vec<f64>],
+    seeded: &mut [bool],
+    start_dist: &mut dyn StartDistribution<G::State>,
+    buffer_rng: &mut SplitMix64,
+    out: &mut Vec<L::Record>,
+    stats: &mut CollectStats,
+) where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
+{
+    let num_agents = game.num_agents();
+
+    for &(gi, _) in finished {
+        let mut ep_reward = vec![0.0; num_agents];
+        for (si, ep_slot) in ep_reward.iter_mut().enumerate() {
+            let steps = std::mem::take(&mut traj[gi][si]);
+            *ep_slot = std::mem::take(&mut episode_returns[gi][si]);
+            if steps.is_empty() {
+                continue;
+            }
+            let tail = tails.get(&(gi, si)).cloned().unwrap_or_default();
+            out.extend(learner.episode_records(&steps, &tail, encoder, si, &mut episodes[gi].rng));
+        }
+        stats.episodes.push(EpisodeSummary {
+            reward: ep_reward,
+            length: ticks[gi],
+            seeded: seeded[gi],
+        });
+        match start_dist.choose(&mut *buffer_rng) {
+            Start::Restore(state) => {
+                Episode::assert_decision_state(game, &state);
+                episodes[gi].state = state;
+                seeded[gi] = true;
+            }
+            Start::Fresh => {
+                episodes[gi].reset(game);
+                seeded[gi] = false;
+            }
+        }
+        ticks[gi] = 0;
+        policy_states[gi] = policy.begin_episode(&mut episodes[gi].rng);
     }
 }

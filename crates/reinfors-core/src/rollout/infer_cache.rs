@@ -69,6 +69,11 @@ impl InferCache {
         self.prev.clear();
     }
 
+    /// The generation this cache last synced to.
+    pub fn seen_generation(&self) -> u64 {
+        self.seen_generation
+    }
+
     /// Clear entries when the shared weights generation changes.
     pub fn sync_generation(&mut self) {
         let now = self.generation.load(Ordering::Relaxed);

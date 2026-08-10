@@ -488,6 +488,7 @@ mod tests {
         let params = EngineParams {
             n_games: 3,
             seed: 0,
+            n_groups: 1,
         };
         let mut engine = Engine::new(
             Connect4,

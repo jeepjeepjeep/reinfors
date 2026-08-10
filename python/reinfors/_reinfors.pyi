@@ -396,6 +396,11 @@ class Engine:
         # Restrict training-record emission to these players (frozen opponents keep acting but
         # leave no records). Default: all players learn; records carry their player either way.
         learn_players: list[int] | None = ...,
+        # Double-buffered collect (1 = off): 2 overlaps tree work with inference via two fixed
+        # game groups. Requires policies.Mcts/AlphaZero, one shared callback, no truncation-tail
+        # bootstrapping. Deterministic per seed; fingerprinted (digests differ from n_groups=1).
+        # Sizing guidance: docs/guides/training.md#overlapping-search-and-inference.
+        n_groups: int = ...,
     ) -> None: ...
     # Tell the engine the net's weights changed (call after every weight sync — e.g. right after
     # load_state_dict onto the collector net). Clears the infer cache at the next round boundary;
