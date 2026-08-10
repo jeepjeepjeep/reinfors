@@ -1,15 +1,4 @@
-//! Leduc hold'em — the standard small imperfect-information benchmark (6 cards, two betting
-//! rounds, a few hundred information sets). Rules and action ids match OpenSpiel's
-//! `leduc_poker`: both players ante 1; each is dealt one private card from a 6-card deck (3
-//! ranks x 2 suits, card id = rank * 2 + suit); round 1 betting (raise size 2), then one
-//! public card, then round 2 betting (raise size 4); at most 2 raises per round; player 0
-//! opens both rounds; FOLD is legal only when facing a raise. Showdown: a private card
-//! pairing the public card wins, otherwise higher rank, equal ranks split.
-//!
-//! Chance is fully declared: the two deals are root chance nodes and
-//! the public reveal is an interior chance node. The state is minimal
-//! — cards, public card, per-round histories; pots, the actor, round, and terminal status are
-//! all derived, so decode validation is pure grammar checking.
+//! Leduc hold'em with declared deals and private observations.
 
 use reinfors_core::game::{Actor, ChanceDist, Game, Transition};
 #[cfg(test)]
@@ -27,27 +16,20 @@ fn rank(card: u8) -> u8 {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LeducState {
-    /// Dealt private cards, player order; grows 0 -> 2 during the birth chain.
     pub cards: Vec<u8>,
-    /// The public card, revealed by the interior chance node between the rounds.
     pub public: Option<u8>,
-    /// Per-round public action histories, player 0 first in both.
     pub history: [Vec<u8>; 2],
 }
 
-/// A betting round is over once a call closes it: any history of length >= 2 ending in CALL
-/// (check-check, raise-call, check-raise-call, ...).
 fn round_over(h: &[u8]) -> bool {
     h.len() >= 2 && *h.last().unwrap() == CALL as u8
 }
 
 impl LeducState {
-    /// Public terminality accessor (bindings).
     pub fn is_terminal_pub(&self) -> bool {
         self.is_terminal()
     }
 
-    /// Public round accessor (bindings).
     pub fn round_pub(&self) -> usize {
         self.round()
     }
@@ -65,14 +47,10 @@ impl LeducState {
         self.folder().is_some() || round_over(&self.history[1])
     }
 
-    /// The active betting round (0 or 1). Round 1 begins once round 0's betting closed —
-    /// including the reveal-pending window where `public` is still `None`.
     fn round(&self) -> usize {
         usize::from(round_over(&self.history[0]))
     }
 
-    /// Per-player pot contribution, derived by replaying the histories (ante 1; a CALL
-    /// matches, a RAISE matches then adds the round's raise size).
     fn contributions(&self) -> [i64; 2] {
         let mut pot = [1i64, 1];
         for (r, h) in self.history.iter().enumerate() {
@@ -82,7 +60,7 @@ impl LeducState {
                 match a as usize {
                     CALL => pot[p] = pot[1 - p].max(pot[p]),
                     RAISE => pot[p] = pot[1 - p].max(pot[p]) + size,
-                    _ => {} // FOLD commits nothing
+                    _ => {}
                 }
             }
         }
@@ -109,7 +87,7 @@ impl LeducPoker {
                 if pairs(0) != pairs(1) {
                     usize::from(pairs(1))
                 } else if rank(state.cards[0]) == rank(state.cards[1]) {
-                    return vec![0.0, 0.0]; // split: equal ranks, equal contributions
+                    return vec![0.0, 0.0];
                 } else {
                     usize::from(rank(state.cards[1]) > rank(state.cards[0]))
                 }
@@ -124,7 +102,7 @@ impl LeducPoker {
 
 impl Game for LeducPoker {
     type State = LeducState;
-    type Event = f64; // per-player chip delta at the terminal tick, 0 elsewhere
+    type Event = f64;
 
     fn num_agents(&self) -> usize {
         2
@@ -135,7 +113,7 @@ impl Game for LeducPoker {
     }
 
     fn perfect_information(&self) -> bool {
-        false // the opponent's card is hidden
+        false
     }
 
     fn information_states(&self) -> bool {
@@ -156,10 +134,10 @@ impl Game for LeducPoker {
 
     fn actor(&self, state: &LeducState) -> Actor {
         if state.cards.len() < 2 {
-            return Actor::Chance; // the deal (birth chain)
+            return Actor::Chance;
         }
         if !state.is_terminal() && state.round() == 1 && state.public.is_none() {
-            return Actor::Chance; // the public reveal (interior)
+            return Actor::Chance;
         }
         Actor::Agent(state.history[state.round()].len() % 2)
     }
@@ -194,7 +172,7 @@ impl Game for LeducPoker {
             .count();
         let mut out = Vec::with_capacity(3);
         if pot[1 - agent] > pot[agent] {
-            out.push(FOLD); // folding with a free check available is illegal
+            out.push(FOLD);
         }
         out.push(CALL);
         if raises < 2 {
@@ -207,8 +185,6 @@ impl Game for LeducPoker {
         let round = state.round();
         let me = state.history[round].len() % 2;
         let legal = self.legal_actions(state, me);
-        // Backstop for direct core callers: an illegal action folds when facing a raise, else
-        // checks.
         let action = if legal.contains(&actions[me]) {
             actions[me]
         } else if legal.contains(&FOLD) {
@@ -224,8 +200,6 @@ impl Game for LeducPoker {
         } else {
             vec![None; 2]
         };
-        // A closed round 0 leaves the state at the reveal chance node (public still None) —
-        // the framework draws it before any agent sees the state.
         Transition {
             next_state: next,
             events,
@@ -234,7 +208,6 @@ impl Game for LeducPoker {
     }
 
     fn initial_state(&self) -> LeducState {
-        // Draws nothing: the empty deal is the birth-chain root.
         LeducState {
             cards: Vec::new(),
             public: None,
@@ -273,7 +246,7 @@ impl reinfors_core::StateCodec for LeducPoker {
             if h.len() > 4 || h.iter().any(|&a| a > RAISE as u8) {
                 return Err("malformed action history".to_string());
             }
-            // Every action must have been legal at its point: replay the grammar.
+            // Validate legality at the historical decision, not only in the final position.
             for (i, &a) in h.iter().enumerate() {
                 let prefix = LeducState {
                     cards: state.cards.clone(),
@@ -312,11 +285,6 @@ impl reinfors_core::StateCodec for LeducPoker {
     }
 }
 
-// ===================== Observation =====================
-
-/// `(21, 1, 1)`: own card one-hot (6) + public card one-hot (6) + round-2 flag (1) + 2 rounds
-/// x 4 history slots holding `(action + 1) / 3`. Exactly the information set (pinned by test
-/// against the key).
 pub struct LeducEncoder;
 
 impl reinfors_core::ActionView for LeducEncoder {}
@@ -399,9 +367,7 @@ mod tests {
     fn betting_follows_the_pyspiel_grammar() {
         let g = LeducPoker;
         let s = dealt(0, 2);
-        // Player 0 opens; no fold with a free check (pinned against pyspiel).
         assert_eq!(g.legal_actions(&s, 0), vec![CALL, RAISE]);
-        // Facing a raise: all three actions until the 2-raise cap.
         let r1 = g.step(&s, &[RAISE, 0]).next_state;
         assert_eq!(g.legal_actions(&r1, 1), vec![FOLD, CALL, RAISE]);
         let r2 = g.step(&r1, &[0, RAISE]).next_state;
@@ -411,15 +377,13 @@ mod tests {
     #[test]
     fn showdown_and_fold_pay_the_derived_pots() {
         let g = LeducPoker;
-        // raise-fold in round 1: p1 folds, p0 wins p1's ante.
         let t = play(&g, dealt(0, 2), &[RAISE, FOLD]);
         assert!(t.terminal);
         assert_eq!(t.events, vec![Some(1.0), Some(-1.0)]);
-        // check-check, reveal, check-check: showdown for the antes. Public pairs p1.
         let mut s = play(&g, dealt(0, 2), &[CALL, CALL]).next_state;
         assert!(matches!(g.actor(&s), Actor::Chance), "reveal pending");
         let reveal = g.remaining(&s).iter().position(|&c| c == 3).unwrap();
-        s = g.apply_chance_node(&s, reveal).next_state; // public = 3 pairs p1's card 2
+        s = g.apply_chance_node(&s, reveal).next_state;
         let t = play(&g, s, &[CALL, CALL]);
         assert!(t.terminal);
         assert_eq!(
@@ -427,16 +391,12 @@ mod tests {
             vec![Some(-1.0), Some(1.0)],
             "pair beats high card"
         );
-        // raise-call round 1, reveal, raise-raise-call round 2 (both raises hit the cap):
         let mut s = play(&g, dealt(4, 0), &[RAISE, CALL]).next_state;
         let reveal = g.remaining(&s).iter().position(|&c| c == 2).unwrap();
         s = g.apply_chance_node(&s, reveal).next_state;
         let t = play(&g, s, &[RAISE, RAISE, CALL]);
         assert!(t.terminal);
-        // Contributions: ante 1 + round-1 raise 2 + two round-2 raises of 4 -> 11 each;
-        // K high beats J.
         assert_eq!(t.events, vec![Some(11.0), Some(-11.0)]);
-        // Split: equal ranks at showdown.
         let mut s = play(&g, dealt(0, 1), &[CALL, CALL]).next_state;
         s = g.apply_chance_node(&s, 0).next_state;
         let t = play(&g, s, &[CALL, CALL]);
@@ -448,7 +408,6 @@ mod tests {
         let g = LeducPoker;
         let mut rng = TestRng(7);
         for _ in 0..200 {
-            // Birth chain via the realization path (step_env handles interior reveals).
             let mut s = g.initial_state();
             while matches!(g.actor(&s), Actor::Chance) {
                 let o = g.chance_node(&s).draw(&mut rng);
@@ -511,7 +470,7 @@ mod tests {
         dup.public = Some(0);
         assert!(g.validate_decoded_state(&dup, false).is_err());
         let mut bad = s.clone();
-        bad.history[0] = vec![FOLD as u8]; // fold with a free check: illegal in the grammar
+        bad.history[0] = vec![FOLD as u8];
         assert!(g
             .validate_decoded_state(&bad, true)
             .unwrap_err()

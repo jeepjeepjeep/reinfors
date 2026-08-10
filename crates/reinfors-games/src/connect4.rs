@@ -1,9 +1,4 @@
-//! Connect-4 — a sequential 2-player zero-sum `Game`, the first adversarial non-snake game. It
-//! validates the search's sequential path: alternating `Actor::Agent(0)` / `Actor::Agent(1)` nodes
-//! (the searching agent's MAX turns vs the opponent's modeled-chance turns), driven through the same
-//! generic search + rollout engine as snake. Deterministic, so declared chance is the default
-//! (`None`). Standard rules: only non-full columns are legal (the searches mask to the legal set;
-//! the retired "full column = immediate loss" rule predates sparse legality).
+//! Standard deterministic Connect Four.
 
 use reinfors_core::{ActionView, Actor, Game, Reward, Space, StateEncoder, Transition};
 
@@ -11,7 +6,6 @@ const COLS: usize = 7;
 const ROWS: usize = 6;
 const CONNECT: usize = 4;
 
-/// serde stops at 32-element arrays; the 42-cell board round-trips through a length-checked Vec.
 mod cells_serde {
     use serde::de::Error as _;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -36,24 +30,19 @@ mod cells_serde {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Connect4State {
     #[serde(with = "cells_serde")]
-    cells: [u8; COLS * ROWS], // 0 empty, 1 player-0, 2 player-1; index = row*COLS + col, row 0 = bottom
-    turn: usize, // whose move it is (0 or 1)
-    /// Derived (some line completed, or the board full), so the codec recomputes it at decode
-    /// rather than transporting a second copy of the fact.
+    cells: [u8; COLS * ROWS],
+    turn: usize,
     #[serde(skip)]
     done: bool,
 }
 
 impl Connect4State {
-    /// The board as `[row][col]` cell codes (0 empty, 1 player-0, 2 player-1), row 0 = bottom — for
-    /// rendering / inspection (the encoder owns the network view).
     pub fn board(&self) -> Vec<Vec<u8>> {
         (0..ROWS)
             .map(|r| (0..COLS).map(|c| self.cells[r * COLS + c]).collect())
             .collect()
     }
 
-    /// Whose move it is (0 or 1).
     pub fn turn(&self) -> usize {
         self.turn
     }
@@ -63,7 +52,6 @@ impl Connect4State {
     }
 }
 
-/// A player's outcome on one tick: nothing yet (game ongoing), or the terminal result from its view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Connect4Event {
     #[default]
@@ -73,7 +61,6 @@ pub enum Connect4Event {
     Draw,
 }
 
-/// Connect-4's terminal reward weights (zero-sum: the loser gets `loss`, the winner `win`).
 #[derive(Clone, Copy, Debug)]
 pub struct Connect4Reward {
     pub win: f64,
@@ -104,8 +91,6 @@ impl Reward for Connect4Reward {
     }
 }
 
-/// Standard 7x6 Connect-4. Rules only; the reward (zero-sum win/loss/draw) is the decoupled
-/// [`Connect4Reward`].
 #[derive(Default)]
 pub struct Connect4;
 
@@ -114,14 +99,12 @@ impl Connect4 {
         cells[r * COLS + c]
     }
 
-    /// Lowest empty row in `col`, or `None` if the column is full.
     fn drop_row(cells: &[u8], col: usize) -> Option<usize> {
         (0..ROWS).find(|&r| Self::at(cells, r, col) == 0)
     }
 
-    /// Whether the piece just placed at `(r, c)` by `player` completes a line of `CONNECT`.
     fn wins(cells: &[u8], r: usize, c: usize, player: u8) -> bool {
-        const DIRS: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)]; // horiz, vert, two diagonals
+        const DIRS: [(i32, i32); 4] = [(0, 1), (1, 0), (1, 1), (1, -1)];
         for (dr, dc) in DIRS {
             let mut count = 1;
             for sign in [1i32, -1] {
@@ -144,10 +127,6 @@ impl Connect4 {
         false
     }
 
-    /// Whether the position is terminal by the rules alone: some completed line, or a full board.
-    /// Quantifies [`Self::wins`] — the one definition of a line — over the grid; `step` applies
-    /// the same primitive incrementally at the last drop. The codec recomputes `done` from this
-    /// at decode, so the flag is never transported.
     fn board_terminal(cells: &[u8; COLS * ROWS]) -> bool {
         let has_win = (0..ROWS).any(|r| {
             (0..COLS).any(|c| {
@@ -158,7 +137,6 @@ impl Connect4 {
         has_win || cells.iter().all(|&c| c != 0)
     }
 
-    /// Per-agent terminal event vector for a win by `winner`, or a draw.
     fn outcome_events(winner: Option<usize>) -> Vec<Connect4Event> {
         match winner {
             Some(w) => (0..2)
@@ -192,9 +170,6 @@ impl Game for Connect4 {
     }
 
     fn legal_actions(&self, state: &Connect4State, agent: usize) -> Vec<usize> {
-        // Standard rules: only non-full columns are playable (matching every reference
-        // implementation, incl. OpenSpiel). The pre-chess "full column = immediate loss" rule was
-        // scaffolding for the retired all-actions-always-legal contract.
         if agent == state.turn && !state.done {
             (0..COLS)
                 .filter(|&c| Self::drop_row(&state.cells, c).is_some())
@@ -213,16 +188,14 @@ impl Game for Connect4 {
         let col = actions[mover];
         let mut cells = state.cells;
         let (next_turn, winner, terminal) = match Self::drop_row(&cells, col) {
-            // Full column: unreachable via legal play (searches mask to the legal set, the Env
-            // boundary validates) — kept as a losing backstop rather than a panic for direct core
-            // callers.
+            // Env validates this; direct core callers receive a losing terminal backstop.
             None => (mover, Some(1 - mover), true),
             Some(r) => {
                 cells[r * COLS + col] = (mover + 1) as u8;
                 if Self::wins(&cells, r, col, (mover + 1) as u8) {
                     (mover, Some(mover), true)
                 } else if cells.iter().all(|&v| v != 0) {
-                    (mover, None, true) // board full: draw
+                    (mover, None, true)
                 } else {
                     (1 - mover, None, false)
                 }
@@ -251,14 +224,11 @@ impl Game for Connect4 {
             done: false,
         }
     }
-
-    // Deterministic transitions: no chance states.
 }
 
-/// The default Connect-4 observation: two own/opponent piece planes from the mover's perspective.
 pub struct Connect4Planes;
 
-impl ActionView for Connect4Planes {} // absolute: identity action view
+impl ActionView for Connect4Planes {}
 
 impl StateEncoder for Connect4Planes {
     type State = Connect4State;
@@ -278,12 +248,12 @@ impl StateEncoder for Connect4Planes {
     }
 
     fn obs_shape(&self) -> (usize, usize, usize) {
-        (2, ROWS, COLS) // channel 0 = own pieces, 1 = opponent's
+        (2, ROWS, COLS)
     }
 
     fn observation_space(&self) -> Space {
         let (c, h, w) = self.obs_shape();
-        Space::unit_box(vec![c, h, w]) // both planes are one-hot occupancy: values in [0, 1]
+        Space::unit_box(vec![c, h, w])
     }
 }
 
@@ -337,7 +307,6 @@ mod tests {
         }
     }
 
-    // K=2 heads, A=7, zero leaf values — so the only signal is the terminal win/loss reward.
     fn zero_infer(_players: &[usize], _obs: Vec<f32>, n: usize) -> Vec<f64> {
         vec![0.0; n * 2 * 7]
     }
@@ -348,11 +317,6 @@ mod tests {
 
     #[test]
     fn search_is_invariant_to_illegal_action_values() {
-        // The review oracle: two nets IDENTICAL on legal columns and wildly different only on the
-        // full column's phantom slot must produce identical search output — root values, interior
-        // TreeStrap targets, and their count. Guards every legality seam at once: leaf bootstraps
-        // (per-head max over the mover's legal set), the distributional opponent (softmax gathered
-        // to the legal set, weights summing to 1), and densified targets.
         let mut cells = [0u8; 42];
         for r in 0..ROWS {
             at(&mut cells, r, 0, if r % 2 == 0 { 1 } else { 2 });
@@ -382,9 +346,9 @@ mod tests {
                 let mut infer = move |_players: &[usize], _obs: Vec<f32>, n: usize| -> Vec<f64> {
                     let mut out = Vec::with_capacity(n * 7);
                     for _ in 0..n {
-                        out.push(phantom); // column 0 is full (illegal) throughout this subtree
+                        out.push(phantom);
                         for c in 1..7 {
-                            out.push(-0.5 + 0.1 * c as f64); // all-negative legal values
+                            out.push(-0.5 + 0.1 * c as f64);
                         }
                     }
                     out
@@ -406,7 +370,6 @@ mod tests {
             assert_eq!(lo_v, hi_v, "root values must ignore the phantom slot");
             assert_eq!(lo_i.len(), hi_i.len(), "record counts must match");
             assert_eq!(lo_i, hi_i, "interior targets must ignore the phantom slot");
-            // and the phantom slot itself is a densified zero, never the max of anything
             assert_eq!(lo_v[0][0], 0.0);
         }
     }
@@ -419,12 +382,10 @@ mod tests {
             turn: 0,
             done: false,
         };
-        // A normal move stacks at the bottom and passes the turn.
         let t = g.step(&empty, &[0]);
-        assert_eq!(t.next_state.cells[0], 1); // player 0 at (0,0)
+        assert_eq!(t.next_state.cells[0], 1);
         assert_eq!(t.next_state.turn, 1);
         assert!(!t.terminal && t.events == vec![None, None]);
-        // Completing four-in-a-row wins (player 0 has 3 across the bottom; col 3 finishes it).
         let mut cells = [0u8; 42];
         for c in 0..3 {
             at(&mut cells, 0, c, 1);
@@ -440,8 +401,6 @@ mod tests {
         assert!(
             t.terminal && t.events == vec![Some(Connect4Event::Win), Some(Connect4Event::Loss)]
         );
-        // Standard rules: a full column is ILLEGAL — legal_actions excludes it, and stepping it
-        // anyway (unreachable via legal play) hits the losing backstop rather than corrupting.
         let mut full = [0u8; 42];
         for r in 0..ROWS {
             at(&mut full, r, 0, if r % 2 == 0 { 1 } else { 2 });
@@ -479,23 +438,20 @@ mod tests {
         };
         assert_eq!(g.num_agents(), 2);
         assert_eq!(g.action_count(), 7);
-        assert_eq!(g.actor(&s), Actor::Agent(1)); // whose turn it is
-        assert_eq!(g.legal_actions(&s, 1).len(), 7); // the mover has all columns
-        assert!(g.legal_actions(&s, 0).is_empty()); // the other player has no move
+        assert_eq!(g.actor(&s), Actor::Agent(1));
+        assert_eq!(g.legal_actions(&s, 1).len(), 7);
+        assert!(g.legal_actions(&s, 0).is_empty());
     }
 
     #[test]
     fn search_finds_the_winning_drop() {
-        // Player 0 to move with three across the bottom (cols 0-2) and player 1 elsewhere: dropping in
-        // column 3 wins immediately, so it must be the best root action with value = the win reward.
-        // This drives the sequential MAX-vs-opponent-chance search.
         let g = Connect4;
         let mut cells = [0u8; 42];
         for c in 0..3 {
-            at(&mut cells, 0, c, 1); // player 0
+            at(&mut cells, 0, c, 1);
         }
         for c in 4..7 {
-            at(&mut cells, 0, c, 2); // player 1 (so move counts are consistent with turn 0)
+            at(&mut cells, 0, c, 2);
         }
         let state = Connect4State {
             cells,
@@ -512,7 +468,7 @@ mod tests {
             0,
             zero_infer,
         );
-        let values = &results[0].0; // [K][7]
+        let values = &results[0].0;
         for head in values {
             let best = (0..7)
                 .max_by(|&a, &b| head[a].partial_cmp(&head[b]).unwrap())
@@ -527,11 +483,8 @@ mod tests {
 
     #[test]
     fn engine_rolls_out_a_sequential_two_player_game() {
-        // The rollout engine plays full Connect-4 games — turns alternate (only the mover is active
-        // each tick), both players' trajectories are z-mixed at game end, and records are [K][A=7].
-        // Exercises the Actor::Agent(other) opponent nodes end to end.
-        let policy = SelectiveExpectimax::new(cfg(), 2, 0.0); // n_heads, epsilon
-        let learner = TreeStrap::new(0.99, 0.3, 1.0, false); // gamma, outcome_weight, bootstrap_p, interior
+        let policy = SelectiveExpectimax::new(cfg(), 2, 0.0);
+        let learner = TreeStrap::new(0.99, 0.3, 1.0, false);
         let params = EngineParams {
             n_games: 3,
             seed: 0,
@@ -548,8 +501,8 @@ mod tests {
         assert!(records.len() >= 60);
         for (obs, tgt, mask, _player) in &records {
             assert_eq!(obs.len(), 2 * ROWS * COLS);
-            assert_eq!(tgt.len(), 2); // K heads
-            assert!(tgt.iter().all(|row| row.len() == 7)); // A columns
+            assert_eq!(tgt.len(), 2);
+            assert!(tgt.iter().all(|row| row.len() == 7));
             assert_eq!(mask.len(), 2);
         }
         assert!(

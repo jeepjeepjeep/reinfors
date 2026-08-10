@@ -1,14 +1,7 @@
-//! Engine integration tests over the concrete `Snake` + `SelectiveExpectimax` +
-//! `TreeStrap`. These live in reinfors-games (not core) so the generic `Engine` stays game-free:
-//! they build the engine via the public core API (`Engine`, `EngineParams`, `SelectiveExpectimax`,
-//! `TreeStrap`, `SearchConfig`) and a `Snake`.
-
 use reinfors_core::{ChanceMode, Opponent, SearchConfig};
 use reinfors_core::{Engine, EngineParams, ReachedStateBuffer, SelectiveExpectimax, TreeStrap};
 use reinfors_games::{snake_length_cell, EgocentricSnake, Snake, SnakeReward};
 
-/// Test config bundle: the snake + search knobs the helpers below read (was `reinfors_games::
-/// SearchParams`, which only the retired parity wrappers needed).
 struct SearchParams {
     grid_size: i32,
     initial_length: usize,
@@ -25,7 +18,6 @@ struct SearchParams {
     opponent: Opponent,
 }
 
-/// The default snake encoder for the engine (egocentric, sized from the search's grid).
 fn enc(s: &SearchParams) -> Box<EgocentricSnake> {
     Box::new(EgocentricSnake {
         grid_size: s.grid_size,
@@ -36,9 +28,8 @@ fn params(n_games: usize, seed: u64) -> EngineParams {
     EngineParams { n_games, seed }
 }
 
-/// The default test learner: gamma 0.99 (matches `search()`), the given z-mix weight + interior flag,
-/// bootstrap_p 0.8.
 fn learner(outcome_weight: f64, interior: bool) -> TreeStrap {
+    // Keep gamma coupled to search(), so direct-search and engine targets agree.
     TreeStrap::new(0.99, outcome_weight, 0.8, interior)
 }
 
@@ -54,7 +45,6 @@ fn config(s: &SearchParams) -> SearchConfig {
     }
 }
 
-/// The default test policy: the given head count, epsilon 0.1. (Interior collection is the learner's.)
 fn policy(s: &SearchParams, n_heads: usize) -> SelectiveExpectimax {
     SelectiveExpectimax::new(config(s), n_heads, 0.1)
 }
@@ -97,13 +87,10 @@ fn game(search: &SearchParams, initial_food_count: usize) -> Snake {
     }
 }
 
-/// The decoupled reward handle (the engine + search apply it; the game no longer carries it).
 fn reward(search: &SearchParams) -> Box<SnakeReward> {
     Box::new(search.reward)
 }
 
-/// Build an engine with the default test config (3 initial apples, TreeStrap with outcome_weight
-/// 0.5 + interior targets), allowing per-test tweaks.
 fn engine(
     n_games: usize,
     n_heads: usize,
@@ -120,7 +107,7 @@ fn engine(
     )
 }
 
-// Two disagreeing heads, sum-dependent — flat `(obs[n*dim], n) -> values[n*2*3]` (head-major).
+// The two heads deliberately disagree, so tests exercise per-head targets rather than duplicates.
 fn infer(obs: Vec<f32>, n: usize) -> Vec<f64> {
     let dim = obs.len() / n;
     let mut out = Vec::with_capacity(n * 2 * 3);
@@ -144,10 +131,10 @@ fn collect_returns_well_formed_records() {
     let (records, _stats) = e.collect(50, infer);
     assert!(records.len() >= 50);
     for (obs, tgt, mask, _player) in &records {
-        assert_eq!(obs.len(), 5 * 12 * 12); // flat observation
-        assert_eq!(tgt.len(), 2); // K heads
-        assert!(tgt.iter().all(|row| row.len() == 3)); // A actions
-        assert_eq!(mask.len(), 2); // per-head bootstrap mask
+        assert_eq!(obs.len(), 5 * 12 * 12);
+        assert_eq!(tgt.len(), 2);
+        assert!(tgt.iter().all(|row| row.len() == 3));
+        assert_eq!(mask.len(), 2);
         assert!(mask.iter().all(|&m| m == 0.0 || m == 1.0));
     }
 }
@@ -168,10 +155,8 @@ fn distinct_seeds_diverge() {
 
 #[test]
 fn games_carry_food_so_snakes_can_eat() {
-    // Over a long rollout some snake should grow past its initial length (it ate), exercising the
-    // in-tree spawn + env respawn path. Interior off so the record floor tracks decisions (with it
-    // on, the floor is reached in far fewer ticks). The apple count is invariant: eating discards
-    // one and respawns one, so every game always holds initial_food_count.
+    // Long collection is the assertion: interior=false keeps its floor tied to
+    // decisions while Snake's unit tests own the detailed food/growth invariants.
     let s = search();
     let mut e = Engine::new(
         game(&s, 3),
@@ -184,14 +169,11 @@ fn games_carry_food_so_snakes_can_eat() {
     for _ in 0..4 {
         e.collect(300, infer);
     }
-    // The engine's internal state is private; a long rollout exercising eating is enough here — the
-    // detailed growth/apple-count invariants are covered by the Snake unit tests.
 }
 
 #[test]
 fn bootstrap_p_extremes_set_all_or_no_heads() {
     let s = search();
-    // bootstrap_p now lives on the learner. n_heads (2) matches `infer`'s 2 heads.
     let all = TreeStrap::new(0.99, 0.5, 1.0, true);
     for (_, _, mask, _player) in Engine::new(
         game(&s, 3),
@@ -227,9 +209,8 @@ fn bootstrap_p_extremes_set_all_or_no_heads() {
 
 #[test]
 fn zero_outcome_weight_leaves_targets_unblended() {
-    // With outcome_weight = 0 the z-mix is a no-op, so a record's target equals its raw searched
-    // values; with weight > 0 some executed-action entry must differ. We can't read the search
-    // values here, but determinism lets us assert the two configs diverge.
+    // This only proves outcome_weight changes targets; direct equality to raw search values is
+    // covered by collected_targets_equal_a_direct_search below.
     let s = search();
     let r0 = Engine::new(
         game(&s, 3),
@@ -263,16 +244,13 @@ fn zero_outcome_weight_leaves_targets_unblended() {
 
 #[test]
 fn survival_bonus_propagates_through_z_mixing_on_truncation() {
-    // max_ticks = 1: every episode truncates after one (surviving) decision. With outcome_weight
-    // = 1 the executed action's target equals the realized return, which on a truncation includes
-    // the survival bonus. Two engines identical but for `survival` must differ in their targets by
-    // exactly the bonus, and only in the executed action's entry — survival touches neither the
-    // search values, the chosen action, nor the z-tail.
+    // One-tick truncation and no food isolate the survival bonus. Interior records are never
+    // z-mixed, so disabling them ensures every compared target is eligible for the bonus.
     let bonus = 0.25;
     let mk = |survival: f64| {
         let mut s = search();
         s.reward.survival = survival;
-        s.max_ticks = Some(1); // the game's horizon: truncate after one decision per agent
+        s.max_ticks = Some(1);
         Engine::new(
             game(&s, 0),
             enc(&s),
@@ -281,7 +259,6 @@ fn survival_bonus_propagates_through_z_mixing_on_truncation() {
             learner(1.0, false),
             params(4, 0),
         )
-        // no initial food; ow=1, interior off
     };
     let base = mk(0.0).collect(4, infer).0;
     let surv = mk(bonus).collect(4, infer).0;
@@ -304,10 +281,7 @@ fn survival_bonus_propagates_through_z_mixing_on_truncation() {
 
 #[test]
 fn collect_reports_episode_and_search_telemetry() {
-    // A long enough rollout finishes several episodes and runs many searches; the telemetry must
-    // be populated and internally consistent (means finite, lengths bounded by max_ticks).
-    // Interior off so the record floor tracks decisions (with it on, the floor is reached via
-    // interior targets before any episode completes).
+    // interior=false prevents interior records satisfying the floor before episodes finish.
     let s = search();
     let max_ticks = s.max_ticks.unwrap();
     let mut e = Engine::new(
@@ -362,16 +336,13 @@ fn telemetry_is_deterministic_for_a_seed() {
 
 #[test]
 fn collected_targets_equal_a_direct_search() {
-    // The engine collects each decision's raw searched values as its target (z-mix is a no-op at
-    // outcome_weight 0). With no food the search has no chance node, so it is seed-independent — a
-    // direct `search_many` on the food-free initial state reproduces the engine's first targets,
-    // pinning that `collect` feeds through exactly what the search computes.
     use reinfors_core::{search_many, Game};
     use reinfors_games::EgocentricSnake;
 
     let mut s = search();
-    s.max_ticks = Some(1); // the game's horizon: truncate after one decision per agent
+    s.max_ticks = Some(1);
     let (records, _) = Engine::new(
+        // No food removes chance, making the direct search seed-independent.
         game(&s, 0),
         enc(&s),
         reward(&s),
@@ -381,7 +352,6 @@ fn collected_targets_equal_a_direct_search() {
     )
     .collect(2, infer);
 
-    // The engine's deterministic food-free initial state (placement, no food) — same as episode 0's.
     let state = game(&s, 0).initial_state();
     let direct = search_many(
         &game(&s, 0),
@@ -411,9 +381,7 @@ fn collected_targets_equal_a_direct_search() {
 
 #[test]
 fn start_buffer_with_p_fresh_one_is_bit_identical_to_default() {
-    // The determinism guard: the start-buffer machinery (per-tick `observe` + its disjoint RNG) must
-    // never perturb the env-chance draws. With p_fresh = 1.0 every reset falls back to `initial_state`,
-    // so the collected records must be bit-identical to the default `AlwaysInitialState` engine.
+    // p_fresh=1 must leave rollout chance untouched; the buffer uses a disjoint RNG stream.
     let baseline = engine(4, 2, 5).collect(80, infer).0;
     let buffered = engine(4, 2, 5)
         .with_start_distribution(Box::new(ReachedStateBuffer::new(
@@ -431,10 +399,7 @@ fn start_buffer_with_p_fresh_one_is_bit_identical_to_default() {
 
 #[test]
 fn start_buffer_seeds_episodes_once_it_fills() {
-    // With p_fresh = 0, once the buffer has states (after the first episode) every reset restores one,
-    // so finished episodes get tagged `seeded`. The telemetry tag lets a caller keep off-d0 episodes
-    // out of the true-start curves. Short horizon + interior off so episodes finish quickly and the
-    // record floor tracks decisions.
+    // A short horizon fills the buffer quickly; p_fresh=0 then forces restored starts.
     let mut s = search();
     s.max_ticks = Some(5);
     let mut e = Engine::new(
@@ -442,6 +407,7 @@ fn start_buffer_seeds_episodes_once_it_fills() {
         enc(&s),
         reward(&s),
         policy(&s, 2),
+        // Interior records could satisfy the floor before enough resets exercise the buffer.
         learner(0.5, false),
         params(4, 6),
     )

@@ -1,7 +1,3 @@
-//! The information-capability seam, end to end with the real hidden-information game: search
-//! families reject hold'em at construction (their trees would be clairvoyant about hole cards);
-//! the observation-only DQN family composes and collects.
-
 use reinfors_core::{
     ChanceMode, Dqn, Engine, EngineParams, EpsilonGreedyQ, Opponent, SearchConfig,
     SelectiveExpectimax, Space, StateEncoder, TreeStrap,
@@ -18,7 +14,6 @@ fn game() -> TexasHoldem {
     }
 }
 
-/// PR-2 ships the real egocentric encoder; the gating tests only need SOME per-agent view.
 struct FlatEnc;
 impl reinfors_core::ActionView for FlatEnc {}
 impl StateEncoder for FlatEnc {
@@ -86,7 +81,6 @@ fn dqn_family_collects_poker_hands() {
     });
     assert!(records.len() >= 60);
     assert!(stats.decisions > 0 && !stats.episodes.is_empty());
-    // Episodes are single hands: per-episode rewards are zero-sum across the three seats.
     for ep in &stats.episodes {
         let sum: f64 = ep.reward.iter().sum();
         assert!(sum.abs() < 1e-9, "zero-sum hand, got {:?}", ep.reward);

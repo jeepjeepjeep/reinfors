@@ -1,11 +1,3 @@
-//! The reachability property every state codec must satisfy: any state produced by real play
-//! round-trips canonically (encode∘decode = identity on bytes) and validates — live states with
-//! done=false, terminal states with done=true. This is the false-REJECTION guard for
-//! `validate_decoded_state`. The contract is safety, not reachability: probes below check that
-//! unsafe states reject, that derived flags are recomputed at decode rather than transported,
-//! and that unreachable-but-safe states are ACCEPTED (only reinfors-produced snapshots have
-//! meaningful gameplay semantics).
-
 use reinfors_core::{Game, Rng, StateCodec};
 use reinfors_games::{
     Backgammon, Chess, Connect4, GridState, GridWorld, KuhnPoker, LeducPoker, Snake, TexasHoldem,
@@ -25,9 +17,8 @@ impl Rng for Lcg {
     }
 }
 
-/// Episode birth the way the rollout runtime does it: realize any root chance chain (a
-/// declared deal) down to the first decision state — mid-chain states are transient and are
-/// exactly what `validate_decoded_state` rejects.
+// Match runtime birth by consuming transient root chance states: decoded live states must be
+// actionable, so validators deliberately reject snapshots taken partway through this chain.
 fn birth<G: Game>(game: &G, rng: &mut dyn reinfors_core::Rng) -> <G as Game>::State {
     let mut s = game.initial_state();
     while matches!(game.actor(&s), reinfors_core::Actor::Chance) {
@@ -69,9 +60,6 @@ where
             .collect();
         let t = reinfors_core::game::step_env(&game, &state, &joint, &mut rng);
         if t.terminal {
-            // TERMINAL states are snapshot-restorable too — the round-trip + validation
-            // property must hold for them with done=true (the recomputed state-side flags must
-            // agree with the envelope).
             let bytes = game.encode(&t.next_state);
             let back = game
                 .decode(&bytes)
@@ -142,8 +130,6 @@ fn every_game_round_trips_reachable_states() {
     );
 }
 
-/// False-ACCEPT probes for the SAFETY contract: states game methods cannot operate on safely
-/// (out-of-bounds indexing, panicking representation) must reject.
 #[test]
 fn validators_reject_unsafe_states() {
     use reinfors_games::snake::{Action, SnakeBody, SnakeState};
@@ -169,7 +155,6 @@ fn validators_reject_unsafe_states() {
         pending_food: 0,
         birth: false,
     };
-    // a state with the wrong snake count would index out of the game's agent range
     let three = Snake {
         num_snakes: 3,
         grid_size: 6,
@@ -185,14 +170,12 @@ fn validators_reject_unsafe_states() {
         pending_food: 0,
         birth: false,
     };
+    // A mismatched snake count would index beyond the game's agent-shaped arrays.
     assert!(three
         .validate_decoded_state(&two_state, false)
         .unwrap_err()
         .contains("has 2 snakes"));
 
-    // lifecycle coherence, both directions: `done` gates whether the Env may continue, so it
-    // must match the shared terminal rule (`advance`'s own) — a live envelope over a decided
-    // position would let play continue past the end of the game.
     let both_alive = mk(body(&[(1, 1)], true), body(&[(3, 3)], true), &[]);
     assert!(snake_game
         .validate_decoded_state(&both_alive, true)
@@ -214,7 +197,7 @@ fn validators_reject_unsafe_states() {
         .validate_decoded_state(&led, false)
         .unwrap_err()
         .contains("terminal=true"));
-    // out-of-grid cells index past the observation planes
+    // Off-grid bodies or food would index beyond observation planes.
     let off_grid = mk(body(&[(6, 0)], true), body(&[(3, 3)], true), &[]);
     assert!(snake_game
         .validate_decoded_state(&off_grid, false)
@@ -225,20 +208,19 @@ fn validators_reject_unsafe_states() {
         .validate_decoded_state(&off_grid_food, false)
         .unwrap_err()
         .contains("outside the grid"));
-    // an alive snake with no body panics `head()`
     let headless = mk(body(&[], true), body(&[(3, 3)], true), &[]);
+    // An alive empty body would panic the first call to head().
     assert!(snake_game
         .validate_decoded_state(&headless, false)
         .unwrap_err()
         .contains("empty body"));
 
-    // connect4: cell codes outside {empty, p0, p1} and out-of-range movers reject. Fields are
-    // private, so states are built via decode: postcard layout = version, cells len varint,
-    // 42 cells, turn (done is derived, never on the wire).
     let c4 = Connect4;
+    // Postcard fields: version, 42-cell Vec length, cells, then turn.
+    // `3` for the first cell and `2` for turn are the two forged hazards.
     let mut bad_cell = vec![2u8, 42, 3];
     bad_cell.extend([0u8; 41]);
-    bad_cell.push(0); // turn 0
+    bad_cell.push(0);
     let forged = c4.decode(&bad_cell).unwrap();
     assert!(c4
         .validate_decoded_state(&forged, false)
@@ -246,7 +228,7 @@ fn validators_reject_unsafe_states() {
         .contains("cell value"));
     let mut bad_turn = vec![2u8, 42];
     bad_turn.extend([0u8; 42]);
-    bad_turn.push(2); // turn 2
+    bad_turn.push(2);
     let forged = c4.decode(&bad_turn).unwrap();
     assert!(c4
         .validate_decoded_state(&forged, false)
@@ -258,8 +240,6 @@ fn validators_reject_unsafe_states() {
         goal: (4, 4),
         max_ticks: None,
     };
-    // lifecycle coherence: envelope done must agree with the recomputed state flag. (The raw
-    // root is the unborn chance state — rejected as out-of-grid — so build a realized one.)
     let live = GridState {
         pos: (0, 0),
         done: false,
@@ -270,12 +250,8 @@ fn validators_reject_unsafe_states() {
         .contains("disagrees"));
 }
 
-/// Derived flags never travel: decode recomputes them from the same rule functions `step` uses,
-/// so a stored flag cannot disagree with the position (the old duplicated-fact forgeries are now
-/// unrepresentable, not just rejected).
 #[test]
 fn derived_flags_are_recomputed_at_decode() {
-    // connect4: play to a win, round-trip, and the decoded state knows it is done.
     let c4 = Connect4;
     let mut rng = Lcg(3);
     let mut s = c4.initial_state();
@@ -297,7 +273,6 @@ fn derived_flags_are_recomputed_at_decode() {
     assert!(back.is_done(), "terminal flag must be recomputed at decode");
     c4.validate_decoded_state(&back, true).unwrap();
 
-    // gridworld: a state at the goal decodes as done.
     let gw = GridWorld {
         size: 5,
         goal: (0, 1),
@@ -312,9 +287,6 @@ fn derived_flags_are_recomputed_at_decode() {
     gw.validate_decoded_state(&back, true).unwrap();
 }
 
-/// The narrowed contract's flip side: unreachable-but-SAFE states are accepted. No occupancy or
-/// alternation rules are re-proved at the boundary (lifecycle coherence — envelope done vs the
-/// shared terminal rule — is checked, but history is not).
 #[test]
 fn unreachable_but_safe_states_are_accepted() {
     use reinfors_games::snake::{Action, SnakeBody, SnakeState};
@@ -334,9 +306,8 @@ fn unreachable_but_safe_states_are_accepted() {
         direction: Action::Up,
         alive: true,
     };
-    // two living snakes on the same cell, food under both: impossible through play (occupancy is
-    // not re-proved), safe to step, and live under the terminal rule (equal lengths, both alive)
     let overlap = SnakeState {
+        // Equal lengths keep this deliberately overlapping state non-terminal.
         snakes: vec![body(&[(1, 1)]), body(&[(1, 1)])],
         food: HashSet::from_iter([(1, 1)]),
         pending_food: 0,
@@ -344,11 +315,10 @@ fn unreachable_but_safe_states_are_accepted() {
     };
     game.validate_decoded_state(&overlap, false).unwrap();
 
-    // connect4: a parity-violating board (two p0 pieces, none for p1) is safe to play on.
     let c4 = Connect4;
     let mut bytes = vec![2u8, 42, 1, 1];
     bytes.extend([0u8; 40]);
-    bytes.push(0); // turn 0 again — alternation violated
+    bytes.push(0);
     let s = c4.decode(&bytes).unwrap();
     c4.validate_decoded_state(&s, false).unwrap();
     assert!(!c4.legal_actions(&s, 0).is_empty());

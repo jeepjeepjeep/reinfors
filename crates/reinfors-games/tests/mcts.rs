@@ -1,6 +1,3 @@
-//! The MCTS (UCT) planner on real games: it finds a forced connect4 win, is deterministic, and rejects
-//! simultaneous games. Mirrors how the binding pairs `Mcts` with a sequential game.
-
 use reinfors_core::{mcts_many, Actor, ChanceMode, Evaluator, Game, MctsConfig, Rng};
 use reinfors_games::{Connect4, Connect4Planes, Connect4Reward, EgocentricSnake, Snake};
 
@@ -34,10 +31,8 @@ fn reward() -> Connect4Reward {
     }
 }
 
-// A trivial zeros evaluator (K=1): leaf values are 0, so all signal comes from terminal win/loss —
-// enough for MCTS to solve tactics, exactly like a random-rollout MCTS.
 fn zeros_infer(_p: usize, _obs: Vec<f32>, n: usize) -> Vec<f64> {
-    vec![0.0; n * 7] // K=1, A=7
+    vec![0.0; n * 7]
 }
 
 fn argmax(v: &[f64]) -> usize {
@@ -46,7 +41,6 @@ fn argmax(v: &[f64]) -> usize {
         .unwrap()
 }
 
-/// Build a position where P0 has three in column 3 and it is P0's move — column 3 wins outright.
 fn forced_win_state() -> reinfors_games::Connect4State {
     let game = Connect4;
     let mut state = game.initial_state();
@@ -81,11 +75,9 @@ fn mcts_finds_a_forced_connect4_win() {
         values[3] > 0.9,
         "the winning move's value should approach the win reward"
     );
-    assert_eq!(evals[0].visits.len(), 7); // per-action visit counts, full action space
+    assert_eq!(evals[0].visits.len(), 7);
 }
 
-/// A position where P1 has three in column 0 and it is P0's move — if P0 doesn't play column 0, P1 wins
-/// there next turn. P0's only safe move is to block by playing column 0.
 fn opponent_threat_state() -> reinfors_games::Connect4State {
     let game = Connect4;
     let mut state = game.initial_state();
@@ -101,9 +93,7 @@ fn opponent_threat_state() -> reinfors_games::Connect4State {
 
 #[test]
 fn mcts_blocks_opponent_win() {
-    // Exercises the negamax turn-change: the opponent's win one ply deeper must propagate to the root
-    // as a loss, so P0 prefers the (neutral) block over any move that lets P1 win. A sign error in the
-    // backup would make P0 choose a losing move instead.
+    // This is a negamax sign guard: the opponent's next-ply win must back up as P0's loss.
     let evals = mcts_many(
         &Connect4,
         &Connect4Planes,
@@ -145,7 +135,6 @@ fn mcts_is_deterministic() {
 
 #[test]
 fn mcts_pools_multiple_requests() {
-    // Two requests searched together (pooled, batched infer) each resolve their own tree correctly.
     let evals = mcts_many(
         &Connect4,
         &Connect4Planes,

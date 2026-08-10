@@ -184,7 +184,7 @@ ENCODER_INFO: dict[str, EncoderInfo] = {
         "Snake",
         "(5, grid_size, grid_size); (5, 20, 20) by default",
         "rf.encoders.Snake()",
-        "Mover-relative body, opponent, food, and wall planes.",
+        "Mover-relative own-head, own-body, opponent-head, opponent-body, and food planes.",
     ),
     "connect4": EncoderInfo(
         "Connect4",

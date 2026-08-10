@@ -1,24 +1,18 @@
-//! `Env` over the concrete games: a sequential game (Connect-4) played to a known win, and a
-//! simultaneous game (snake) stepped a tick. Validates the caller-driven single-game loop end to end.
-
 use reinfors_core::Env;
 use reinfors_games::{Connect4, Connect4Event, Connect4Planes, EgocentricSnake, Snake};
 
 #[test]
 fn connect4_played_to_a_vertical_win() {
     let mut env = Env::new(Connect4, Box::new(Connect4Planes), 0);
-    // P0 stacks column 0, P1 column 1; P0 completes four-in-a-column first. Moves alternate, matching
-    // the game's turn order, which `active_agents` reports.
     let moves = [(0, 0), (1, 1), (0, 0), (1, 1), (0, 0), (1, 1), (0, 0)];
     let mut last = Vec::new();
     for (agent, col) in moves {
-        assert_eq!(env.active_agents(), vec![agent]); // sequential: one mover per tick
+        assert_eq!(env.active_agents(), vec![agent]);
         let mut joint = vec![0usize; env.num_agents()];
         joint[agent] = col;
-        last = env.step(&joint); // the tick's (agent, event) trace
+        last = env.step(&joint);
     }
     assert!(env.done());
-    // The terminal trace carries the outcome (Env holds no reward); P0 wins, P1 loses.
     assert_eq!(
         last,
         vec![(0, Connect4Event::Win), (1, Connect4Event::Loss)],
@@ -39,8 +33,8 @@ fn snake_steps_both_agents_simultaneously() {
         max_ticks: None,
     };
     let mut env = Env::new(game, Box::new(EgocentricSnake { grid_size: 8 }), 0);
-    assert_eq!(env.active_agents(), vec![0, 1]); // simultaneous: both live agents act
+    assert_eq!(env.active_agents(), vec![0, 1]);
     assert_eq!(env.observe(0).len(), 5 * 8 * 8);
-    let events = env.step(&[1, 1]); // both move forward
+    let events = env.step(&[1, 1]);
     assert_eq!(events.len(), 2);
 }
