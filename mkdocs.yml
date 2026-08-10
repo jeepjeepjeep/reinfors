@@ -75,10 +75,11 @@ nav:
           - Operating-point tuning: benchmarks/openspiel/tuning.md
           - The matched round: benchmarks/openspiel/matched-round.md
           - Design differences: benchmarks/openspiel/design-differences.md
+          - Reproducing: benchmarks/openspiel/reproducing.md
       - Internals:
           - benchmarks/internal/index.md
           - Throughput levers: benchmarks/internal/throughput-levers.md
-      - Reproducing: benchmarks/reproducing.md
+          - Reproducing: benchmarks/internal/reproducing.md
   - Reference:
       - reference/index.md
       - Inference contract: reference/inference-contract.md

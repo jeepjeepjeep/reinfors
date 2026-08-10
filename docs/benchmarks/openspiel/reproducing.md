@@ -1,9 +1,13 @@
-# Reproducing
+# Reproducing the comparison
 
-All harnesses, patches, raw logs, and analysis scripts live in the companion benchmark
-repository (`reinfors-benchmarks`); this page summarizes the run surface so results can be
-audited against exact commands. Every published table links to the commit and resolved
-configuration that produced it.
+The cross-framework harness lives in the companion benchmark repository
+(`reinfors-benchmarks`), published alongside this library: the OpenSpiel source-build
+machinery and its documented patches, the measurement and round-orchestration scripts, the
+head-to-head bridge, and the raw logs and artifacts of every published run. That material
+is deliberately not vendored into reinfors — third-party patches, training loops, and
+cloud tooling are outside the library's scope, and a drifting copy would be worse than a
+pointer. The commands below are the companion repo's run surface, so published results can
+be audited against exact invocations.
 
 ## One-time setup (per instance)
 
@@ -46,16 +50,9 @@ python benchmarks/openspiel/eval_h2h_chess.py <rf_ckpt> <os_dir> --os-checkpoint
 python scripts/plot_round.py <rf_round_dir> <os_round_dir> -o round_panels.png
 ```
 
-## Grouped-collection grid
-
-```bash
-CORES=0-3 WIDTH=256 DEPTH=8 NGAMES="64 128" NGROUPS=1 MINUTES=20 bash scripts/measure_states_rf.sh
-CORES=0-3 WIDTH=256 DEPTH=8 NGAMES="64 128" NGROUPS=2 MINUTES=20 bash scripts/measure_states_rf.sh
-```
-
 ## Publication artifacts
 
-Per published number: reinfors and benchmark-repo commits, `resolved_config()` /
+Per published number: reinfors and companion-repo commits, `resolved_config()` /
 `config_fingerprint()` of every engine, full command line, raw interior-window samples,
-learner logs from both stacks, head-to-head PGNs, and the analysis notebook or script that
-reduced them.
+learner logs from both stacks, head-to-head PGNs, and the analysis script that reduced
+them.

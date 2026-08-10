@@ -19,7 +19,12 @@ Shared foundations, applying to both families:
 - [Environment and setup](setup.md) — the instance, isolation invariants, and version pins.
 - [Methodology](methodology.md) — the measurement protocol, including the rules that exist
   because an earlier version of the benchmark broke them.
-- [Reproducing](reproducing.md) — commands, seeds, and publication artifacts.
+
+Each family carries its own reproduction guide
+([internal](internal/reproducing.md), [comparison](openspiel/reproducing.md)): internal
+benchmarks reproduce from this repository; the cross-framework harness, its documented
+OpenSpiel patches, and the raw artifacts of published runs live in the companion benchmark
+repository, published alongside reinfors.
 
 Numeric results are being populated as the final long-form runs complete; tables marked
 _TBD_ are structural placeholders whose protocol is already frozen. Every published number
