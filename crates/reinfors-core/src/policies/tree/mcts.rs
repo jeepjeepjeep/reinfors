@@ -1295,6 +1295,7 @@ pub(crate) struct PooledSearch<'c, G: Game> {
     a: usize,
     trees: Vec<Tree<G::State>>,
     consumers: Vec<Vec<(usize, usize, usize)>>,
+    awaiting: bool,
 }
 
 impl<'c, G: Game> PooledSearch<'c, G> {
@@ -1352,18 +1353,29 @@ impl<'c, G: Game> PooledSearch<'c, G> {
             a,
             trees,
             consumers: Vec::new(),
+            awaiting: false,
         }
     }
 
     pub(crate) fn finished(&self) -> bool {
-        !self.trees.iter().any(|t| t.sims < self.num_simulations)
+        !self.awaiting && !self.trees.iter().any(|t| t.sims < self.num_simulations)
     }
 
     /// Drive every unfinished tree until it stages rows into `batch` or completes its budget.
+    /// Rounds alternate strictly: every `stage_round` must be answered by `apply_rows` before
+    /// the next, and the batch must be fresh — ticket ids index the consumer table directly.
     pub(crate) fn stage_round<F>(&mut self, batch: &mut EvalBatch<'_, '_, F>)
     where
         F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
+        assert!(
+            !self.awaiting,
+            "stage_round with a round outstanding: apply_rows must consume it first"
+        );
+        assert!(
+            batch.is_empty(),
+            "stage_round requires a fresh batch: ticket ids index the consumer table"
+        );
         let (game, enc, reward) = (self.game, self.enc, self.reward);
         let (num_simulations, gamma, max_depth, chance, a) = (
             self.num_simulations,
@@ -1489,10 +1501,13 @@ impl<'c, G: Game> PooledSearch<'c, G> {
                 }
             }
         }
+        self.awaiting = true;
     }
 
     /// Distribute one committed round to every tree that staged rows in it.
     pub(crate) fn apply_rows(&mut self, rows: &CommittedRows) {
+        assert!(self.awaiting, "apply_rows without a staged round");
+        self.awaiting = false;
         let consumers = std::mem::take(&mut self.consumers);
         for (ticket, waiting) in consumers.iter().enumerate() {
             for &(ti, node, slot) in waiting {
@@ -1512,6 +1527,10 @@ impl<'c, G: Game> PooledSearch<'c, G> {
     }
 
     pub(crate) fn into_evaluations(self) -> Vec<SearchEvaluation> {
+        assert!(
+            self.finished(),
+            "into_evaluations on an unfinished pool: outstanding rows or unspent budget"
+        );
         let a = self.a;
         self.trees.into_iter().map(|t| t.evaluation(a)).collect()
     }
@@ -3173,5 +3192,209 @@ mod forced_maxn_tests {
             "Max^N root values converge to the self-interested payoffs: {:?}",
             maxn.values[0]
         );
+    }
+}
+
+#[cfg(test)]
+mod pooled_lifecycle_tests {
+    use super::*;
+    use crate::encoder::StateEncoder;
+    use crate::game::{Actor, Game, Transition};
+    use crate::reward::Reward;
+    use crate::rollout::evaluator::{Evaluator, InferMode};
+
+    #[derive(Clone)]
+    struct St {
+        tick: usize,
+    }
+    struct SimPair;
+    impl Game for SimPair {
+        type State = St;
+        type Event = ();
+        fn num_agents(&self) -> usize {
+            2
+        }
+        fn action_count(&self) -> usize {
+            2
+        }
+        fn actor(&self, _s: &St) -> Actor {
+            Actor::Simultaneous
+        }
+        fn legal_actions(&self, _s: &St, _agent: usize) -> Vec<usize> {
+            vec![0, 1]
+        }
+        fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
+            Transition {
+                next_state: St { tick: s.tick + 1 },
+                events: vec![None; 2],
+                terminal: s.tick + 1 >= 4,
+            }
+        }
+        fn initial_state(&self) -> St {
+            St { tick: 0 }
+        }
+    }
+    struct Enc;
+    impl crate::encoder::ActionView for Enc {}
+    impl StateEncoder for Enc {
+        type State = St;
+        fn encode(&self, s: &St, agent: usize) -> Vec<f32> {
+            vec![s.tick as f32, agent as f32]
+        }
+        fn obs_shape(&self) -> (usize, usize, usize) {
+            (1, 1, 2)
+        }
+    }
+    struct Zero;
+    impl Reward for Zero {
+        type Event = ();
+        fn step_reward(&self, _e: &(), _agent: usize) -> f64 {
+            0.0
+        }
+    }
+
+    fn infer(_player: usize, obs: Vec<f32>, n: usize) -> Vec<f64> {
+        assert_eq!(obs.len(), n * 2);
+        vec![0.25; n * 2]
+    }
+
+    fn new_pool<'c>(
+        game: &'c SimPair,
+        enc: &'c Enc,
+        reward: &'c Zero,
+        guidance: &'c Guidance,
+        sims: usize,
+    ) -> PooledSearch<'c, SimPair> {
+        PooledSearch::new(
+            game,
+            enc,
+            reward,
+            sims,
+            1.0,
+            64,
+            guidance,
+            ChanceMode::AlwaysResample,
+            7,
+            vec![(St { tick: 0 }, 0)],
+            false,
+        )
+    }
+
+    #[test]
+    fn final_round_is_outstanding_until_applied() {
+        let (game, enc, reward) = (SimPair, Enc, Zero);
+        let g = Guidance::Uct { c: 1.0 };
+        let mut f = infer;
+        let mut eval: Evaluator<'_, _> = Evaluator::new(&mut f, InferMode::Shared, None);
+        let mut p = new_pool(&game, &enc, &reward, &g, 1);
+        let mut batch = eval.batch();
+        p.stage_round(&mut batch);
+        // The single simulation is spent, but its (multi-row: simultaneous) evaluation is in
+        // flight — the pool must not present as finished.
+        assert!(!p.finished());
+        let rows = batch.commit();
+        p.apply_rows(&rows);
+        assert!(p.finished());
+        let evals = p.into_evaluations();
+        assert_eq!(evals.len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "round outstanding")]
+    fn double_stage_panics() {
+        let (game, enc, reward) = (SimPair, Enc, Zero);
+        let g = Guidance::Uct { c: 1.0 };
+        let mut f = infer;
+        let mut eval: Evaluator<'_, _> = Evaluator::new(&mut f, InferMode::Shared, None);
+        let mut p = new_pool(&game, &enc, &reward, &g, 2);
+        let mut batch = eval.batch();
+        p.stage_round(&mut batch);
+        drop(batch);
+        let mut batch2 = eval.batch();
+        p.stage_round(&mut batch2);
+    }
+
+    #[test]
+    #[should_panic(expected = "without a staged round")]
+    fn apply_without_stage_panics() {
+        let (game, enc, reward) = (SimPair, Enc, Zero);
+        let g = Guidance::Uct { c: 1.0 };
+        let mut f = infer;
+        let mut eval: Evaluator<'_, _> = Evaluator::new(&mut f, InferMode::Shared, None);
+        let empty = eval.batch().commit();
+        let mut p = new_pool(&game, &enc, &reward, &g, 1);
+        p.apply_rows(&empty);
+    }
+
+    #[test]
+    #[should_panic(expected = "unfinished pool")]
+    fn into_evaluations_while_awaiting_panics() {
+        let (game, enc, reward) = (SimPair, Enc, Zero);
+        let g = Guidance::Uct { c: 1.0 };
+        let mut f = infer;
+        let mut eval: Evaluator<'_, _> = Evaluator::new(&mut f, InferMode::Shared, None);
+        let mut p = new_pool(&game, &enc, &reward, &g, 1);
+        let mut batch = eval.batch();
+        p.stage_round(&mut batch);
+        drop(batch);
+        let _ = p.into_evaluations();
+    }
+
+    #[test]
+    #[should_panic(expected = "fresh batch")]
+    fn nonempty_batch_panics() {
+        let (game, enc, reward) = (SimPair, Enc, Zero);
+        let g = Guidance::Uct { c: 1.0 };
+        let mut f = infer;
+        let mut eval: Evaluator<'_, _> = Evaluator::new(&mut f, InferMode::Shared, None);
+        let mut p = new_pool(&game, &enc, &reward, &g, 1);
+        let mut batch = eval.batch();
+        let _ = batch.resolve_or_stage(0, &[9.0, 9.0]);
+        p.stage_round(&mut batch);
+    }
+
+    #[test]
+    fn alternated_pools_match_search_many() {
+        let (game, enc, reward) = (SimPair, Enc, Zero);
+        let g = Guidance::Uct { c: 1.0 };
+        let sims = 6;
+        let mut f = infer;
+        let mut eval: Evaluator<'_, _> = Evaluator::new(&mut f, InferMode::Shared, None);
+        let guidance = Guidance::Uct { c: 1.0 };
+        let reference = search_many(
+            &game,
+            &enc,
+            &reward,
+            sims,
+            1.0,
+            64,
+            &guidance,
+            ChanceMode::AlwaysResample,
+            7,
+            vec![(St { tick: 0 }, 0)],
+            &mut eval,
+            false,
+        );
+
+        let mut f2 = infer;
+        let mut eval2: Evaluator<'_, _> = Evaluator::new(&mut f2, InferMode::Shared, None);
+        let mut a = new_pool(&game, &enc, &reward, &g, sims);
+        let mut b = new_pool(&game, &enc, &reward, &g, sims);
+        while !a.finished() || !b.finished() {
+            for p in [&mut a, &mut b] {
+                if p.finished() {
+                    continue;
+                }
+                let mut batch = eval2.batch();
+                p.stage_round(&mut batch);
+                let rows = batch.commit();
+                p.apply_rows(&rows);
+            }
+        }
+        for evals in [a.into_evaluations(), b.into_evaluations()] {
+            assert_eq!(evals.len(), 1);
+            assert_eq!(evals[0].visits, reference[0].visits);
+            assert_eq!(evals[0].values, reference[0].values);
+        }
     }
 }
