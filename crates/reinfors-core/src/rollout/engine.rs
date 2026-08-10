@@ -291,8 +291,9 @@ where
     /// Double-buffered collect: games split into two fixed groups whose search rounds
     /// alternate, so one group's tree work overlaps the other's inference (which runs on a
     /// submitter thread owning the callback). Deterministic: static membership, strict
-    /// alternation, game-index row order; rows staged under a superseded weights generation
-    /// never enter the cache. Requires a policy with a pooled search (binding-gated; panics
+    /// alternation, game-index row order. Once a batch boundary observes a new weights
+    /// generation, older rows are cleared and never served (see [`Evaluator::ingest`]).
+    /// Requires a policy with a pooled search (binding-gated; panics
     /// here as the backstop), shared inference, and no truncation-tail bootstrapping.
     pub fn collect_grouped<F>(
         &mut self,
