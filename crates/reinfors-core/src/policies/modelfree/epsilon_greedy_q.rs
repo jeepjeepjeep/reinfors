@@ -1,6 +1,4 @@
-//! Epsilon-greedy acting on per-head Q-values. `evaluate` is a plain batched network forward (no
-//! search), and `select` is a Thompson-head epsilon-greedy choice. Its `QEvaluation` is the seam's
-//! non-search case; the matching `Dqn` (in `crate::learners::dqn`) consumes it into transitions.
+//! Epsilon-greedy acting on ensemble Q-values.
 
 use std::collections::HashMap;
 
@@ -11,16 +9,12 @@ use crate::policy::Policy;
 use crate::reward::Reward;
 use crate::rollout::evaluator::Evaluator;
 
-/// DQN's per-decision evaluation: just the per-head Q-values `[K][A]` from one network forward (no
-/// search tree, interior targets, or stats — the seam's non-search case).
+/// Per-head Q-values and legal actions for one decision.
 pub struct QEvaluation {
     pub values: Vec<Vec<f64>>,
-    /// The state's legal action ids — acting and the learner's TD targets must stay inside this
-    /// set on sparse-action games (an illegal argmax acts on a phantom Q value).
     pub legal: Vec<usize>,
 }
 
-/// Bootstrapped-DQN acting: a batched forward, then a Thompson-head epsilon-greedy choice.
 pub struct EpsilonGreedyQ {
     n_heads: usize,
     epsilon: f64,
@@ -37,14 +31,14 @@ impl EpsilonGreedyQ {
 
 impl Policy for EpsilonGreedyQ {
     type Evaluation = QEvaluation;
-    type PolicyState = usize; // the Thompson head for the current episode
+    type PolicyState = usize;
 
     fn max_agents(&self, _sequential: bool) -> Option<usize> {
-        None // each agent acts greedily on its own Q row; no cross-agent structure
+        None
     }
 
     fn supports_imperfect_information(&self) -> bool {
-        true // evaluates only the acting agent's own observation — never the true state
+        true
     }
 
     fn begin_episode(&self, rng: &mut dyn Rng) -> usize {
@@ -106,10 +100,10 @@ impl Policy for EpsilonGreedyQ {
         &self,
         game: &G,
         enc: &dyn StateEncoder<State = G::State>,
-        _reward: &dyn Reward<Event = G::Event>, // model-free: rewards come from the env, not the search
+        _reward: &dyn Reward<Event = G::Event>,
         requests: Vec<(G::State, usize)>,
         _seed: u64,
-        _collect_interior: bool, // DQN has no interior targets — a plain forward, nothing to collect
+        _collect_interior: bool,
         eval: &mut Evaluator<'_, F>,
     ) -> Vec<QEvaluation>
     where
@@ -127,11 +121,9 @@ impl Policy for EpsilonGreedyQ {
             obs_flat.extend(enc.encode(state, *agent));
         }
         let players: Vec<usize> = requests.iter().map(|(_, agent)| *agent).collect();
-        let q = eval.forward(&players, obs_flat, n); // flat [n, K, A]
+        let q = eval.forward(&players, obs_flat, n);
         let k = q.len() / (n * a);
-        // Per-agent permutation tables, computed once: this dense materialization is the reactive
-        // path's throughput ceiling, so it must not pay a virtual `head_index` call per scalar.
-        // Identity views (every absolute encoder) keep the contiguous-copy fast path.
+        // Build each action-frame permutation once rather than dispatching per Q-value.
         let mut perms: HashMap<usize, (Vec<usize>, bool)> = HashMap::new();
         requests
             .iter()
@@ -140,8 +132,6 @@ impl Policy for EpsilonGreedyQ {
                 let (perm, identity) = perms
                     .entry(*agent)
                     .or_insert_with(|| head_permutation(enc, a, *agent));
-                // Materialize the net's head-frame row into GAME-frame per-action values (the
-                // internal currency of select and the search seam).
                 let values = (0..k)
                     .map(|h| {
                         let start = (i * k + h) * a;
@@ -160,8 +150,6 @@ impl Policy for EpsilonGreedyQ {
             .collect()
     }
 
-    /// Thompson-head argmax over the LEGAL set (epsilon explores uniformly over it): identical to
-    /// the dense behavior on all-legal games, correct instead of phantom-Q-driven on sparse ones.
     fn select(&self, eval: &QEvaluation, head: &mut usize, rng: &mut dyn Rng) -> usize {
         let k = eval.values.len();
         let row = &eval.values[(*head).min(k - 1)];
@@ -189,7 +177,6 @@ mod tests {
 
     #[test]
     fn select_is_thompson_head_argmax_then_epsilon() {
-        // No epsilon: pick the argmax of the chosen head. Head 1's best action is index 2.
         let policy = EpsilonGreedyQ::new(2, 0.0);
         let eval = QEvaluation {
             values: vec![vec![3.0, 1.0, 2.0], vec![0.0, 1.0, 5.0]],

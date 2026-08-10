@@ -1,8 +1,4 @@
-//! A single, caller-driven game instance — the inverse of the autonomous [`Engine`](crate::Engine).
-//! `Env` holds one live episode (a `Game`'s rules + the current `State` + an RNG + an encoder) and
-//! advances it with externally supplied actions, so the action source is the caller's: a trained net,
-//! a baseline, a search, or a human. The `Engine` drives N games with its own policy for training;
-//! `Env` drives one game move-by-move for play, evaluation, and debugging.
+//! Caller-driven game environment.
 
 use crate::encoder::StateEncoder;
 use crate::game::Game;
@@ -53,9 +49,7 @@ impl<G: Game> Env<G> {
         self.done
     }
 
-    /// The mutable slice of this env — `(state, rng state, done)` — for snapshot/fork. The state
-    /// is cloned; the immutable composition (game/encoder) is NOT part of it and is reconstructed
-    /// from config by the caller.
+    /// Clone the mutable environment state for snapshots or forks.
     pub fn parts(&self) -> (G::State, u64, bool) {
         (
             self.episode.state.clone(),
@@ -64,18 +58,14 @@ impl<G: Game> Env<G> {
         )
     }
 
-    /// Install a mutable slice captured by [`parts`](Self::parts) (or decoded by a
-    /// [`StateCodec`](crate::StateCodec)). Restore lands at a step boundary: transient last-step
-    /// outputs (events/rewards) belong to the step that produced them and are not part of state.
+    /// Restore mutable state at a step boundary.
     pub fn set_parts(&mut self, state: G::State, rng_state: u64, done: bool) {
         self.episode.state = state;
         self.episode.rng = SplitMix64::from_state(rng_state);
         self.done = done;
     }
 
-    /// Empty once the episode is over — games without an internal terminal flag (snake with
-    /// `play_to_last=false`, backgammon) would otherwise still report movers after `done`,
-    /// letting a finished env (or a restored terminal snapshot) be stepped.
+    /// Active agents, or an empty list after the episode ends.
     pub fn active_agents(&self) -> Vec<usize> {
         if self.done {
             return Vec::new();
@@ -90,7 +80,6 @@ impl<G: Game> Env<G> {
         self.game.legal_actions(&self.episode.state, agent)
     }
 
-    /// The encoded observation for `agent` (the value-network view of the current state).
     pub fn observe(&self, agent: usize) -> Vec<f32> {
         self.episode.observe(&*self.encoder, agent)
     }
@@ -99,10 +88,7 @@ impl<G: Game> Env<G> {
         self.encoder.observation_space()
     }
 
-    /// Apply a joint action (one index per agent; entries for inactive agents are ignored), advancing
-    /// the episode through the env tick. Returns the tick's ordered `(agent, event)` trace — every
-    /// emission across the tick's edges (`Env` holds no reward; a game-aware caller reads the
-    /// outcome from these or `state()`).
+    /// Apply a joint action and return the tick's ordered event trace.
     pub fn step(&mut self, actions: &[usize]) -> Vec<(usize, G::Event)> {
         debug_assert!(!self.done, "step() after done — call reset() first");
         debug_assert_eq!(
@@ -122,7 +108,6 @@ mod tests {
     use crate::encoder::{ActionView, StateEncoder};
     use crate::game::{Actor, Game, Transition};
 
-    // A 1-agent walk to `goal`: action 1 steps right, 0 stays; the event is 1.0 at the goal, else 0.0.
     struct Walk {
         goal: i32,
     }
@@ -180,11 +165,11 @@ mod tests {
         let mut e = env();
         assert!(!e.done() && e.active_agents() == vec![0]);
         assert_eq!(e.observe(0), vec![0.0]);
-        assert_eq!(e.step(&[1]), vec![]); // 0 -> 1: nothing settled
-        assert_eq!(e.step(&[1]), vec![]); // 1 -> 2
-        assert_eq!(e.step(&[1]), vec![(0, 1.0)]); // 2 -> 3: goal emits
+        assert_eq!(e.step(&[1]), vec![]);
+        assert_eq!(e.step(&[1]), vec![]);
+        assert_eq!(e.step(&[1]), vec![(0, 1.0)]);
         assert!(e.done());
-        assert!(e.active_agents().is_empty()); // no legal actions once finished
+        assert!(e.active_agents().is_empty());
         assert_eq!(*e.state(), 3);
     }
 
@@ -214,8 +199,8 @@ mod tests {
     fn stepping_after_done_is_a_misuse() {
         let mut e = env();
         for _ in 0..3 {
-            e.step(&[1]); // reaches the goal -> done
+            e.step(&[1]);
         }
-        e.step(&[1]); // misuse: should trip the debug assert
+        e.step(&[1]);
     }
 }

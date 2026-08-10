@@ -1,45 +1,4 @@
-//! Deep CFR (Brown et al. 2019, external-sampling variant): the neural scale-up of the
-//! tabular [`cfr`](crate::solvers::cfr) solver. Where tabular CFR reads and writes a regret
-//! table row, this queries the user's per-player ADVANTAGE networks through the standard
-//! `infer` seam and — instead of accumulating — EMITS training samples:
-//!
-//! - at the traverser's infosets: one advantage sample per visit, `(features, iteration,
-//!   legal ids, targets)` with targets `v(a) − Σ_a σ(a)·v(a)` over the enumerated actions;
-//! - at the infosets of player `(traverser + 1) % N` along the sampled path: one strategy
-//!   sample `(features, iteration, legal ids, σ)` — the average-policy network (the playable
-//!   product) trains on these. That is OpenSpiel's "simple" average estimator, the same rule
-//!   as tabular MCCFR (at 2 players it is every opponent infoset).
-//!
-//! The user owns reservoir buffers, iteration-weighted losses, and (re)training — reinfors
-//! ships the data generator (the DQN-family division of labor). Strategies are derived from
-//! net outputs by regret matching over clamped advantages, with a pure-argmax fallback when
-//! none is positive (Brown's scheme).
-//!
-//! **Why a solver and not an engine policy**: external sampling's unbiasedness requires
-//! traverser-infoset visitation weighted by OPPONENT-AND-CHANCE reach only, with all of the
-//! traverser's own actions expanded — the counterfactual measure. Engine episodes advance by
-//! both players' sampled actions (self-play visitation includes the traverser's own reach),
-//! which is the wrong distribution for these estimates. Root-restarted generative traversal
-//! is the sampling scheme that makes frequency equal the right measure — it also conditions
-//! opponent ranges on their actions for free (worlds where the opponent would have folded
-//! simply don't reach this infoset).
-//!
-//! **Throughput**: per-node Python callbacks would be ruinous, so K traversals run in
-//! LOCKSTEP as explicit-stack machines — a machine advances until it blocks on a net query
-//! (opponent nodes block descent; the traverser's σ is only needed at unwind, so children
-//! explore first), pending queries batch per round grouped by player, and a per-player
-//! [`InferCache`] (nets are frozen within one `collect` call; caches clear at every call)
-//! turns the heavily revisited early-tree infosets into cache hits. `infer` runs only on the
-//! calling thread. Per-machine rng streams are derived deterministically, so results are
-//! reproducible and independent of cache state or advancement interleaving.
-//!
-//! **Player count**: any `2..=MAX_CFR_PLAYERS` sequential players. The 2-player zero-sum Nash story does
-//! NOT survive past two players — there the traversals are empirical per-player regret
-//! minimization (the Pluribus regime), measured by the exact NashConv instrument on
-//! enumerable games and by frozen-policy exploiters at scale.
-//!
-//! Construction gates match tabular CFR: `2..=MAX_CFR_PLAYERS` players, [`Game::information_states`],
-//! rng-free `initial_state` (chance fully declared by construction).
+//! Batched external-sampling Deep CFR traversal and sample generation.
 
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
@@ -52,33 +11,27 @@ use crate::rng::SplitMix64;
 use crate::rollout::infer_cache::InferCache;
 use crate::solvers::best_response;
 
-/// `(infoset key, encoded features, legal ids)` per reachable infoset — the exploitability
-/// instrument's input rows.
+/// `(information key, encoded features, legal actions)` for each reachable information set.
 pub type InfosetFeatures = Vec<(Vec<u8>, Vec<f32>, Vec<usize>)>;
 
-/// One advantage-network training sample, emitted at a traverser infoset visit.
+/// One advantage-network training sample.
 pub struct AdvantageSample {
     pub obs: Vec<f32>,
     pub iteration: u64,
-    /// Legal action ids; `targets` aligns with this list.
     pub legal: Vec<usize>,
-    /// Sampled advantages `v(a) − v̄` per legal action.
     pub targets: Vec<f64>,
 }
 
-/// One average-policy training sample, emitted at the infosets of player
-/// `(traverser + 1) % N` along the sampled path (the simple average estimator).
+/// One average-policy training sample.
 pub struct StrategySample {
-    /// The acting (opponent) player the sample belongs to.
     pub player: usize,
     pub obs: Vec<f32>,
     pub iteration: u64,
     pub legal: Vec<usize>,
-    /// The current strategy σ played at this visit; `probs` aligns with `legal`.
     pub probs: Vec<f64>,
 }
 
-/// One `collect` call's telemetry (the engine `CollectStats` idiom).
+/// Telemetry for one collection call.
 #[derive(Default)]
 pub struct DeepCfrStats {
     pub traversals: usize,
@@ -86,17 +39,12 @@ pub struct DeepCfrStats {
     pub strategy_samples: usize,
     pub infer_calls: usize,
     pub infer_rows: usize,
-    /// Time inside the `infer` callback only (the net's share of the wall clock).
     pub infer_seconds: f64,
-    /// The whole `collect` call (traversal, chance sampling, caching, sample construction).
     pub collect_seconds: f64,
     pub cache_lookups: usize,
     pub cache_hits: usize,
 }
 
-/// Regret matching over one net row restricted to the legal ids: play proportionally to
-/// clamped-positive advantages; when none is positive, PURE ARGMAX of the advantage (Brown's
-/// fallback — not uniform).
 fn matched_strategy(row: &[f64], legal: &[usize]) -> Vec<f64> {
     let clamped: Vec<f64> = legal.iter().map(|&a| row[a].max(0.0)).collect();
     let total: f64 = clamped.iter().sum();
@@ -106,7 +54,7 @@ fn matched_strategy(row: &[f64], legal: &[usize]) -> Vec<f64> {
     let mut best = 0;
     for (i, &a) in legal.iter().enumerate().skip(1) {
         if row[a] > row[legal[best]] {
-            best = i; // strict: ties keep the FIRST maximal action (conventional argmax)
+            best = i;
         }
     }
     let mut sigma = vec![0.0; legal.len()];
@@ -126,11 +74,10 @@ fn sample_index(probs: &[f64], rng: &mut SplitMix64) -> usize {
     probs.len() - 1
 }
 
-/// A traversal's explicit stack frame.
 enum Frame<S> {
-    /// A pure edge-reward accumulator (chance-chain rewards; the opponent's stepped edge).
-    Edge { r: f64 },
-    /// The traverser's node: children explored depth-first; σ requested at unwind.
+    Edge {
+        r: f64,
+    },
     Traverser {
         state: S,
         obs: Vec<f32>,
@@ -139,7 +86,6 @@ enum Frame<S> {
         pending_edge: f64,
         awaiting_sigma: bool,
     },
-    /// An opponent node blocked on its σ query.
     OpponentAwait {
         who: usize,
         state: S,
@@ -153,15 +99,11 @@ enum Step<S> {
     Return(f64),
 }
 
-/// One in-flight traversal: an explicit-stack coroutine that advances until it blocks on a
-/// net query or completes. Owns its rng stream (derived deterministically), so results are
-/// independent of advancement interleaving and cache state.
+/// An explicit-stack traversal that yields when inference is required.
 struct Machine<S> {
     stack: Vec<Frame<S>>,
     step: Option<Step<S>>,
-    /// `(player, cache key, obs, already-missed)` of the pending σ query — the flag keeps
-    /// the post-miss re-check out of the hit statistics (a miss would otherwise manufacture
-    /// exactly one "hit" when its own inserted row resolves it).
+    // The flag prevents the post-miss recheck from counting as a cache hit.
     blocked: Option<(usize, u128, Vec<f32>, bool)>,
     rng: SplitMix64,
     done: bool,
@@ -173,8 +115,8 @@ pub struct DeepCfrSolver<G: Game> {
     reward: Box<dyn Reward<Event = G::Event>>,
     iteration: u64,
     seed: u64,
-    collects: u64,           // salts per-machine rng streams across collect calls
-    caches: Vec<InferCache>, // one per player (never share obs-keyed rows across nets)
+    collects: u64,
+    caches: Vec<InferCache>,
 }
 
 impl<G: Game> DeepCfrSolver<G> {
@@ -196,10 +138,7 @@ impl<G: Game> DeepCfrSolver<G> {
             game.information_states(),
             "Deep CFR requires information-state keys (Game::information_states)"
         );
-        // Gate on the REALIZED root: a declared game's raw root is commonly a chance node,
-        // which says nothing about decision dynamics — probing it would let a chance-root
-        // simultaneous game through to a mid-collect panic. (Uniform dynamics per game is a
-        // framework contract; a mid-game switch is caught by the loud runtime backstop.)
+        // A chance root does not reveal the game's decision dynamics.
         let realized = crate::game::realize_initial_state(&game, &mut SplitMix64::new(0x0517_B0BE));
         assert!(
             !matches!(game.actor(&realized), Actor::Simultaneous),
@@ -224,27 +163,17 @@ impl<G: Game> DeepCfrSolver<G> {
         self.iteration
     }
 
-    /// Advance to the next CFR iteration — the weight `t` stamped on emitted samples (the
-    /// user's loss weights linearly by it, per Brown).
+    /// Advance the iteration stamped on emitted samples.
     pub fn next_iteration(&mut self) {
         self.iteration += 1;
     }
 
-    /// Roll back the per-call rng salt after a FAILED collect (e.g. the caller's net raised
-    /// mid-call and the returned samples were discarded): a retry then draws the same worlds
-    /// a fresh solver would, keeping error paths transactional with respect to determinism.
+    /// Roll back collection RNG state after a failed callback.
     pub fn rollback_collect(&mut self) {
         self.collects = self.collects.saturating_sub(1);
     }
 
-    /// Run `traversals` external-sampling traversals with `player` as the traverser, emitting
-    /// advantage samples for `player` and strategy samples at the infosets of player
-    /// `(player + 1) % N` (the simple average estimator).
-    ///
-    /// `infer(player, obs_flat, rows) -> advantages` serves the CURRENT advantage network of
-    /// `player` on a row-major `[rows, obs_dim]` batch, returning `rows * action_count` f64s.
-    /// Networks must be frozen for the duration of one call (the per-player caches assume it;
-    /// they clear at every call, so retraining BETWEEN calls is the expected rhythm).
+    /// Collect external-sampling advantage and average-strategy samples.
     pub fn collect<F>(
         &mut self,
         player: usize,
@@ -266,7 +195,7 @@ impl<G: Game> DeepCfrSolver<G> {
         let started = std::time::Instant::now();
         self.collects += 1;
         for cache in &mut self.caches {
-            cache.force_clear(); // nets may have been retrained since the previous call
+            cache.force_clear();
         }
         let mut advantage = Vec::new();
         let mut strategy = Vec::new();
@@ -294,8 +223,7 @@ impl<G: Game> DeepCfrSolver<G> {
             .collect();
 
         loop {
-            // Advance every machine as far as the (round-warm) caches allow.
-            let mut misses: HashMap<usize, Vec<usize>> = HashMap::new(); // player -> machines
+            let mut misses: HashMap<usize, Vec<usize>> = HashMap::new();
             let mut all_done = true;
             for (mi, m) in machines.iter_mut().enumerate() {
                 loop {
@@ -330,7 +258,6 @@ impl<G: Game> DeepCfrSolver<G> {
                 }
                 continue;
             }
-            // One batched call per player with pending queries, deduplicated by cache key.
             let mut players: Vec<usize> = misses.keys().copied().collect();
             players.sort_unstable();
             for who in players {
@@ -360,7 +287,6 @@ impl<G: Game> DeepCfrSolver<G> {
                     self.caches[who].insert(*key, &out[i * action_count..(i + 1) * action_count]);
                 }
             }
-            // The outer loop's cache path resumes the blocked machines against the warm cache.
         }
         stats.advantage_samples = advantage.len();
         stats.strategy_samples = strategy.len();
@@ -368,7 +294,6 @@ impl<G: Game> DeepCfrSolver<G> {
         (advantage, strategy, stats)
     }
 
-    /// Deliver a σ row to the machine's blocked frame, then keep advancing.
     fn resume(
         &self,
         m: &mut Machine<G::State>,
@@ -390,9 +315,7 @@ impl<G: Game> DeepCfrSolver<G> {
                 legal,
             } => {
                 let sigma = matched_strategy(row, &legal);
-                // OpenSpiel's "simple" average estimator (matching tabular MCCFR): the
-                // strategy stream records only player (traverser + 1) % N — recording every
-                // sampled non-traverser over-counts under the other traversers' passes.
+                // The simple average estimator records one successor player.
                 if who == (player + 1) % self.game.num_agents() {
                     strategy.push(StrategySample {
                         player: who,
@@ -435,15 +358,12 @@ impl<G: Game> DeepCfrSolver<G> {
         self.advance(m, player);
     }
 
-    /// Small-step the machine until it blocks on a net query or completes.
     fn advance(&self, m: &mut Machine<G::State>, player: usize) {
         while let Some(step) = m.step.take() {
             match step {
                 Step::Descend(mut state) => loop {
                     match self.game.actor(&state) {
                         Actor::Chance => {
-                            // Root deals and interior reveals: draw, accumulate the
-                            // traverser's edge rewards, stop on a chain that settles the game.
                             let outcome = self.game.chance_node(&state).draw(&mut m.rng);
                             let t = self.game.apply_chance_node(&state, outcome);
                             let r = crate::reward::edge_reward(&*self.reward, &t.events, player);
@@ -514,7 +434,6 @@ impl<G: Game> DeepCfrSolver<G> {
                             awaiting_sigma: complete,
                         });
                         if complete {
-                            // All children valued: request the traverser's σ for the baseline.
                             if let Some(Frame::Traverser { obs, .. }) = m.stack.last() {
                                 let key = InferCache::key(obs);
                                 m.blocked = Some((player, key, obs.clone(), false));
@@ -534,7 +453,6 @@ impl<G: Game> DeepCfrSolver<G> {
         }
     }
 
-    /// Step the traverser-frame's next unexplored action.
     fn start_child(&self, m: &mut Machine<G::State>, player: usize) {
         let Some(Frame::Traverser {
             state,
@@ -558,8 +476,6 @@ impl<G: Game> DeepCfrSolver<G> {
         });
     }
 
-    /// Apply one decision: the deterministic step. Chance-node chains on the resulting state
-    /// are the descent loop's job.
     fn realize_transition(
         &self,
         state: &G::State,
@@ -575,11 +491,7 @@ impl<G: Game> DeepCfrSolver<G> {
         (r, Some(next_state))
     }
 
-    // ---------------- the exploitability instrument ----------------
-
-    /// Every reachable information set with an exemplar state and its features — the input to
-    /// the exact-exploitability instrument for a NET policy (enumerable games only: the walk
-    /// is capped like best response). Returns `(key, features, legal ids)` per infoset.
+    /// Features and legal actions for every reachable information set.
     pub fn infoset_features(
         &self,
     ) -> Result<InfosetFeatures, best_response::EnumerationCapExceeded> {
@@ -593,10 +505,7 @@ impl<G: Game> DeepCfrSolver<G> {
             .collect())
     }
 
-    /// Exact exploitability of a policy given per-infoset action probabilities (aligned with
-    /// each infoset's legal ids, as returned by [`infoset_features`](Self::infoset_features));
-    /// unlisted infosets play uniform. Same instrument and definition as tabular CFR
-    /// (NashConv / num_players, zero at Nash).
+    /// Exact exploitability of a profile; unlisted information sets play uniformly.
     pub fn exploitability_of(
         &self,
         probs: &HashMap<Vec<u8>, Vec<f64>>,
@@ -610,6 +519,4 @@ impl<G: Game> DeepCfrSolver<G> {
     }
 }
 
-/// Per-player cache capacity (rows). Poker traversals hammer the early tree, so hit rates are
-/// high at modest sizes; rows are `action_count` f64s.
 const CACHE_ROWS: usize = 1 << 18;

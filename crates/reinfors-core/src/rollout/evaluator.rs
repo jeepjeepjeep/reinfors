@@ -1,31 +1,8 @@
-//! The evaluation service: THE single path from any consumer (tree searches, episode-tail
-//! bootstraps, plain forwards) to the net. Wraps the user's `infer` callback together with the
-//! optional [`InferCache`] and all throughput telemetry, so no consumer can bypass caching or
-//! account inconsistently — the layering the cache's first design got wrong (the cache was a peer
-//! parameter each call site had to remember to consult).
-//!
-//! Consumers use a two-phase batch protocol:
-//!
-//! ```ignore
-//! let mut batch = eval.batch();                 // syncs the weights generation once
-//! match batch.resolve_or_stage(0, &obs) {
-//!     Resolve::Resolved(row) => consume(row),   // cache hit — no forward will be paid
-//!     Resolve::Staged(ticket) => wait(ticket),  // deduped: identical obs ⇒ identical ticket
-//! }
-//! let rows = batch.commit();                    // ONE pooled call of pure misses + cache insert
-//! consume(rows.row(ticket));
-//! ```
-//!
-//! Accounting is layered by where knowledge lives: the Evaluator counts *global throughput*
-//! (calls, rows, seconds, cache lookups/hits — purpose-blind), while search-simulation bookkeeping
-//! (the sim-fate identity) lives in the trees that know what a simulation is. A tail bootstrap is
-//! therefore not a category here — just another batch.
+//! Batched network evaluation, caching, and throughput accounting.
 
 use crate::rollout::infer_cache::InferCache;
 
-/// How rows route to networks: one shared network (today's default — a single pooled call per
-/// batch, byte-identical to the pre-routing behavior), or one network per PLAYER (rows group
-/// by player, one call per player per batch, per-player caches).
+/// Whether rows route to one shared network or one network per player.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum InferMode {
     Shared,
@@ -35,20 +12,14 @@ pub enum InferMode {
 pub struct Evaluator<'a, F> {
     infer: &'a mut F,
     mode: InferMode,
-    /// `Shared`: exactly one cache slot. `PerPlayer`: one slot per player.
     caches: Option<&'a mut [InferCache]>,
-    /// Global throughput telemetry (all consumers): forwarded rows, pooled calls, callback seconds.
     pub rows: usize,
     pub calls: usize,
     pub seconds: f64,
 }
 
-/// The outcome of offering one observation to a batch.
 pub enum Resolve {
-    /// Served from the cache — the row is available immediately, no forward will run for it.
     Resolved(Vec<f64>),
-    /// Queued for the pooled call; redeem the ticket against [`CommittedRows`] after `commit`.
-    /// Identical observations within one batch share a ticket (within-batch dedup).
     Staged(usize),
 }
 
@@ -56,13 +27,12 @@ pub struct EvalBatch<'e, 'a, F> {
     eval: &'e mut Evaluator<'a, F>,
     obs_flat: Vec<f32>,
     keys: Vec<u128>,
-    players: Vec<usize>, // per staged row, parallel to `keys`
+    players: Vec<usize>,
     staged: std::collections::HashMap<u128, usize>,
     n: usize,
     dim: usize,
 }
 
-/// The committed rows of one batch, indexed by ticket.
 pub struct CommittedRows {
     out: Vec<f64>,
     stride: usize,
@@ -104,7 +74,6 @@ where
         }
     }
 
-    /// Start a batch. Picks up any pending `weights_updated` bump before any lookup can be served.
     pub fn batch<'e>(&'e mut self) -> EvalBatch<'e, 'a, F> {
         if let Some(caches) = self.caches.as_deref_mut() {
             for cache in caches.iter_mut() {
@@ -122,10 +91,6 @@ where
         }
     }
 
-    /// Convenience single-phase forward for consumers whose whole request set is one batch (the
-    /// non-tree policies, per-round expectimax pools, episode-tail bootstraps): every row goes
-    /// through the same resolve/stage/commit path, so they get caching and dedup identically to the
-    /// tree searches.
     pub fn forward(&mut self, players: &[usize], obs: Vec<f32>, n: usize) -> Vec<f64> {
         let dim = obs.len() / n.max(1);
         let mut batch = self.batch();
@@ -170,8 +135,6 @@ impl<'e, 'a, F> EvalBatch<'e, 'a, F>
 where
     F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
 {
-    /// Offer one observation for `player`'s network: a cache hit resolves immediately;
-    /// otherwise it is staged (deduped per network) for the pooled call(s).
     pub fn resolve_or_stage(&mut self, player: usize, obs: &[f32]) -> Resolve {
         if self.eval.caches.is_some() {
             let key = self.eval.row_key(player, obs);
@@ -201,10 +164,7 @@ where
         self.n == 0
     }
 
-    /// Run the pooled forward(s) over the staged misses, insert them into the cache(s), and
-    /// return the rows for ticket redemption (always in TICKET order, whatever the network
-    /// grouping). An empty batch performs no call. `Shared` keeps the single pooled call
-    /// byte-for-byte; `PerPlayer` makes one call per player with staged rows.
+    /// Forward staged misses and return rows in ticket order.
     pub fn commit(self) -> CommittedRows {
         if self.n == 0 {
             return CommittedRows {
@@ -222,8 +182,7 @@ where
                 out
             }
             InferMode::PerPlayer => {
-                // Group tickets by player (order of first appearance — deterministic), one
-                // call per player, then scatter rows back into ticket order.
+                // Preserve first-seen player order so routed calls remain deterministic.
                 let mut order: Vec<usize> = Vec::new();
                 let mut groups: std::collections::HashMap<usize, Vec<usize>> =
                     std::collections::HashMap::new();
@@ -249,8 +208,7 @@ where
                     self.eval.seconds += started.elapsed().as_secs_f64();
                     self.eval.calls += 1;
                     self.eval.rows += tickets.len();
-                    // Every player's rows are flattened under ONE stride below; a diverging or
-                    // non-divisible return would silently interleave rows and poison the caches.
+                    // A single stride is used below, so routed row widths must agree.
                     assert!(
                         rows.len().is_multiple_of(tickets.len()),
                         "player {player} infer returned {} values for {} rows (not divisible)",
@@ -298,7 +256,6 @@ mod tests {
     use std::sync::Arc;
 
     fn double_infer(_player: usize, obs: Vec<f32>, n: usize) -> Vec<f64> {
-        // row = [2·obs] per staged observation, dim 2
         assert_eq!(obs.len(), n * 2);
         obs.iter().map(|&v| f64::from(v) * 2.0).collect()
     }
@@ -317,7 +274,7 @@ mod tests {
         let mut batch = eval.batch();
         let a = batch.resolve_or_stage(0, &[1.0, 2.0]);
         let b = batch.resolve_or_stage(0, &[3.0, 4.0]);
-        let c = batch.resolve_or_stage(0, &[1.0, 2.0]); // duplicate of a
+        let c = batch.resolve_or_stage(0, &[1.0, 2.0]);
         let (Resolve::Staged(ta), Resolve::Staged(tb), Resolve::Staged(tc)) = (a, b, c) else {
             panic!("cold cache must stage everything");
         };
@@ -326,9 +283,8 @@ mod tests {
         let rows = batch.commit();
         assert_eq!(rows.row(ta), &[2.0, 4.0]);
         assert_eq!(rows.row(tb), &[6.0, 8.0]);
-        assert_eq!((eval.rows, eval.calls), (2, 1)); // dedup: 2 rows forwarded, not 3
+        assert_eq!((eval.rows, eval.calls), (2, 1));
 
-        // second batch: both positions now resolve from cache, commit is a no-op call-wise
         let mut batch = eval.batch();
         let Resolve::Resolved(row) = batch.resolve_or_stage(0, &[1.0, 2.0]) else {
             panic!("warm cache must resolve");

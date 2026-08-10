@@ -1,57 +1,28 @@
-//! The start-state seam: a [`StartDistribution`] decides where each fresh episode begins. It is a
-//! training-only injection into the [`Engine`](crate::Engine) — the caller-driven [`Env`](crate::Env)
-//! never resets inside a training loop, so it holds none. The default [`AlwaysInitialState`] yields the
-//! game's `initial_state` (bit-identical to having no seam at all); alternatives seed some episodes
-//! from previously-reached states to flatten start-state coverage.
-//!
-//! Why coverage, not bias: value-based training with bootstrapping (TreeStrap/DQN) regresses each
-//! state toward its own successor targets, so *where* episodes start changes the data distribution, not
-//! the targets — off-`d₀` starts are unbiased. The lever is [`ReachedStateBuffer`], which coarsens
-//! states into cells and samples cells ~uniformly (Go-Explore style): storing everything and sampling
-//! uniformly would just reproduce the front-loaded visitation distribution.
-//!
-//! Determinism: the methods take an injected `&mut dyn Rng` (the engine passes a *disjoint* buffer
-//! stream), so the seam never perturbs the env-chance draw order. `AlwaysInitialState` draws nothing.
+//! Episode start-state distributions.
 
 use std::collections::BTreeMap;
 
 use crate::game::Rng;
 
-/// Where a fresh episode starts.
 pub enum Start<S> {
-    /// A fresh root: realize the game's `initial_state` (drawing any root chance chain from
-    /// the per-game env RNG, exactly as with no seam).
     Fresh,
-    /// Start from this specific state.
     Restore(S),
 }
 
-/// Chooses each episode's start state. `Send + Sync` so a composed `Engine` stays `Send + Sync`
-/// (the binding erases it behind a `Send + Sync` engine); the seam itself is only touched serially.
+/// Chooses each episode's start state.
 pub trait StartDistribution<S>: Send + Sync {
-    /// Pick this episode's start: `Fresh` (the engine uses `initial_state`) or a specific `Restore`d
-    /// state. Draws only from the injected buffer RNG.
     fn choose(&mut self, rng: &mut dyn Rng) -> Start<S>;
 
-    /// Observe a reached (non-terminal) state each rollout tick, so state-buffer distributions can
-    /// fill. Default: ignore (draws nothing).
     fn observe(&mut self, state: &S, rng: &mut dyn Rng) {
         let _ = (state, rng);
     }
 
-    /// Snapshot this distribution's mutable state (`encode_state` = the game codec). The default
-    /// (stateless distributions, e.g. `AlwaysInitialState`) is an empty payload.
     fn snapshot_bytes(&self, encode_state: &dyn Fn(&S) -> Vec<u8>) -> Vec<u8> {
         let _ = encode_state;
         Vec::new()
     }
 
-    /// Restore a payload produced by [`snapshot_bytes`](Self::snapshot_bytes).
-    ///
-    /// CONTRACT: restoration must be transactional — on `Err`, `self` is unchanged. Decode (and
-    /// validate) the complete payload into replacement state before mutating anything.
-    /// `Engine::restore_bytes` promises that a malformed snapshot leaves the engine untouched,
-    /// and it relies on this seam honoring the same guarantee.
+    /// Restore transactionally: an error must leave `self` unchanged.
     fn restore_bytes(
         &mut self,
         bytes: &[u8],
@@ -66,8 +37,7 @@ pub trait StartDistribution<S>: Send + Sync {
     }
 }
 
-/// The default distribution: every episode starts fresh from the game's `initial_state`. Draws no
-/// buffer RNG and observes nothing, so an engine using it is bit-identical to one with no seam.
+/// Always begin at the game's initial state.
 pub struct AlwaysInitialState;
 
 impl<S> StartDistribution<S> for AlwaysInitialState {
@@ -76,14 +46,12 @@ impl<S> StartDistribution<S> for AlwaysInitialState {
     }
 }
 
-/// Coarsens a state into a difficulty cell for the reached-state buffer, or `None` to skip it. The one
-/// game-specific piece, supplied at buffer construction (e.g. snake's `snake_length_cell`).
+/// Map a state to a reached-state buffer cell, or skip it.
 pub type CellKey<S> = Box<dyn Fn(&S) -> Option<u64> + Send + Sync>;
 
-/// A bounded per-cell reservoir: uniform-within-cell samples with rolling eviction of stale states.
 struct Reservoir<S> {
     items: Vec<S>,
-    count: usize, // total observed (drives reservoir sampling)
+    count: usize,
 }
 
 impl<S> Default for Reservoir<S> {
@@ -95,14 +63,9 @@ impl<S> Default for Reservoir<S> {
     }
 }
 
-/// A cell-stratified reservoir of reached states. `cell_key` coarsens a state into a difficulty cell
-/// (or `None` to skip it — the one game-specific piece, injected at construction); each cell keeps a
-/// bounded reservoir. Sampling picks a non-empty cell ~uniformly then a state within, so start coverage
-/// spreads across difficulty instead of tracking the visitation distribution. `p_fresh` is a safety
-/// valve: that fraction of resets ignore the buffer and start from `initial_state`.
+/// Cell-stratified reservoir of reached states.
 pub struct ReachedStateBuffer<S> {
-    // BTreeMap (not HashMap) so cell iteration order is deterministic — HashMap's randomized order
-    // would make the sampled cell depend on process state, breaking reproducibility.
+    // Sorted iteration is required for seeded reproducibility.
     cells: BTreeMap<u64, Reservoir<S>>,
     cell_key: CellKey<S>,
     capacity: usize,
@@ -110,8 +73,6 @@ pub struct ReachedStateBuffer<S> {
 }
 
 impl<S: Clone + Send + Sync> ReachedStateBuffer<S> {
-    /// `capacity` is the per-cell reservoir size; `p_fresh` the fraction of resets that ignore the
-    /// buffer; `cell_key` the game-specific coarsening (`None` = don't buffer this state).
     pub fn new(
         capacity: usize,
         p_fresh: f64,
@@ -125,7 +86,6 @@ impl<S: Clone + Send + Sync> ReachedStateBuffer<S> {
         }
     }
 
-    /// The non-empty cell keys, in deterministic (sorted) order.
     fn occupied_cells(&self) -> Vec<u64> {
         self.cells
             .iter()
@@ -138,7 +98,6 @@ impl<S: Clone + Send + Sync> ReachedStateBuffer<S> {
 impl<S: Clone + Send + Sync> StartDistribution<S> for ReachedStateBuffer<S> {
     fn choose(&mut self, rng: &mut dyn Rng) -> Start<S> {
         let occupied = self.occupied_cells();
-        // Warm-up: an empty buffer always falls back, drawing nothing.
         if occupied.is_empty() {
             return Start::Fresh;
         }
@@ -158,11 +117,9 @@ impl<S: Clone + Send + Sync> StartDistribution<S> for ReachedStateBuffer<S> {
         let res = self.cells.entry(cell).or_default();
         res.count += 1;
         if res.items.len() < capacity {
-            res.items.push(state.clone()); // still filling
+            res.items.push(state.clone());
         } else {
-            // Reservoir sampling: the k-th item lands in a random slot with probability capacity/k, so
-            // the reservoir stays a uniform sample of all states seen for this cell (rolling eviction).
-            // The state is cloned only when accepted, bounding the per-tick cost.
+            // Standard reservoir replacement keeps each cell uniform over all observations.
             let j = rng.below(res.count);
             if j < capacity {
                 res.items[j] = state.clone();
@@ -260,8 +217,6 @@ mod tests {
 
     #[test]
     fn samples_a_valid_state_and_reservoir_is_bounded() {
-        // Two cells (even/odd); capacity 8. After many observations each cell holds <= capacity states,
-        // and a sampled state is always one that was observed.
         let mut buf = ReachedStateBuffer::<i32>::new(8, 0.0, |&x| Some((x % 2) as u64));
         let mut rng = SplitMix64::new(3);
         for i in 0..500 {
@@ -283,8 +238,8 @@ mod tests {
     fn cell_key_none_skips_the_state() {
         let mut buf = ReachedStateBuffer::<i32>::new(4, 0.0, |&x| (x > 0).then_some(x as u64));
         let mut rng = SplitMix64::new(4);
-        buf.observe(&-1, &mut rng); // skipped
-        buf.observe(&-2, &mut rng); // skipped
+        buf.observe(&-1, &mut rng);
+        buf.observe(&-2, &mut rng);
         assert!(buf.occupied_cells().is_empty());
         buf.observe(&5, &mut rng);
         assert_eq!(buf.occupied_cells(), vec![5]);

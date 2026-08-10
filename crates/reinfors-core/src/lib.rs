@@ -1,7 +1,4 @@
-//! reinfors-core: the pure-Rust generic simulation + search + rollout framework (no Python, no game).
-//!
-//! It defines the `Game` trait, the `Policy` (acting) + `Learner` (records) seams the rollout `Engine`
-//! drives, and concrete algorithm impls under `policies`/`learners`.
+//! Generic game, search, solver, and rollout primitives.
 
 /// Canonical built-in game/algorithm compatibility documentation.
 pub const COMPATIBILITY_DOCS: &str =

@@ -1,15 +1,4 @@
-//! AlphaZero-style planner: PUCT over the shared MCTS tree (see `mcts`), guided by a two-headed net.
-//!
-//! Differs from the UCT `Mcts` policy on exactly one axis — the guidance (see `mcts::Guidance`):
-//! the net returns `[A]` policy logits plus a value per row (stride `A+1`, vs UCT's `[K][A]` Q rows),
-//! each node stores its softmaxed prior, selection scores `Q + c·P·√N/(1+n)`, and the root prior is
-//! mixed with Dirichlet exploration noise (`(1-ε)P + ε·Dir(α)`) drawn from the search seed — so
-//! collects stay bit-reproducible. Everything else (arena tree, pooled per-round `infer` batching,
-//! negamax backup, acting temperature) is the shared machinery.
-//!
-//! **Sequential + single-agent games only**, like `Mcts` — the binding enforces it, the tree panics as
-//! a backstop. The produced [`SearchEvaluation`] carries the root's per-action mean values and visit
-//! counts; the AlphaZero learner reads the visits as its policy target `π`.
+//! PUCT search guided by policy logits and state values.
 
 use crate::codec::bytes::Reader;
 use crate::encoder::StateEncoder;
@@ -26,26 +15,15 @@ use crate::rollout::evaluator::Evaluator;
 #[derive(Clone, Copy, Debug)]
 pub struct AlphaZeroConfig {
     pub num_simulations: usize,
-    /// PUCT exploration constant (the `c` in `Q + c·P·√N/(1+n)`).
     pub c_puct: f64,
     pub gamma: f64,
     pub max_depth: i32,
-    /// Root Dirichlet mix weight ε — `(1-ε)·P + ε·Dir(α)` at each search root; 0 disables the noise.
     pub noise_epsilon: f64,
-    /// Dirichlet concentration α (AlphaZero convention: ~10/branching-factor).
     pub noise_alpha: f64,
-    /// AlphaZero acting temperature — same semantics as `MctsConfig`: `> 0` samples the move
-    /// `∝ visits^(1/temperature)` for the first `temperature_drop` plies, 0 acts greedily.
     pub temperature: f64,
     pub temperature_drop: u32,
-    /// How the search consumes the game's declared chance states (see
-    /// [`ChanceMode`](crate::ChanceMode)). Inert for deterministic games.
     pub chance: ChanceMode,
-    /// Simultaneous games: which root priors the Dirichlet noise perturbs — the requester's
-    /// only, or every agent's. Irrelevant for sequential games (one root table).
     pub noise_scope: NoiseScope,
-    /// Sequential backup scheme: `Auto` (negamax at <=2 agents, Max^N past) or `MaxN` forced at
-    /// 2 — the negamax-deletion measurement seam (see [`SequentialBackup`]).
     pub sequential_backup: SequentialBackup,
 }
 
@@ -59,9 +37,7 @@ impl AlphaZero {
     }
 }
 
-/// Pooled PUCT over a batch of `(state, agent)` requests — the AlphaZero counterpart of `mcts_many`.
-/// `infer` must return `n·(A+1)` values: per row, `A` policy logits then the state value. `seed`
-/// drives the root-noise Dirichlet draws (disjoint per tree).
+/// Run pooled PUCT over `(state, agent)` requests.
 pub fn alphazero_many<G, F>(
     game: &G,
     enc: &dyn StateEncoder<State = G::State>,
@@ -99,18 +75,17 @@ where
 
 impl Policy for AlphaZero {
     type Evaluation = SearchEvaluation;
-    type PolicyState = u32; // plies acted this episode — drives the temperature_drop cutoff
+    type PolicyState = u32;
 
     fn supports_imperfect_information(&self) -> bool {
-        false // rides the MCTS tree: branches on the true state
+        false
     }
 
     fn max_agents(&self, _sequential: bool) -> Option<usize> {
-        None // rides the MCTS tree: negamax at ≤2 sequential, Max^N past that, DUCT-N for sim
+        None
     }
 
     fn evaluates_all_perspectives(&self, sequential: bool, num_agents: usize) -> bool {
-        // Max^N consumes every perspective's leaf values — at N>2 always, and at 2 when forced.
         sequential
             && (num_agents > 2
                 || (num_agents == 2
@@ -122,7 +97,6 @@ impl Policy for AlphaZero {
     }
 
     fn decode_eval(&self, r: &mut Reader, action_count: usize) -> Result<SearchEvaluation, String> {
-        // one value row plus full-width visits (the π source the AZ learner requires)
         decode_search_eval(r, action_count, 1, true)
     }
 
@@ -156,7 +130,6 @@ impl Policy for AlphaZero {
         alphazero_many(game, enc, reward, &self.cfg, requests, seed, eval)
     }
 
-    /// Classic AlphaZero acting: by visit count — sampled under the opening temperature, greedy after.
     fn select(&self, eval: &SearchEvaluation, state: &mut u32, rng: &mut dyn Rng) -> usize {
         let ply = *state;
         *state += 1;
@@ -173,6 +146,6 @@ impl Policy for AlphaZero {
 
 impl SearchPolicy for AlphaZero {
     fn supports_chance(&self, _mode: ChanceMode) -> bool {
-        true // sampled-trajectory search: every mode is expressible
+        true
     }
 }
