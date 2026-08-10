@@ -46,8 +46,9 @@ exact two-dimensional shape and contain finite values; legality is applied insid
 
 Pass one callable to share an advantage network between players, or a sequence indexed by player.
 Networks must remain frozen for the duration of each `collect` call and may be retrained between
-calls. `DeepCfr.exploitability(policy_infer=...)` separately expects one `(rows, actions)` policy
-probability array, also `float32` or `float64`.
+calls. `DeepCfr.exploitability(policy_infer=...)` separately expects one `(rows, actions)` score
+array, also `float32` or `float64`. It clamps negative scores to zero and renormalizes over legal
+actions, using a uniform legal policy when a row has no positive mass.
 
 ## Legal actions
 
