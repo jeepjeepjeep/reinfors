@@ -22,11 +22,9 @@ commit whose run manifest contains the exact commands, resolved configurations, 
 # instrumentation + device patches, builds trainer and head-to-head binaries)
 bash scripts/setup_openspiel_cpp.sh
 
-# from sibling checkouts: install a release wheel into the companion measurement venv
-cd ../reinfors
-VIRTUAL_ENV=../reinfors-benchmarks/.venv23 uvx maturin develop --release \
-    -m crates/reinfors-py/Cargo.toml
-cd ../reinfors-benchmarks
+# from the reinfors checkout: release wheel into the measurement venv (a debug build is
+# refused at runtime)
+maturin develop --release -m crates/reinfors-py/Cargo.toml
 ```
 
 Per-boot: disable SMT (guarded by every script), pull, rebuild the wheel.
