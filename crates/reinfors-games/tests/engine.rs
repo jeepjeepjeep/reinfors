@@ -25,7 +25,11 @@ fn enc(s: &SearchParams) -> Box<EgocentricSnake> {
 }
 
 fn params(n_games: usize, seed: u64) -> EngineParams {
-    EngineParams { n_games, seed }
+    EngineParams {
+        n_games,
+        seed,
+        n_groups: 1,
+    }
 }
 
 fn learner(outcome_weight: f64, interior: bool) -> TreeStrap {

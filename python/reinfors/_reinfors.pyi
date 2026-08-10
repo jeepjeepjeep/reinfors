@@ -396,6 +396,13 @@ class Engine:
         # Restrict training-record emission to these players (frozen opponents keep acting but
         # leave no records). Default: all players learn; records carry their player either way.
         learn_players: list[int] | None = ...,
+        # Double-buffered collect (1 = off): 2 splits the games into two fixed groups whose
+        # search rounds alternate, overlapping tree work with inference (the callback runs on a
+        # submitter thread). Requires policies.Mcts/AlphaZero, a single shared callback, and no
+        # truncation-tail bootstrapping. Deterministic per seed; digests differ from n_groups=1
+        # (a different composition — the fingerprint records it). Size groups to keep the GPU
+        # batch at its sweet spot: n_games=128 with n_groups=2 gives two 64-row groups.
+        n_groups: int = ...,
     ) -> None: ...
     # Tell the engine the net's weights changed (call after every weight sync — e.g. right after
     # load_state_dict onto the collector net). Clears the infer cache at the next round boundary;

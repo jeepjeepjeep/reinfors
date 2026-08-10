@@ -186,6 +186,7 @@ mod tests {
                 EngineParams {
                     n_games: 1,
                     seed: 0,
+                    n_groups: 1,
                 },
             );
             let (records, _) =
@@ -300,6 +301,7 @@ mod dispatch_tests {
             EngineParams {
                 n_games: 1,
                 seed: 0,
+                n_groups: 1,
             },
         );
         let (records, _) =

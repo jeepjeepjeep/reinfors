@@ -59,6 +59,7 @@ fn search_policies_reject_hidden_information_at_construction() {
         EngineParams {
             n_games: 1,
             seed: 0,
+            n_groups: 1,
         },
     );
 }
@@ -74,6 +75,7 @@ fn dqn_family_collects_poker_hands() {
         EngineParams {
             n_games: 4,
             seed: 3,
+            n_groups: 1,
         },
     );
     let (records, stats) = engine.collect(60, |_obs: Vec<f32>, n: usize| {
