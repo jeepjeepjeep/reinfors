@@ -11,7 +11,8 @@ callback rather than corrupting search. Match a traceback fragment here first:
 | `not compatible with`, `would be clairvoyant`, or `supports at most` | The algorithm does not support that game's semantics | [Construction is rejected](#construction-is-rejected) |
 | `win_food_lead is a two-snake rule` | `win_food_lead` was combined with `num_snakes != 2` | [Construction is rejected](#construction-is-rejected) |
 | `expected … per-player infer callables` | The callback sequence does not match the player count | [Per-player callback count](#per-player-callback-count) |
-| `infer output must be a float64 NumPy array` or `AlphaZero infer output must be` | Wrong callback dtype or rank | [Callback dtype or shape errors](#callback-dtype-or-shape-errors) |
+| `must be a float64 or float32 ndarray` | Unsupported callback dtype or non-array output | [Callback dtype or shape errors](#callback-dtype-or-shape-errors) |
+| `must be a 1-d ndarray`, `must be a 2-d ndarray`, or `must be a 3-d ndarray` | Wrong callback rank | [Callback dtype or shape errors](#callback-dtype-or-shape-errors) |
 | `infer returned shape` or `AlphaZero infer must return` | Wrong callback rows, heads, or action count | [Wrong row or action count](#wrong-row-or-action-count) |
 | `outputs must contain only finite values` | The callback returned NaN or infinity | [NaN or infinity from inference](#nan-or-infinity-from-inference) |
 | `this engine is held by a collect_stream` | A stream still owns the engine | [The engine is held by a stream](#the-engine-is-held-by-a-stream) |
@@ -46,9 +47,10 @@ and Deep CFR; a short sequence never silently reuses its final callback.
 
 ## Callback dtype or shape errors
 
-Engine observations arrive as a two-dimensional `float32` NumPy array. Engine outputs must be
-`float64`; Q-family policies require `(rows, heads, actions)`, while AlphaZero requires a tuple of
-logits `(rows, actions)` and values `(rows,)`. Deep CFR instead returns `(rows, actions)`.
+Engine observations arrive as a two-dimensional `float32` NumPy array. Outputs may be `float32` or
+`float64`; native `float32` is recommended and widened exactly inside reinfors. Q-family policies
+require `(rows, heads, actions)`, while AlphaZero requires a tuple of logits
+`(rows, width >= actions)` and values `(rows,)`. Deep CFR instead returns `(rows, actions)`.
 
 Framework tensors must be detached, moved to CPU, and converted to NumPy before returning. Do not
 remove a singleton Q head: `(rows, 1, actions)` is distinct from `(rows, actions)`. The complete
@@ -59,7 +61,9 @@ object's observed Python type, dtype, and shape.
 
 Return exactly one output row for every input row, even when a row has no actions you wish to train.
 The action dimension is the game's fixed action vocabulary, not the number of currently legal
-actions. Legality is applied around the network.
+actions. Q-family and Deep CFR widths must match it exactly. AlphaZero may return a wider padded
+policy head; reinfors ignores columns after the action vocabulary. Legality is applied around the
+network.
 
 ## NaN or infinity from inference
 

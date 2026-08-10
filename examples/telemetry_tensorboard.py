@@ -31,7 +31,7 @@ def main() -> None:
     n_actions = game.action_space().n
 
     def infer(obs: np.ndarray) -> np.ndarray:
-        return np.zeros((len(obs), 1, n_actions), dtype=np.float64)
+        return np.zeros((len(obs), 1, n_actions), dtype=np.float32)
 
     with SummaryWriter(args.logdir) as writer:
         for update in range(args.updates):

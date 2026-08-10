@@ -26,8 +26,8 @@ def main() -> None:
     n_actions = game.action_space().n
 
     def infer(obs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        logits = np.zeros((len(obs), n_actions), dtype=np.float64)
-        values = np.zeros(len(obs), dtype=np.float64)
+        logits = np.zeros((len(obs), n_actions), dtype=np.float32)
+        values = np.zeros(len(obs), dtype=np.float32)
         return logits, values
 
     batch = engine.collect(n_records=args.records, infer=infer)

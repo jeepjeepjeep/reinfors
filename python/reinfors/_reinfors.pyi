@@ -96,8 +96,8 @@ class DeepCfrBatch:
 class DeepCfr:
     """Deep CFR data generator (external sampling): traversals query the current advantage
     networks through `infer` (one callable, or a per-player sequence) and emit advantage and
-    strategy training samples. Each callback maps float32 `(rows, observation_size)` to float64
-    advantages `(rows, actions)`. Buffers, weighting, and training are the caller's."""
+    strategy training samples. Each callback maps float32 `(rows, observation_size)` to float32 or
+    float64 advantages `(rows, actions)`. Buffers, weighting, and training are the caller's."""
 
     def __init__(self, game: GameHandle, seed: int = ...) -> None: ...
     def next_iteration(self) -> None: ...
@@ -260,7 +260,8 @@ class PolicyHandle:
     # AlphaZero (PUCT) for compatible sequential, single-agent, and simultaneous (DUCT)
     # compositions; see the algorithm catalogue for its learner pairing. `noise=` accepts an
     # rf.noise.Dirichlet(epsilon=..., alpha=..., scope="requester" | "all") handle or None. The infer
-    # callback returns a (policy_logits (N, A) f64, values (N,) f64) tuple — one forward, both heads.
+    # callback returns (policy_logits (N, width>=A), values (N,)); each array may be f32 or f64.
+    # Columns after A are ignored, allowing a padded policy head without a device-side slice.
     # Root Dirichlet noise plus acting temperature drive self-play diversity;
     # acting is by visit count. temperature_drop=None applies the temperature to whole episodes.
     @staticmethod

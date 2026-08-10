@@ -65,9 +65,31 @@ terminal or an alternating-game truncation tail, so its target is the immediate 
 | `policy_targets` | `(records, actions)` | Root visit distribution |
 | `value_targets` | `(records,)` | Realized return-to-go, discounted by `rf.learners.AlphaZero(gamma=...)` (default `1.0`) |
 | `policy_weights` | `(records,)` | Whether the row contributes policy loss |
+| `legal_ids` | `(legal_nnz,)` | Legal action ids in the encoder's head frame, packed as CSR |
+| `legal_offsets` | `(records + 1,)` | CSR offsets delimiting each row's legal ids |
 
 Sequential N-player search emits value-only rows for non-moving perspectives. Their policy
-target is inert and `policy_weights` is zero; every row contributes to value loss.
+target is inert, `policy_weights` is zero, and their legal slice is empty; every row contributes to
+value loss.
+
+For a direct update on the returned batch, densify its CSR legality and mask logits before the
+policy softmax:
+
+```python
+counts = np.diff(batch.legal_offsets)
+rows = np.repeat(np.arange(len(batch.obs)), counts)
+legal = np.zeros(batch.policy_targets.shape, dtype=bool)
+legal[rows, batch.legal_ids] = True
+
+legal = torch.from_numpy(legal).to(logits.device)
+masked_logits = logits.masked_fill(~legal, torch.finfo(logits.dtype).min)
+```
+
+Use `torch.finfo(logits.dtype).min`, not a fixed large negative constant: a value such as `-1e9`
+overflows `float16`. Multiply the per-row policy loss by `policy_weights`; rows with empty legality
+slices are value-only and must not contribute to the policy reduction. When sampling from replay,
+gather the selected rows' CSR slices and allocate only `(minibatch_size, actions)` rather than a
+dense mask for the full buffer.
 
 ## Solver collection
 

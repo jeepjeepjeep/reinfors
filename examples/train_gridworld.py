@@ -44,7 +44,7 @@ def infer(obs_batch: np.ndarray) -> np.ndarray:
     net.eval()
     with torch.no_grad():
         obs = torch.from_numpy(np.ascontiguousarray(obs_batch)).to(device)
-        return net(obs).unsqueeze(1).cpu().double().numpy()
+        return net(obs).unsqueeze(1).cpu().numpy()
 
 
 for update in range(1, UPDATES + 1):

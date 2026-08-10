@@ -1,7 +1,7 @@
 # reinfors
 
 <p align="center">
-  <img src="assets/reinfors-banner.svg" alt="Animated reinfors logo" width="100%">
+  <img src="https://raw.githubusercontent.com/jeepjeepjeep/reinfors/main/assets/reinfors-banner.svg" alt="Animated reinfors logo" width="100%">
 </p>
 
 High-throughput reinforcement-learning search and sampling in Rust, with caller-owned
@@ -38,7 +38,7 @@ actions = game.action_space().n
 
 def infer(obs: np.ndarray) -> np.ndarray:
     # Replace with PyTorch, JAX, an accelerator service, or any other backend.
-    return np.zeros((len(obs), 1, actions), dtype=np.float64)
+    return np.zeros((len(obs), 1, actions), dtype=np.float32)
 
 batch = engine.collect(n_records=1024, infer=infer)
 print(batch.obs.shape, batch.targets.shape, batch.telemetry)

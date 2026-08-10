@@ -71,7 +71,7 @@ def infer(obs_batch: np.ndarray) -> np.ndarray:
     net.eval()
     with torch.no_grad():
         obs = torch.from_numpy(np.ascontiguousarray(obs_batch)).to(device)
-        return net(obs).unsqueeze(1).cpu().double().numpy()
+        return net(obs).unsqueeze(1).cpu().numpy()
 
 
 for update in range(1, UPDATES + 1):
@@ -119,7 +119,8 @@ schedule.
 The inference callback is the adapter between the two sides. Here the network produces one Q-value
 per action, and `unsqueeze(1)` adds the head axis expected by `EpsilonGreedyQ(n_heads=1)`. The
 head axis is an ensemble dimension rather than a distinct policy/value model output. The callback
-returns NumPy `float64` values; action legality stays inside the game and policy. Use the
+returns the network's native NumPy `float32` values, which reinfors widens exactly; action legality
+stays inside the game and policy. Use the
 [troubleshooting table](../reference/troubleshooting.md) when a callback or composition is rejected.
 
 Every GridWorld move is legal, so the target network can take a dense maximum over its four outputs.

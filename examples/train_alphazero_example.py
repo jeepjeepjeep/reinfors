@@ -3,7 +3,7 @@
 reinfors owns *data generation* — self-play, the PUCT search (root Dirichlet noise + opening
 temperature), and record assembly all run in Rust. *You* own *learning* — the two-headed network and
 the gradient step are plain PyTorch here. The two meet at one seam: the `infer` callback, an
-`(N, C*H*W) float32` batch -> `(policy_logits (N, A), values (N,)) float64` tuple, one forward for
+`(N, C*H*W) float32` batch -> `(policy_logits (N, A), values (N,)) float32` tuple, one forward for
 both heads, called once per pooled search round with the live weights.
 
 Each collect yields `(obs, pi, z)`: pi is the root visit distribution (the policy head's
@@ -69,7 +69,7 @@ class AlphaZeroNet(nn.Module):
 
 def make_infer(net: AlphaZeroNet, device: str) -> Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]]:
     """The search's per-round callback: a flat `(N, C*H*W)` float32 batch -> the AlphaZero tuple
-    `(policy_logits (N, A) f64, values (N,) f64)`. No-grad, eval-mode, side-effect free."""
+    `(policy_logits (N, A) f32, values (N,) f32)`. No-grad, eval-mode, side-effect free."""
     net.to(device)
     c, h, w = net.obs_shape
 

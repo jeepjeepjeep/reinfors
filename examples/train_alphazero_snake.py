@@ -5,7 +5,7 @@ Snake exercises both tree capabilities the sequential connect4 example
 (decoupled/DUCT per-agent search statistics) and declared environment chance (the food respawn,
 consumed per `--chance-mode`). The wiring is the same one-seam story: reinfors runs self-play +
 PUCT in Rust and calls the `infer` callback — `(N, C*H*W) float32 -> (logits (N, A), values (N,))
-float64` — once per pooled round; the net and the gradient step live here.
+float32` — once per pooled round; the net and the gradient step live here.
 
 Differences from the connect4 reference, all snake-driven:
   - the value head is LINEAR, not tanh: snake's z is a discounted *return* (food rewards

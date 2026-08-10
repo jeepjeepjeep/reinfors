@@ -2,7 +2,7 @@
 
 reinfors owns *data generation* — env dynamics, observations, and the batched selective search all run
 in Rust. *You* own *learning* — the network and the gradient step are plain PyTorch here. The two meet
-at one seam: the `infer` callback, an `(N, C*H*W) float32` batch -> `(N, K, A) float64` forward that
+at one seam: the `infer` callback, an `(N, C*H*W) float32` batch -> `(N, K, A) float32` forward that
 the search calls once per pooled round. Because it closes over the live network, each `collect`
 automatically searches with the current weights — the actor-learner weight sync is implicit.
 
@@ -46,9 +46,9 @@ class ExampleNet(nn.Module):
 
 
 def make_infer(net: ExampleNet, device: str = "cpu") -> Callable[[np.ndarray], np.ndarray]:
-    """The search's per-round callback: a flat `(N, C*H*W)` float32 batch -> `(N, K, A)` float64
+    """The search's per-round callback: a flat `(N, C*H*W)` float32 batch -> `(N, K, A)` float32
     forward of `net`. A no-grad forward, run in eval mode and restored afterwards so it's side-effect
-    free; the device->host copy moves float32, with the upcast to float64 on the host."""
+    free; reinfors widens the returned values exactly."""
     net.to(device)
     c, h, w = net.obs_shape
 

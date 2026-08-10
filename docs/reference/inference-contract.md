@@ -19,13 +19,17 @@ particular contiguity on input; make it contiguous if your framework requires it
 
 | Policy | Required output |
 | --- | --- |
-| `EpsilonGreedyQ` | Q values, `float64`, `(rows, heads, actions)` |
-| `Mcts` with TreeStrap | Q values, `float64`, `(rows, 1, actions)`—one ensemble head |
-| `SelectiveExpectimax` | Ensemble Q values, `float64`, `(rows, heads, actions)` |
-| `AlphaZero` | Tuple of policy logits `(rows, actions)` and values `(rows,)`, both `float64` |
+| `EpsilonGreedyQ` | Q values, `(rows, heads, actions)` |
+| `Mcts` with TreeStrap | Q values, `(rows, 1, actions)`—one ensemble head |
+| `SelectiveExpectimax` | Ensemble Q values, `(rows, heads, actions)` |
+| `AlphaZero` | Tuple of policy logits `(rows, width)` where `width >= actions`, and values `(rows,)`; logit columns after `actions` are ignored |
 
-Outputs must have exactly the requested row count and contain finite values. Constructor settings
-determine `n_heads` and the action count; see [head terminology](glossary.md#network-outputs-and-ensembles).
+Every output array may be `float32` or `float64`. Returning the network's native `float32` is the
+recommended path: reinfors widens it exactly after crossing the boundary and avoids a caller-side
+conversion. Outputs must have exactly the requested row count and contain finite values. Q-family
+action widths are exact; AlphaZero alone permits a padded policy head and consumes its first
+`actions` columns. Constructor settings determine `n_heads` and the action count; see
+[head terminology](glossary.md#network-outputs-and-ensembles).
 
 ## Deep CFR
 
@@ -34,7 +38,7 @@ Each callback has this exact contract:
 
 ```text
 input:  float32 NumPy array, shape (rows, flattened_observation_size)
-output: float64 NumPy array, shape (rows, actions)
+output: float32 or float64 NumPy array, shape (rows, actions)
 ```
 
 The output contains one advantage per action id, with no ensemble-head dimension. It must have the
@@ -43,7 +47,7 @@ exact two-dimensional shape and contain finite values; legality is applied insid
 Pass one callable to share an advantage network between players, or a sequence indexed by player.
 Networks must remain frozen for the duration of each `collect` call and may be retrained between
 calls. `DeepCfr.exploitability(policy_infer=...)` separately expects one `(rows, actions)` policy
-probability array.
+probability array, also `float32` or `float64`.
 
 ## Legal actions
 

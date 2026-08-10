@@ -46,8 +46,8 @@ n_actions = game.action_space().n
 def infer(obs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Return policy logits and a value for each observation."""
     rows = obs.shape[0]
-    logits = np.zeros((rows, n_actions), dtype=np.float64)
-    values = np.zeros(rows, dtype=np.float64)
+    logits = np.zeros((rows, n_actions), dtype=np.float32)
+    values = np.zeros(rows, dtype=np.float32)
     return logits, values
 
 batch = engine.collect(n_records=512, infer=infer)
@@ -73,11 +73,11 @@ move them to an accelerator, run any model, and return host NumPy arrays:
 def infer(obs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     x = framework_tensor(obs).reshape(len(obs), *game.observation_space().shape)
     logits, values = model(x.to(device))
-    return (
-        logits.detach().cpu().numpy().astype(np.float64, copy=False),
-        values.detach().cpu().numpy().astype(np.float64, copy=False),
-    )
+    return logits.detach().cpu().numpy(), values.detach().cpu().numpy()
 ```
+
+Return native `float32` when possible; reinfors widens it exactly. `float64` is also accepted when
+that is the network's natural output.
 
 The exact output depends on the chosen policy. See the [inference contract](reference/inference-contract.md)
 and [batch formats](reference/batch-formats.md). If the callback is rejected, match its exception in

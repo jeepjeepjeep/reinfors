@@ -6,7 +6,7 @@ Reinfors separates reusable rules, search, record generation, and user-owned lea
 CALLER-OWNED PYTHON
 
 ┌──────────────────────────────────────────────────────────────────────┐
-│ Training loop calls Engine.collect(...) or reads a CollectStream    │
+│ Training loop calls Engine.collect(...) or reads a CollectStream     │
 └──────────────────────────────────┬───────────────────────────────────┘
                                    │
 ══════════════════════ RUST / PYTHON BOUNDARY ═════════════════════════
@@ -28,9 +28,9 @@ RUST: ENGINE AND COMPOSED COMPONENTS
       perspective     │               │
                       ▼               ├──────────────────────────┐
               ┌───────────────┐       │                  ┌───────┴────────┐
-              │ Encoder       │       │                  │ Policy/search │
-              │ observation + │       └──────────────────│ uses Game +   │
-              │ action view   │                          │ network data  │
+              │ Encoder       │       │                  │ Policy/search  │
+              │ observation + │       └──────────────────│ uses Game +    │
+              │ action view   │                          │ network data   │
               └───────┬───────┘                          └───────┬────────┘
                       │ encoded evaluation request               │
                       ▼                                          │
@@ -64,7 +64,7 @@ RUST
                                   │
               ┌───────────────────▼──────────────────────┐
               │ Game applies actions and chance          │
-              │ transitions, producing ordered events   │
+              │ transitions, producing ordered events    │
               └──────────────┬────────────────┬──────────┘
                              │                │ events
                 transition / │                ▼
