@@ -20,13 +20,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import _reinfors, chance_modes, encoders, games, gym, learners, noise, policies, solvers, spaces
+from . import _reinfors, catalog, chance_modes, encoders, games, gym, learners, noise, policies, solvers, spaces
 from ._reinfors import (
+    AlphaZeroBatch,
+    CollectStream,
+    DeepCfrBatch,
+    DqnBatch,
     Engine,
     EngineSnapshot,
     Env,
     EnvSnapshot,
     Reward,
+    TreeStrapBatch,
     chess_action_uci,
     chess_uci_action,
     core_build_profile,
@@ -129,12 +134,18 @@ def engine_from_config(config: dict[str, Any]) -> Engine:
 
 
 __all__ = [
+    "AlphaZeroBatch",
+    "CollectStream",
+    "DeepCfrBatch",
+    "DqnBatch",
     "Engine",
     "EngineSnapshot",
     "Env",
     "EnvSnapshot",
     "Reward",
+    "TreeStrapBatch",
     "_reinfors",
+    "catalog",
     "chance_modes",
     "chess_action_uci",
     "chess_uci_action",

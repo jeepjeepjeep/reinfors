@@ -33,12 +33,12 @@
 //! calling thread. Per-machine rng streams are derived deterministically, so results are
 //! reproducible and independent of cache state or advancement interleaving.
 //!
-//! **Player count**: any 2..=10 sequential players. The 2-player zero-sum Nash story does
+//! **Player count**: any `2..=MAX_CFR_PLAYERS` sequential players. The 2-player zero-sum Nash story does
 //! NOT survive past two players — there the traversals are empirical per-player regret
 //! minimization (the Pluribus regime), measured by the exact NashConv instrument on
 //! enumerable games and by frozen-policy exploiters at scale.
 //!
-//! Construction gates match tabular CFR: 2..=10 players, [`Game::information_states`],
+//! Construction gates match tabular CFR: `2..=MAX_CFR_PLAYERS` players, [`Game::information_states`],
 //! rng-free `initial_state` (chance fully declared by construction).
 
 use std::collections::HashMap;

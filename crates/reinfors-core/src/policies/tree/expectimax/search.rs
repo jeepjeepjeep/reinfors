@@ -306,7 +306,8 @@ where
     assert!(
         game.perfect_information(),
         "tree search on a hidden-information game is clairvoyant: its values condition on state \
-         the agents cannot observe; use an observation-only policy family"
+         the agents cannot observe; see {}",
+        crate::COMPATIBILITY_DOCS
     );
     let a = game.action_count();
     // Each search gets its own chance-sampling stream, seeded deterministically from the request

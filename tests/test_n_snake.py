@@ -149,7 +149,7 @@ def test_expectimax_treestrap_collects_three_snakes() -> None:
 def test_start_buffer_runs_with_three_snakes() -> None:
     engine = rf.Engine(
         _snake(3),
-        rf.Reward(food=1.0),
+        rf.Reward(food=1.0, loss=0.0, win=0.0),
         rf.policies.Mcts(num_simulations=8),
         rf.learners.TreeStrap(),
         n_games=2,

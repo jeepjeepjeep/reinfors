@@ -3,7 +3,7 @@
 reinfors owns *data generation* — self-play, the PUCT search (root Dirichlet noise + opening
 temperature), and record assembly all run in Rust. *You* own *learning* — the two-headed network and
 the gradient step are plain PyTorch here. The two meet at one seam: the `infer` callback, an
-`(N, C*H*W) float32` batch -> `(policy_logits (N, A), values (N,)) float64` tuple, one forward for
+`(N, C*H*W) float32` batch -> `(policy_logits (N, A), values (N,)) float32` tuple, one forward for
 both heads, called once per pooled search round with the live weights.
 
 Each collect yields `(obs, pi, z)`: pi is the root visit distribution (the policy head's
@@ -21,8 +21,8 @@ weights to a concurrent search round. Python locks are GIL-aware; there is no de
 This is a deliberately tiny, self-contained reference, not a production trainer: no replay buffer,
 no checkpoints, no logging. It exists to show the wiring.
 
-    uv run --with torch python scripts/train_alphazero_example.py --iterations 40
-    uv run --with torch python scripts/train_alphazero_example.py --iterations 40 --depth 1
+    uv run --with torch python examples/train_alphazero_example.py --iterations 40
+    uv run --with torch python examples/train_alphazero_example.py --iterations 40 --depth 1
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ import random
 import threading
 import time
 from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import reinfors as rf
@@ -68,7 +69,7 @@ class AlphaZeroNet(nn.Module):
 
 def make_infer(net: AlphaZeroNet, device: str) -> Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]]:
     """The search's per-round callback: a flat `(N, C*H*W)` float32 batch -> the AlphaZero tuple
-    `(policy_logits (N, A) f64, values (N,) f64)`. No-grad, eval-mode, side-effect free."""
+    `(policy_logits (N, A) f32, values (N,) f32)`. No-grad, eval-mode, side-effect free."""
     net.to(device)
     c, h, w = net.obs_shape
 
@@ -165,7 +166,7 @@ def eval_vs_random(net: AlphaZeroNet, device: str, games: int, seed: int) -> flo
     for g in range(games):
         env = rf.Env(rf.games.Connect4(), seed=rng.randrange(2**31))
         net_side = g % 2
-        events = ["", ""]
+        events: list[tuple[int, Any]] = []
         while not env.done():
             agent = env.active_agents()[0]
             if agent == net_side:
@@ -179,9 +180,10 @@ def eval_vs_random(net: AlphaZeroNet, device: str, games: int, seed: int) -> flo
             else:
                 action = rng.choice(env.legal_actions(agent))
             events = env.step({agent: action})
-        if events[net_side] == "win":
+        result = next((event for player, event in events if player == net_side), None)
+        if result == "win":
             score += 1.0
-        elif events[net_side] == "draw":
+        elif result == "draw":
             score += 0.5
     net.train(was_training)
     return score / games
@@ -192,7 +194,7 @@ def run_iteration(
     net: AlphaZeroNet,
     optimizer: torch.optim.Optimizer,
     it: int,
-    batch: rf._reinfors.AlphaZeroBatch,
+    batch: rf.AlphaZeroBatch,
 ) -> None:
     obs, pi, z = batch.obs, batch.policy_targets, batch.value_targets
     weights = batch.policy_weights
@@ -259,8 +261,8 @@ def main() -> None:
         # Synchronous reference loop: collect and train take turns; one net, implicit weight sync.
         infer = make_infer(net, args.device)
         for it in range(1, args.iterations + 1):
-            batch = engine.collect(args.collect_size, infer)  # search with live weights
-            assert isinstance(batch, rf._reinfors.AlphaZeroBatch)  # narrows the family union
+            batch = engine.collect(n_records=args.collect_size, infer=infer)  # search with live weights
+            assert isinstance(batch, rf.AlphaZeroBatch)  # narrows the family union
             run_iteration(args, net, optimizer, it, batch)
     else:
         # Overlapped loop: the worker collects batch t+1 (reading the collector net) while we train
@@ -276,10 +278,10 @@ def main() -> None:
             with sync_lock:
                 return base_infer(obs_batch)
 
-        with engine.collect_stream(args.collect_size, locked_infer, depth=depth) as stream:
+        with engine.collect_stream(collect_size=args.collect_size, infer=locked_infer, depth=depth) as stream:
             for it in range(1, args.iterations + 1):
                 batch = stream.next()
-                assert isinstance(batch, rf._reinfors.AlphaZeroBatch)  # narrows the family union
+                assert isinstance(batch, rf.AlphaZeroBatch)  # narrows the family union
                 with sync_lock:
                     collector_net.load_state_dict(net.state_dict())
                 run_iteration(args, net, optimizer, it, batch)

@@ -5,7 +5,7 @@ Snake exercises both tree capabilities the sequential connect4 example
 (decoupled/DUCT per-agent search statistics) and declared environment chance (the food respawn,
 consumed per `--chance-mode`). The wiring is the same one-seam story: reinfors runs self-play +
 PUCT in Rust and calls the `infer` callback — `(N, C*H*W) float32 -> (logits (N, A), values (N,))
-float64` — once per pooled round; the net and the gradient step live here.
+float32` — once per pooled round; the net and the gradient step live here.
 
 Differences from the connect4 reference, all snake-driven:
   - the value head is LINEAR, not tanh: snake's z is a discounted *return* (food rewards
@@ -24,8 +24,8 @@ Differences from the connect4 reference, all snake-driven:
     primary training signal, and a search-backed eval (net + small-sim search vs random) is the
     right future probe.
 
-    uv run --with torch python scripts/train_alphazero_snake.py --iterations 30
-    uv run --with torch python scripts/train_alphazero_snake.py --chance-mode always_resample
+    uv run --with torch python examples/train_alphazero_snake.py --iterations 30
+    uv run --with torch python examples/train_alphazero_snake.py --chance-mode always_resample
 """
 
 from __future__ import annotations
@@ -105,7 +105,7 @@ def build_engine(args: argparse.Namespace) -> rf.Engine:
 def train_pass(
     net: SnakeAzNet,
     optimizer: torch.optim.Optimizer,
-    batch: rf._reinfors.AlphaZeroBatch,
+    batch: rf.AlphaZeroBatch,
     batch_size: int,
     device: str,
     rng: np.random.Generator,
@@ -206,9 +206,9 @@ def main() -> None:
         print(f"eval[start] mean reward vs random: {eval_vs_random(net, args, args.eval_games, args.seed):+.2f}")
     t0 = time.perf_counter()
     for it in range(1, args.iterations + 1):
-        batch = engine.collect(args.collect_size, infer)
+        batch = engine.collect(n_records=args.collect_size, infer=infer)
         engine.weights_updated()  # about to train: cached rows from the old weights must not serve
-        assert isinstance(batch, rf._reinfors.AlphaZeroBatch)
+        assert isinstance(batch, rf.AlphaZeroBatch)
         policy_loss, value_loss = train_pass(net, optimizer, batch, args.batch_size, args.device, rng)
         episodes = batch.telemetry["episodes"]
         mean_reward = float(np.mean([np.mean(r) for r, _len, _seeded in episodes])) if episodes else float("nan")

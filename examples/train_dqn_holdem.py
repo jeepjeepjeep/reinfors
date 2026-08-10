@@ -19,7 +19,7 @@ what the probes measure (measured: eps 0.1-0.3 drift to ~0 bb/hand vs random, ep
 ~+5.8 across seeds). Principled self-play convergence for poker (NFSP/CFR-style) is out of scope
 for this example.
 
-    uv run --with torch python scripts/train_dqn_holdem.py --iterations 60
+    uv run --with torch python examples/train_dqn_holdem.py --iterations 60
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ import time
 import numpy as np
 import reinfors as rf
 import torch
-from reinfors._reinfors import DqnBatch
+from reinfors import DqnBatch
 from torch import nn
 
 
@@ -231,7 +231,7 @@ def main() -> None:
     t0 = time.perf_counter()
     print(f"DQN hold'em: {args.num_players} seats, {args.heads} heads, {args.n_games} games/collect")
     for it in range(1, args.iterations + 1):
-        batch = engine.collect(args.collect_size, infer)
+        batch = engine.collect(n_records=args.collect_size, infer=infer)
         assert isinstance(batch, DqnBatch)
         replay.push(batch, 3)
         loss = train_step(

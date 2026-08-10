@@ -1,7 +1,7 @@
 """The `rf.solvers.DeepCfr` surface: batch shapes and CSR consistency, the polymorphic infer
 argument, determinism, callback error propagation, the exact exploitability instrument, and a
 numpy table-emulated convergence run (the no-torch stand-in for real networks; the torch
-reference lives in scripts/train_deep_cfr.py).
+reference lives in examples/train_deep_cfr.py).
 """
 
 from collections.abc import Callable
@@ -73,6 +73,16 @@ def test_callback_errors_and_bad_shapes_propagate() -> None:
         solver.collect(player=0, traversals=4, infer=boom)
     with pytest.raises(ValueError, match="one row of 2 advantages"):
         solver.collect(player=0, traversals=4, infer=lambda obs: np.zeros((obs.shape[0], 5)))
+    with pytest.raises(ValueError, match="finite"):
+        solver.collect(player=0, traversals=4, infer=lambda obs: np.full((obs.shape[0], 2), np.nan))
+    with pytest.raises(TypeError) as error:
+        solver.collect(
+            player=0,
+            traversals=4,
+            infer=lambda obs: np.zeros((obs.shape[0], 2), dtype=np.int32),
+        )
+    assert "float64 or float32 ndarray" in str(error.value)
+    assert "dtype int32" in str(error.value)
     with pytest.raises(ValueError, match="player must be below 2"):
         solver.collect(player=2, traversals=1, infer=zeros2)
     fresh = rf.solvers.DeepCfr(rf.games.KuhnPoker(), seed=0)
@@ -89,6 +99,8 @@ def test_transposed_infer_shapes_are_rejected() -> None:
         solver.collect(player=0, traversals=8, infer=lambda obs: np.zeros((2, obs.shape[0])))
     with pytest.raises(ValueError, match="policy_infer returned shape"):
         solver.exploitability(lambda obs: np.full((2, obs.shape[0]), 0.5))
+    with pytest.raises(TypeError, match=r"float64 or float32 ndarray.*dtype int32"):
+        solver.exploitability(lambda obs: np.ones((obs.shape[0], 2), dtype=np.int32))
 
 
 def test_failed_collects_are_transactional() -> None:
@@ -114,7 +126,7 @@ def test_failed_collects_are_transactional() -> None:
 
 
 def test_construction_gates() -> None:
-    with pytest.raises(ValueError, match="information-state"):
+    with pytest.raises(ValueError, match=r"compatibility\.md"):
         rf.solvers.DeepCfr(rf.games.Connect4())
     # N-player hold'em now constructs (no Nash guarantee past 2 — documented at the gate).
     rf.solvers.DeepCfr(rf.games.TexasHoldem(num_players=3))

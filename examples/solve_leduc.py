@@ -6,7 +6,7 @@ time-AVERAGED strategy, queryable by `env.information_state_key(agent)`. Exploit
 (exact best-response improvement, zero at Nash) is the convergence metric; on this game CFR+
 reaches milli-blind exploitability in a few hundred iterations and a few seconds.
 
-    python scripts/solve_leduc.py --iterations 1000
+    python examples/solve_leduc.py --iterations 1000
 """
 
 from __future__ import annotations

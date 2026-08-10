@@ -8,8 +8,8 @@ both, so a reinfors game drops into an existing pipeline unchanged::
     import reinfors as rf
     from reinfors import gym
 
-    env = gym.make(rf.games.GridWorld(size=8), rf.Reward(goal=1.0))   # -> gymnasium.Env
-    env = gym.make(rf.games.Snake(grid_size=10), rf.Reward(food=1.0)) # -> pettingzoo ParallelEnv
+    env = gym.make(game=rf.games.GridWorld(size=8), reward=rf.Reward(goal=1.0))   # -> gymnasium.Env
+    env = gym.make(game=rf.games.Snake(grid_size=10), reward=rf.Reward(food=1.0)) # -> ParallelEnv
 
 Single-agent games become a ``gymnasium.Env``; simultaneous multi-agent games (e.g. snake) become a
 PettingZoo ``ParallelEnv``; turn-based (sequential) multi-agent games (connect4, chess, backgammon)
@@ -18,11 +18,11 @@ become a PettingZoo ``AECEnv``. Legality follows the ecosystem's conventions: AE
 ``pettingzoo.test.api_test`` samples legally), and the Parallel adapter carries the mask in
 ``infos[agent]["action_mask"]`` so its observations stay plain arrays.
 
-The reward is supplied here rather than by ``rf.Env`` itself (which stays reward-free for play/eval):
-the standard APIs must return a scalar reward from ``step``, and the game's event→reward mapping stays
-in Rust — the adapter only reads back ``env.rewards``. reinfors' ``rf.Env`` has no truncation horizon of
-its own, so the time limit is applied here (defaulting to the game's ``truncation_horizon()``), exactly
-as Gymnasium's ``TimeLimit`` wrapper does.
+The reward is supplied to the adapter because the standard APIs must return a scalar reward from
+``step``. The game's event→reward mapping stays in Rust: the adapter builds its native ``rf.Env`` with
+that mapping and only reads back ``env.rewards``. reinfors' ``rf.Env`` has no truncation horizon of its
+own, so the time limit is applied here (defaulting to the game's ``truncation_horizon()``), exactly as
+Gymnasium's ``TimeLimit`` wrapper does.
 
 ``gymnasium`` / ``pettingzoo`` are optional dependencies (``pip install reinfors[gym]``); they are
 imported lazily, so importing this module without them installed is fine until you call a constructor.

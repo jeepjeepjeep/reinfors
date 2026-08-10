@@ -54,9 +54,10 @@ class Discrete:
     n: int
 
 class Cfr:
-    """Counterfactual regret minimization over a 2-player declared-chance game with
+    """Counterfactual regret minimization over compatible sequential declared-chance games with
     information-state keys. Variants: "vanilla", "plus" (CFR+), "external_mccfr". The output
-    is the AVERAGE strategy, keyed by `Env.information_state_key` bytes."""
+    is the AVERAGE strategy, keyed by `Env.information_state_key` bytes. See the generated
+    compatibility catalogue for built-in compositions."""
 
     def __init__(self, game: GameHandle, variant: str = ..., seed: int = ...) -> None: ...
     def iterate(self, n: int) -> None: ...
@@ -95,7 +96,8 @@ class DeepCfrBatch:
 class DeepCfr:
     """Deep CFR data generator (external sampling): traversals query the current advantage
     networks through `infer` (one callable, or a per-player sequence) and emit advantage and
-    strategy training samples; buffers, weighting, and training are the caller's."""
+    strategy training samples. Each callback maps float32 `(rows, observation_size)` to float32 or
+    float64 advantages `(rows, actions)`. Buffers, weighting, and training are the caller's."""
 
     def __init__(self, game: GameHandle, seed: int = ...) -> None: ...
     def next_iteration(self) -> None: ...
@@ -115,14 +117,15 @@ class GameHandle:
         stack: int = ...,
         small_blind: int = ...,
         big_blind: int = ...,
+        encoder: EncoderHandle | None = ...,
     ) -> GameHandle: ...
     # One episode = one hand at fresh stacks; chip-delta rewards (zero-sum), reward key: scale.
     # Hidden information: search policies reject it; train with EpsilonGreedyQ + Dqn.
     @staticmethod
-    def KuhnPoker(players: int = ...) -> GameHandle: ...
+    def KuhnPoker(players: int = ..., encoder: EncoderHandle | None = ...) -> GameHandle: ...
     # 3-card analytic testbed (12 infosets); hidden information; reward key: scale.
     @staticmethod
-    def LeducPoker() -> GameHandle: ...
+    def LeducPoker(encoder: EncoderHandle | None = ...) -> GameHandle: ...
     # 6-card two-round benchmark; hidden information; reward key: scale.
     @staticmethod
     def Snake(
@@ -133,9 +136,10 @@ class GameHandle:
         win_food_lead: int | None = ...,
         max_ticks: int | None = ...,
         num_snakes: int = ...,
+        encoder: EncoderHandle | None = ...,
     ) -> GameHandle: ...
     @staticmethod
-    def Connect4() -> GameHandle: ...
+    def Connect4(encoder: EncoderHandle | None = ...) -> GameHandle: ...
     # Standard chess (cozy-chess rules). Actions = the AlphaZero 8x8x73 = 4672 encoding (~35 legal
     # per position — the tree searches mask to the legal set). `encoder` is an rf.encoders.* handle
     # picking the observation view (default MinimalChess, (19, 8, 8)); the state's history
@@ -146,7 +150,7 @@ class GameHandle:
     # Backgammon: OpenSpiel-compatible 1352-action encoding, declared dice chance (21 rolls,
     # non-uniform), no doubling cube. Reward keys: win/gammon/backgammon (defaults 1/2/3, zero-sum).
     @staticmethod
-    def Backgammon(max_ticks: int | None = ...) -> GameHandle: ...
+    def Backgammon(max_ticks: int | None = ..., encoder: EncoderHandle | None = ...) -> GameHandle: ...
     # The goal defaults to the far corner (size-1, size-1), derived from `size`; explicit
     # coordinates must lie inside the grid. Invalid configs raise ValueError at construction.
     @staticmethod
@@ -155,16 +159,24 @@ class GameHandle:
         goal_row: int | None = ...,
         goal_col: int | None = ...,
         max_ticks: int | None = ...,
+        encoder: EncoderHandle | None = ...,
     ) -> GameHandle: ...
     def observation_space(self) -> Box: ...
     def action_space(self) -> Discrete: ...
-    # The truncation horizon (episode cap); None = never truncate (only for games that always end,
-    # like Connect-4). Loop-prone games default to a finite cap.
+    @property
+    def encoder(self) -> EncoderHandle: ...
+    # The declared truncation horizon (episode cap), or None when the game declares no horizon.
     def truncation_horizon(self) -> int | None: ...
 
 class EncoderHandle:
-    # Observation-encoder handles, passed to a game handle's `encoder=` kwarg. Game-specific; any
-    # state bookkeeping a view needs is enabled in the game automatically when selected.
+    # Every game handle carries one compatible observation encoder. Constructors use the game's
+    # registered default when `encoder=None`.
+    @property
+    def name(self) -> str: ...
+    @staticmethod
+    def Snake() -> EncoderHandle: ...
+    @staticmethod
+    def Connect4() -> EncoderHandle: ...
     @staticmethod
     def MinimalChess() -> EncoderHandle: ...
     # Mover-relative chess view (19, 8, 8): board seen from the mover's side, action head indexed
@@ -181,6 +193,16 @@ class EncoderHandle:
     # AlphaZero's chess view: 14*history_length + 7 planes; history_length=8 = the paper's 119.
     @staticmethod
     def AlphaZeroChess(history_length: int = ...) -> EncoderHandle: ...
+    @staticmethod
+    def Backgammon() -> EncoderHandle: ...
+    @staticmethod
+    def TexasHoldem() -> EncoderHandle: ...
+    @staticmethod
+    def KuhnPoker() -> EncoderHandle: ...
+    @staticmethod
+    def LeducPoker() -> EncoderHandle: ...
+    @staticmethod
+    def GridWorld() -> EncoderHandle: ...
 
 class ChanceModeHandle:
     # How a search consumes declared chance (rf.chance_modes.*; policy `chance=` kwarg). Expand-once
@@ -199,58 +221,59 @@ class NoiseHandle:
     def Dirichlet(epsilon: float = ..., alpha: float = ..., scope: str = ...) -> NoiseHandle: ...
 
 class PolicyHandle:
-    # Best-first selective expectimax (expand-once). chance_mode: "committed" (default; the
-    # historical food_samples estimator) | "expand_all" (exact fan). "always_resample" is rejected —
+    # Best-first selective expectimax (expand-once). Pass `chance=rf.chance_modes.Committed(samples=...)`
+    # (default samples=1) or `chance=rf.chance_modes.ExpandAll()`. AlwaysResample is rejected because
     # an expand-once search has no traversal event to redraw on.
     @staticmethod
     def SelectiveExpectimax(
-        expansion_budget: int = ...,
-        top_k: int = ...,
-        max_depth: int = ...,
-        beta: float = ...,
-        chance: ChanceModeHandle | None = ...,
-        n_heads: int = ...,
-        epsilon: float = ...,
-        opponent: str = ...,
-        opp_temperature: float = ...,
-        opp_floor: float = ...,
+        expansion_budget: int = 64,
+        top_k: int = 8,
+        max_depth: int = 12,
+        beta: float = 1.0,
+        chance: ChanceModeHandle | None = None,
+        n_heads: int = 1,
+        epsilon: float = 0.0,
+        opponent: str = "uniform",
+        opp_temperature: float = 1.0,
+        opp_floor: float = 0.0,
     ) -> PolicyHandle: ...
     @staticmethod
-    def EpsilonGreedyQ(n_heads: int = ..., epsilon: float = ...) -> PolicyHandle: ...
-    # MCTS (UCT); pairs with TreeStrap; sequential, single-agent, AND simultaneous (decoupled/DUCT
-    # per-agent statistics) games. act_by: "value" | "visits".
+    def EpsilonGreedyQ(n_heads: int = 1, epsilon: float = 0.1) -> PolicyHandle: ...
+    # MCTS (UCT) for compatible sequential, single-agent, and simultaneous (decoupled/DUCT
+    # per-agent statistics) compositions. See the algorithm catalogue for its learner pairing.
+    # act_by: "value" | "visits".
     # temperature > 0 (AlphaZero-style) samples the first temperature_drop plies of each episode
     # ∝ visits^(1/temperature) for training self-play diversity (None = whole episode); 0 = greedy.
-    # chance_mode (declared-chance games, explicit chance states being the canonical model): "always_resample"
-    # (fresh draw ∝ p per descent, unbiased default) | "committed" (freeze chance_samples draws
-    # per edge — food_samples-style, for wide fans) | "expand_all" (evaluate every outcome at
-    # expansion — exact, narrow fans).
+    # `chance=` accepts AlwaysResample() (fresh draw per descent; unbiased default),
+    # Committed(samples=...) (freeze that many draws per edge for depth on wide fans), or
+    # ExpandAll() (evaluate every outcome; exact for narrow fans).
     @staticmethod
     def Mcts(
-        num_simulations: int = ...,
-        uct_c: float = ...,
-        max_depth: int = ...,
-        act_by: str = ...,
-        temperature: float = ...,
-        temperature_drop: int | None = ...,
-        chance: ChanceModeHandle | None = ...,
+        num_simulations: int = 64,
+        uct_c: float = 2.0,
+        max_depth: int = 64,
+        act_by: str = "value",
+        temperature: float = 0.0,
+        temperature_drop: int | None = None,
+        chance: ChanceModeHandle | None = None,
     ) -> PolicyHandle: ...
-    # AlphaZero (PUCT); pairs with learners.AlphaZero; sequential, single-agent, and simultaneous
-    # (DUCT) games — noise_scope: "requester" (default) | "all" picks which root priors the
-    # Dirichlet noise perturbs in a simultaneous tree. The infer
-    # callback returns a (policy_logits (N, A) f64, values (N,) f64) tuple — one forward, both heads.
-    # Root Dirichlet noise (noise_epsilon/noise_alpha) + acting temperature drive self-play diversity;
+    # AlphaZero (PUCT) for compatible sequential, single-agent, and simultaneous (DUCT)
+    # compositions; see the algorithm catalogue for its learner pairing. `noise=` accepts an
+    # rf.noise.Dirichlet(epsilon=..., alpha=..., scope="requester" | "all") handle or None. The infer
+    # callback returns (policy_logits (N, width>=A), values (N,)); each array may be f32 or f64.
+    # Columns after A are ignored, allowing a padded policy head without a device-side slice.
+    # Root Dirichlet noise plus acting temperature drive self-play diversity;
     # acting is by visit count. temperature_drop=None applies the temperature to whole episodes.
     @staticmethod
     def AlphaZero(
-        num_simulations: int = ...,
-        c_puct: float = ...,
-        max_depth: int = ...,
-        temperature: float = ...,
-        temperature_drop: int | None = ...,
-        chance: ChanceModeHandle | None = ...,
+        num_simulations: int = 64,
+        c_puct: float = 1.5,
+        max_depth: int = 64,
+        temperature: float = 1.0,
+        temperature_drop: int | None = 8,
+        chance: ChanceModeHandle | None = None,
         noise: NoiseHandle | None = ...,
-        sequential_backup: str = ...,
+        sequential_backup: str = "auto",
     ) -> PolicyHandle: ...
 
 class LearnerHandle:
@@ -319,6 +342,8 @@ class DqnBatch:
     rewards: NDArray[np.float64]
     next_obs: NDArray[np.float32]
     dones: NDArray[np.bool_]
+    # Authoritative TD bootstrap rule: false at terminals and no-successor truncation tails.
+    can_bootstrap: NDArray[np.bool_]
     masks: NDArray[np.float32]
     # Legality in CSR form (record i's ids = ids[offsets[i]:offsets[i+1]]) — sparse because dense
     # (M, A) masks dwarf the observations on wide action spaces (~37 GB per 1M chess transitions).
@@ -375,8 +400,10 @@ class Engine:
     # The batch is learner-shaped: the TreeStrap family yields a `TreeStrapBatch`, the DQN family a
     # `DqnBatch`. Both expose named fields and also unpack positionally (back-compat with the old tuple).
     # infer outputs may be float64 or float32 (f32 widens exactly -> bit-identical batches;
-    # f32 skips the producer-side conversion — the GPU fast path).
-    def collect(self, n_records: int, infer: Any) -> TreeStrapBatch | DqnBatch | AlphaZeroBatch: ...
+    # f32 skips the producer-side conversion — the GPU fast path). The concrete batch family is
+    # selected by the runtime learner handle, so this remains Any until Engine carries that
+    # relationship as a generic type parameter.
+    def collect(self, n_records: int, infer: Any) -> Any: ...
     # Continuous background collection: a worker thread runs collect after collect into a bounded
     # queue of `depth` finished batches (None = unbounded, the continuous-actor topology). The engine
     # is held by the stream until stop(); collect() errors meanwhile. Weight staleness is the
@@ -390,10 +417,12 @@ class CollectStream:
 
     Single-consumer: one thread loops `next()` and owns `stop()`. Other threads run freely during
     the wait but must not touch the stream object (a concurrent `stop()` raises RuntimeError
-    "Already borrowed" and could not interrupt a blocked `next()` anyway). A stream dropped without
-    `stop()` permanently forfeits its engine — prefer the `with` form."""
+    "Already borrowed" and could not interrupt a blocked `next()` anyway). If the stream is dropped
+    without `stop()`, the engine remains unavailable for the rest of the process: it cannot collect,
+    snapshot, restore, or start another stream. Prefer the `with` form."""
 
-    def next(self) -> TreeStrapBatch | DqnBatch | AlphaZeroBatch: ...
+    # Like Engine.collect, the concrete batch family is selected by the runtime learner handle.
+    def next(self) -> Any: ...
     def pending(self) -> int: ...
     # Lossless checkpoint barrier: stops new collects, finishes the in-flight one with real
     # inference, returns every remaining batch; the engine (returned to its Engine) then matches
@@ -401,7 +430,7 @@ class CollectStream:
     def pause(self) -> list[Any]: ...
     def stop(self) -> None: ...
     def __iter__(self) -> CollectStream: ...
-    def __next__(self) -> TreeStrapBatch | DqnBatch | AlphaZeroBatch: ...
+    def __next__(self) -> Any: ...
     def __enter__(self) -> CollectStream: ...
     def __exit__(self, *args: Any) -> None: ...
 

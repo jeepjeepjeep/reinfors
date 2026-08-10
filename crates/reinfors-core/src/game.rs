@@ -116,8 +116,8 @@ impl ChanceDist {
     }
 }
 
-/// A finite-action, perfect-information game. Single-agent, sequential or simultaneous multi-agent,
-/// and N-player general-sum are all expressible via `actor` + the per-agent `Event`. The game owns
+/// A finite-action game. Single-agent, sequential or simultaneous multi-agent, imperfect-information,
+/// and N-player general-sum games are expressible via `actor` + the per-agent `Event`. The game owns
 /// only dynamics + outcomes; turning an `Event` into a scalar reward is the [`Reward`](crate::Reward)'s
 /// job, decoupled like the encoder.
 pub trait Game {
@@ -230,8 +230,8 @@ pub trait Game {
     /// the root without a private-sampling escape hatch.
     fn initial_state(&self) -> Self::State;
 
-    /// The episode-length cap after which the rollout truncates a still-running game, or `None` for a
-    /// game that always ends on its own (e.g. Connect-4). This is a property the game *declares* — the
+    /// The episode-length cap after which the rollout truncates a still-running game, or `None` when
+    /// the game declares no horizon. This is a property the game *declares* — the
     /// `Engine` does the tick-counting and enforces it, so the horizon never enters `State` or the
     /// search. Truncation is thus wholly a game concern (when *and*, via `mark_truncation`, what).
     fn truncation_horizon(&self) -> Option<usize> {

@@ -1,0 +1,148 @@
+# Examples
+
+Start with the smallest script that answers your question. Model and optimizer code remains visible
+because it belongs to the experiment rather than a reinfors abstraction.
+
+## First steps
+
+### Quickstart
+
+`examples/quickstart.py` demonstrates synchronous [AlphaZero](../catalogue/algorithms.md#alphazero)
+collection with a NumPy callback and no extra dependencies.
+
+**Runtime:** seconds for the default smoke run on a laptop CPU.
+
+```bash
+python examples/quickstart.py
+```
+
+### Train GridWorld
+
+`examples/train_gridworld.py` is the smallest complete [DQN](../catalogue/algorithms.md#dqn)
+training loop. Install `reinfors[train]`.
+
+**Runtime:** seconds for the ten-update default on a laptop CPU.
+
+```bash
+python examples/train_gridworld.py
+```
+
+### Streaming
+
+`examples/streaming.py` demonstrates bounded
+[TreeStrap + UCT MCTS](../catalogue/algorithms.md#treestrap-uct-mcts) collection, queue inspection,
+and clean shutdown with no extra dependencies.
+
+**Runtime:** seconds for the three-batch default on a laptop CPU.
+
+```bash
+python examples/streaming.py --updates 3
+```
+
+### TensorBoard telemetry
+
+`examples/telemetry_tensorboard.py` writes search, inference, episode-length, and return metrics to
+TensorBoard. Install `reinfors[train]` and `tensorboard`.
+
+**Runtime:** seconds to about a minute for the default on a laptop CPU.
+
+```bash
+python examples/telemetry_tensorboard.py --updates 10
+```
+
+## End-to-end training
+
+These scripts include more experiment machinery—replay, evaluation, CLI configuration, or
+reporting—because they demonstrate complete research workflows.
+
+### TreeStrap Snake
+
+`examples/train_treestrap_snake.py` trains ensemble Q-values from TreeStrap targets using either
+[selective expectimax](../catalogue/algorithms.md#treestrap-selective-expectimax) or
+[UCT MCTS](../catalogue/algorithms.md#treestrap-uct-mcts).
+
+**Runtime:** minutes for the default; use `--iterations 1` for a smoke test.
+
+```bash
+python examples/train_treestrap_snake.py --iterations 20
+```
+
+### AlphaZero Connect 4
+
+`examples/train_alphazero_example.py` covers policy/value heads, visit targets, synchronous or
+concurrent collection, evaluation, and saving a network.
+
+**Runtime:** minutes for the 40-iteration CPU default; one iteration checks plumbing.
+
+```bash
+python examples/train_alphazero_example.py
+```
+
+### AlphaZero Snake
+
+`examples/train_alphazero_snake.py` applies AlphaZero to simultaneous actions, stochastic search,
+and unbounded values.
+
+**Runtime:** minutes or longer for the default, scaling strongly with simulations and collection size.
+
+```bash
+python examples/train_alphazero_snake.py
+```
+
+### DQN Hold'em
+
+`examples/train_dqn_holdem.py` covers imperfect observations, replay, ensemble DQN, and sparse legal
+actions.
+
+**Runtime:** minutes or longer for the default; use `--iterations 1 --eval-every 0` for a smoke test.
+
+```bash
+python examples/train_dqn_holdem.py
+```
+
+### Deep CFR training
+
+`examples/train_deep_cfr.py` demonstrates per-player advantage inference, caller-owned reservoirs,
+and advantage/strategy training.
+
+**Runtime:** long-running at the default; reduce iterations and training steps for a smoke test.
+
+```bash
+python examples/train_deep_cfr.py
+```
+
+## Solving and evaluation
+
+### Solve Leduc
+
+`examples/solve_leduc.py` runs tabular CFR, CFR+, or external-sampling MCCFR and reports exact
+exploitability where the game is enumerable.
+
+**Runtime:** seconds to minutes, depending on the game, variant, iterations, and exact probes.
+
+```bash
+python examples/solve_leduc.py --iterations 1000
+```
+
+### AlphaZero head-to-head
+
+`examples/eval_az_h2h.py` referees two saved AlphaZero Connect 4 networks with alternating seats and
+sampled opening diversity.
+
+**Runtime:** seconds for the default search-free referee after checkpoint loading.
+
+```bash
+python examples/eval_az_h2h.py a.pt b.pt --games 200 --opening-plies 4
+```
+
+## Adapters and validation
+
+Start with the [Gymnasium and PettingZoo guide](../guides/adapters.md); the adapter tests under
+`tests/` provide additional compliance-level examples. For algorithm-specific array meanings,
+consult [batch formats](../reference/batch-formats.md) before copying a loss.
+
+## Next steps
+
+- Build from the smallest DQN example with the [training guide](../guides/training.md).
+- Compare saved agents with the [evaluation guide](../guides/evaluation.md).
+- Add experiment metrics with [telemetry and TensorBoard](../guides/telemetry.md).

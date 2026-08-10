@@ -1,5 +1,5 @@
-//! Concrete `Learner` implementations. `treestrap` consumes the expectimax family's `SearchEvaluation`
-//! (so it pairs with any expectimax policy); `dqn` consumes `QEvaluation`.
+//! Concrete `Learner` implementations. Each learner consumes a policy-family evaluation type;
+//! built-in pairings are documented in the generated compatibility catalogue.
 //!
 //! Dependency direction: `learners` → `policies` is a **one-way** edge. Each learner imports the
 //! `Evaluation` type it consumes from the policy family that *produces* it ("producer owns the type"),

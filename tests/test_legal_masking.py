@@ -52,6 +52,7 @@ def test_dqn_on_chess_acts_and_masks_legally() -> None:
     # NEXT TURN. Non-terminal empties are truncation tails only (alternating game: the post-move
     # view is opponent-to-move -> documented no-bootstrap).
     next_counts = np.diff(batch.next_legal_offsets)
+    assert np.array_equal(batch.can_bootstrap, next_counts > 0)
     assert np.all(next_counts[batch.dones] == 0)
     live = next_counts[~batch.dones]
     assert (live >= 1).mean() > 0.8, "most interior steps must have an own-turn successor"
@@ -73,6 +74,7 @@ def test_dqn_masks_are_dense_on_all_legal_games() -> None:
     assert isinstance(batch, DqnBatch)
     assert np.all(np.diff(batch.legal_offsets) == 4)  # all four actions legal everywhere
     next_counts = np.diff(batch.next_legal_offsets)
+    assert np.array_equal(batch.can_bootstrap, next_counts > 0)
     assert np.all(next_counts[~batch.dones] == 4)
     assert np.all(next_counts[batch.dones] == 0)
 

@@ -9,7 +9,7 @@
 //!   * UNIFIED ENV (permanent) — the `Env` pyclass: a caller-driven single-game instance for play /
 //!     evaluation, mirroring the engine's type-erasure.
 //!   * PER-GAME CONFIG (permanent) — the `rf.games`/`rf.policies`/`rf.learners` handles: a game's /
-//!     algorithm's parameter surface. Adding one here + a factory arm is all a new composition needs.
+//!     algorithm's parameter surface. Adding one also requires a factory arm and catalogue metadata.
 
 use std::collections::HashMap;
 
@@ -237,8 +237,14 @@ where
         let arr = Array2::from_shape_vec((n, dim), obs_flat)
             .expect("obs batch shape")
             .into_pyarray(py);
-        // Shared form = one callback for every player; per-player form = one per player.
-        let infer = callbacks[player.min(callbacks.len() - 1)].bind(py);
+        // `engine_callbacks` admits exactly one shared callback or one callback per player.
+        // Index directly in the per-player form: silently clamping here could hide a routing bug.
+        let callback = if callbacks.len() == 1 {
+            &callbacks[0]
+        } else {
+            &callbacks[player]
+        };
+        let infer = callback.bind(py);
         match infer
             .call1((arr,))
             .and_then(|r| infer_rows_3d(&r, "infer output"))
@@ -256,6 +262,14 @@ where
                              n_heads{}, {action_count})",
                             expected_heads.map_or(String::new(), |k| format!(" = {k}"))
                         ))
+                    });
+                    return vec![0.0; fallback];
+                }
+                if flat.iter().any(|value| !value.is_finite()) {
+                    callback_err.get_or_insert_with(|| {
+                        pyo3::exceptions::PyValueError::new_err(
+                            "infer outputs must contain only finite values",
+                        )
                     });
                     return vec![0.0; fallback];
                 }
@@ -292,7 +306,12 @@ where
         let arr = Array2::from_shape_vec((n, dim), obs_flat)
             .expect("obs batch shape")
             .into_pyarray(py);
-        let infer = callbacks[player.min(callbacks.len() - 1)].bind(py);
+        let callback = if callbacks.len() == 1 {
+            &callbacks[0]
+        } else {
+            &callbacks[player]
+        };
+        let infer = callback.bind(py);
         let extracted = infer.call1((arr,)).and_then(|r| {
             let (logits, values) = r.extract::<(Bound<'_, PyAny>, Bound<'_, PyAny>)>()?;
             // Each element dispatches on dtype independently (a mixed f32/f64 tuple is fine).
@@ -317,7 +336,16 @@ where
                     });
                     return vec![0.0; n * stride];
                 }
-                logits.pack_policy_value(&values, action_count)
+                let packed = logits.pack_policy_value(&values, action_count);
+                if packed.iter().any(|value| !value.is_finite()) {
+                    callback_err.get_or_insert_with(|| {
+                        pyo3::exceptions::PyValueError::new_err(
+                            "AlphaZero infer outputs must contain only finite values",
+                        )
+                    });
+                    return vec![0.0; n * stride];
+                }
+                packed
             }
             Err(e) => {
                 *callback_err = Some(e);
@@ -453,7 +481,8 @@ fn chance_cfg(mode: &ChanceMode) -> Value {
     }
 }
 
-fn game_cfg(spec: &GameSpec) -> Value {
+fn game_cfg(spec: &GameSpec, selected_encoder: EncoderSpec) -> Value {
+    let encoder = selected_encoder.cfg();
     match spec {
         GameSpec::Snake {
             num_snakes,
@@ -472,8 +501,9 @@ fn game_cfg(spec: &GameSpec) -> Value {
             "play_to_last": play_to_last,
             "win_food_lead": win_food_lead,
             "max_ticks": max_ticks,
+            "encoder": encoder,
         }),
-        GameSpec::Connect4 => json!({"name": "connect4"}),
+        GameSpec::Connect4 => json!({"name": "connect4", "encoder": encoder}),
         GameSpec::TexasHoldem {
             num_players,
             stack,
@@ -485,22 +515,17 @@ fn game_cfg(spec: &GameSpec) -> Value {
             "stack": stack,
             "small_blind": small_blind,
             "big_blind": big_blind,
+            "encoder": encoder,
         }),
-        GameSpec::KuhnPoker { players } => json!({"name": "kuhn_poker", "players": players}),
-        GameSpec::LeducPoker => json!({"name": "leduc_poker"}),
-        GameSpec::Chess { max_ticks, encoder } => {
-            let enc = match encoder {
-                ChessEncoderSpec::Minimal => json!({"name": "minimal_chess"}),
-                ChessEncoderSpec::Relative => json!({"name": "relative_chess"}),
-                ChessEncoderSpec::OpenSpiel => json!({"name": "openspiel_chess"}),
-                ChessEncoderSpec::AlphaZero { history } => {
-                    json!({"name": "alphazero_chess", "history_length": history})
-                }
-            };
-            json!({"name": "chess", "max_ticks": max_ticks, "encoder": enc})
+        GameSpec::KuhnPoker { players } => {
+            json!({"name": "kuhn_poker", "players": players, "encoder": encoder})
+        }
+        GameSpec::LeducPoker => json!({"name": "leduc_poker", "encoder": encoder}),
+        GameSpec::Chess { max_ticks, .. } => {
+            json!({"name": "chess", "max_ticks": max_ticks, "encoder": encoder})
         }
         GameSpec::Backgammon { max_ticks } => {
-            json!({"name": "backgammon", "max_ticks": max_ticks})
+            json!({"name": "backgammon", "max_ticks": max_ticks, "encoder": encoder})
         }
         GameSpec::GridWorld {
             size,
@@ -512,6 +537,7 @@ fn game_cfg(spec: &GameSpec) -> Value {
             "goal_row": goal.0,
             "goal_col": goal.1,
             "max_ticks": max_ticks,
+            "encoder": encoder,
         }),
     }
 }
@@ -837,7 +863,7 @@ impl PyEngine {
         let config = json!({
             "schema_version": CONFIG_SCHEMA_VERSION,
             "reinfors_version": reinfors_core::version(),
-            "game": game_cfg(&game.spec),
+            "game": game_cfg(&game.spec, game.encoder),
             "reward": resolved_reward,
             "policy": policy_cfg(&policy.spec),
             "learner": learner_cfg(&learner.spec),
@@ -1098,13 +1124,75 @@ impl PyEngine {
     }
 }
 
-/// The chess observation view, carried by an `rf.encoders.*` handle (game-handle kwarg).
+/// The chess observation view. Chess is the one built-in with multiple encoder implementations;
+/// every game still carries an `EncoderSpec` and exposes the same `encoder=` constructor seam.
 #[derive(Clone, Copy)]
 enum ChessEncoderSpec {
     Minimal,
     Relative,
     OpenSpiel,
     AlphaZero { history: usize },
+}
+
+#[derive(Clone, Copy)]
+enum EncoderSpec {
+    Snake,
+    Connect4,
+    Chess(ChessEncoderSpec),
+    Backgammon,
+    TexasHoldem,
+    KuhnPoker,
+    LeducPoker,
+    GridWorld,
+}
+
+impl EncoderSpec {
+    fn cfg(self) -> Value {
+        match self {
+            EncoderSpec::Snake => json!({"name": "snake"}),
+            EncoderSpec::Connect4 => json!({"name": "connect4"}),
+            EncoderSpec::Chess(ChessEncoderSpec::Minimal) => json!({"name": "minimal_chess"}),
+            EncoderSpec::Chess(ChessEncoderSpec::Relative) => json!({"name": "relative_chess"}),
+            EncoderSpec::Chess(ChessEncoderSpec::OpenSpiel) => {
+                json!({"name": "openspiel_chess"})
+            }
+            EncoderSpec::Chess(ChessEncoderSpec::AlphaZero { history }) => {
+                json!({"name": "alphazero_chess", "history_length": history})
+            }
+            EncoderSpec::Backgammon => json!({"name": "backgammon"}),
+            EncoderSpec::TexasHoldem => json!({"name": "texas_holdem"}),
+            EncoderSpec::KuhnPoker => json!({"name": "kuhn_poker"}),
+            EncoderSpec::LeducPoker => json!({"name": "leduc_poker"}),
+            EncoderSpec::GridWorld => json!({"name": "gridworld"}),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            EncoderSpec::Snake => "snake",
+            EncoderSpec::Connect4 => "connect4",
+            EncoderSpec::Chess(ChessEncoderSpec::Minimal) => "minimal_chess",
+            EncoderSpec::Chess(ChessEncoderSpec::Relative) => "relative_chess",
+            EncoderSpec::Chess(ChessEncoderSpec::OpenSpiel) => "openspiel_chess",
+            EncoderSpec::Chess(ChessEncoderSpec::AlphaZero { .. }) => "alphazero_chess",
+            EncoderSpec::Backgammon => "backgammon",
+            EncoderSpec::TexasHoldem => "texas_holdem",
+            EncoderSpec::KuhnPoker => "kuhn_poker",
+            EncoderSpec::LeducPoker => "leduc_poker",
+            EncoderSpec::GridWorld => "gridworld",
+        }
+    }
+
+    fn action_count(self) -> usize {
+        match self {
+            EncoderSpec::Snake | EncoderSpec::TexasHoldem | EncoderSpec::LeducPoker => 3,
+            EncoderSpec::Connect4 => 7,
+            EncoderSpec::Chess(_) => CHESS_ACTIONS,
+            EncoderSpec::Backgammon => 1352,
+            EncoderSpec::KuhnPoker => 2,
+            EncoderSpec::GridWorld => 4,
+        }
+    }
 }
 
 /// The chess game + encoder pair for an encoder choice — the game's `history_len` is set to exactly
@@ -1409,6 +1497,10 @@ struct DqnBatch {
     next_obs: Py<PyArray2<f32>>, // (M, dim)
     #[pyo3(get)]
     dones: Py<PyArray1<bool>>, // (M,)
+    /// Whether each row has a valid next-state bootstrap. False at terminals and at any
+    /// truncation tail whose next observation has no actions for this agent.
+    #[pyo3(get)]
+    can_bootstrap: Py<PyArray1<bool>>, // (M,)
     #[pyo3(get)]
     masks: Py<PyArray2<f32>>, // (M, K)
     // Legality in CSR form — record i's legal ids are `ids[offsets[i]..offsets[i+1]]`. Sparse on
@@ -1658,6 +1750,7 @@ impl RecordBatch for DqnRecord {
         let mut players: Vec<i64> = Vec::with_capacity(m);
         let mut rewards: Vec<f64> = Vec::with_capacity(m);
         let mut dones: Vec<bool> = Vec::with_capacity(m);
+        let mut can_bootstrap: Vec<bool> = Vec::with_capacity(m);
         let mut legal_ids: Vec<i64> = Vec::new();
         let mut legal_offsets: Vec<i64> = Vec::with_capacity(m + 1);
         let mut next_legal_ids: Vec<i64> = Vec::new();
@@ -1672,6 +1765,7 @@ impl RecordBatch for DqnRecord {
             legal_offsets.push(legal_ids.len() as i64);
             next_legal_ids.extend(t.next_legal.iter().map(|&a| a as i64));
             next_legal_offsets.push(next_legal_ids.len() as i64);
+            can_bootstrap.push(!t.next_legal.is_empty());
             actions.push(t.action as i64);
             players.push(t.player as i64);
             rewards.push(t.reward);
@@ -1695,6 +1789,7 @@ impl RecordBatch for DqnRecord {
                 rewards: rewards.into_pyarray(py).unbind(),
                 next_obs: next_arr.unbind(),
                 dones: dones.into_pyarray(py).unbind(),
+                can_bootstrap: can_bootstrap.into_pyarray(py).unbind(),
                 masks: mask_arr.unbind(),
                 legal_ids: legal_ids.into_pyarray(py).unbind(),
                 legal_offsets: legal_offsets.into_pyarray(py).unbind(),
@@ -1975,6 +2070,46 @@ enum GameSpec {
 }
 
 impl GameSpec {
+    fn name(&self) -> &'static str {
+        match self {
+            GameSpec::Snake { .. } => "snake",
+            GameSpec::Connect4 => "connect4",
+            GameSpec::Chess { .. } => "chess",
+            GameSpec::Backgammon { .. } => "backgammon",
+            GameSpec::TexasHoldem { .. } => "texas_holdem",
+            GameSpec::KuhnPoker { .. } => "kuhn_poker",
+            GameSpec::LeducPoker => "leduc_poker",
+            GameSpec::GridWorld { .. } => "gridworld",
+        }
+    }
+
+    fn default_encoder(&self) -> EncoderSpec {
+        match *self {
+            GameSpec::Snake { .. } => EncoderSpec::Snake,
+            GameSpec::Connect4 => EncoderSpec::Connect4,
+            GameSpec::Chess { encoder, .. } => EncoderSpec::Chess(encoder),
+            GameSpec::Backgammon { .. } => EncoderSpec::Backgammon,
+            GameSpec::TexasHoldem { .. } => EncoderSpec::TexasHoldem,
+            GameSpec::KuhnPoker { .. } => EncoderSpec::KuhnPoker,
+            GameSpec::LeducPoker => EncoderSpec::LeducPoker,
+            GameSpec::GridWorld { .. } => EncoderSpec::GridWorld,
+        }
+    }
+
+    fn accepts_encoder(&self, encoder: EncoderSpec) -> bool {
+        matches!(
+            (self, encoder),
+            (GameSpec::Snake { .. }, EncoderSpec::Snake)
+                | (GameSpec::Connect4, EncoderSpec::Connect4)
+                | (GameSpec::Chess { .. }, EncoderSpec::Chess(_))
+                | (GameSpec::Backgammon { .. }, EncoderSpec::Backgammon)
+                | (GameSpec::TexasHoldem { .. }, EncoderSpec::TexasHoldem)
+                | (GameSpec::KuhnPoker { .. }, EncoderSpec::KuhnPoker)
+                | (GameSpec::LeducPoker, EncoderSpec::LeducPoker)
+                | (GameSpec::GridWorld { .. }, EncoderSpec::GridWorld)
+        )
+    }
+
     /// The game's player count — cache-slot and per-player-callback sizing at construction.
     fn num_agents(&self) -> usize {
         match *self {
@@ -1993,8 +2128,8 @@ impl GameSpec {
     /// defaults. Lets a caller size a network from a handle (`game.observation_space()`) without
     /// hard-coding any game's dimensions.
     fn spaces(&self) -> (Space, Space) {
-        // Observation space comes from the game's default encoder (representation); the action space
-        // is the game's (rules).
+        // Observation space comes from the encoder selected on the handle (representation); the
+        // action space is the game's (rules). Single-encoder games have only their default variant.
         fn of<G: Game>(game: G, enc: &dyn StateEncoder<State = G::State>) -> (Space, Space) {
             (enc.observation_space(), game.action_space())
         }
@@ -2067,10 +2202,10 @@ fn reward_schema(game: &GameSpec) -> &'static [(&'static str, f64)] {
         GameSpec::Snake { .. } => &[
             ("step", 0.0),
             ("food", 0.0),
-            ("loss", 0.0),
+            ("loss", -1.0),
             ("draw", 0.0),
             ("kill", 0.0),
-            ("win", 0.0),
+            ("win", 1.0),
             ("survival", 0.0),
         ],
         GameSpec::Connect4 => &[("win", 1.0), ("loss", -1.0), ("draw", 0.0)],
@@ -2299,13 +2434,14 @@ fn check_max_agents<P: Policy, G: Game>(policy: &P, label: &str, game: &G) -> Py
 /// so the searcher's own width is not a factor). The searches still check the realized,
 /// state-dependent products as backstops.
 /// The hidden-information gate (no-panic contract): search policies branch on the true state
-/// and would be clairvoyant about hidden state (poker's hole cards) — a config error here,
-/// before `Engine::new`'s assert backstop. The DQN family is exempt (observation-only).
+/// and would be clairvoyant about hidden state — a config error here before `Engine::new`'s
+/// assert backstop. Compatible workflows are documented centrally rather than duplicated here.
 fn check_information<G: Game>(label: &str, game: &G) -> PyResult<()> {
     if !game.perfect_information() {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "the {label} policy searches the true state and would be clairvoyant on this \
-             hidden-information game; use the DQN family (EpsilonGreedyQ + Dqn)"
+             hidden-information game; see {}",
+            reinfors_core::COMPATIBILITY_DOCS
         )));
     }
     Ok(())
@@ -2392,7 +2528,9 @@ where
         ) => {
             validate_search_params(expansion_budget, top_k, max_depth, beta)?;
             if n_heads < 1 {
-                return Err(pyo3::exceptions::PyValueError::new_err("n_heads must be >= 1"));
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "n_heads must be >= 1",
+                ));
             }
             check_unit("epsilon", epsilon)?;
             check_unit("outcome_weight", outcome_weight)?;
@@ -2409,7 +2547,11 @@ where
             let policy = SelectiveExpectimax::new(cfg, n_heads, epsilon);
             check_information("SelectiveExpectimax", &game)?;
             check_max_agents(&policy, "SelectiveExpectimax", &game)?;
-            check_joint_space("SelectiveExpectimax", &game, game.num_agents().saturating_sub(1))?;
+            check_joint_space(
+                "SelectiveExpectimax",
+                &game,
+                game.num_agents().saturating_sub(1),
+            )?;
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
@@ -2454,10 +2596,14 @@ where
                 ));
             }
             if max_depth < 1 {
-                return Err(pyo3::exceptions::PyValueError::new_err("max_depth must be >= 1"));
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "max_depth must be >= 1",
+                ));
             }
             if uct_c < 0.0 {
-                return Err(pyo3::exceptions::PyValueError::new_err("uct_c must be >= 0"));
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "uct_c must be >= 0",
+                ));
             }
             if !(temperature >= 0.0 && temperature.is_finite()) {
                 return Err(pyo3::exceptions::PyValueError::new_err(
@@ -2525,10 +2671,14 @@ where
                 ));
             }
             if max_depth < 1 {
-                return Err(pyo3::exceptions::PyValueError::new_err("max_depth must be >= 1"));
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "max_depth must be >= 1",
+                ));
             }
             if c_puct < 0.0 {
-                return Err(pyo3::exceptions::PyValueError::new_err("c_puct must be >= 0"));
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "c_puct must be >= 0",
+                ));
             }
             check_unit("noise_epsilon", noise_epsilon)?;
             if !(noise_alpha > 0.0 && noise_alpha.is_finite()) {
@@ -2580,7 +2730,9 @@ where
         }
         (PolicySpec::EpsilonGreedyQ { n_heads, epsilon }, LearnerSpec::Dqn { bootstrap_p }) => {
             if n_heads < 1 {
-                return Err(pyo3::exceptions::PyValueError::new_err("n_heads must be >= 1"));
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "n_heads must be >= 1",
+                ));
             }
             check_unit("epsilon", epsilon)?;
             check_unit("bootstrap_p", bootstrap_p)?;
@@ -2607,10 +2759,10 @@ where
                 num_agents,
             }))
         }
-        _ => Err(pyo3::exceptions::PyValueError::new_err(
-            "incompatible policy/learner: TreeStrap pairs with SelectiveExpectimax or Mcts, Dqn with \
-             EpsilonGreedyQ, and AlphaZero (policy) with AlphaZero (learner)",
-        )),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "incompatible policy/learner composition; see {}",
+            reinfors_core::COMPATIBILITY_DOCS
+        ))),
     }
 }
 
@@ -2622,8 +2774,8 @@ struct StartBufferConfig {
 }
 
 /// Game axis: pick the concrete game from `GameSpec`, then dispatch to `build_for_game`. One arm per
-/// game; each instantly works with every family. The start distribution is wired here too, since only
-/// the snake arm has a cell key for the reached-state buffer (other games use `AlwaysInitialState`).
+/// game; each instantly works with every compatible family. The start distribution is wired here too;
+/// unsupported game/start-distribution combinations are reported against the compatibility catalogue.
 #[allow(clippy::too_many_arguments)]
 fn build_engine(
     game: GameSpec,
@@ -2636,11 +2788,12 @@ fn build_engine(
     learn_players: Option<Vec<usize>>,
 ) -> PyResult<Box<dyn ErasedEngine>> {
     let reward = build_reward(&game, reward)?;
-    // The reached-state buffer needs a game-specific cell key; only snake supplies one in v1.
+    // A reached-state buffer needs a game-specific cell key.
     if start_buffer.is_some() && !matches!(game, GameSpec::Snake { .. }) {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "start_buffer is only supported for the snake game",
-        ));
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "this game does not support start_buffer; see {}",
+            reinfors_core::COMPATIBILITY_DOCS
+        )));
     }
     match (game, reward) {
         (
@@ -2820,7 +2973,7 @@ fn build_engine(
 // ===========================================================================
 // UNIFIED ENV (permanent) — `rf.Env`, the caller-driven single-game instance. Mirrors the engine's
 // type-erasure: one `Env` pyclass holds any game behind `Box<dyn ErasedEnv>`, built via a per-game
-// arm that pairs the game with its default encoder. Drives one game move-by-move (play / eval).
+// arm that pairs the game with its selected encoder. Drives one game move-by-move (play / eval).
 // ===========================================================================
 
 const ENV_SNAPSHOT_SCHEMA: u8 = 1;
@@ -2921,6 +3074,7 @@ struct PyEnv {
     inner: Box<dyn ErasedEnv>,
     // Retained for `fork` (rebuilds the composition) and `resolved_config`/snapshot fingerprints.
     game_spec: GameSpec,
+    encoder_spec: EncoderSpec,
     reward_weights: Option<HashMap<String, f64>>,
     config: Value,
     fingerprint: String,
@@ -2947,6 +3101,7 @@ impl PyEnv {
     #[pyo3(signature = (game, reward=None, seed=0))]
     fn new(game: GameHandle, reward: Option<PyReward>, seed: u64) -> PyResult<Self> {
         let game_spec = game.spec.clone();
+        let encoder_spec = game.encoder;
         let reward_weights = reward.as_ref().map(|r| r.weights.clone());
         let reward_cfg = match &reward_weights {
             None => Value::Null, // reward-free (play/eval): rewards is always None
@@ -2966,13 +3121,14 @@ impl PyEnv {
         };
         let config = json!({
             "schema_version": ENV_SNAPSHOT_SCHEMA,
-            "game": game_cfg(&game_spec),
+            "game": game_cfg(&game_spec, encoder_spec),
             "reward": reward_cfg,
         });
         let fingerprint = fingerprint_hex(&canonical_config_bytes(&config));
         Ok(PyEnv {
             inner: build_env(game.spec, reward, seed)?,
             game_spec,
+            encoder_spec,
             reward_weights,
             config,
             fingerprint,
@@ -3034,6 +3190,7 @@ impl PyEnv {
         let mut forked = PyEnv {
             inner: build_env(self.game_spec.clone(), reward, 0)?,
             game_spec: self.game_spec.clone(),
+            encoder_spec: self.encoder_spec,
             reward_weights: self.reward_weights.clone(),
             config: self.config.clone(),
             fingerprint: self.fingerprint.clone(),
@@ -3511,7 +3668,7 @@ where
     }
 }
 
-/// Build a type-erased `Env` from a `GameSpec`, pairing the game with its default encoder. One arm per
+/// Build a type-erased `Env` from a `GameSpec`, pairing the game with its selected encoder. One arm per
 /// game (mirrors `build_engine`'s game axis). An optional `reward` makes the `Env` report per-step
 /// scalar rewards (for the training-facing adapters); `None` keeps it reward-free (play/eval).
 fn build_env(game: GameSpec, reward: Option<PyReward>, seed: u64) -> PyResult<Box<dyn ErasedEnv>> {
@@ -3810,11 +3967,34 @@ fn space_to_py(py: Python<'_>, space: Space) -> PyResult<Bound<'_, PyAny>> {
     }
 }
 
-/// Game handle (`rf.games.Snake` / `.Connect4` / `.GridWorld`).
+/// Opaque game handle. See `rf.games` and the generated game catalogue for built-in constructors.
 #[pyclass]
 #[derive(Clone)]
 struct GameHandle {
     spec: GameSpec,
+    encoder: EncoderSpec,
+}
+
+const ENCODER_DOCS: &str =
+    "https://github.com/jeepjeepjeep/reinfors/blob/main/docs/catalogue/games.md#observation-encoders";
+
+fn game_handle(mut spec: GameSpec, encoder: Option<EncoderHandle>) -> PyResult<GameHandle> {
+    let selected = encoder.map_or_else(|| spec.default_encoder(), |handle| handle.spec);
+    if !spec.accepts_encoder(selected) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "incompatible encoder {:?} for game {:?}; see {}",
+            selected.name(),
+            spec.name(),
+            ENCODER_DOCS
+        )));
+    }
+    if let (GameSpec::Chess { encoder, .. }, EncoderSpec::Chess(chess)) = (&mut spec, selected) {
+        *encoder = chess;
+    }
+    Ok(GameHandle {
+        spec,
+        encoder: selected,
+    })
 }
 
 #[pymethods]
@@ -3823,7 +4003,7 @@ impl GameHandle {
     // Snake can loop forever (circling without eating/dying), so `max_ticks` defaults to a finite cap:
     // it keeps `Engine.collect` from spinning on a non-terminating episode. Pass `max_ticks=None` to
     // explicitly opt into never truncating.
-    #[pyo3(signature = (grid_size=20, initial_length=3, food=3, play_to_last=true, win_food_lead=None, max_ticks=1000, num_snakes=2))]
+    #[pyo3(signature = (grid_size=20, initial_length=3, food=3, play_to_last=true, win_food_lead=None, max_ticks=1000, num_snakes=2, encoder=None))]
     #[pyo3(name = "Snake")]
     #[allow(clippy::too_many_arguments)]
     fn snake(
@@ -3834,6 +4014,7 @@ impl GameHandle {
         win_food_lead: Option<usize>,
         max_ticks: Option<usize>,
         num_snakes: usize,
+        encoder: Option<EncoderHandle>,
     ) -> PyResult<Self> {
         check_max_ticks(max_ticks)?;
         // Validate by constructing: the game's own invariants are the single source of truth.
@@ -3848,8 +4029,8 @@ impl GameHandle {
         }
         .validate()
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
-        Ok(GameHandle {
-            spec: GameSpec::Snake {
+        game_handle(
+            GameSpec::Snake {
                 num_snakes,
                 grid_size,
                 initial_length,
@@ -3858,20 +4039,22 @@ impl GameHandle {
                 win_food_lead,
                 max_ticks,
             },
-        })
+            encoder,
+        )
     }
 
     #[staticmethod]
     // One episode = one hand at fresh stacks (chip-delta rewards, zero-sum); the button is
-    // drawn per episode so seats rotate positions across self-play. Hidden information: the
-    // search families reject this game — train with the DQN family.
-    #[pyo3(signature = (num_players=6, stack=200, small_blind=5, big_blind=10))]
+    // drawn per episode so seats rotate positions across self-play. See the compatibility catalogue
+    // for appropriate imperfect-information workflows.
+    #[pyo3(signature = (num_players=6, stack=200, small_blind=5, big_blind=10, encoder=None))]
     #[pyo3(name = "TexasHoldem")]
     fn texas_holdem(
         num_players: usize,
         stack: u32,
         small_blind: u32,
         big_blind: u32,
+        encoder: Option<EncoderHandle>,
     ) -> PyResult<Self> {
         TexasHoldem {
             num_players,
@@ -3881,47 +4064,40 @@ impl GameHandle {
         }
         .validate()
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
-        Ok(GameHandle {
-            spec: GameSpec::TexasHoldem {
+        game_handle(
+            GameSpec::TexasHoldem {
                 num_players,
                 stack,
                 small_blind,
                 big_blind,
             },
-        })
+            encoder,
+        )
     }
 
     #[staticmethod]
     // The 3-card analytic testbed for imperfect-information algorithms (12 information sets,
-    // known Nash family). Hidden information: search families reject it; solve with
-    // rf.solvers or train with the DQN family.
-    #[pyo3(name = "KuhnPoker", signature = (players=2))]
-    fn kuhn_poker(players: usize) -> PyResult<Self> {
+    // known Nash family). See the compatibility catalogue for supported workflows.
+    #[pyo3(name = "KuhnPoker", signature = (players=2, encoder=None))]
+    fn kuhn_poker(players: usize, encoder: Option<EncoderHandle>) -> PyResult<Self> {
         (KuhnPoker { players })
             .validate()
             .map_err(pyo3::exceptions::PyValueError::new_err)?;
-        Ok(GameHandle {
-            spec: GameSpec::KuhnPoker { players },
-        })
+        game_handle(GameSpec::KuhnPoker { players }, encoder)
     }
 
     #[staticmethod]
-    // The standard small imperfect-information benchmark: 6 cards, two betting rounds, a
-    // public card between them. Hidden information: search families reject it; solve with
-    // rf.solvers or train with the DQN family.
-    #[pyo3(name = "LeducPoker")]
-    fn leduc_poker() -> Self {
-        GameHandle {
-            spec: GameSpec::LeducPoker,
-        }
+    // A small imperfect-information benchmark: 6 cards, two betting rounds, and a public card
+    // between them. See the compatibility catalogue for supported workflows.
+    #[pyo3(name = "LeducPoker", signature = (encoder=None))]
+    fn leduc_poker(encoder: Option<EncoderHandle>) -> PyResult<Self> {
+        game_handle(GameSpec::LeducPoker, encoder)
     }
 
     #[staticmethod]
-    #[pyo3(name = "Connect4")]
-    fn connect4() -> Self {
-        GameHandle {
-            spec: GameSpec::Connect4,
-        }
+    #[pyo3(name = "Connect4", signature = (encoder=None))]
+    fn connect4(encoder: Option<EncoderHandle>) -> PyResult<Self> {
+        game_handle(GameSpec::Connect4, encoder)
     }
 
     #[staticmethod]
@@ -3933,23 +4109,24 @@ impl GameHandle {
     #[pyo3(name = "Chess")]
     fn chess(max_ticks: Option<usize>, encoder: Option<EncoderHandle>) -> PyResult<Self> {
         check_max_ticks(max_ticks)?;
-        let encoder = encoder.map_or(ChessEncoderSpec::Minimal, |e| e.chess);
-        Ok(GameHandle {
-            spec: GameSpec::Chess { max_ticks, encoder },
-        })
+        game_handle(
+            GameSpec::Chess {
+                max_ticks,
+                encoder: ChessEncoderSpec::Minimal,
+            },
+            encoder,
+        )
     }
 
     #[staticmethod]
     // Backgammon with the OpenSpiel-compatible 1352-action encoding and declared dice chance; no
     // doubling cube. Reward keys: win/gammon/backgammon (defaults 1/2/3, zero-sum). Weak nets can
     // shuffle checkers for a long time, so `max_ticks` defaults to a finite cap.
-    #[pyo3(signature = (max_ticks=1000))]
+    #[pyo3(signature = (max_ticks=1000, encoder=None))]
     #[pyo3(name = "Backgammon")]
-    fn backgammon(max_ticks: Option<usize>) -> PyResult<Self> {
+    fn backgammon(max_ticks: Option<usize>, encoder: Option<EncoderHandle>) -> PyResult<Self> {
         check_max_ticks(max_ticks)?;
-        Ok(GameHandle {
-            spec: GameSpec::Backgammon { max_ticks },
-        })
+        game_handle(GameSpec::Backgammon { max_ticks }, encoder)
     }
 
     #[staticmethod]
@@ -3957,13 +4134,14 @@ impl GameHandle {
     // (pass `max_ticks=None` to opt into never truncating). The goal defaults to the far corner,
     // DERIVED from `size` — an absolute default would silently sit mid-grid (or out of it) for other
     // sizes.
-    #[pyo3(signature = (size=5, goal_row=None, goal_col=None, max_ticks=1000))]
+    #[pyo3(signature = (size=5, goal_row=None, goal_col=None, max_ticks=1000, encoder=None))]
     #[pyo3(name = "GridWorld")]
     fn gridworld(
         size: i32,
         goal_row: Option<i32>,
         goal_col: Option<i32>,
         max_ticks: Option<usize>,
+        encoder: Option<EncoderHandle>,
     ) -> PyResult<Self> {
         check_max_ticks(max_ticks)?;
         // saturating: a nonsense `size` must reach validate() as an error, not overflow here
@@ -3976,13 +4154,14 @@ impl GameHandle {
         }
         .validate()
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
-        Ok(GameHandle {
-            spec: GameSpec::GridWorld {
+        game_handle(
+            GameSpec::GridWorld {
                 size,
                 goal,
                 max_ticks,
             },
-        })
+            encoder,
+        )
     }
 
     /// The game's observation `Space` (an `rf.spaces.Box`) — its `shape` sizes the value network's
@@ -3996,9 +4175,15 @@ impl GameHandle {
         space_to_py(py, self.spec.spaces().1)
     }
 
-    /// The episode-length cap after which the rollout truncates a still-running game, or `None` for a
-    /// game that always ends on its own (Connect-4). Loop-prone games (snake, gridworld) default to a
-    /// finite cap so `Engine.collect` can't spin on a non-terminating episode.
+    /// The selected network-facing representation. Every game has an encoder; constructors use
+    /// their registered default when `encoder=None`.
+    #[getter]
+    fn encoder(&self) -> EncoderHandle {
+        EncoderHandle { spec: self.encoder }
+    }
+
+    /// The episode-length cap after which the rollout truncates a still-running game, or `None` when
+    /// the game declares no truncation horizon. Constructors choose safe defaults for loop-prone games.
     fn truncation_horizon(&self) -> Option<usize> {
         match self.spec {
             GameSpec::Snake { max_ticks, .. }
@@ -4133,12 +4318,12 @@ fn cap_err(e: reinfors_core::EnumerationCapExceeded) -> pyo3::PyErr {
     pyo3::exceptions::PyValueError::new_err(e.to_string())
 }
 
-/// `rf.solvers.Cfr` — counterfactual regret minimization over a sequential game with declared
-/// chance and information-state keys (the poker family, 2..=10 players; convergence to Nash
-/// is only guaranteed at 2-player zero-sum). Variants: "vanilla", "plus" (CFR+),
+/// `rf.solvers.Cfr` — counterfactual regret minimization over compatible sequential games with
+/// declared chance and information-state keys; convergence to Nash is guaranteed only at
+/// 2-player zero-sum. Variants: "vanilla", "plus" (CFR+),
 /// "external_mccfr". The output is the AVERAGE strategy (`average_strategy` by
 /// `env.information_state_key` bytes); `exploitability()` is the exact convergence metric
-/// (enumeration-capped: Kuhn/Leduc-sized games, not full hold'em).
+/// for enumerable trees. See the compatibility catalogue for built-in compositions.
 #[pyclass(name = "Cfr")]
 struct PyCfr {
     inner: Box<dyn ErasedCfr>,
@@ -4186,9 +4371,11 @@ impl PyCfr {
                 big_blind,
             } => {
                 if variant != CfrVariant::ExternalMccfr {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "full hold'em's chance fans are unenumerable: use variant=\"external_mccfr\"",
-                    ));
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "this game's chance fan is not supported by an exact CFR variant; \
+                             use variant=\"external_mccfr\" or see {}",
+                        reinfors_core::COMPATIBILITY_DOCS
+                    )));
                 }
                 Box::new(CfrSolver::new(
                     TexasHoldem {
@@ -4203,15 +4390,15 @@ impl PyCfr {
                 ))
             }
             _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "CFR requires a sequential game with declared chance and information-state \
-                     keys (KuhnPoker, LeducPoker, TexasHoldem)",
-                ))
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "this game is not compatible with CFR; see {}",
+                    reinfors_core::COMPATIBILITY_DOCS
+                )))
             }
         };
         let composition = json!({
             "solver": {"name": "cfr", "variant": variant_name},
-            "game": game_cfg(&game.spec),
+            "game": game_cfg(&game.spec, game.encoder),
             "reward": {"scale": 1.0},
         });
         let fingerprint = fingerprint_hex(&canonical_config_bytes(&composition));
@@ -4346,7 +4533,7 @@ struct DeepCfrBatch {
 /// `rf.solvers.DeepCfr` — the Deep CFR data generator (Brown et al. 2019, external
 /// sampling): traversals query the CURRENT advantage networks through `infer` and emit the
 /// two training streams; buffers, iteration-weighted losses, and training are the caller's
-/// (see `scripts/train_deep_cfr.py`). `infer` is a single callable (shared network) or a
+/// (see `examples/train_deep_cfr.py`). `infer` is a single callable (shared network) or a
 /// per-player sequence, each `f(obs (M, dim) f32) -> (M, action_count) f64` advantages.
 #[pyclass(name = "DeepCfr")]
 struct PyDeepCfr {
@@ -4438,16 +4625,16 @@ impl PyDeepCfr {
                 )
             }
             _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "Deep CFR requires a 2-player game with declared chance and \
-                         information-state keys (KuhnPoker::default(), LeducPoker, heads-up TexasHoldem)",
-                ))
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "this game is not compatible with Deep CFR; see {}",
+                    reinfors_core::COMPATIBILITY_DOCS
+                )))
             }
         };
         let config = json!({
             "schema": CONFIG_SCHEMA_VERSION,
             "solver": {"name": "deep_cfr", "seed": seed},
-            "game": game_cfg(&game.spec),
+            "game": game_cfg(&game.spec, game.encoder),
             "reward": {"scale": 1.0},
         });
         Ok(PyDeepCfr {
@@ -4503,7 +4690,11 @@ impl PyDeepCfr {
             if callback_err.is_some() {
                 return vec![0.0; rows * a]; // argmax fallback keeps the unwind cheap
             }
-            let target = &callbacks[who.min(callbacks.len() - 1)];
+            let target = if callbacks.len() == 1 {
+                &callbacks[0]
+            } else {
+                &callbacks[who]
+            };
             let arr = Array2::from_shape_vec((rows, dim), obs_flat)
                 .expect("obs batch shape")
                 .into_pyarray(py);
@@ -4521,6 +4712,14 @@ impl PyDeepCfr {
                                 "infer returned shape {shape:?} for {rows} rows; expected \
                                  ({rows}, {a}) — one row of {a} advantages per query"
                             ))
+                        });
+                        return vec![0.0; rows * a];
+                    }
+                    if flat.iter().any(|value| !value.is_finite()) {
+                        callback_err.get_or_insert_with(|| {
+                            pyo3::exceptions::PyValueError::new_err(
+                                "Deep CFR infer outputs must contain only finite values",
+                            )
                         });
                         return vec![0.0; rows * a];
                     }
@@ -4616,8 +4815,8 @@ impl PyDeepCfr {
     }
 
     /// Exact exploitability of the AVERAGE-POLICY network (NashConv / num_players, zero at
-    /// Nash; for more than 2 players a positive plateau is the expected outcome) —
-    /// enumerable games only (Kuhn/Leduc, not full hold'em). `policy_infer(obs) -> (M,
+    /// Nash; for more than 2 players a positive plateau is the expected outcome). Available only
+    /// when the game tree fits the exact-enumeration cap. `policy_infer(obs) -> (M,
     /// action_count)` scores every reachable infoset in ONE batched call; rows are clamped
     /// non-negative and renormalized over the legal actions (uniform when degenerate).
     fn exploitability(&self, py: Python<'_>, policy_infer: &Bound<'_, PyAny>) -> PyResult<f64> {
@@ -4766,8 +4965,9 @@ impl PolicyHandle {
         })
     }
 
-    /// AlphaZero (PUCT) planner; pairs with `rf.learners.AlphaZero`; sequential, single-agent,
-    /// and simultaneous (decoupled/DUCT) games. The net callback returns a `(policy_logits (N, A), values (N,))` tuple — one forward,
+    /// AlphaZero (PUCT) planner for compatible sequential, single-agent, and simultaneous
+    /// (decoupled/DUCT) compositions. See the algorithm catalogue for its learner pairing. The net
+    /// callback returns a `(policy_logits (N, A), values (N,))` tuple — one forward,
     /// both heads. Root Dirichlet noise `(1-noise_epsilon)·P + noise_epsilon·Dir(noise_alpha)`
     /// supplies search-level exploration (drawn from the seeded stream — collects stay reproducible);
     /// the acting temperature (same semantics as `Mcts`) supplies move-level diversity. Acting is by
@@ -4981,23 +5181,83 @@ impl NoiseHandle {
     }
 }
 
-/// Observation-encoder handle (`rf.encoders.*`): a configurable view of a game's state, passed to
-/// the game handle (e.g. `rf.games.Chess(encoder=rf.encoders.AlphaZeroChess(history_length=8))`).
-/// Encoders are game-specific; the game handle validates the pairing.
+/// Observation-encoder handle (`rf.encoders.*`): the network-facing view paired with every game
+/// handle. Encoders are game-specific; game constructors validate the pairing.
 #[pyclass]
 #[derive(Clone)]
 struct EncoderHandle {
-    chess: ChessEncoderSpec,
+    spec: EncoderSpec,
 }
 
 #[pymethods]
 impl EncoderHandle {
+    #[getter]
+    fn name(&self) -> &'static str {
+        self.spec.name()
+    }
+
+    #[staticmethod]
+    #[pyo3(name = "Snake")]
+    fn snake() -> Self {
+        EncoderHandle {
+            spec: EncoderSpec::Snake,
+        }
+    }
+
+    #[staticmethod]
+    #[pyo3(name = "Connect4")]
+    fn connect4() -> Self {
+        EncoderHandle {
+            spec: EncoderSpec::Connect4,
+        }
+    }
+
+    #[staticmethod]
+    #[pyo3(name = "Backgammon")]
+    fn backgammon() -> Self {
+        EncoderHandle {
+            spec: EncoderSpec::Backgammon,
+        }
+    }
+
+    #[staticmethod]
+    #[pyo3(name = "TexasHoldem")]
+    fn texas_holdem() -> Self {
+        EncoderHandle {
+            spec: EncoderSpec::TexasHoldem,
+        }
+    }
+
+    #[staticmethod]
+    #[pyo3(name = "KuhnPoker")]
+    fn kuhn_poker() -> Self {
+        EncoderHandle {
+            spec: EncoderSpec::KuhnPoker,
+        }
+    }
+
+    #[staticmethod]
+    #[pyo3(name = "LeducPoker")]
+    fn leduc_poker() -> Self {
+        EncoderHandle {
+            spec: EncoderSpec::LeducPoker,
+        }
+    }
+
+    #[staticmethod]
+    #[pyo3(name = "GridWorld")]
+    fn gridworld() -> Self {
+        EncoderHandle {
+            spec: EncoderSpec::GridWorld,
+        }
+    }
+
     /// The default chess view: (19, 8, 8) piece/castling/ep/clock planes, no history.
     #[staticmethod]
     #[pyo3(name = "MinimalChess")]
     fn minimal_chess() -> Self {
         EncoderHandle {
-            chess: ChessEncoderSpec::Minimal,
+            spec: EncoderSpec::Chess(ChessEncoderSpec::Minimal),
         }
     }
 
@@ -5009,7 +5269,7 @@ impl EncoderHandle {
     #[pyo3(name = "RelativeChess")]
     fn relative_chess() -> Self {
         EncoderHandle {
-            chess: ChessEncoderSpec::Relative,
+            spec: EncoderSpec::Chess(ChessEncoderSpec::Relative),
         }
     }
 
@@ -5020,7 +5280,7 @@ impl EncoderHandle {
     #[pyo3(name = "OpenSpielChess")]
     fn openspiel_chess() -> Self {
         EncoderHandle {
-            chess: ChessEncoderSpec::OpenSpiel,
+            spec: EncoderSpec::Chess(ChessEncoderSpec::OpenSpiel),
         }
     }
 
@@ -5029,24 +5289,53 @@ impl EncoderHandle {
     /// engine (play/eval scripts): read logits at `head_index(a, agent)` for each legal game
     /// action `a` from `env.legal_actions`.
     fn head_index(&self, action: usize, agent: usize) -> PyResult<usize> {
-        if action >= CHESS_ACTIONS {
+        let action_count = self.spec.action_count();
+        if action >= action_count {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "action {action} out of range for the {CHESS_ACTIONS}-action chess encoding"
+                "action {action} out of range for the {action_count}-action {} encoding",
+                self.spec.name()
             )));
         }
-        let (_, enc) = chess_parts(None, self.chess);
-        Ok(enc.head_index(action, agent))
+        match self.spec {
+            EncoderSpec::Chess(chess) => {
+                let (_, enc) = chess_parts(None, chess);
+                Ok(enc.head_index(action, agent))
+            }
+            // Keep this exhaustive: a new encoder must explicitly declare whether its Python-facing
+            // action frame is identity or route through its concrete `ActionView` implementation.
+            EncoderSpec::Snake
+            | EncoderSpec::Connect4
+            | EncoderSpec::Backgammon
+            | EncoderSpec::TexasHoldem
+            | EncoderSpec::KuhnPoker
+            | EncoderSpec::LeducPoker
+            | EncoderSpec::GridWorld => Ok(action),
+        }
     }
 
     /// Inverse of `head_index`.
     fn game_action(&self, head: usize, agent: usize) -> PyResult<usize> {
-        if head >= CHESS_ACTIONS {
+        let action_count = self.spec.action_count();
+        if head >= action_count {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "head {head} out of range for the {CHESS_ACTIONS}-action chess encoding"
+                "head {head} out of range for the {action_count}-action {} encoding",
+                self.spec.name()
             )));
         }
-        let (_, enc) = chess_parts(None, self.chess);
-        Ok(enc.game_action(head, agent))
+        match self.spec {
+            EncoderSpec::Chess(chess) => {
+                let (_, enc) = chess_parts(None, chess);
+                Ok(enc.game_action(head, agent))
+            }
+            // Deliberately mirrors the exhaustive `head_index` decision above.
+            EncoderSpec::Snake
+            | EncoderSpec::Connect4
+            | EncoderSpec::Backgammon
+            | EncoderSpec::TexasHoldem
+            | EncoderSpec::KuhnPoker
+            | EncoderSpec::LeducPoker
+            | EncoderSpec::GridWorld => Ok(head),
+        }
     }
 
     /// AlphaZero's chess view: `14·history_length + 7` planes (12 piece + 2 repetition planes per
@@ -5066,9 +5355,9 @@ impl EncoderHandle {
             )));
         }
         Ok(EncoderHandle {
-            chess: ChessEncoderSpec::AlphaZero {
+            spec: EncoderSpec::Chess(ChessEncoderSpec::AlphaZero {
                 history: history_length,
-            },
+            }),
         })
     }
 }

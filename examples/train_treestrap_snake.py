@@ -2,7 +2,7 @@
 
 reinfors owns *data generation* — env dynamics, observations, and the batched selective search all run
 in Rust. *You* own *learning* — the network and the gradient step are plain PyTorch here. The two meet
-at one seam: the `infer` callback, an `(N, C*H*W) float32` batch -> `(N, K, A) float64` forward that
+at one seam: the `infer` callback, an `(N, C*H*W) float32` batch -> `(N, K, A) float32` forward that
 the search calls once per pooled round. Because it closes over the live network, each `collect`
 automatically searches with the current weights — the actor-learner weight sync is implicit.
 
@@ -10,7 +10,7 @@ This is a deliberately tiny, self-contained reference, not a production trainer:
 checkpoints, no logging. It exists to show the wiring. For a real run (config, replay, TensorBoard,
 resume) see snake_RL's `scripts/train_reinfors.py`, which uses this same `Engine` + `infer` contract.
 
-    uv run --with torch python scripts/train_example.py --iterations 20
+    uv run --with torch python examples/train_treestrap_snake.py --iterations 20
 """
 
 from __future__ import annotations
@@ -46,9 +46,9 @@ class ExampleNet(nn.Module):
 
 
 def make_infer(net: ExampleNet, device: str = "cpu") -> Callable[[np.ndarray], np.ndarray]:
-    """The search's per-round callback: a flat `(N, C*H*W)` float32 batch -> `(N, K, A)` float64
+    """The search's per-round callback: a flat `(N, C*H*W)` float32 batch -> `(N, K, A)` float32
     forward of `net`. A no-grad forward, run in eval mode and restored afterwards so it's side-effect
-    free; the device->host copy moves float32, with the upcast to float64 on the host."""
+    free; reinfors widens the returned values exactly."""
     net.to(device)
     c, h, w = net.obs_shape
 
@@ -150,7 +150,9 @@ def main() -> None:
 
     print(f"training on {args.device} — grid {args.grid}, {args.heads} heads, {args.n_games} games/collect")
     for it in range(args.iterations):
-        obs, target, mask, telemetry = engine.collect(args.collect_size, infer)  # search with live weights
+        obs, target, mask, telemetry = engine.collect(
+            n_records=args.collect_size, infer=infer
+        )  # search with live weights
         loss = train_step(net, optimizer, obs, target, mask, args.device)
         eps = telemetry["episodes"]
         mean_r = sum(sum(r) / len(r) for r, _len, _s in eps) / len(eps) if eps else float("nan")

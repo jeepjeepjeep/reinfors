@@ -228,6 +228,40 @@ def test_engine_rejects_head_count_mismatch() -> None:
         engine.collect(10, _infer)
 
 
+@pytest.mark.parametrize("bad_value", [np.nan, np.inf, -np.inf])
+def test_engine_rejects_non_finite_inference_outputs(bad_value: float) -> None:
+    def infer(arr: np.ndarray) -> np.ndarray:
+        out = _infer(arr)
+        out.flat[0] = bad_value
+        return out
+
+    with pytest.raises(ValueError, match="finite"):
+        _engine(0, interior=False).collect(10, infer)
+
+
+@pytest.mark.parametrize(
+    ("bad_infer", "observed"),
+    [
+        (
+            lambda arr: np.zeros((arr.shape[0], _K, 3), dtype=np.int32),
+            "must be a float64 or float32 ndarray; got dtype int32",
+        ),
+        (
+            lambda arr: np.zeros((arr.shape[0], 3), dtype=np.float64),
+            "must be a 3-d ndarray; got 2-d",
+        ),
+    ],
+)
+def test_engine_reports_infer_dtype_and_rank(
+    bad_infer: Any,
+    observed: str,
+) -> None:
+    with pytest.raises(TypeError) as error:
+        _engine(0, interior=False).collect(10, bad_infer)
+    message = str(error.value)
+    assert observed in message
+
+
 def test_infer_error_surfaces_during_collect() -> None:
     # A failing network forward must propagate its real error — the head-count check (success path
     # only) must not mask it. Regression guard: a raising infer with n_heads > 1 used to panic with a

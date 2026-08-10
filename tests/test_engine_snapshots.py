@@ -3,6 +3,7 @@ yields byte-identical records (cold cache notwithstanding), across every composi
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -73,6 +74,30 @@ def test_bytes_round_trip_and_cross_engine_restore() -> None:
     other, _ = _mk("dqn")  # same composition, fresh engine
     other.restore(snap, expect_policy_version="net-v7")
     assert _sig(other, infer, 50) == _sig(engine, infer, 50)
+
+
+def test_documented_crash_resume_snippet_runs() -> None:
+    """Execute the guide's restore block so documentation cannot invent a second fingerprint gate."""
+    source, infer = _mk("dqn")
+    _sig(source, infer, 40)
+    model_version = "net-v7"
+    saved_config = source.resolved_config()
+    snapshot_payload = source.snapshot(policy_version=model_version).to_bytes()
+
+    guide = Path(__file__).parents[1] / "docs/guides/configuration-and-checkpoints.md"
+    resume_section = guide.read_text(encoding="utf-8").split("## Resume after a crash", 1)[1]
+    snippet = resume_section.split("```python\n", 1)[1].split("\n```", 1)[0]
+    namespace: dict[str, Any] = {
+        "model_version": model_version,
+        "saved_config": saved_config,
+        "snapshot_payload": snapshot_payload,
+    }
+    exec(snippet, namespace)
+
+    restored = namespace["engine"]
+    snapshot = namespace["snapshot"]
+    assert source.config_fingerprint() != snapshot.fingerprint  # Distinct hashes by design.
+    assert _sig(restored, infer, 50) == _sig(source, infer, 50)
 
 
 def test_restore_rejections_leave_the_engine_intact() -> None:

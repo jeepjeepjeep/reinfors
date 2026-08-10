@@ -11,6 +11,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import _reinfors
+from .catalog import GAMES
 
 Snake = _reinfors.GameHandle.Snake
 TexasHoldem = _reinfors.GameHandle.TexasHoldem
@@ -31,6 +32,7 @@ _REGISTRY: dict[str, Callable[..., Any]] = {
     "connect4": Connect4,
     "gridworld": GridWorld,
 }
+assert _REGISTRY.keys() == GAMES.keys(), "game registry and documentation catalogue diverged"
 
 
 def registered() -> list[str]:

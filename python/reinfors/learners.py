@@ -1,9 +1,8 @@
 """``rf.learners`` — learning-algorithm handles for composing an ``Engine``.
 
 Each constructor returns an opaque learner handle. A learner pairs with the policy family that
-produces the evaluation it consumes (``TreeStrap`` ↔ ``SelectiveExpectimax``/``Mcts``, ``Dqn`` ↔
-``EpsilonGreedyQ``, ``AlphaZero`` ↔ ``AlphaZero``); ``Engine`` rejects an incompatible pairing.
-``make`` / ``registered`` are the name-addressable form.
+produces its evaluation type; ``Engine`` rejects incompatible pairings. The generated compatibility
+catalogue is the canonical built-in matrix. ``make`` / ``registered`` are the name-addressable form.
 """
 
 from __future__ import annotations
@@ -12,6 +11,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import _reinfors
+from .catalog import LEARNERS
 
 TreeStrap = _reinfors.LearnerHandle.TreeStrap
 Dqn = _reinfors.LearnerHandle.Dqn
@@ -22,6 +22,7 @@ _REGISTRY: dict[str, Callable[..., Any]] = {
     "dqn": Dqn,
     "alphazero": AlphaZero,
 }
+assert _REGISTRY.keys() == LEARNERS, "learner registry and documentation catalogue diverged"
 
 
 def registered() -> list[str]:

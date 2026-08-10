@@ -12,12 +12,14 @@ from __future__ import annotations
 from typing import Any
 
 from . import _reinfors
+from .catalog import NOISE
 
 Dirichlet = _reinfors.NoiseHandle.Dirichlet
 
 _REGISTRY = {
     "dirichlet": Dirichlet,
 }
+assert _REGISTRY.keys() == NOISE, "noise registry and documentation catalogue diverged"
 
 
 def registered() -> list[str]:

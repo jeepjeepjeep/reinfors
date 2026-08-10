@@ -139,7 +139,7 @@ def _throughput(work: Callable[[], int], repeats: int) -> float:
 def bench_collect(name: str, *, grid: int, mode: str, n_games: int, records: int, repeats: int, hidden: int) -> float:
     engine = _engine(name, grid, mode, n_games)
     infer = _infer(_obs_dim(name, grid), GAMES[name].make(grid).action_space().n, hidden)
-    return _throughput(lambda: int(engine.collect(records, infer).obs.shape[0]), repeats)
+    return _throughput(lambda: int(engine.collect(n_records=records, infer=infer).obs.shape[0]), repeats)
 
 
 def bench_env_steps(name: str, *, grid: int, steps: int, repeats: int, seed: int = 0) -> float:

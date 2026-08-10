@@ -1,0 +1,83 @@
+site_name: reinfors
+site_description: High-throughput reinforcement-learning search and sampling in Rust with caller-owned Python training
+site_url: https://jeepjeepjeep.github.io/reinfors/
+repo_url: https://github.com/jeepjeepjeep/reinfors
+repo_name: jeepjeepjeep/reinfors
+edit_uri: edit/main/docs/
+strict: true
+
+theme:
+  name: material
+  features:
+    - content.code.copy
+    - navigation.indexes
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/brightness-7
+        name: Use dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/brightness-4
+        name: Use light mode
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Guides:
+      - guides/index.md
+      - Training loop: guides/training.md
+      - Telemetry and TensorBoard: guides/telemetry.md
+      - Concurrent collection: guides/streaming.md
+      - Configuration and checkpoints: guides/configuration-and-checkpoints.md
+      - Evaluation: guides/evaluation.md
+      - Gymnasium and PettingZoo: guides/adapters.md
+  - Concepts:
+      - concepts/index.md
+      - Architecture: concepts/architecture.md
+      - Sampling and training: concepts/sampling-and-training.md
+  - Catalogue:
+      - catalogue/index.md
+      - Games: catalogue/games.md
+      - Algorithms: catalogue/algorithms.md
+      - Compatibility: catalogue/compatibility.md
+  - Examples: examples/index.md
+  - Extending reinfors:
+      - extending/index.md
+      - Component contracts: extending/component-contracts.md
+      - Add a game: extending/rust-components.md
+      - Python bindings: extending/python-bindings.md
+  - Benchmarks:
+      - benchmarks/index.md
+      - Methodology: benchmarks/methodology.md
+      - Reproducing: benchmarks/reproducing.md
+  - Reference:
+      - reference/index.md
+      - Inference contract: reference/inference-contract.md
+      - Batch formats: reference/batch-formats.md
+      - Glossary: reference/glossary.md
+      - Telemetry fields: reference/telemetry-fields.md
+      - Python API: reference/python-api.md
+      - Troubleshooting: reference/troubleshooting.md
+      - Current boundaries: reference/limits.md
+  - Development:
+      - Setup: development/setup.md
+      - Documentation: development/documentation.md

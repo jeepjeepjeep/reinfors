@@ -1,4 +1,4 @@
-"""Smoke test for the Deep CFR reference trainer (`scripts/train_deep_cfr.py`) — the
+"""Smoke test for the Deep CFR reference trainer (`examples/train_deep_cfr.py`) — the
 `test_example.py` pattern: not a learning-quality test, but a guard that the reference keeps
 running against the current API (the per-player infer list, the CSR batch fields, the
 exploitability instrument). torch-gated.
@@ -17,7 +17,7 @@ torch = pytest.importorskip("torch")
 
 
 def _load() -> Any:
-    path = os.path.join(os.path.dirname(__file__), "..", "scripts", "train_deep_cfr.py")
+    path = os.path.join(os.path.dirname(__file__), "..", "examples", "train_deep_cfr.py")
     spec = importlib.util.spec_from_file_location("train_deep_cfr", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
