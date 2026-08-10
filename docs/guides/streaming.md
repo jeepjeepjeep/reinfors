@@ -11,11 +11,9 @@ The stream borrows the engine for its lifetime. Calling `engine.collect()` or st
 stream while it is active raises an error. `stop()`, `pause()`, or context-manager exit returns the
 engine.
 
-!!! warning
-
-    Never abandon a stream without stopping it. The engine then remains unavailable for the rest
-    of the process: it cannot collect, snapshot, restore, or start another stream. Always use the
-    `with` form unless lifecycle ownership is handled explicitly.
+> **Warning:** Never abandon a stream without stopping it. The engine then remains unavailable
+> for the rest of the process: it cannot collect, snapshot, restore, or start another stream.
+> Always use the `with` form unless lifecycle ownership is handled explicitly.
 
 `collect_size` names the requested [record floor](../reference/glossary.md#collection) for each
 worker-produced batch; the synchronous spelling is `n_records`.

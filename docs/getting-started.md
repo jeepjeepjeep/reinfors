@@ -21,13 +21,9 @@ pip install "reinfors[gym]"
 
 For a source checkout, see the [development setup](development/setup.md).
 
-!!! note "Terms used below"
-
-    - A **record** is one learner-produced training row.
-    - `n_games` is the number of episode slots advanced in parallel, not a total episode count.
-
-    The [glossary](reference/glossary.md) defines record floors, heads, ticks, CSR, and
-    search terms when you need them.
+A **record** is one learner-produced training row. `n_games` is the number of episode slots
+advanced in parallel, not a total episode count. The [glossary](reference/glossary.md) defines
+record floors, heads, ticks, CSR, and search terms when you need them.
 
 ## Collect a search batch
 

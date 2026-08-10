@@ -18,43 +18,31 @@ service without changing the engine.
 
 ## Start at the level you need
 
-<div class="grid cards" markdown>
+### Try it
 
--   **Try it**
+Install reinfors and collect your first batch with a small synchronous example.
 
-    ---
+[Getting started →](getting-started.md)
 
-    Install reinfors and collect your first batch with a small synchronous example.
+### Build a training loop
 
-    [Getting started →](getting-started.md)
+Connect an arbitrary network, choose synchronous or concurrent collection, and consume
+learner-shaped training records (rows).
 
--   **Build a training loop**
+[Architecture →](concepts/architecture.md) · [Training guide →](guides/training.md)
 
-    ---
+### Choose components
 
-    Connect an arbitrary network, choose synchronous or concurrent collection, and consume
-    learner-shaped training records (rows).
+Browse the supported games and algorithm compositions.
 
-    [Architecture →](concepts/architecture.md) · [Training guide →](guides/training.md)
+[Games →](catalogue/games.md) · [Algorithms →](catalogue/algorithms.md)
 
--   **Choose components**
+### Extend the library
 
-    ---
+Implement games, encoders, rewards, policies, learners, or solvers against the Rust traits and
+expose them through Python.
 
-    Browse the supported games and algorithm compositions.
-
-    [Games →](catalogue/games.md) · [Algorithms →](catalogue/algorithms.md)
-
--   **Extend the library**
-
-    ---
-
-    Implement games, encoders, rewards, policies, learners, or solvers against the Rust
-    traits and expose them through Python.
-
-    [Extension guide →](extending/index.md)
-
-</div>
+[Extension guide →](extending/index.md)
 
 ## Core capabilities
 
