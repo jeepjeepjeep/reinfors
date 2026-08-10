@@ -28,7 +28,7 @@ Isolation invariants, enforced by the measurement scripts (which refuse to run o
 |---|---|
 | reinfors | release build (`core_build_profile()` guard aborts on debug), commit recorded per run |
 | Python torch | 2.3.0 + cu121 (pinned to the libtorch generation below) |
-| OpenSpiel | master snapshot `112b7770` built from source with CUDA libtorch |
+| OpenSpiel | pinned master snapshot (re-verified against upstream tip before publication runs), source-built with CUDA libtorch |
 | libtorch | 2.3.0 cu121 (their pinned generation) |
 
 Torch/libtorch are pinned to the **same kernel generation** on both sides: a 2.13-vs-2.3

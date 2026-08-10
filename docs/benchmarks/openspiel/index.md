@@ -23,8 +23,13 @@ a result.
 
 ## The comparison target
 
-The benchmark targets OpenSpiel **as maintained today**: a recorded master snapshot built
-from source with CUDA libtorch, including upstream's own performance fixes. Two documented,
+The benchmark targets OpenSpiel **as maintained today**: a pinned master snapshot built
+from source with CUDA libtorch, including upstream's own performance fixes. The pin policy:
+the snapshot is taken from the upstream tip, and before any publication run it is
+re-verified against current master — if commits have landed touching the measured
+subsystems (`algorithms/alpha_zero_torch`, the game, the evaluator/bot surfaces), the
+benchmark re-pins and rebuilds rather than publishing against a superseded target. The pin
+in force is recorded with every result. Two documented,
 content-preserving interventions were required — restoring build glue that master deletes
 while still referencing (the libtorch path does not build as shipped), and measurement
 instrumentation in its evaluator plus a device flag in its example game runner. All patches
