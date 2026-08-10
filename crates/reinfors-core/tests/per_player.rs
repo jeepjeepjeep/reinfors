@@ -1,9 +1,3 @@
-//! Per-player inference routing: `collect_routed(InferMode::PerPlayer, ...)` serves each
-//! row's PLAYER from its own network, records carry their player (the primary mechanism —
-//! each player's transitions are off-policy data of the network that generated them),
-//! `learn_players` skips frozen players' records at source, and per-player caches never
-//! cross-contaminate. The shared wrapper stays byte-identical to the historical path.
-
 use reinfors_core::{
     Actor, Dqn, Engine, EngineParams, EpsilonGreedyQ, Game, InferCache, InferMode, Transition,
 };
@@ -13,8 +7,6 @@ struct St {
     tick: usize,
 }
 
-/// Two players alternating for six plies; actions are free (both always legal); terminal pays
-/// nothing — the tests read ACTIONS and record tags, not returns.
 struct Alt;
 
 impl Game for Alt {
@@ -76,7 +68,7 @@ fn engine() -> Engine<Alt, EpsilonGreedyQ, Dqn> {
         Alt,
         Box::new(Enc),
         Box::new(Zero),
-        EpsilonGreedyQ::new(1, 0.0), // greedy: actions read the nets directly
+        EpsilonGreedyQ::new(1, 0.0),
         Dqn::new(1, 1.0),
         EngineParams {
             n_games: 2,
@@ -85,7 +77,6 @@ fn engine() -> Engine<Alt, EpsilonGreedyQ, Dqn> {
     )
 }
 
-/// Player 0's net prefers action 0; player 1's prefers action 1.
 fn opposed_nets(player: usize, _obs: Vec<f32>, n: usize) -> Vec<f64> {
     let row = if player == 0 { [1.0, 0.0] } else { [0.0, 1.0] };
     (0..n).flat_map(|_| row).collect()
@@ -132,14 +123,11 @@ fn learn_players_freezes_records_at_source() {
     let mut e = engine().with_learn_players(&[1]);
     let (records, stats) = e.collect_routed(12, InferMode::PerPlayer, opposed_nets);
     assert!(records.iter().all(|r| r.player == 1), "player 0 is frozen");
-    // The frozen player still ACTS (decisions counted for both) — it just leaves no records.
     assert!(stats.decisions >= records.len() * 2 - 2);
 }
 
 #[test]
 fn per_player_caches_never_cross_contaminate() {
-    // Identical observations, different nets: with per-player caches, each player's rows must
-    // come from its OWN network even though the obs bytes are identical.
     let caches = (0..3)
         .map(|_| {
             InferCache::new(
@@ -158,8 +146,6 @@ fn per_player_caches_never_cross_contaminate() {
     }
 }
 
-/// Both players decide every tick (three ticks), so one pooled forward carries BOTH players'
-/// rows — the cross-player row-width check has two groups to compare.
 struct Simul;
 
 impl Game for Simul {

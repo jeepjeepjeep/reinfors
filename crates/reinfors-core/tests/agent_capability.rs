@@ -1,8 +1,3 @@
-//! The agent-count capability seam (N-player phase 0): policies declare `max_agents`, engine
-//! construction enforces it (a real assert, not a debug one — an unsupported count computes
-//! silently wrong values, e.g. negamax past two players), the search entry points carry their own
-//! backstops, and a capability-free policy drives an N>2 game through the engine end to end.
-
 use reinfors_core::{
     mcts_many, search_many, ActBy, Actor, AlphaZero, AlphaZeroConfig, ChanceMode, Dqn, Engine,
     EngineParams, EpsilonGreedyQ, Evaluator, Game, Mcts, MctsConfig, Opponent, Policy, Reward, Rng,
@@ -14,8 +9,6 @@ struct St {
     tick: usize,
 }
 
-/// A minimal 3-agent simultaneous game: everyone picks one of two actions each tick, nothing
-/// matters, terminal after three ticks.
 struct ThreeWay;
 
 impl Game for ThreeWay {
@@ -82,7 +75,6 @@ fn search_cfg() -> SearchConfig {
 
 #[test]
 fn policies_declare_their_agent_capability() {
-    // Expectimax: single-perspective search, agent-count-free under either dynamics.
     assert_eq!(
         SelectiveExpectimax::new(search_cfg(), 2, 0.0).max_agents(true),
         None
@@ -101,8 +93,6 @@ fn policies_declare_their_agent_capability() {
         chance: ChanceMode::Committed { samples: 1 },
     };
     let mcts = Mcts::new(mcts_cfg, ActBy::Value);
-    // Dynamics-aware: UCT sequential caps at 2 (Q leaf values need own-turn decision points);
-    // simultaneous DUCT runs at any N.
     assert_eq!(mcts.max_agents(true), Some(2));
     assert_eq!(mcts.max_agents(false), None);
     let az_cfg = AlphaZeroConfig {
@@ -122,7 +112,6 @@ fn policies_declare_their_agent_capability() {
     assert_eq!(EpsilonGreedyQ::new(1, 0.0).max_agents(true), None);
 }
 
-/// 3 agents taking turns (agent = tick mod 3); nothing matters, terminal after three plies.
 struct RoundRobin;
 
 impl Game for RoundRobin {
@@ -156,8 +145,6 @@ impl Game for RoundRobin {
     }
 }
 
-/// Every built-in policy is agent-count-free now, so the construction gate is pinned with a stub
-/// that still declares a cap (future capped policies keep this seam honest).
 struct CappedStub;
 impl Policy for CappedStub {
     type Evaluation = ();
@@ -248,8 +235,6 @@ fn engine_rejects_a_capped_policy_on_a_three_agent_game() {
 
 #[test]
 fn expectimax_engine_collects_on_a_three_agent_simultaneous_game() {
-    // Factored co-mover expectimax end to end: the searcher's MAX edges fan over both co-movers'
-    // joint (uniform here), TreeStrap consumes the evaluations.
     let policy = SelectiveExpectimax::new(search_cfg(), 1, 0.0);
     let learner = TreeStrap::new(0.99, 0.3, 1.0, false);
     let mut engine = Engine::new(
@@ -270,7 +255,7 @@ fn expectimax_engine_collects_on_a_three_agent_simultaneous_game() {
 
 #[test]
 fn expectimax_searches_a_three_agent_game() {
-    let mut infer = |_players: &[usize], _obs: Vec<f32>, n: usize| vec![0.0; n * 4]; // K=2 heads x A=2
+    let mut infer = |_players: &[usize], _obs: Vec<f32>, n: usize| vec![0.0; n * 4];
     let results = search_many(
         &ThreeWay,
         &Enc,
@@ -302,8 +287,6 @@ fn mcts_cfg() -> MctsConfig {
 #[test]
 #[should_panic(expected = "compatibility.md")]
 fn uct_rejects_sequential_three_agent_games() {
-    // Q-derived (UCT) leaf values exist only at the evaluated agent's own decision points, which
-    // a sequential game gives non-movers none of — N>2 sequential search needs PUCT.
     let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2];
     let mut eval = Evaluator::new(&mut infer, reinfors_core::InferMode::Shared, None);
     let _ = mcts_many(
@@ -319,7 +302,6 @@ fn uct_rejects_sequential_three_agent_games() {
 
 #[test]
 fn uct_searches_a_simultaneous_three_agent_game() {
-    // DUCT-N: every agent owns a decoupled table, so simultaneous games search at any N.
     let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2];
     let mut eval = Evaluator::new(&mut infer, reinfors_core::InferMode::Shared, None);
     let evals = mcts_many(
@@ -333,7 +315,7 @@ fn uct_searches_a_simultaneous_three_agent_game() {
     );
     for e in &evals {
         assert_eq!(e.legal, vec![0, 1]);
-        assert_eq!(e.visits.iter().sum::<f64>() as usize, 16); // requester's table, all sims
+        assert_eq!(e.visits.iter().sum::<f64>() as usize, 16);
     }
 }
 
@@ -375,8 +357,6 @@ fn az_collect_cfg() -> AlphaZeroConfig {
 
 #[test]
 fn alphazero_engine_collects_on_a_three_agent_sequential_game() {
-    // Sequential N>2 runs Max^N under PUCT: every leaf is evaluated from all three perspectives
-    // through the same pooled forward.
     let policy = AlphaZero::new(az_collect_cfg());
     let learner = reinfors_core::AlphaZeroLearner::new(0.99);
     let mut engine = Engine::new(
@@ -392,8 +372,6 @@ fn alphazero_engine_collects_on_a_three_agent_sequential_game() {
     );
     let (records, stats) = engine.collect(9, |_obs: Vec<f32>, n: usize| vec![0.0; n * 3]);
     assert!(records.len() >= 9);
-    // Every self-play state yields one row per perspective: the mover's (weight 1, real pi) and
-    // both non-movers' (weight 0, inert zero pi) — Max^N's per-perspective values supervised.
     let movers = records.iter().filter(|r| r.3 == 1.0).count();
     let value_only = records.iter().filter(|r| r.3 == 0.0).count();
     assert_eq!(movers + value_only, records.len());
@@ -412,9 +390,6 @@ fn alphazero_engine_collects_on_a_three_agent_sequential_game() {
 
 #[test]
 fn learn_players_filters_value_only_perspectives() {
-    // Frozen players must not leak through the sequential-Max^N value-only path either: with
-    // only player 0 learning, each RoundRobin episode leaves its mover record (ply 0) plus its
-    // two value-only perspectives (plies 1 and 2) — nothing from players 1 and 2.
     let mut engine = Engine::new(
         RoundRobin,
         Box::new(Enc),
@@ -433,14 +408,11 @@ fn learn_players_filters_value_only_perspectives() {
     assert!(movers >= 2);
     assert_eq!(movers + value_only, records.len());
     assert_eq!(value_only, movers * 2);
-    // Enc writes the encoded-for agent into obs[1]: the unfiltered output would also have a 2:1
-    // value-only ratio, but its records would carry all three perspectives, not only player 0's.
     for r in &records {
         assert_eq!(r.0[1], 0.0, "every record is player 0's perspective");
     }
 }
 
-/// Two players alternating for four plies; free actions, zero reward.
 struct TwoTurn;
 
 impl Game for TwoTurn {
@@ -474,9 +446,6 @@ impl Game for TwoTurn {
     }
 }
 
-/// `Enc` writes the encoded-for agent into `obs[1]`, so "net `p` only ever receives observations
-/// encoded for perspective `p`" pins every pooled row's routing — leaf, value-only,
-/// opponent-model, and bootstrap rows alike.
 fn assert_rows_encoded_for(p: usize, obs: &[f32]) {
     for row in obs.chunks(2) {
         assert_eq!(
@@ -573,8 +542,6 @@ fn duct_routes_every_perspective_to_its_own_network() {
 
 #[test]
 fn expectimax_routes_opponent_model_rows_to_that_mover() {
-    // Distributional opponent: opponent nodes evaluate the MOVER's own observation through the
-    // mover's network; requester leaves stay on the requester's.
     let cfg = SearchConfig {
         opponent: Opponent::Distributional {
             temperature: 1.0,
@@ -608,9 +575,6 @@ fn expectimax_routes_opponent_model_rows_to_that_mover() {
     );
 }
 
-/// RoundRobin with a terminal payoff vector [1, 2, 3]: with gamma 1, EVERY record's z for agent
-/// i is exactly i+1 — per-perspective returns from each agent's own reward stream, value-only
-/// rows included (their rewards land on the correct tick, not the previous decision).
 struct PayoutSeq;
 
 impl Game for PayoutSeq {
@@ -686,7 +650,7 @@ fn value_only_rows_carry_each_agents_own_return() {
     let (records, _) = engine.collect(9, |_obs: Vec<f32>, n: usize| vec![0.0; n * 3]);
     assert!(records.len() >= 9);
     for (obs, _pi, z, _w, _player, _legal) in &records {
-        let agent = obs[1] as f64; // Enc encodes [tick, agent]
+        let agent = obs[1] as f64;
         assert!(
             (z - (agent + 1.0)).abs() < 1e-12,
             "agent {agent}'s z must be its own payoff, got {z}"
@@ -696,8 +660,6 @@ fn value_only_rows_carry_each_agents_own_return() {
 
 #[test]
 fn a_capability_free_policy_collects_on_a_three_agent_game() {
-    // The engine rollout is agent-count-generic; with the gate expressed per policy, a cap-free
-    // policy (per-agent greedy Q) drives a 3-agent game end to end.
     let policy = EpsilonGreedyQ::new(1, 0.0);
     let learner = Dqn::new(1, 1.0);
     let mut engine = Engine::new(
@@ -716,7 +678,6 @@ fn a_capability_free_policy_collects_on_a_three_agent_game() {
     assert!(stats.decisions > 0 && !stats.episodes.is_empty());
 }
 
-/// RoundRobin that never terminates on its own — the engine's truncation horizon ends episodes.
 struct EndlessRR;
 
 impl Game for EndlessRR {
@@ -755,10 +716,6 @@ impl Game for EndlessRR {
 
 #[test]
 fn truncation_bootstraps_every_perspectives_own_tail() {
-    // The net returns a DISTINCT value per encoded agent ((agent+1)/10). With zero rewards and
-    // gamma 1, every record's z must equal its own agent's value of the truncated final state —
-    // non-mover value-only trajectories included (they were previously seeded with zero because
-    // only the final mover counted as active).
     let az_cfg = AlphaZeroConfig {
         num_simulations: 8,
         c_puct: 1.5,
@@ -787,7 +744,7 @@ fn truncation_bootstraps_every_perspectives_own_tail() {
         let mut out = Vec::with_capacity(n * 3);
         for r in 0..n {
             let agent = f64::from(obs[r * 2 + 1]);
-            out.extend([0.0, 0.0, (agent + 1.0) / 10.0]); // 2 logits + the per-agent value
+            out.extend([0.0, 0.0, (agent + 1.0) / 10.0]);
         }
         out
     };
@@ -807,11 +764,9 @@ fn truncation_bootstraps_every_perspectives_own_tail() {
     }
 }
 
-/// A simultaneous 2-agent game whose every tick passes through a combinatorial Uniform chance
-/// STATE — the shape the compact declaration exists for.
 struct WideChance;
 #[derive(Clone)]
-struct WSt(usize); // even = joint decision, odd = the chance state its tick runs through
+struct WSt(usize);
 impl Game for WideChance {
     type State = WSt;
     type Event = ();
@@ -837,7 +792,7 @@ impl Game for WideChance {
     }
     fn step(&self, s: &WSt, _actions: &[usize]) -> Transition<WSt, ()> {
         Transition {
-            next_state: WSt(s.0 + 1), // into this tick's chance state
+            next_state: WSt(s.0 + 1),
             events: vec![None; 2],
             terminal: false,
         }
@@ -871,8 +826,6 @@ impl StateEncoder for WEnc {
 
 #[test]
 fn sampling_modes_traverse_combinatorial_uniform_chance() {
-    // Committed and AlwaysResample draw single indices from a 5e7-outcome space — no vector, no
-    // dense child array (AlwaysResample materializes children sparsely per distinct outcome).
     for chance in [
         ChanceMode::Committed { samples: 2 },
         ChanceMode::AlwaysResample,
@@ -960,12 +913,9 @@ fn uniform_draws_cover_the_index_space() {
         hits.iter().all(|&h| h > 0),
         "every index reachable: {hits:?}"
     );
-    // Loose uniformity: no bucket more than 3x the mean.
     assert!(hits.iter().all(|&h| h < 300), "roughly uniform: {hits:?}");
 }
 
-/// `TwoRobin` with hidden information declared — the search entries must reject it directly,
-/// not only via engine construction (a direct caller would otherwise get clairvoyant values).
 struct HiddenTwo;
 
 impl Game for HiddenTwo {
@@ -1033,8 +983,6 @@ fn direct_expectimax_rejects_hidden_information() {
     );
 }
 
-/// `TwoRobin` whose root IS a chance node — a declared deal, realized at episode birth by
-/// the chain machinery (root chance is first-class).
 struct RootNodey;
 
 impl Game for RootNodey {
@@ -1084,9 +1032,6 @@ impl Game for RootNodey {
 
 #[test]
 fn realized_roots_expose_the_true_decision_dynamics() {
-    // The raw root of a declared-deal game is Actor::Chance — probing it directly would
-    // misclassify the game as simultaneous. The canonical realization helper answers with the
-    // first DECISION state, where turn-taking is visible (RootNodey is sequential).
     struct P(u64);
     impl Rng for P {
         fn below(&mut self, n: usize) -> usize {
@@ -1110,8 +1055,6 @@ fn realized_roots_expose_the_true_decision_dynamics() {
 
 #[test]
 fn episode_birth_realizes_root_chance_chains() {
-    // The root chance node (a declared deal) is realized at birth: construction succeeds,
-    // every episode starts at the post-deal decision state, and collect proceeds normally.
     let mut engine = Engine::new(
         RootNodey,
         Box::new(Enc),
@@ -1131,9 +1074,6 @@ fn episode_birth_realizes_root_chance_chains() {
 #[test]
 #[should_panic(expected = "cannot start at a chance node")]
 fn start_distribution_restores_must_be_decision_states() {
-    // A game with an INTERIOR chance node (tick 5, unreachable in play): construction passes on
-    // the tick-0 decision state, then a hostile start distribution restores the chance node —
-    // the restore path must hold the same decision-state start contract as `initial_state`.
     struct MidNodey;
     impl Game for MidNodey {
         type State = St;
@@ -1193,7 +1133,6 @@ fn start_distribution_restores_must_be_decision_states() {
     }
 }
 
-/// Two agents taking turns; terminal after four plies with payoffs [1, 2].
 struct TwoRobin;
 
 impl Game for TwoRobin {
@@ -1234,9 +1173,6 @@ impl Game for TwoRobin {
 
 #[test]
 fn forced_maxn_supervises_both_perspectives_at_two_agents() {
-    // The negamax-deletion measurement seam: SequentialBackup::MaxN at 2 agents runs the vector
-    // backup AND emits value-only rows for the non-mover — supervised ≡ consumed. Auto keeps the
-    // mover-only negamax pipeline byte-for-byte.
     let cfg = |backup| AlphaZeroConfig {
         num_simulations: 8,
         c_puct: 1.5,
@@ -1272,7 +1208,6 @@ fn forced_maxn_supervises_both_perspectives_at_two_agents() {
     let value_only = maxn.iter().filter(|r| r.3 == 0.0).count();
     let movers = maxn.iter().filter(|r| r.3 == 1.0).count();
     assert_eq!(value_only, movers, "one non-mover row per decision at N=2");
-    // gamma 1, rewards only at the end: every row's z is its own agent's payoff.
     for (obs, _pi, z, _w, _player, _legal) in &maxn {
         let expect = f64::from(obs[1]) + 1.0;
         assert!(
@@ -1282,7 +1217,6 @@ fn forced_maxn_supervises_both_perspectives_at_two_agents() {
     }
 }
 
-/// Two agents taking turns forever; the engine's horizon truncates at tick 2.
 struct EndlessTwo;
 
 impl Game for EndlessTwo {
@@ -1321,10 +1255,6 @@ impl Game for EndlessTwo {
 
 #[test]
 fn forced_maxn_truncation_bootstraps_both_perspectives() {
-    // sequential_backup="maxn" at TWO agents: the tree consumes both perspectives' leaf values
-    // and both hold per-tick trajectories — so a truncation must tail-bootstrap BOTH, not just
-    // the currently active agent (the regression: the tail gate hardcoded n > 2, silently
-    // seeding the non-mover's z from zero).
     let cfg = AlphaZeroConfig {
         num_simulations: 8,
         c_puct: 1.5,
@@ -1349,8 +1279,6 @@ fn forced_maxn_truncation_bootstraps_both_perspectives() {
             seed: 8,
         },
     );
-    // The net returns a distinct value per encoded agent ((agent+1)/10); zero rewards, gamma 1:
-    // every record's z must equal ITS OWN agent's tail value.
     let infer = |obs: Vec<f32>, n: usize| {
         let mut out = Vec::with_capacity(n * 3);
         for r in 0..n {
