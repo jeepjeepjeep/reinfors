@@ -1685,8 +1685,8 @@ fn build_telemetry<'py>(
     telemetry.set_item("infer_rows", stats.infer_rows)?;
     telemetry.set_item("cache_lookups", stats.cache_lookups)?;
     telemetry.set_item("cache_hits", stats.cache_hits)?;
-    // Exact MCTS sim-fate identity: decisions*sims = fresh + hit + shared + terminal + depthcap
-    // - extra_eval_rows; the subtraction removes auxiliary perspective/fan evaluation rows.
+    // Exact Mcts/AlphaZero tree sim-fate identity: decisions*sims = fresh + hit + shared + terminal
+    // + depthcap - extra_eval_rows; the subtraction removes auxiliary perspective/fan rows.
     telemetry.set_item("terminal_sims", stats.sum_terminal_sims)?;
     telemetry.set_item("depthcap_sims", stats.sum_depthcap_sims)?;
     telemetry.set_item("shared_rows", stats.sum_shared_rows)?;
@@ -2081,7 +2081,7 @@ enum LearnerSpec {
 }
 
 fn check_positive_finite(name: &str, v: f64) -> PyResult<()> {
-    // Scale-like parameters appear in denominators and therefore must be strictly positive.
+    // Scale-like parameters such as opp_temperature appear in denominators and must stay positive.
     if !v.is_finite() || v <= 0.0 {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "{name} must be finite and > 0"
