@@ -1,7 +1,8 @@
 # Reproducing the comparison
 
 The cross-framework harness lives in the companion benchmark repository
-(`reinfors-benchmarks`), published alongside this library: the OpenSpiel source-build
+([reinfors-benchmarks](https://github.com/jeepjeepjeep/reinfors-benchmarks)), published
+alongside this library: the OpenSpiel source-build
 machinery and its documented patches, the measurement and round-orchestration scripts, the
 head-to-head bridge, and the raw logs and artifacts of every published run. That material
 is deliberately not vendored into reinfors — third-party patches, training loops, and
