@@ -40,9 +40,8 @@ class EnvSnapshot:
     def from_bytes(data: bytes) -> EnvSnapshot: ...
 
 class Reward:
-    # A generic named-weight reward; each game validates the keys it understands (snake: step/food/
-    # loss/draw/kill/win/survival; connect4: win/loss/draw; gridworld: step/goal). Weights must be
-    # finite (NaN/inf raise ValueError at construction).
+    # A generic named-weight reward; each game validates its own event keys. See the game catalogue
+    # for supported keys and defaults. Weights must be finite (NaN/inf raise ValueError).
     def __init__(self, **weights: float) -> None: ...
 
 # Space descriptors a game advertises (re-exported as rf.spaces.Box / rf.spaces.Discrete).
