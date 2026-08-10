@@ -1,5 +1,9 @@
 # reinfors
 
+<p align="center">
+  <img src="assets/reinfors-banner.svg" alt="Animated reinfors logo" width="100%">
+</p>
+
 High-throughput reinforcement-learning search and sampling in Rust, with caller-owned
 Python networks and training.
 
