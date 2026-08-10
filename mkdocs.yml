@@ -71,6 +71,7 @@ nav:
       - Methodology: benchmarks/methodology.md
       - vs. OpenSpiel:
           - benchmarks/openspiel/index.md
+          - Comparison protocol: benchmarks/openspiel/protocol.md
           - Operating-point tuning: benchmarks/openspiel/tuning.md
           - The matched round: benchmarks/openspiel/matched-round.md
           - Design differences: benchmarks/openspiel/design-differences.md

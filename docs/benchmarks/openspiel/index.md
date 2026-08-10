@@ -39,6 +39,9 @@ on this workload — larger than any real difference).
 
 ## Contents
 
+- [Comparison protocol](protocol.md) — the fairness rules layered on the shared
+  methodology: matched knobs, each side its own best configuration, cache semantics,
+  deadline artifacts, paired scoring.
 - [Operating-point tuning](tuning.md) — how each side's configuration was selected
   empirically, under the full round workload, before any head-to-head.
 - [The matched round](matched-round.md) — 2h training throughput, the head-to-head
@@ -47,4 +50,5 @@ on this workload — larger than any real difference).
   difference traced to its structural origin, in both directions.
 
 The shared [environment](../setup.md) and [methodology](../methodology.md) pages govern
-every number in this family.
+every number in this family; the [comparison protocol](protocol.md) adds the rules that
+only exist because there are two frameworks in the room.
