@@ -107,6 +107,7 @@ fn engine(
     )
 }
 
+// The two heads deliberately disagree, so tests exercise per-head targets rather than duplicates.
 fn infer(obs: Vec<f32>, n: usize) -> Vec<f64> {
     let dim = obs.len() / n;
     let mut out = Vec::with_capacity(n * 2 * 3);
@@ -208,6 +209,8 @@ fn bootstrap_p_extremes_set_all_or_no_heads() {
 
 #[test]
 fn zero_outcome_weight_leaves_targets_unblended() {
+    // This only proves outcome_weight changes targets; direct equality to raw search values is
+    // covered by collected_targets_equal_a_direct_search below.
     let s = search();
     let r0 = Engine::new(
         game(&s, 3),
@@ -241,8 +244,8 @@ fn zero_outcome_weight_leaves_targets_unblended() {
 
 #[test]
 fn survival_bonus_propagates_through_z_mixing_on_truncation() {
-    // One-tick truncation and no food isolate the survival bonus; interior=false
-    // keeps the record floor tied to decisions.
+    // One-tick truncation and no food isolate the survival bonus. Interior records are never
+    // z-mixed, so disabling them ensures every compared target is eligible for the bonus.
     let bonus = 0.25;
     let mk = |survival: f64| {
         let mut s = search();
@@ -337,9 +340,9 @@ fn collected_targets_equal_a_direct_search() {
     use reinfors_games::EgocentricSnake;
 
     let mut s = search();
-    // One food-free tick makes the direct search seed-independent and exactly comparable.
     s.max_ticks = Some(1);
     let (records, _) = Engine::new(
+        // No food removes chance, making the direct search seed-independent.
         game(&s, 0),
         enc(&s),
         reward(&s),
@@ -378,6 +381,7 @@ fn collected_targets_equal_a_direct_search() {
 
 #[test]
 fn start_buffer_with_p_fresh_one_is_bit_identical_to_default() {
+    // p_fresh=1 must leave rollout chance untouched; the buffer uses a disjoint RNG stream.
     let baseline = engine(4, 2, 5).collect(80, infer).0;
     let buffered = engine(4, 2, 5)
         .with_start_distribution(Box::new(ReachedStateBuffer::new(
@@ -395,6 +399,7 @@ fn start_buffer_with_p_fresh_one_is_bit_identical_to_default() {
 
 #[test]
 fn start_buffer_seeds_episodes_once_it_fills() {
+    // A short horizon fills the buffer quickly; p_fresh=0 then forces restored starts.
     let mut s = search();
     s.max_ticks = Some(5);
     let mut e = Engine::new(
@@ -402,6 +407,7 @@ fn start_buffer_seeds_episodes_once_it_fills() {
         enc(&s),
         reward(&s),
         policy(&s, 2),
+        // Interior records could satisfy the floor before enough resets exercise the buffer.
         learner(0.5, false),
         params(4, 6),
     )

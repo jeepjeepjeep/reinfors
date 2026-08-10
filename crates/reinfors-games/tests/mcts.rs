@@ -93,6 +93,7 @@ fn opponent_threat_state() -> reinfors_games::Connect4State {
 
 #[test]
 fn mcts_blocks_opponent_win() {
+    // This is a negamax sign guard: the opponent's next-ply win must back up as P0's loss.
     let evals = mcts_many(
         &Connect4,
         &Connect4Planes,

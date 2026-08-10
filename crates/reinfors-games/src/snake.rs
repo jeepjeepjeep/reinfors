@@ -1434,6 +1434,7 @@ impl reinfors_core::StateCodec for Snake {
             .map(|i| cells.saturating_sub(i))
             .try_fold(1u128, |acc, f| acc.checked_mul(f))
             .unwrap_or(u128::MAX);
+        // Outcome indices cross the f64 seam; beyond 2^53 distinct integers would alias.
         if worst > (1u128 << 53).min(usize::MAX as u128) {
             return Err(format!(
                 "{} food cells with {} snakes imply a respawn index space past \

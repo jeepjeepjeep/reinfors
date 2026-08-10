@@ -65,6 +65,7 @@ fn assert_obs_within_advertised_bounds<G: Game>(mut env: Env<G>, steps: usize) {
         if env.done() {
             break;
         }
+        // Every game exercised here admits action 0 on its opening ticks.
         env.step(&vec![0usize; env.num_agents()]);
     }
 }

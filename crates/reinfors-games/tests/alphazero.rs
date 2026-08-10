@@ -45,7 +45,7 @@ fn sharp_infer(col: usize) -> impl FnMut(usize, Vec<f32>, usize) -> Vec<f64> {
     move |_p, _obs, n| {
         let mut out = vec![0.0; n * 8];
         for row in 0..n {
-            // A logit of 6 assigns roughly 87% prior mass to this column.
+            // Against six zero logits, 6 assigns roughly 98.5% prior mass to this column.
             out[row * 8 + col] = 6.0;
         }
         out
@@ -92,6 +92,7 @@ fn finds_the_forced_connect4_win() {
 
 #[test]
 fn priors_steer_visits() {
+    // With few simulations and no terminal signal from the opening, visits follow the prior.
     let game = Connect4;
     let state = game.initial_state();
     for col in [2usize, 5] {
@@ -139,7 +140,11 @@ fn search_is_deterministic_per_seed_and_noise_diversifies_across_seeds() {
         differs,
         "root noise never changed the visit distribution across seeds"
     );
-    assert_eq!(run(1, 0.0), run(2, 0.0));
+    assert_eq!(
+        run(1, 0.0),
+        run(2, 0.0),
+        "with noise disabled, no search randomness remains"
+    );
 }
 
 #[test]

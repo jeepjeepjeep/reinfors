@@ -15,6 +15,7 @@ pub const BAR: i32 = 100;
 pub const PASS: i32 = -1;
 const ENC_BAR: i32 = 24;
 const ENC_PASS: i32 = 25;
+// Internal destination sentinel for a checker borne off the board.
 const SCORE: i32 = 101;
 
 pub const ROLLS: [[u8; 2]; 21] = [
@@ -286,6 +287,8 @@ impl BackgammonState {
     }
 
     fn decode_action(&self, action: usize) -> [CheckerMove; 2] {
+        // X moves 0->23 (home 18..23; bar enters at die-1); O moves 23->0 (home 0..5; bar enters
+        // at 24-die). Thus these sources plus their assigned dice specify the checker moves.
         debug_assert!(action < NUM_ACTIONS);
         let high_first = action < 676;
         let a = if high_first { action } else { action - 676 };

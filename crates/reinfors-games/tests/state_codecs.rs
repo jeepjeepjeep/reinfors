@@ -17,6 +17,8 @@ impl Rng for Lcg {
     }
 }
 
+// Match runtime birth by consuming transient root chance states: decoded live states must be
+// actionable, so validators deliberately reject snapshots taken partway through this chain.
 fn birth<G: Game>(game: &G, rng: &mut dyn reinfors_core::Rng) -> <G as Game>::State {
     let mut s = game.initial_state();
     while matches!(game.actor(&s), reinfors_core::Actor::Chance) {
@@ -168,6 +170,7 @@ fn validators_reject_unsafe_states() {
         pending_food: 0,
         birth: false,
     };
+    // A mismatched snake count would index beyond the game's agent-shaped arrays.
     assert!(three
         .validate_decoded_state(&two_state, false)
         .unwrap_err()
@@ -194,6 +197,7 @@ fn validators_reject_unsafe_states() {
         .validate_decoded_state(&led, false)
         .unwrap_err()
         .contains("terminal=true"));
+    // Off-grid bodies or food would index beyond observation planes.
     let off_grid = mk(body(&[(6, 0)], true), body(&[(3, 3)], true), &[]);
     assert!(snake_game
         .validate_decoded_state(&off_grid, false)

@@ -7,6 +7,8 @@ use reinfors_core::Reward;
 #[cfg(test)]
 use reinfors_core::Rng;
 
+/// ACPC-compatible card id: `rank * 4 + suit`, with rank 0 as deuce and 12 as ace. This layout is
+/// fixed by the parity mapping rather than an internal representation detail.
 pub type Card = u8;
 
 pub const DECK: u8 = 52;
@@ -182,6 +184,7 @@ impl TexasHoldem {
     }
 
     fn open_betting(&self, state: &mut HoldemState) {
+        // ACPC counts only seats that are neither folded nor all-in as able to bet.
         let can_bet: Vec<usize> = (0..self.num_players)
             .filter(|&i| state.live(i) && state.stacks[i] > 0)
             .collect();
@@ -1066,6 +1069,9 @@ mod tests {
     }
 }
 
+/// `(11 + 2*(N-1) + 10, 4, 13)`: 0 hole, 1 board, 2 pot, 3 call, 4 stack, 5..=8 street,
+/// 9 raises, 10 button; then two channels per clockwise opponent, four `(seat, action)` history
+/// pairs, and separate turn and river cards.
 pub struct HoldemEgocentric {
     pub num_players: usize,
     pub stack: u32,
@@ -1135,6 +1141,7 @@ impl reinfors_core::StateEncoder for HoldemEgocentric {
             );
             for (k, &(seat, action)) in street.iter().enumerate() {
                 let rel = (seat as usize + n - agent) % n;
+                // Zero means an unused slot, so relative seats and actions are stored one-based.
                 obs[seat_ch * PLANE + k] = (rel + 1) as f32 / n as f32;
                 obs[act_ch * PLANE + k] = (action + 1) as f32 / 3.0;
             }

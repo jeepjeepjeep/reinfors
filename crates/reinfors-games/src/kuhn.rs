@@ -234,6 +234,7 @@ impl reinfors_core::StateEncoder for KuhnEncoder {
 
     fn encode(&self, s: &KuhnState, agent: usize) -> Vec<f32> {
         let cards = self.players + 1;
+        // (N+1) card slots + (2N-1) history slots = the advertised 3N shape.
         let mut obs = vec![0.0f32; cards + 2 * self.players - 1];
         obs[s.cards[agent] as usize] = 1.0;
         for (i, &a) in s.history.iter().enumerate() {

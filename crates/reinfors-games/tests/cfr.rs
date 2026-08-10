@@ -192,6 +192,7 @@ fn the_solver_rejects_games_without_information_states() {
 #[test]
 #[should_panic(expected = "sequential turn-taking only")]
 fn chance_root_simultaneous_games_fail_at_construction() {
+    // This duplicates Deep CFR's minimal stub so both solver construction gates remain pinned.
     struct Sim;
     #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
     struct St {
@@ -275,6 +276,7 @@ fn mccfr_runs_on_heads_up_holdem() {
 #[test]
 #[should_panic(expected = "player 2 out of range")]
 fn expected_value_rejects_an_out_of_range_player() {
+    // Fixed-width value storage would otherwise return its untouched 0.0 slot silently.
     let mut solver = kuhn_solver(CfrVariant::Vanilla);
     solver.iterate(1);
     solver.expected_value(2);

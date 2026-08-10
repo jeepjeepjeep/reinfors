@@ -445,6 +445,7 @@ fn holdem_traversals_run_at_scale() {
         "every traversal reaches the traverser"
     );
     assert!(!strategy.is_empty());
+    // Distinct private deals rarely share rows at this scale; the asserted gain is batching.
     assert!(stats.infer_calls > 0);
     assert!(
         stats.infer_calls * 5 < stats.infer_rows,
