@@ -29,6 +29,7 @@ fn params(n_games: usize, seed: u64) -> EngineParams {
 }
 
 fn learner(outcome_weight: f64, interior: bool) -> TreeStrap {
+    // Keep gamma coupled to search(), so direct-search and engine targets agree.
     TreeStrap::new(0.99, outcome_weight, 0.8, interior)
 }
 
@@ -153,6 +154,8 @@ fn distinct_seeds_diverge() {
 
 #[test]
 fn games_carry_food_so_snakes_can_eat() {
+    // Long collection is the assertion: interior=false keeps its floor tied to
+    // decisions while Snake's unit tests own the detailed food/growth invariants.
     let s = search();
     let mut e = Engine::new(
         game(&s, 3),
@@ -238,6 +241,8 @@ fn zero_outcome_weight_leaves_targets_unblended() {
 
 #[test]
 fn survival_bonus_propagates_through_z_mixing_on_truncation() {
+    // One-tick truncation and no food isolate the survival bonus; interior=false
+    // keeps the record floor tied to decisions.
     let bonus = 0.25;
     let mk = |survival: f64| {
         let mut s = search();
@@ -273,6 +278,7 @@ fn survival_bonus_propagates_through_z_mixing_on_truncation() {
 
 #[test]
 fn collect_reports_episode_and_search_telemetry() {
+    // interior=false prevents interior records satisfying the floor before episodes finish.
     let s = search();
     let max_ticks = s.max_ticks.unwrap();
     let mut e = Engine::new(
@@ -331,6 +337,7 @@ fn collected_targets_equal_a_direct_search() {
     use reinfors_games::EgocentricSnake;
 
     let mut s = search();
+    // One food-free tick makes the direct search seed-independent and exactly comparable.
     s.max_ticks = Some(1);
     let (records, _) = Engine::new(
         game(&s, 0),

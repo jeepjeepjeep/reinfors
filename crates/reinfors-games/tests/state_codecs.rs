@@ -205,12 +205,15 @@ fn validators_reject_unsafe_states() {
         .unwrap_err()
         .contains("outside the grid"));
     let headless = mk(body(&[], true), body(&[(3, 3)], true), &[]);
+    // An alive empty body would panic the first call to head().
     assert!(snake_game
         .validate_decoded_state(&headless, false)
         .unwrap_err()
         .contains("empty body"));
 
     let c4 = Connect4;
+    // Postcard fields: version, 42-cell Vec length, cells, then turn.
+    // `3` for the first cell and `2` for turn are the two forged hazards.
     let mut bad_cell = vec![2u8, 42, 3];
     bad_cell.extend([0u8; 41]);
     bad_cell.push(0);
@@ -300,6 +303,7 @@ fn unreachable_but_safe_states_are_accepted() {
         alive: true,
     };
     let overlap = SnakeState {
+        // Equal lengths keep this deliberately overlapping state non-terminal.
         snakes: vec![body(&[(1, 1)]), body(&[(1, 1)])],
         food: HashSet::from_iter([(1, 1)]),
         pending_food: 0,

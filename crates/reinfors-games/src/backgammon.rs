@@ -9,6 +9,8 @@ use reinfors_core::{ActionView, Actor, Game, Reward, StateEncoder, Transition};
 pub const NUM_POINTS: usize = 24;
 pub const NUM_CHECKERS: u8 = 15;
 pub const NUM_ACTIONS: usize = 1352;
+// Board positions use OpenSpiel's kBarPos/kPassPos sentinels. Action digits
+// use a separate base-26 namespace: points 0..23, bar 24, pass 25.
 pub const BAR: i32 = 100;
 pub const PASS: i32 = -1;
 const ENC_BAR: i32 = 24;
@@ -259,6 +261,8 @@ impl BackgammonState {
     }
 
     fn encode_action(&self, moves: &[CheckerMove]) -> usize {
+        // Caller-facing ids encode two sources as dig1*26+dig0; the upper 676
+        // ids select low-die-first rather than high-die-first.
         let (high, _low) = self.high_low();
         let mut dig0 = ENC_PASS;
         let mut dig1 = ENC_PASS;
@@ -339,6 +343,7 @@ impl BackgammonState {
             return 1;
         }
         let in_winner_home = if loser == 0 {
+            // The winner is O here, whose home board is points 0..5.
             self.board[0][0..6].iter().any(|&c| c > 0)
         } else {
             self.board[1][18..24].iter().any(|&c| c > 0)
@@ -924,6 +929,7 @@ impl reinfors_core::StateCodec for Backgammon {
     type State = BackgammonState;
 
     fn encode(&self, s: &BackgammonState) -> Vec<u8> {
+        // Layout 3 added the root-chance `opening` flag; bump on wire changes.
         crate::codec_util::serde_encode(3, s)
     }
 

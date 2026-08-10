@@ -29,6 +29,7 @@ fn kuhn_equilibrium_has_the_known_structure() {
     let mut solver = kuhn_solver(CfrVariant::Plus);
     solver.iterate(2000);
     assert!(solver.exploitability().unwrap() < 1e-4);
+    // These hold throughout Kuhn's equilibrium family, alpha in [0, 1/3].
     let g = KuhnPoker::default();
     let key = |cards: [u8; 2], hist: &[u8], agent: usize| {
         use reinfors_core::Game;

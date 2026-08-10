@@ -274,6 +274,7 @@ pub fn snake_length_cell(state: &SnakeState) -> Option<u64> {
     let bucket = |len: usize| ((len / CELL_BUCKET_SIZE) as u64).min(CELL_N_BUCKETS - 1);
     let mut buckets: Vec<u64> = state.snakes.iter().map(|s| bucket(s.len())).collect();
     buckets.sort_unstable();
+    // Preserve legacy two-player keys: changing this shift re-buckets saved buffers.
     let shift = if buckets.len() <= 4 { 16 } else { 8 };
     Some(buckets.into_iter().fold(0u64, |acc, b| (acc << shift) | b))
 }
@@ -357,6 +358,7 @@ impl Snake {
             ));
         }
         let k_max = self.num_snakes.min(self.initial_food_count) as u128;
+        // Combined chance outcomes pass through f64; above 2^53 distinct indices alias.
         let worst: u128 = (0..k_max)
             .map(|i| cell_count.saturating_sub(i))
             .try_fold(1u128, |acc, f| acc.checked_mul(f))
@@ -713,6 +715,9 @@ impl Game for Snake {
             "chance only at AwaitingRespawn states"
         );
         let n = self.free_cell_count(state);
+        // Chained birth draws avoid a huge initial combinatorial node. In-game
+        // respawns stay combined so Committed{s} retains s complete worlds,
+        // rather than branching into s^k partial worlds.
         if state.birth {
             return reinfors_core::ChanceDist::Uniform(n.max(1));
         }
@@ -1387,6 +1392,7 @@ impl reinfors_core::StateCodec for Snake {
     type State = SnakeState;
 
     fn encode(&self, s: &SnakeState) -> Vec<u8> {
+        // Layout 5 widened pending_food to u32 (4 introduced it as u8).
         crate::codec_util::serde_encode(5, s)
     }
 

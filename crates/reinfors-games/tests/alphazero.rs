@@ -45,6 +45,7 @@ fn sharp_infer(col: usize) -> impl FnMut(usize, Vec<f32>, usize) -> Vec<f64> {
     move |_p, _obs, n| {
         let mut out = vec![0.0; n * 8];
         for row in 0..n {
+            // A logit of 6 assigns roughly 87% prior mass to this column.
             out[row * 8 + col] = 6.0;
         }
         out

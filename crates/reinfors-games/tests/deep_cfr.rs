@@ -18,6 +18,8 @@ fn zeros(_player: usize, _obs: Vec<f32>, rows: usize) -> Vec<f64> {
 
 #[test]
 fn zeros_net_samples_follow_the_argmax_fallback() {
+    // Deep CFR follows Brown's argmax fallback for nonpositive advantages;
+    // tabular CFR's zero-regret policy is instead uniform.
     let mut solver = kuhn_solver(7);
     solver.next_iteration();
     let (advantage, strategy, stats) = solver.collect(0, 64, zeros);
@@ -40,6 +42,8 @@ fn zeros_net_samples_follow_the_argmax_fallback() {
         );
         assert!(s.probs[1..].iter().all(|&p| p == 0.0));
     }
+    // The assertion pins within-round deduplication, not cache reuse: the
+    // deterministic zero net keeps traversals depth-synchronised.
     assert!(
         stats.infer_rows * 4 < stats.cache_lookups,
         "queries dedupe hard on Kuhn: {} rows for {} queries",
@@ -75,6 +79,8 @@ fn traversals_are_deterministic_per_seed() {
 
 #[test]
 fn table_emulated_deep_cfr_converges_on_kuhn() {
+    // Weighted means are the regression optimum of the emitted samples;
+    // regret matching is scale-invariant, so they stand in for cumulative tables.
     struct Table {
         rows: HashMap<Vec<u8>, (Vec<f64>, f64)>,
     }

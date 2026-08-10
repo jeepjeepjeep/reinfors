@@ -565,8 +565,9 @@ impl reinfors_core::StateCodec for TexasHoldem {
             return Err("history must cover the four betting streets".to_string());
         }
         for street in &state.history {
+            // The encoder has 52 history slots; real streets use at most 45.
             if street.len() > 52 {
-                return Err("implausible street history length".to_string());
+                return Err("street history exceeds the 52-slot encoder capacity".to_string());
             }
             for &(seat, action) in street {
                 if seat as usize >= n || action as usize >= HOLDEM_ACTIONS {

@@ -3,6 +3,10 @@
 use cozy_chess::{Board, Color, File, GameStatus, Move, Piece, Rank, Square};
 use reinfors_core::{ActionView, Actor, Game, Reward, StateEncoder, Transition};
 
+/// AlphaZero's 8×8×73 action map: `from_square * 73 + move_type`.
+/// Move types are 0..56 ray direction × distance, 56..64 knight directions,
+/// and 64..73 pawn direction × {knight, bishop, rook} underpromotions. Ray
+/// directions are N, NE, E, SE, S, SW, W, NW; queen promotions use ray slots.
 pub const CHESS_ACTIONS: usize = 64 * 73;
 
 const RAY_DIRS: [(i8, i8); 8] = [
@@ -250,6 +254,8 @@ fn agent_of(color: Color) -> usize {
     }
 }
 
+/// The material-only sufficient subset of FIDE §5.2.2: KNvKN and
+/// opposite-coloured KBvKB admit helpmates, so deliberately play on.
 fn insufficient_material(board: &Board) -> bool {
     if !(board.pieces(Piece::Pawn) | board.pieces(Piece::Rook) | board.pieces(Piece::Queen))
         .is_empty()
@@ -454,11 +460,13 @@ impl StateEncoder for ChessPlanesMinimal {
     }
 }
 
+// Rank reflection maps N↔S, NE↔SE and NW↔SW; E/W remain fixed.
 const RAY_REFLECT: [usize; 8] = [4, 3, 2, 1, 0, 7, 6, 5];
 const KNIGHT_REFLECT: [usize; 8] = [3, 2, 1, 0, 7, 6, 5, 4];
 
 pub(crate) fn reflect_action(action: usize) -> usize {
-    // This must remain the same rank reflection used by ChessPlanesRelative.
+    // This sigma must remain coherent with ChessPlanesRelative's observation
+    // reflection. Underpromotion slots are fixed because forward is implicit.
     let from = action / 73;
     let mt = action % 73;
     let from_r = (7 - from / 8) * 8 + from % 8;
@@ -533,6 +541,7 @@ impl StateEncoder for ChessPlanesRelative {
             }
         }
         if let Some(file) = board.en_passant() {
+            // Sigma reflects ranks only, so the en-passant file is unchanged.
             let f = file as usize;
             for rank in 0..8 {
                 obs[17 * PLANE + rank * 8 + f] = 1.0;
@@ -548,6 +557,13 @@ impl StateEncoder for ChessPlanesRelative {
     }
 }
 
+/// OpenSpiel's `(20, 8, 8)` layout, pinned to
+/// `chess.cc::ObservationTensor` at commit `d15d49f8`:
+///
+/// - 0..12: K/Q/R/B/N/P occupancy, White then Black per piece type
+/// - 12: empty squares; 13: `(repetition - 1) / 2`
+/// - 14: side to move (`ColorToPlayer`, ones for White); 15: halfmove / 101
+/// - 16..20: White long/short, then Black long/short castling rights
 pub struct ChessPlanesOpenSpiel;
 
 impl ActionView for ChessPlanesOpenSpiel {}
@@ -604,6 +620,10 @@ impl StateEncoder for ChessPlanesOpenSpiel {
     }
 }
 
+/// AlphaZero-style history with a deliberately absolute frame: unlike the
+/// paper, boards are not flipped; a side-to-move plane is supplied instead.
+/// History is newest-first. This layout and the absolute action map form a
+/// checkpoint contract and must not be changed independently.
 pub struct ChessPlanesAz119 {
     pub history: usize,
 }

@@ -30,7 +30,7 @@ obs_shape = game.observation_space().shape  # (19, 8, 8)
 
 | Encoder | Game | Observation shape | Constructor | Purpose |
 | --- | --- | --- | --- | --- |
-| Snake | Snake | (5, grid_size, grid_size); (5, 20, 20) by default | `rf.encoders.Snake()` | Mover-relative body, opponent, food, and wall planes. |
+| Snake | Snake | (5, grid_size, grid_size); (5, 20, 20) by default | `rf.encoders.Snake()` | Mover-relative own-head, own-body, opponent-head, opponent-body, and food planes. |
 | Connect4 | Connect 4 | (2, 6, 7) | `rf.encoders.Connect4()` | Acting-player and opponent piece planes. |
 | MinimalChess | Chess | (19, 8, 8) | `rf.encoders.MinimalChess()` | Absolute piece, turn, castling, en-passant and clock planes; the Chess default. |
 | RelativeChess | Chess | (19, 8, 8) | `rf.encoders.RelativeChess()` | Mover-relative board and matching action-head mapping. |
