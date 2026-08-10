@@ -1,4 +1,7 @@
 //! Generational cache for raw network-output rows.
+//!
+//! Each cache is confined to one engine collection worker. It is deliberately mutable and
+//! lock-free; the atomic generation signal does not make the cache itself thread-safe.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

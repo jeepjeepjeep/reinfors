@@ -171,6 +171,7 @@ impl BrPass<'_> {
     }
 
     /// Resolve values while sharing one action choice across each information set.
+    // Perfect recall makes recursive resolution of deeper infoset choices well-founded.
     fn value(&mut self, idx: usize) -> f64 {
         match &self.arena.nodes[idx] {
             ArenaNode::Terminal => 0.0,
@@ -255,6 +256,8 @@ fn br_value_in(arena: &Arena, profile: &Profile<'_>, br_player: usize) -> f64 {
 }
 
 /// `(infoset key, exemplar state, acting agent)` per reachable infoset.
+/// One first-visited state per information key. The information-state contract guarantees every
+/// member has the same features and ordered legal actions, so any member is a valid exemplar.
 pub type InfosetExemplars<S> = Vec<(Vec<u8>, S, usize)>;
 
 pub fn enumerate_infosets<G: Game>(

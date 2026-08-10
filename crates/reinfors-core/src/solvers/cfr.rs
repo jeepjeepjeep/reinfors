@@ -25,6 +25,7 @@ pub enum CfrVariant {
 }
 
 impl CfrVariant {
+    // Persisted in solver payloads; changing an id is a wire-format break.
     fn id(self) -> u8 {
         match self {
             CfrVariant::Vanilla => 0,
@@ -35,6 +36,7 @@ impl CfrVariant {
 }
 
 struct Node {
+    // Every state in an information set must expose this same ordered action list.
     actions: Vec<usize>,
     regrets: Vec<f64>,
     cumulative: Vec<f64>,
@@ -204,13 +206,14 @@ impl<G: Game> CfrSolver<G> {
         let width = |x: usize, what: &str| -> u32 {
             u32::try_from(x).unwrap_or_else(|_| panic!("{what} exceeds the u32 payload bound"))
         };
-        let mut out = vec![1u8];
+        let mut out = vec![1u8]; // payload layout version
         out.push(self.variant.id());
         out.extend_from_slice(&width(self.game.action_count(), "action_count").to_le_bytes());
         out.extend_from_slice(&self.rng.state().to_le_bytes());
         out.extend_from_slice(&self.iterations.to_le_bytes());
         out.extend_from_slice(&(self.nodes.len() as u64).to_le_bytes());
         let mut keys: Vec<&Vec<u8>> = self.nodes.keys().collect();
+        // HashMap iteration is unstable; canonical order makes equivalent solves byte-identical.
         keys.sort();
         for key in keys {
             let node = &self.nodes[key];

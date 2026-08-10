@@ -295,7 +295,8 @@ mod frame_tests {
             terminal: true,
         }];
         let recs = learner.episode_records(&steps, &[], &Rot, 0, &mut SplitMix64::new(0));
-        // Blend in game frame: [0.1, 2.0, 0.3], then rotate into head frame [0.3, 0.1, 2.0].
+        // w=1 replaces executed game action 1 with z=reward+gamma*tail=2; rotating game slots
+        // [0.1, 2.0, 0.3] then yields head slots [0.3, 0.1, 2.0].
         assert_eq!(recs[0].1, vec![vec![0.3, 0.1, 2.0]]);
     }
 }

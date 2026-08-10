@@ -19,6 +19,7 @@ pub struct AlphaZeroConfig {
     pub gamma: f64,
     pub max_depth: i32,
     pub noise_epsilon: f64,
+    /// Dirichlet concentration; the AlphaZero heuristic is roughly `10 / branching_factor`.
     pub noise_alpha: f64,
     pub temperature: f64,
     pub temperature_drop: u32,

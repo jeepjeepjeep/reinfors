@@ -357,6 +357,7 @@ fn az_collect_cfg() -> AlphaZeroConfig {
 
 #[test]
 fn alphazero_engine_collects_on_a_three_agent_sequential_game() {
+    // Sequential N>2 needs PUCT values for every perspective; Q-only UCT has no non-mover leaves.
     let policy = AlphaZero::new(az_collect_cfg());
     let learner = reinfors_core::AlphaZeroLearner::new(0.99);
     let mut engine = Engine::new(
@@ -390,6 +391,7 @@ fn alphazero_engine_collects_on_a_three_agent_sequential_game() {
 
 #[test]
 fn learn_players_filters_value_only_perspectives() {
+    // Filtering to player 0 should retain its mover row plus two value-only perspectives per tick.
     let mut engine = Engine::new(
         RoundRobin,
         Box::new(Enc),
@@ -408,6 +410,8 @@ fn learn_players_filters_value_only_perspectives() {
     assert!(movers >= 2);
     assert_eq!(movers + value_only, records.len());
     assert_eq!(value_only, movers * 2);
+    // The same 2:1 ratio exists without filtering; only the encoded perspectives below prove that
+    // frozen players did not leak into either record path.
     for r in &records {
         assert_eq!(r.0[1], 0.0, "every record is player 0's perspective");
     }
@@ -575,6 +579,8 @@ fn expectimax_routes_opponent_model_rows_to_that_mover() {
     );
 }
 
+/// Each terminal event pays agent i exactly i+1. With gamma 1, this pins event/tick attribution for
+/// mover and value-only trajectories to each perspective's own reward stream.
 struct PayoutSeq;
 
 impl Game for PayoutSeq {
@@ -716,6 +722,7 @@ impl Game for EndlessRR {
 
 #[test]
 fn truncation_bootstraps_every_perspectives_own_tail() {
+    // Rewards are zero and gamma is one, so each record must equal its encoded agent's distinct tail.
     let az_cfg = AlphaZeroConfig {
         num_simulations: 8,
         c_puct: 1.5,
@@ -1074,6 +1081,7 @@ fn episode_birth_realizes_root_chance_chains() {
 #[test]
 #[should_panic(expected = "cannot start at a chance node")]
 fn start_distribution_restores_must_be_decision_states() {
+    // Ordinary play terminates at tick 4; tick 5 exists only so a hostile restore can inject chance.
     struct MidNodey;
     impl Game for MidNodey {
         type State = St;
@@ -1280,6 +1288,7 @@ fn forced_maxn_truncation_bootstraps_both_perspectives() {
             seed: 8,
         },
     );
+    // Rewards are zero and gamma is one, so z must be each encoded agent's distinct tail value.
     let infer = |obs: Vec<f32>, n: usize| {
         let mut out = Vec::with_capacity(n * 3);
         for r in 0..n {
@@ -1297,7 +1306,6 @@ fn forced_maxn_truncation_bootstraps_both_perspectives() {
         records.iter().any(|r| r.3 == 0.0),
         "value-only rows present"
     );
-    // Presence alone is non-discriminating; these values prove every perspective got its own tail.
     for (obs, _pi, z, _w, _player, _legal) in &records {
         let expect = (f64::from(obs[1]) + 1.0) / 10.0;
         assert!(

@@ -29,6 +29,8 @@ pub struct SearchConfig {
 
 #[derive(Default, Clone, Copy, Debug)]
 pub struct SearchStats {
+    // MCTS maintains the exact identity expansions = fresh + hit + shared + terminal + depthcap
+    // - extra_eval_rows; the subtraction removes auxiliary perspective rows from sim fate.
     pub max_depth: i32,
     pub expansions: usize,
     pub leaves: usize,
@@ -146,6 +148,8 @@ impl<S> Search<S> {
     }
 }
 
+/// Build one lockstep round: expand the selected frontier and fuse every resulting network row
+/// into the next pooled forward.
 fn expand_round<G: Game>(
     s: &mut Search<G::State>,
     game: &G,
@@ -319,6 +323,8 @@ where
         .map(|mut s| {
             resolve(&mut s.arena, 0, cfg.gamma, s.n_heads);
             let agent = s.agent;
+            // Resolve-phase MAX values are in the searcher's action frame; this deliberately differs
+            // from bootstrap leaves, whose legal set belongs to the leaf mover.
             let legal_of = |state: &G::State| game.legal_actions(state, agent);
             let values = node_action_values(&s.arena, 0, cfg.gamma, s.n_heads, a, &legal_of);
             let mut interior: Vec<InteriorTarget> = Vec::new();
@@ -522,6 +528,7 @@ fn push_branches<G: Game>(
         match cfg.chance {
             ChanceMode::Committed { samples } => {
                 let k = samples.max(1);
+                // The parent is already popped: resolved + pending + children is the projected fan.
                 assert!(
                     resolved.len() + work.len() + k <= MAX_ENUMERATED_OUTCOMES,
                     "a chance chain's flattened fan exceeds the enumeration bound ({}); use a \
@@ -544,6 +551,7 @@ fn push_branches<G: Game>(
                     MAX_ENUMERATED_OUTCOMES
                 );
                 assert!(
+                    // As above, check the size after inserting this outcome fan, not before it.
                     resolved.len() + work.len() + count <= MAX_ENUMERATED_OUTCOMES,
                     "a chance chain's flattened fan exceeds the enumeration bound ({}); use a \
                      narrower sampling mode",

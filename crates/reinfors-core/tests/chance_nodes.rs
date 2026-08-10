@@ -247,6 +247,8 @@ fn chain_rewards_join_their_tick_undiscounted_and_add_no_depth() {
     assert!((values[0][0] - 10.0).abs() < 1e-9, "{}", values[0][0]);
 }
 
+/// Half the fan terminates with +4 and half continues at zero, so its exact value is 2. Setting
+/// `both_terminal` makes the second half terminal too and exercises a fan with no staged rows.
 struct MixedFan {
     both_terminal: bool,
 }
@@ -413,6 +415,8 @@ fn simultaneous_trees_take_per_agent_chance_rewards() {
     }
 }
 
+/// P0 moves, chance hands the turn to P1, then P1 ends at +1: P0's value must flip only at the
+/// decision handoff, never merely while traversing chance.
 struct TurnFlip;
 impl Game for TurnFlip {
     type State = St;
@@ -495,6 +499,7 @@ fn engine_collects_with_search_policies_through_chance() {
     assert!(stats.decisions > 0);
 }
 
+/// Half terminates at +2 and half chains to a second chance node paying +6: exact value 4.
 struct BranchChain;
 impl Game for BranchChain {
     type State = St;
@@ -587,6 +592,7 @@ fn expand_all_flattens_chance_chains() {
 
 #[test]
 fn expand_all_flattens_chains_with_decision_continuations() {
+    // Reuses ChainTick's derivation above: (1+2+3) + 0.5*8 = 10.
     let cfg = mcts_cfg(256, 2, 0.5, ChanceMode::ExpandAll);
     let e = run_mcts(&ChainTick, chain_chance, &cfg, vec![(St { tick: 0 }, 0)]);
     let q = e[0].values[0][0];

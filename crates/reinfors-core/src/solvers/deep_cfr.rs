@@ -118,7 +118,9 @@ pub struct DeepCfrSolver<G: Game> {
     reward: Box<dyn Reward<Event = G::Event>>,
     iteration: u64,
     seed: u64,
+    // Salts independent per-machine RNG streams across calls; failed calls roll this back.
     collects: u64,
+    // Observation-keyed rows must never cross per-player networks.
     caches: Vec<InferCache>,
 }
 
@@ -173,7 +175,7 @@ impl<G: Game> DeepCfrSolver<G> {
         self.iteration += 1;
     }
 
-    /// Roll back collection RNG state after a failed callback.
+    /// Roll back the call salt after a failed callback so a retry draws the same worlds.
     pub fn rollback_collect(&mut self) {
         self.collects = self.collects.saturating_sub(1);
     }
@@ -210,6 +212,7 @@ impl<G: Game> DeepCfrSolver<G> {
         };
         let action_count = self.game.action_count();
 
+        // Machine-local streams keep samples reproducible across cache hits and scheduling order.
         let mut machines: Vec<Machine<G::State>> = (0..traversals)
             .map(|k| {
                 let salt = (self.collects << 32) ^ ((player as u64) << 24) ^ k as u64;

@@ -20,7 +20,8 @@ impl AlphaZeroLearner {
 
 fn normalized_visits(visits: &[f64]) -> Vec<f64> {
     let total: f64 = visits.iter().sum();
-    // Zero visits identify value-only records; their policy target must remain inert.
+    // A real root totals num_simulations - 1 visits, positive because construction requires at
+    // least two simulations. Zero therefore unambiguously marks a value-only record.
     if total <= 0.0 {
         return vec![0.0; visits.len()];
     }

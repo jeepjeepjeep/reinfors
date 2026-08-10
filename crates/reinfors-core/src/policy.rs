@@ -8,7 +8,8 @@ use crate::reward::Reward;
 use crate::rollout::engine::CollectStats;
 use crate::rollout::evaluator::Evaluator;
 
-/// Maximum simultaneous joint-action fan.
+/// Maximum simultaneous joint-action fan. Bindings reject statically oversized compositions;
+/// search repeats the check against each realized legal-action product.
 pub const MAX_JOINT_SLOTS: usize = 1 << 20;
 
 /// Maximum chance fan materialized by exhaustive search modes.
@@ -20,7 +21,8 @@ pub trait Policy {
 
     type PolicyState;
 
-    /// Largest supported agent count for sequential or simultaneous dynamics.
+    /// Largest supported agent count for sequential or simultaneous dynamics. This has no default
+    /// so every policy must make its capability claim deliberately.
     fn max_agents(&self, sequential: bool) -> Option<usize>;
 
     /// Whether sequential search consumes every agent's perspective.
@@ -29,7 +31,8 @@ pub trait Policy {
         false
     }
 
-    /// Whether the policy is sound when the game state contains hidden information.
+    /// Whether the policy is sound when the game state contains hidden information. This has no
+    /// default so a new policy cannot acquire that soundness claim accidentally.
     fn supports_imperfect_information(&self) -> bool;
 
     fn begin_episode(&self, rng: &mut dyn Rng) -> Self::PolicyState;
@@ -74,7 +77,8 @@ pub trait Policy {
 /// How tree search consumes declared chance distributions.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum ChanceMode {
-    /// Draw a fresh outcome on every traversal.
+    /// Draw a fresh outcome on every traversal. Unlike `Committed { samples: 1 }`, repeated draws
+    /// converge to the chance distribution instead of freezing one biased sample.
     #[default]
     AlwaysResample,
     /// Draw and freeze `samples` outcomes at edge expansion.
@@ -84,7 +88,8 @@ pub enum ChanceMode {
 }
 
 impl ChanceMode {
-    /// Whether the mode redraws on every traversal rather than only at expansion.
+    /// Whether the mode redraws on every traversal rather than only at expansion. Policies should
+    /// reject unsupported modes through this property rather than matching the variant name.
     pub fn requires_repeated_traversal(&self) -> bool {
         matches!(self, ChanceMode::AlwaysResample)
     }

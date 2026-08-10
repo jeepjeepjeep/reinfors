@@ -43,7 +43,8 @@ pub trait Learner<E> {
             .collect()
     }
 
-    /// An optional non-mover evaluation for policies that consume every perspective.
+    /// An optional non-mover evaluation for policies that consume every perspective. Implementors
+    /// must also encode a policy-mask convention for these value-only rows (AlphaZero uses zero π).
     fn value_only_evaluation(&self, action_count: usize) -> Option<E> {
         let _ = action_count;
         None

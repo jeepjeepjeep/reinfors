@@ -25,7 +25,9 @@ pub(crate) enum Guidance {
     },
 }
 
-/// Backup scheme for sequential games. Simultaneous games always use DUCT.
+/// Backup scheme for sequential games. Simultaneous games always use DUCT. In a two-seed Connect4
+/// comparison, `Auto`'s negamax path scored about 0.60 against forced `MaxN` at about 35% less wall
+/// time; `MaxN` remains the remeasurement seam.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SequentialBackup {
     #[default]
@@ -277,6 +279,8 @@ fn flatten_chance_fan<G: Game>(
 ) -> (Vec<FanLeaf<G::State>>, bool) {
     let mut leaves: Vec<FanLeaf<G::State>> = Vec::with_capacity(seed.len());
     let mut chained = false;
+    // One shared stack makes the projected-size check include unprocessed siblings. Reverse seed
+    // insertion preserves the original outcome order when the stack is popped.
     let mut stack: Vec<(FanLeaf<G::State>, usize)> =
         seed.into_iter().rev().map(|e| (e, 0)).collect();
     {
@@ -299,6 +303,7 @@ fn flatten_chance_fan<G: Game>(
                 MAX_ENUMERATED_OUTCOMES
             );
             assert!(
+                // The parent has already been popped, so this is the fan size after expansion.
                 leaves.len() + stack.len() + count <= MAX_ENUMERATED_OUTCOMES,
                 "a chance chain's flattened fan exceeds the enumeration bound ({}); use a narrower sampling mode",
                 MAX_ENUMERATED_OUTCOMES
@@ -326,6 +331,8 @@ fn agent_table<G: Game>(
 ) -> AgentTable {
     let mut actions = game.legal_actions(state, agent);
     if actions.is_empty() {
+        // Inactive simultaneous agents retain one placeholder slot; the game must ignore action 0
+        // for them, matching the engine's inactive-agent convention.
         actions = vec![0];
     }
     let width = actions.len();
@@ -592,6 +599,7 @@ impl<S: Clone> Tree<S> {
 
     fn chance_child(&self, ni: usize, slot: usize) -> Option<usize> {
         let node = &self.arena[ni];
+        // Only AlwaysResample has an empty dense child array; it materializes a sparse outcome map.
         if node.child.is_empty() {
             let NodeKind::Chance { resampled, .. } = &node.kind else {
                 unreachable!("chance_child on a decision node");
@@ -1040,6 +1048,8 @@ impl<S: Clone> Tree<S> {
             fan_weights
         };
         let mut ref_actor = self.arena[cni].actor;
+        // Negamax child values use each outcome's mover perspective. Chance may change that mover,
+        // so normalize all nonterminal values to one reference under the 2p zero-sum contract.
         if self.mode == TreeMode::SeqNegamax {
             for &c in &self.arena[cni].child {
                 if !self.arena[c as usize].terminal {
@@ -1270,6 +1280,8 @@ where
         })
         .collect();
     assert!(
+        // Q-derived UCT leaf values exist only at the evaluated agent's own turns. Sequential MaxN
+        // needs every perspective; simultaneous search gives every agent its own table instead.
         !(matches!(guidance, Guidance::Uct { .. })
             && trees.iter().any(|t| t.mode == TreeMode::SeqMaxN)),
         "UCT does not support this sequential player count; see {}",
@@ -1445,6 +1457,8 @@ fn consume_row<S: Clone>(
     ti: usize,
     view: &dyn ActionView,
 ) {
+    // Fresh forwards, cache hits, and within-batch deduplication all terminate here; keeping one
+    // ingestion path prevents cache behavior from changing search semantics.
     let is_sim_node = matches!(tree.arena[ni].kind, NodeKind::Simultaneous(_));
     let is_maxn_node = !is_sim_node && tree.mode == TreeMode::SeqMaxN;
     let row_agent = if is_sim_node || is_maxn_node {
@@ -1535,6 +1549,7 @@ fn consume_row<S: Clone>(
 }
 
 pub(crate) fn sample_visits(visits: &[f64], temperature: f64, rng: &mut dyn Rng) -> usize {
+    // Max-normalization prevents low temperatures overflowing; unvisited actions retain zero mass.
     let n_max = visits.iter().fold(0.0f64, |m, &v| m.max(v));
     if n_max <= 0.0 {
         return 0;
