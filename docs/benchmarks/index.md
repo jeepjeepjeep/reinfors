@@ -1,28 +1,29 @@
 # Benchmarks
 
-This section is intentionally a skeleton while the benchmark suite is rerun on controlled
-hardware. No historical headline numbers are carried forward without their complete
-configuration and reproducibility artifacts.
+Two distinct families of measurement live here, sharing one environment and one
+measurement discipline:
 
-These benchmarks are not intended to claim universal throughput leadership. Specialized, fully
-fused implementations may be faster on the workload they were built around; the relevant question
-for reinfors is how much throughput its modular game/search/training boundary preserves, and where
-that flexibility becomes the limiting cost.
+**[reinfors vs. OpenSpiel](openspiel/index.md)** — a controlled, like-for-like comparison
+against [OpenSpiel](https://github.com/google-deepmind/open_spiel)'s C++ libtorch
+AlphaZero: matched 2-hour training rounds, head-to-head strength evaluation, and the
+structural analysis of why the numbers differ.
 
-The published results will evaluate the claims reinfors is designed around:
+**[reinfors internals](internal/index.md)** — reinfors measured against itself:
+device characterization (kernel batch curves, cache behavior) and the throughput effect of
+individual configuration levers (native f32 outputs, inference caching, grouped
+collection). These are the numbers that guide *your* configuration choices, independent of
+any other framework.
 
-- native environment and search throughput;
-- effective inference batch sizes at the Rust/Python boundary;
-- synchronous versus overlapped actor–learner utilization;
-- scaling with parallel games, CPU threads, and search budget;
-- comparison with relevant OpenSpiel implementations where semantics align;
-- end-to-end time-to-training-data, not only isolated environment steps.
+Shared foundations, applying to both families:
 
-Results will link to the exact commit, resolved configurations, command lines, raw data, and
-analysis code. Until those artifacts are ready, treat performance as an implementation goal,
-not a documented guarantee.
+- [Environment and setup](setup.md) — the instance, isolation invariants, and version pins.
+- [Methodology](methodology.md) — the measurement protocol, including the rules that exist
+  because an earlier version of the benchmark broke them.
 
-## Next steps
+Each family carries its own reproduction guide:
+[internal](internal/reproducing.md) (this repository) and
+[comparison](openspiel/reproducing.md) (the companion benchmark repository).
 
-- Read the required [methodology and publication checklist](methodology.md).
-- Run the existing harnesses from the [reproduction guide](reproducing.md).
+Numeric results are being populated as the final long-form runs complete; tables marked
+_TBD_ are structural placeholders whose protocol is already frozen. Every published number
+links to the commit, resolved configuration, command line, and raw logs that produced it.

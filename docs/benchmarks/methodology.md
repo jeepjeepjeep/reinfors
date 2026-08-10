@@ -1,46 +1,34 @@
-# Benchmark methodology
+# Methodology
 
-Every published benchmark should include the following.
+The measurement discipline shared by every benchmark family. Rules specific to comparing
+two frameworks live in the [comparison protocol](openspiel/protocol.md).
 
-## System
+## Termination: hard kill, interior windows
 
-- CPU model, physical/logical core count, memory, NUMA layout;
-- accelerator model, memory, driver, and framework versions;
-- operating system and power/performance settings;
-- release build confirmation from `rf.core_build_profile()`;
-- reinfors and comparison-library commits.
+Each leg is killed (SIGKILL) at its deadline, on both stacks. Rates use counter deltas
+between timestamped interior samples; runs with fewer than two interior samples fail
+rather than fall back to totals. This avoids counting work completed while draining after
+the deadline, which inflated one side by 18–31% in an early sweep.
 
-## Workload
+## The training-relevant rate is states/s, not rows/s
 
-- resolved engine configuration and fingerprint;
-- game, observation encoder, reward, policy, learner, chance mode, and seeds;
-- model architecture, parameter count, precision, device, and compilation settings;
-- parallel games, search budget, cache capacity, stream depth, and thread settings;
-- warm-up, measured duration, repeats, and uncertainty calculation.
+A *row* is one position forwarded through the net: search effort. A *state* is one training
+example delivered to the learner — and in AlphaZero-style training a position only becomes
+an example when its game **finishes** (the value target is the realized outcome). Under a
+hard deadline, in-flight games count for nothing. Configurations routinely trade these
+against each other (more parallel games → more rows/s, slower per-game progress → fewer
+completed states/s), so topology selection and headline comparisons use states/s at matched
+search budget; rows/s is recorded as diagnosis.
 
-## Measurements
+## Determinism, repeats, and uncertainty
 
-Report both throughput and the work that produced it: records, decisions, episodes,
-inference calls and rows, callback time, effective callback batch size, cache behavior, search
-expansions, and episode lengths. For concurrent runs, separately report collection, training,
-idle time, queue occupancy, and policy lag.
+Collection is seeded and bit-reproducible per configuration under fixed weights and
+deterministic inference; every run records its seed and resolved configuration.
 
-Comparisons must align rules, observation semantics, chance behavior, search budget, and
-model outputs. If they cannot align, label the difference rather than presenting the result
-as like-for-like.
-
-## Publication checklist
-
-- [ ] Commands and configs committed
-- [ ] Raw machine-readable results available
-- [ ] Multiple runs with uncertainty
-- [ ] Correctness checks pass before timing
-- [ ] No debug builds
-- [ ] Warm-up excluded consistently
-- [ ] Charts generated from checked-in analysis
-- [ ] Limitations and non-equivalent semantics disclosed
-
-## Next steps
-
-- Use the commands and harness descriptions in [reproducing benchmarks](reproducing.md).
-- Return to [benchmark status](index.md) for the current publication state.
+Repeats are tiered by cost: tuning and characterization measurements (kernel curves,
+sweep legs) are repeated — at least three legs, reported as median with the spread — while
+the two-hour rounds are explicitly **single-seed per side**, stated as such wherever their
+results appear. Match results report a standard error (computed over opening pairs);
+sweep-derived selections state the margin between the chosen configuration and the
+runner-up. No published number appears without either a repeat-derived spread or a
+single-run label.
