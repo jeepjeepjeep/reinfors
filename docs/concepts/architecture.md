@@ -3,23 +3,94 @@
 Reinfors separates reusable rules, search, record generation, and user-owned learning.
 
 ```text
-                         caller-owned Python
-                   ┌──────────────────────────┐
-                   │ network · optimizer      │
-                   │ replay · devices · RPC   │
-                   └────────────┬─────────────┘
-                                │ infer callback
-                                │ NumPy in / NumPy out
-┌───────────────────────────────┼────────────────────────────────┐
-│ Rust                          ▼                                │
-│ Game ───────┐                                                 │
-│ Encoder ────┼→ Policy + Learner → Engine → Batch              │
-│ Reward ─────┘   search/records    parallel games              │
-│ rules/state · representation · objective                      │
-└────────────────────────────────────────────────────────────────┘
+CALLER-OWNED PYTHON
 
-Env: caller-driven play and evaluation
-Solver: algorithm-owned traversal outside episode collection
+┌──────────────────────────────────────────────────────────────────────┐
+│ Training loop calls Engine.collect(...) or reads a CollectStream    │
+└──────────────────────────────────┬───────────────────────────────────┘
+                                   │
+══════════════════════ RUST / PYTHON BOUNDARY ═════════════════════════
+                                   ▼
+RUST: ENGINE AND COMPOSED COMPONENTS
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ Engine                                                               │
+│ owns active game slots, component instances, cache, batching,        │
+│ record floor, stream queue, snapshots, and telemetry                 │
+└──────────────────────────────────┬───────────────────────────────────┘
+                                   ▼
+              ┌───────────────────────────────┐
+              │ Game                          │
+              │ state · rules · legal actions │
+              │ chance · terminal status      │
+              └───────┬───────────────▲───────┘
+      state + player  │               │ selected action / transition
+      perspective     │               │
+                      ▼               ├──────────────────────────┐
+              ┌───────────────┐       │                  ┌───────┴────────┐
+              │ Encoder       │       │                  │ Policy/search │
+              │ observation + │       └──────────────────│ uses Game +   │
+              │ action view   │                          │ network data  │
+              └───────┬───────┘                          └───────┬────────┘
+                      │ encoded evaluation request               │
+                      ▼                                          │
+              ┌───────────────────────────────┐                  │
+              │ Engine inference pool         │◄─────────────────┘
+              │ batches requests from games,  │
+              │ players, and search leaves    │
+              └───────────────────┬───────────┘
+                                  │ pooled observation array
+══════════════════════ RUST / PYTHON BOUNDARY ═════════════════════════
+                                  ▼
+CALLER-OWNED PYTHON
+
+              ┌──────────────────────────────────────────┐
+              │ infer callback                           │
+              │ NumPy → arbitrary network/device/RPC →   │
+              │ policy values, action values, or logits  │
+              └───────────────────┬──────────────────────┘
+                                  │ prediction arrays
+══════════════════════ RUST / PYTHON BOUNDARY ═════════════════════════
+                                  ▼
+RUST
+
+              ┌──────────────────────────────────────────┐
+              │ Engine routes each prediction row back   │
+              │ to the policy/search that requested it   │
+              └───────────────────┬──────────────────────┘
+                                  │
+                         search continues, or
+                         an action is selected
+                                  │
+              ┌───────────────────▼──────────────────────┐
+              │ Game applies actions and chance          │
+              │ transitions, producing ordered events   │
+              └──────────────┬────────────────┬──────────┘
+                             │                │ events
+                transition / │                ▼
+                search data  │       ┌───────────────────┐
+                             │       │ Reward            │
+                             │       │ events → rewards  │
+                             │       └─────────┬─────────┘
+                             ▼                 ▼
+              ┌──────────────────────────────────────────┐
+              │ Learner                                  │
+              │ Engine-supplied trajectory, decision,    │
+              │ and search data + rewards → records      │
+              └───────────────────┬──────────────────────┘
+                                  │ records accumulate to requested floor
+              ┌───────────────────▼──────────────────────┐
+              │ completed Engine batch                   │
+              │ (direct return or CollectStream queue)   │
+              └───────────────────┬──────────────────────┘
+                                  │
+══════════════════════ RUST / PYTHON BOUNDARY ═════════════════════════
+                                  ▼
+CALLER-OWNED PYTHON
+
+              replay/buffer → loss → optimizer → updated network
+                                  │
+                                  └──────────────► next collection cycle
 ```
 
 ## The two primary execution surfaces
