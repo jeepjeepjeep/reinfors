@@ -3295,7 +3295,6 @@ mod pooled_lifecycle_tests {
         game: &'c SimPair,
         enc: &'c Enc,
         reward: &'c Zero,
-        guidance: &'c Guidance,
         sims: usize,
     ) -> PooledSearch<'c, SimPair> {
         PooledSearch::new(
@@ -3305,7 +3304,7 @@ mod pooled_lifecycle_tests {
             sims,
             1.0,
             64,
-            guidance,
+            Guidance::Uct { c: 1.0 },
             ChanceMode::AlwaysResample,
             7,
             vec![(St { tick: 0 }, 0)],
@@ -3316,10 +3315,9 @@ mod pooled_lifecycle_tests {
     #[test]
     fn final_round_is_outstanding_until_applied() {
         let (game, enc, reward) = (SimPair, Enc, Zero);
-        let g = Guidance::Uct { c: 1.0 };
         let mut f = infer;
         let mut eval: Evaluator<'_, _> = Evaluator::new(&mut f, InferMode::Shared, None);
-        let mut p = new_pool(&game, &enc, &reward, &g, 1);
+        let mut p = new_pool(&game, &enc, &reward, 1);
         let mut batch = eval.batch();
         p.stage_round(&mut batch);
         // The single simulation is spent, but its (multi-row: simultaneous) evaluation is in
@@ -3336,10 +3334,9 @@ mod pooled_lifecycle_tests {
     #[should_panic(expected = "round outstanding")]
     fn double_stage_panics() {
         let (game, enc, reward) = (SimPair, Enc, Zero);
-        let g = Guidance::Uct { c: 1.0 };
         let mut f = infer;
         let mut eval: Evaluator<'_, _> = Evaluator::new(&mut f, InferMode::Shared, None);
-        let mut p = new_pool(&game, &enc, &reward, &g, 2);
+        let mut p = new_pool(&game, &enc, &reward, 2);
         let mut batch = eval.batch();
         p.stage_round(&mut batch);
         drop(batch);
@@ -3351,11 +3348,10 @@ mod pooled_lifecycle_tests {
     #[should_panic(expected = "without a staged round")]
     fn apply_without_stage_panics() {
         let (game, enc, reward) = (SimPair, Enc, Zero);
-        let g = Guidance::Uct { c: 1.0 };
         let mut f = infer;
         let mut eval: Evaluator<'_, _> = Evaluator::new(&mut f, InferMode::Shared, None);
         let empty = eval.batch().commit();
-        let mut p = new_pool(&game, &enc, &reward, &g, 1);
+        let mut p = new_pool(&game, &enc, &reward, 1);
         p.apply_rows(&empty);
     }
 
@@ -3363,10 +3359,9 @@ mod pooled_lifecycle_tests {
     #[should_panic(expected = "unfinished pool")]
     fn into_evaluations_while_awaiting_panics() {
         let (game, enc, reward) = (SimPair, Enc, Zero);
-        let g = Guidance::Uct { c: 1.0 };
         let mut f = infer;
         let mut eval: Evaluator<'_, _> = Evaluator::new(&mut f, InferMode::Shared, None);
-        let mut p = new_pool(&game, &enc, &reward, &g, 1);
+        let mut p = new_pool(&game, &enc, &reward, 1);
         let mut batch = eval.batch();
         p.stage_round(&mut batch);
         drop(batch);
@@ -3377,10 +3372,9 @@ mod pooled_lifecycle_tests {
     #[should_panic(expected = "fresh batch")]
     fn nonempty_batch_panics() {
         let (game, enc, reward) = (SimPair, Enc, Zero);
-        let g = Guidance::Uct { c: 1.0 };
         let mut f = infer;
         let mut eval: Evaluator<'_, _> = Evaluator::new(&mut f, InferMode::Shared, None);
-        let mut p = new_pool(&game, &enc, &reward, &g, 1);
+        let mut p = new_pool(&game, &enc, &reward, 1);
         let mut batch = eval.batch();
         let _ = batch.resolve_or_stage(0, &[9.0, 9.0]);
         p.stage_round(&mut batch);
@@ -3389,7 +3383,6 @@ mod pooled_lifecycle_tests {
     #[test]
     fn alternated_pools_match_search_many() {
         let (game, enc, reward) = (SimPair, Enc, Zero);
-        let g = Guidance::Uct { c: 1.0 };
         let sims = 6;
         let mut f = infer;
         let mut eval: Evaluator<'_, _> = Evaluator::new(&mut f, InferMode::Shared, None);
@@ -3411,8 +3404,8 @@ mod pooled_lifecycle_tests {
 
         let mut f2 = infer;
         let mut eval2: Evaluator<'_, _> = Evaluator::new(&mut f2, InferMode::Shared, None);
-        let mut a = new_pool(&game, &enc, &reward, &g, sims);
-        let mut b = new_pool(&game, &enc, &reward, &g, sims);
+        let mut a = new_pool(&game, &enc, &reward, sims);
+        let mut b = new_pool(&game, &enc, &reward, sims);
         while !a.finished() || !b.finished() {
             for p in [&mut a, &mut b] {
                 if p.finished() {
