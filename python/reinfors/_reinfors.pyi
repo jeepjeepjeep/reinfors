@@ -399,7 +399,7 @@ class Engine:
         # Double-buffered collect (1 = off): 2 overlaps tree work with inference via two fixed
         # game groups. Requires policies.Mcts/AlphaZero, one shared callback, no truncation-tail
         # bootstrapping. Deterministic per seed; fingerprinted (digests differ from n_groups=1).
-        # Sizing guidance: docs/guides/training.md#overlapping-search-and-inference.
+        # Sizing guidance: docs/guides/training.md#overlapping-search-and-inference-n_groups.
         n_groups: int = ...,
     ) -> None: ...
     # Tell the engine the net's weights changed (call after every weight sync — e.g. right after

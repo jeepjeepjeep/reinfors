@@ -47,3 +47,37 @@ def test_one_train_iteration_runs() -> None:
     obs, target, mask, _ = engine.collect(24, ex.make_infer(net))
     loss = ex.train_step(net, optimizer, obs, target, mask, "cpu")
     assert np.isfinite(loss)
+
+
+def test_alphazero_example_grouped_streaming_wiring() -> None:
+    # n_groups=2 + --depth is the distinct grouped streaming path (collect_thunk branch).
+    import subprocess
+    import sys
+
+    path = os.path.join(os.path.dirname(__file__), "..", "examples", "train_alphazero_example.py")
+    proc = subprocess.run(
+        [
+            sys.executable,
+            path,
+            "--iterations",
+            "2",
+            "--collect-size",
+            "48",
+            "--train-passes",
+            "1",
+            "--eval-every",
+            "0",
+            "--n-games",
+            "4",
+            "--n-groups",
+            "2",
+            "--depth",
+            "1",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "n_groups=2" in proc.stdout, "startup print must be self-describing"
+    assert "iter   2" in proc.stdout
