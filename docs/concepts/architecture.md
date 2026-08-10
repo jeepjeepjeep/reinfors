@@ -104,9 +104,7 @@ search-guided methods (for example, DQN, TreeStrap, and AlphaZero).
 interactive play, custom agents, and Gymnasium/PettingZoo adapters. It exposes observations,
 legal actions, active agents, event traces, rewards, snapshots, and forks.
 
-Algorithms whose traversal does not fit policy-driven episode collection use standalone solvers.
-The current solver implementations are CFR-based: tabular CFR trains internally, while Deep CFR calls
-per-player advantage inference and returns samples for caller-owned buffers and optimization.
+Algorithms whose traversal does not fit policy-driven episode collection use standalone solvers (e.g. CFR).
 
 ## Component responsibilities
 
