@@ -4,7 +4,7 @@ Query a game handle for them (``game.observation_space()`` / ``game.action_space
 network without hard-coding any game's dimensions::
 
     game = rf.games.Snake(grid_size=20)
-    obs_shape, n_actions = game.observation_space().shape, game.action_space().n  # size your net from these
+    obs_shape, n_actions = game.observation_space().shape, game.action_space().n
 
 ``Box`` mirrors Gymnasium's: ``shape`` is the contract; ``low`` / ``high`` are numpy arrays broadcast
 to ``shape``. ``Discrete`` is a choice from ``0..n``.

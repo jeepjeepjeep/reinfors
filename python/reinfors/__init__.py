@@ -5,7 +5,7 @@ from the game (the game owns only the rules): the same game trains under any rew
 which only plays/evaluates — needs no reward at all.
 
     import reinfors as rf
-    game    = rf.games.Snake(grid_size=20, max_ticks=750)  # the truncation horizon is the game's
+    game    = rf.games.Snake(grid_size=20, max_ticks=750)
     reward  = rf.Reward(food=1.0, loss=-10.0)
     policy  = rf.policies.SelectiveExpectimax(n_heads=10, expansion_budget=64)
     learner = rf.learners.TreeStrap(gamma=0.99, outcome_weight=0.3)
