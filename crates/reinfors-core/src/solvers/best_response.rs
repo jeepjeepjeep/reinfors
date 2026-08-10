@@ -12,7 +12,8 @@ pub type Profile<'a> = dyn Fn(&[u8], usize) -> Vec<f64> + 'a;
 /// Maximum nodes in an exact enumeration.
 const MAX_TREE_NODES: usize = 4_000_000;
 
-/// The game tree exceeded the exact-enumeration cap.
+/// The game tree exceeded the exact-enumeration cap. This is a typed error because an oversized
+/// but valid game is expected public input, not an internal invariant failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnumerationCapExceeded(pub String);
 

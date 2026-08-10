@@ -59,7 +59,8 @@ pub trait Learner<E> {
         false
     }
 
-    /// Records emitted immediately for one evaluation.
+    /// Records emitted immediately for one evaluation. The mutable evaluation lets a learner move
+    /// out immediate-only payloads instead of retaining them in the episode trajectory.
     fn eval_records(
         &self,
         evaluation: &mut E,

@@ -68,6 +68,7 @@ fn engine() -> Engine<Alt, EpsilonGreedyQ, Dqn> {
         Alt,
         Box::new(Enc),
         Box::new(Zero),
+        // Greedy selection makes the network-routing assertions deterministic.
         EpsilonGreedyQ::new(1, 0.0),
         Dqn::new(1, 1.0),
         EngineParams {
@@ -128,6 +129,8 @@ fn learn_players_freezes_records_at_source() {
 
 #[test]
 fn per_player_caches_never_cross_contaminate() {
+    // Observations are identical across players while their networks prefer opposite actions;
+    // sharing an observation-keyed cache would therefore flip one player's records.
     let caches = (0..3)
         .map(|_| {
             InferCache::new(

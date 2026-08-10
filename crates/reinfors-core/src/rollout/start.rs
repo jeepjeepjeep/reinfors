@@ -9,7 +9,8 @@ pub enum Start<S> {
     Restore(S),
 }
 
-/// Chooses each episode's start state.
+/// Chooses each episode's start state. Implementations must draw only from the injected RNG so
+/// start sampling remains deterministic without perturbing the environment's chance stream.
 pub trait StartDistribution<S>: Send + Sync {
     fn choose(&mut self, rng: &mut dyn Rng) -> Start<S>;
 

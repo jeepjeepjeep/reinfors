@@ -1,6 +1,7 @@
 //! Game-state serialization.
 
-/// Encode and decode one game's state.
+/// Encode and decode one game's state. Malformed input must return `Err` from decoding or
+/// validation, never panic.
 pub trait StateCodec: Send + Sync {
     type State;
 
@@ -8,7 +9,8 @@ pub trait StateCodec: Send + Sync {
 
     fn decode(&self, bytes: &[u8]) -> Result<Self::State, String>;
 
-    /// Validate safety and lifecycle invariants, not reachability through legal play.
+    /// Validate safety and lifecycle invariants, not reachability through legal play. In
+    /// particular, a live state must not retain a transient pending-chance sentinel.
     fn validate_decoded_state(&self, state: &Self::State, done: bool) -> Result<(), String>;
 }
 

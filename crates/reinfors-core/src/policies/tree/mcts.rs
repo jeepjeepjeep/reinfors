@@ -189,6 +189,8 @@ impl<S> Node<S> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TreeMode {
+    // Retained as the 2p default: Connect4 AZ measured ~0.60 head-to-head against forced MaxN at
+    // equal decisions and ~35% less wall time (two seeds). MaxN is the re-measurement seam.
     SeqNegamax,
     SeqMaxN,
     Sim,
@@ -860,6 +862,7 @@ impl<S: Clone> Tree<S> {
         self.arena[self.leaf].value = leaf_value;
         let mut g = leaf_value; // value from `g_actor`'s perspective
         let mut g_actor = self.arena[self.leaf].actor;
+        // This path is selected only for the <=2-agent negamax mode; indexing this at N>2 panics.
         let mut pend = [0.0f64; 2];
         for (p, r) in pend.iter_mut().zip(&self.pend_seed) {
             *p += r;
@@ -1475,6 +1478,8 @@ fn consume_row<S: Clone>(
             let mut prior = softmax(&legal_logits);
             let noised = ni == 0 && (!is_sim_node || slot == tree.requester || *noise_all);
             if noised {
+                // Noise is applied after lookup: the cache must contain raw logits so root hits
+                // reproduce the same per-tree noise as fresh rows.
                 if let Some((eps, alpha, seed)) = noise {
                     if *eps > 0.0 {
                         let mut rng = SplitMix64::new(

@@ -246,6 +246,7 @@ mod frame_tests {
     fn legal_maps_into_the_head_frame_with_pi() {
         let learner = AlphaZeroLearner::new(1.0);
         let mut steps = vec![super::tests::step(vec![6.0, 0.0, 2.0], 0, 0.0)];
+        // A proper subset catches mappings that accidentally work only for full-width legality.
         steps[0].evaluation.legal = vec![0, 2];
         let recs = learner.episode_records(&steps, &[], &Rot, 0, &mut SplitMix64::new(0));
         assert_eq!(recs[0].5, vec![1, 0]);

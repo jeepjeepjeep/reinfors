@@ -1,4 +1,6 @@
-//! Tabular vanilla CFR, CFR+, and external-sampling MCCFR for sequential games.
+//! Tabular vanilla CFR, CFR+, and external-sampling MCCFR for sequential games. Vanilla and CFR+
+//! deliberately mirror OpenSpiel's alternating passes: `current` is materialized after each pass,
+//! not regret-matched on demand. The parity harness pins iteration-exact trajectories.
 
 use std::collections::HashMap;
 

@@ -57,12 +57,14 @@ impl Rng for SplitMix64 {
 }
 
 fn normal(rng: &mut dyn Rng) -> f64 {
+    // Box-Muller; clamp away zero so the logarithm remains finite.
     let u1 = rng.unit().max(f64::MIN_POSITIVE);
     let u2 = rng.unit();
     (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
 }
 
 fn gamma_sample(rng: &mut dyn Rng, alpha: f64) -> f64 {
+    // Marsaglia-Tsang, with the standard alpha<1 boost.
     if alpha < 1.0 {
         let u = rng.unit().max(f64::MIN_POSITIVE);
         return gamma_sample(rng, alpha + 1.0) * u.powf(1.0 / alpha);
@@ -75,6 +77,7 @@ fn gamma_sample(rng: &mut dyn Rng, alpha: f64) -> f64 {
         if v <= 0.0 {
             continue;
         }
+        // The log-domain acceptance test must never see ln(0), which can poison Dirichlet noise.
         let u = rng.unit().max(f64::MIN_POSITIVE);
         if u < 1.0 - 0.0331 * x.powi(4) || u.ln() < 0.5 * x * x + d * (1.0 - v + v.ln()) {
             return d * v;

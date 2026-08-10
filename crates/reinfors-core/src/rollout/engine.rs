@@ -463,6 +463,8 @@ where
             for (i, &(gi, si)) in meta.iter().enumerate() {
                 let row = &q[i * stride..(i + 1) * stride];
                 let state = &self.episodes[gi].state;
+                // Sequential non-mover rows still bootstrap over the mover's available actions;
+                // using `si` here would turn a valid sparse-action tail into an empty one.
                 let legal = match self.game.actor(state) {
                     Actor::Agent(mover) => self.game.legal_actions(state, mover),
                     Actor::Simultaneous => self.game.legal_actions(state, si),

@@ -2,7 +2,8 @@
 
 use crate::space::Space;
 
-/// Per-agent bijection between game action ids and network-head indices.
+/// Per-agent bijection between game action ids and network-head indices. Both maps must be pure
+/// functions of `(action, agent)`; the bijection check cannot detect state-dependent mappings.
 pub trait ActionView: Send + Sync {
     fn head_index(&self, action: usize, agent: usize) -> usize {
         let _ = agent;

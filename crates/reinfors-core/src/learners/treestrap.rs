@@ -25,7 +25,8 @@ impl TreeStrap {
         }
     }
 
-    /// Blend discounted returns into each head's executed-action target.
+    /// Blend discounted returns into each head's executed-action target. This remains an associated
+    /// function because the out-of-file differential parity caller supplies free-standing params.
     pub fn blend_outcome_targets(
         trajectory: &[(Vec<Vec<f64>>, usize, f64)],
         gamma: f64,
@@ -294,6 +295,7 @@ mod frame_tests {
             terminal: true,
         }];
         let recs = learner.episode_records(&steps, &[], &Rot, 0, &mut SplitMix64::new(0));
+        // Blend in game frame: [0.1, 2.0, 0.3], then rotate into head frame [0.3, 0.1, 2.0].
         assert_eq!(recs[0].1, vec![vec![0.3, 0.1, 2.0]]);
     }
 }

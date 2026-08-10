@@ -69,6 +69,7 @@ struct Node<S> {
     value: Vec<f64>,
     sigma: f64,
     path_weight: f64,
+    // True only at the searcher's decisions; opponent nodes must not become TreeStrap targets.
     max_node: bool,
 }
 
@@ -286,6 +287,8 @@ where
                     let slice = &q[row_start * n_heads * a..(row_start + rows) * n_heads * a];
                     s.n_heads = n_heads;
                     let agent = s.agent;
+                    // At a sequential opponent leaf, available actions belong to the mover even
+                    // though the value row is evaluated from the searcher's perspective.
                     let legal_of = |state: &G::State| match game.actor(state) {
                         Actor::Agent(mover) => game.legal_actions(state, mover),
                         Actor::Simultaneous => game.legal_actions(state, agent),
@@ -492,6 +495,7 @@ fn push_branches<G: Game>(
     joint: &[usize],
     mw: MoveWeight,
     agent: usize,
+    // No legal action means death in simultaneous play, but merely "not your turn" sequentially.
     agent_out_terminal: bool,
     depth: i32,
     new_leaves: &mut Vec<usize>,
@@ -846,6 +850,7 @@ fn collect_interior_targets<S, L>(
     if arena[idx].terminal || arena[idx].edges.is_none() {
         return;
     }
+    // Only searcher-choice nodes yield policy targets; opponent expectations are internal.
     if arena[idx].max_node {
         out.push((
             arena[idx].obs.clone(),

@@ -1255,6 +1255,7 @@ impl Game for EndlessTwo {
 
 #[test]
 fn forced_maxn_truncation_bootstraps_both_perspectives() {
+    // Regression: the tail gate once used `n > 2`, omitting the non-mover under forced 2p MaxN.
     let cfg = AlphaZeroConfig {
         num_simulations: 8,
         c_puct: 1.5,
@@ -1296,6 +1297,7 @@ fn forced_maxn_truncation_bootstraps_both_perspectives() {
         records.iter().any(|r| r.3 == 0.0),
         "value-only rows present"
     );
+    // Presence alone is non-discriminating; these values prove every perspective got its own tail.
     for (obs, _pi, z, _w, _player, _legal) in &records {
         let expect = (f64::from(obs[1]) + 1.0) / 10.0;
         assert!(

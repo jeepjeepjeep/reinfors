@@ -124,6 +124,7 @@ where
 
 #[test]
 fn expand_all_backs_up_the_exact_expectation() {
+    // 0.25*10 + 0.75*20 = 17.5 on this tick; discounting the chance edge would wrongly give 8.75.
     let cfg = mcts_cfg(1, 8, 0.5, ChanceMode::ExpandAll);
     let e = run_mcts(&PayoutFan, fan_chance, &cfg, vec![(St { tick: 0 }, 0)]);
     assert!(
@@ -225,6 +226,8 @@ fn chain_chance(s: &St) -> bool {
 
 #[test]
 fn chain_rewards_join_their_tick_undiscounted_and_add_no_depth() {
+    // The depth cap is exactly tight: chance-transparent depth reaches the second decision.
+    // Its value is (1+2+3) + 0.5*8 = 10.
     let cfg = mcts_cfg(256, 2, 0.5, ChanceMode::Committed { samples: 1 });
     let e = run_mcts(&ChainTick, chain_chance, &cfg, vec![(St { tick: 0 }, 0)]);
     let q = e[0].values[0][0];
@@ -651,6 +654,8 @@ impl Game for WideChain {
 #[test]
 #[should_panic(expected = "flattened fan exceeds the enumeration bound")]
 fn the_flattened_fan_cap_counts_unprocessed_outcomes() {
+    // One seed expands to a cap-sized fan while its sibling remains pending; counting only the
+    // expanded seed would admit almost twice the bound.
     let cfg = mcts_cfg(1, 8, 0.5, ChanceMode::ExpandAll);
     let _ = run_mcts(&WideChain, branch_chance, &cfg, vec![(St { tick: 0 }, 0)]);
 }

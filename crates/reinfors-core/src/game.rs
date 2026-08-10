@@ -35,7 +35,8 @@ impl<S, E> Transition<S, E> {
     }
 }
 
-/// A chance state's distribution over outcome indices.
+/// A chance state's distribution over outcome indices. Uniform counts must fit
+/// `min(2^53, usize::MAX)` so sampling cannot silently lose index precision.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChanceDist {
     Weighted(Vec<f64>),
@@ -50,7 +51,8 @@ impl ChanceDist {
         }
     }
 
-    /// Normalized probabilities in outcome order.
+    /// Normalized probabilities in outcome order. Normalization is computed once for the whole
+    /// iterator; a `prob(i)` accessor would make callers accidentally build O(N^2) fans.
     pub fn iter_probs(&self) -> impl Iterator<Item = f64> + '_ {
         let (total, uniform) = match self {
             ChanceDist::Weighted(p) => (Self::checked_total(p), 0.0),
@@ -122,6 +124,10 @@ pub trait Game {
     }
 
     /// Distribution over the outcome indices accepted by `apply_chance_node`.
+    ///
+    /// Pending chance is normally a transient state sentinel: `actor` exposes `Chance`, agent
+    /// legality is empty, and `apply_chance_node` clears it. Keep it out of observations, and reject
+    /// it when validating a live restored state, which otherwise cannot be stepped by an agent.
     fn chance_node(&self, state: &Self::State) -> ChanceDist {
         let _ = state;
         unreachable!("chance_node called on a game that declares no chance nodes")

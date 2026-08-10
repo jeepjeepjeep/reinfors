@@ -1,4 +1,6 @@
-//! Batched network evaluation, caching, and throughput accounting.
+//! Batched network evaluation, caching, and throughput accounting. Every inference consumer must
+//! pass through this service; the earlier peer-parameter design let call sites bypass caching and
+//! telemetry accidentally.
 
 use crate::rollout::infer_cache::InferCache;
 

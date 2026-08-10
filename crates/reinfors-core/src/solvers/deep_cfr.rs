@@ -1,4 +1,6 @@
-//! Batched external-sampling Deep CFR traversal and sample generation.
+//! Batched external-sampling Deep CFR traversal and sample generation. This is a solver rather
+//! than an engine policy because unbiased advantage samples require opponent-and-chance reach:
+//! traverser actions are expanded, not sampled through ordinary self-play visitation.
 
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
@@ -51,6 +53,7 @@ fn matched_strategy(row: &[f64], legal: &[usize]) -> Vec<f64> {
     if total > 0.0 {
         return clamped.iter().map(|c| c / total).collect();
     }
+    // Brown et al.'s fallback is pure argmax; tabular CFR deliberately falls back to uniform.
     let mut best = 0;
     for (i, &a) in legal.iter().enumerate().skip(1) {
         if row[a] > row[legal[best]] {
@@ -145,6 +148,8 @@ impl<G: Game> DeepCfrSolver<G> {
             "simultaneous games are not supported by Deep CFR (sequential turn-taking only)"
         );
         let generation = Arc::new(AtomicU64::new(0));
+        // Observation keys are not network identities: each player's frozen network needs its
+        // own cache or identical observations can cross-contaminate policies.
         let caches = (0..game.num_agents())
             .map(|_| InferCache::new(CACHE_ROWS, Arc::clone(&generation)))
             .collect();

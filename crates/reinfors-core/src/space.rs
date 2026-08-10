@@ -1,4 +1,5 @@
-//! Observation and action space descriptors.
+//! Observation and action space descriptors. Box bounds are uniform scalars and advisory; widen
+//! them to per-element bounds only when an ecosystem adapter has a concrete need for mixed ranges.
 
 /// A continuous tensor or discrete choice space.
 #[derive(Clone, Debug, PartialEq)]
