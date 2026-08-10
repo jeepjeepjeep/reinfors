@@ -11,7 +11,7 @@ use crate::policy::{argmax, Policy, SearchPolicy, MAX_ENUMERATED_OUTCOMES};
 use crate::reward::Reward;
 use crate::rng::{dirichlet, SplitMix64};
 use crate::rollout::engine::CollectStats;
-use crate::rollout::evaluator::{Evaluator, Resolve};
+use crate::rollout::evaluator::{CommittedRows, EvalBatch, Evaluator, Resolve};
 
 /// Search guidance and leaf-output contract.
 pub(crate) enum Guidance {
@@ -1258,40 +1258,123 @@ where
     G::State: Send,
     F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
 {
-    assert!(
-        game.num_agents() >= 1,
-        "a game must have at least one agent"
+    let mut pool = PooledSearch::new(
+        game,
+        enc,
+        reward,
+        num_simulations,
+        gamma,
+        max_depth,
+        guidance,
+        chance,
+        seed,
+        requests,
+        force_maxn,
     );
-    assert!(
-        game.perfect_information(),
-        "tree search on a hidden-information game is clairvoyant: its values condition on state \
-         the agents cannot observe; see {}",
-        crate::COMPATIBILITY_DOCS
-    );
-    let a = game.action_count();
-    let mut trees: Vec<Tree<G::State>> = requests
-        .into_iter()
-        .enumerate()
-        .map(|(ti, (state, agent))| {
-            let chance_seed =
-                seed ^ 0x53A3_C5A9_1D87_2F6B ^ (ti as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-            Tree::new(game, enc, state, agent, chance_seed, force_maxn)
-        })
-        .collect();
-    assert!(
-        // Q-derived UCT leaf values exist only at the evaluated agent's own turns. Sequential MaxN
-        // needs every perspective; simultaneous search gives every agent its own table instead.
-        !(matches!(guidance, Guidance::Uct { .. })
-            && trees.iter().any(|t| t.mode == TreeMode::SeqMaxN)),
-        "UCT does not support this sequential player count; see {}",
-        crate::COMPATIBILITY_DOCS
-    );
-
-    while trees.iter().any(|t| t.sims < num_simulations) {
+    while !pool.finished() {
         let mut batch = eval.batch();
-        let mut consumers: Vec<Vec<(usize, usize, usize)>> = Vec::new();
+        pool.stage_round(&mut batch);
+        let rows = batch.commit();
+        pool.apply_rows(&rows);
+    }
+    pool.into_evaluations()
+}
 
-        for (ti, tree) in trees.iter_mut().enumerate() {
+/// A pooled search whose round loop is owned by the caller: `stage_round` drives every tree
+/// until it stages rows (or finishes), the caller commits the batch however it likes, and
+/// `apply_rows` distributes the results. Schedulers can interleave rounds of several pools.
+pub(crate) struct PooledSearch<'c, G: Game> {
+    game: &'c G,
+    enc: &'c dyn StateEncoder<State = G::State>,
+    reward: &'c dyn Reward<Event = G::Event>,
+    num_simulations: usize,
+    gamma: f64,
+    max_depth: i32,
+    guidance: &'c Guidance,
+    chance: ChanceMode,
+    a: usize,
+    trees: Vec<Tree<G::State>>,
+    consumers: Vec<Vec<(usize, usize, usize)>>,
+}
+
+impl<'c, G: Game> PooledSearch<'c, G> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        game: &'c G,
+        enc: &'c dyn StateEncoder<State = G::State>,
+        reward: &'c dyn Reward<Event = G::Event>,
+        num_simulations: usize,
+        gamma: f64,
+        max_depth: i32,
+        guidance: &'c Guidance,
+        chance: ChanceMode,
+        seed: u64,
+        requests: Vec<(G::State, usize)>,
+        force_maxn: bool,
+    ) -> Self {
+        assert!(
+            game.num_agents() >= 1,
+            "a game must have at least one agent"
+        );
+        assert!(
+            game.perfect_information(),
+            "tree search on a hidden-information game is clairvoyant: its values condition on state \
+             the agents cannot observe; see {}",
+            crate::COMPATIBILITY_DOCS
+        );
+        let a = game.action_count();
+        let trees: Vec<Tree<G::State>> = requests
+            .into_iter()
+            .enumerate()
+            .map(|(ti, (state, agent))| {
+                let chance_seed =
+                    seed ^ 0x53A3_C5A9_1D87_2F6B ^ (ti as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                Tree::new(game, enc, state, agent, chance_seed, force_maxn)
+            })
+            .collect();
+        assert!(
+            // Q-derived UCT leaf values exist only at the evaluated agent's own turns. Sequential MaxN
+            // needs every perspective; simultaneous search gives every agent its own table instead.
+            !(matches!(guidance, Guidance::Uct { .. })
+                && trees.iter().any(|t| t.mode == TreeMode::SeqMaxN)),
+            "UCT does not support this sequential player count; see {}",
+            crate::COMPATIBILITY_DOCS
+        );
+        PooledSearch {
+            game,
+            enc,
+            reward,
+            num_simulations,
+            gamma,
+            max_depth,
+            guidance,
+            chance,
+            a,
+            trees,
+            consumers: Vec::new(),
+        }
+    }
+
+    pub(crate) fn finished(&self) -> bool {
+        !self.trees.iter().any(|t| t.sims < self.num_simulations)
+    }
+
+    /// Drive every unfinished tree until it stages rows into `batch` or completes its budget.
+    pub(crate) fn stage_round<F>(&mut self, batch: &mut EvalBatch<'_, '_, F>)
+    where
+        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+    {
+        let (game, enc, reward) = (self.game, self.enc, self.reward);
+        let (num_simulations, gamma, max_depth, chance, a) = (
+            self.num_simulations,
+            self.gamma,
+            self.max_depth,
+            self.chance,
+            self.a,
+        );
+        let guidance = self.guidance;
+
+        for (ti, tree) in self.trees.iter_mut().enumerate() {
             while tree.sims < num_simulations {
                 tree.sims += 1;
                 match tree.select_expand(game, enc, reward, max_depth, guidance, chance) {
@@ -1327,7 +1410,7 @@ where
                                         );
                                     }
                                     Resolve::Staged(ticket) => {
-                                        stage(tree, ti, leaf, ag, ticket, &mut consumers);
+                                        stage(tree, ti, leaf, ag, ticket, &mut self.consumers);
                                     }
                                 }
                             }
@@ -1343,7 +1426,7 @@ where
                                     consume_row(tree, leaf, 0, &row, guidance, gamma, a, ti, enc);
                                 }
                                 Resolve::Staged(ticket) => {
-                                    stage(tree, ti, leaf, 0, ticket, &mut consumers);
+                                    stage(tree, ti, leaf, 0, ticket, &mut self.consumers);
                                     break;
                                 }
                             }
@@ -1394,7 +1477,7 @@ where
                                         );
                                     }
                                     Resolve::Staged(ticket) => {
-                                        stage(tree, ti, child, ag, ticket, &mut consumers);
+                                        stage(tree, ti, child, ag, ticket, &mut self.consumers);
                                     }
                                 }
                             }
@@ -1406,25 +1489,32 @@ where
                 }
             }
         }
-        let rows = batch.commit();
+    }
+
+    /// Distribute one committed round to every tree that staged rows in it.
+    pub(crate) fn apply_rows(&mut self, rows: &CommittedRows) {
+        let consumers = std::mem::take(&mut self.consumers);
         for (ticket, waiting) in consumers.iter().enumerate() {
             for &(ti, node, slot) in waiting {
                 consume_row(
-                    &mut trees[ti],
+                    &mut self.trees[ti],
                     node,
                     slot,
                     rows.row(ticket),
-                    guidance,
-                    gamma,
-                    a,
+                    self.guidance,
+                    self.gamma,
+                    self.a,
                     ti,
-                    enc,
+                    self.enc,
                 );
             }
         }
     }
 
-    trees.into_iter().map(|t| t.evaluation(a)).collect()
+    pub(crate) fn into_evaluations(self) -> Vec<SearchEvaluation> {
+        let a = self.a;
+        self.trees.into_iter().map(|t| t.evaluation(a)).collect()
+    }
 }
 
 fn stage<S>(
