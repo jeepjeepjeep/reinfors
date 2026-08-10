@@ -114,6 +114,7 @@ impl<const N: usize> InferArray<'_, N> {
         {
             match v.as_slice() {
                 Some(s) => out.extend(s.iter().map(|&x| f64::from(x))),
+                // Sliced network outputs may be strided; preserve row-major logical iteration.
                 None => out.extend(v.iter().map(|&x| f64::from(x))),
             }
         }
@@ -191,6 +192,7 @@ where
         if callback_err.is_some() {
             return vec![0.0; fallback];
         }
+        // Ownership moves into NumPy; the observation batch is not copied at the boundary.
         let arr = Array2::from_shape_vec((n, dim), obs_flat)
             .expect("obs batch shape")
             .into_pyarray(py);
@@ -205,6 +207,8 @@ where
             .and_then(|r| infer_rows_3d(&r, "infer output"))
         {
             Ok((shape, flat)) => {
+                // Validate binding-only shape/head contracts only after extraction succeeds, so a
+                // genuine Python callback error remains the error reported to the caller.
                 // Element counts alone would admit transposed arrays and scramble evaluations.
                 let bad = shape[0] != n
                     || shape[2] != action_count
@@ -252,6 +256,7 @@ where
         if callback_err.is_some() {
             return vec![0.0; n * stride];
         }
+        // Ownership moves into NumPy; the observation batch is not copied at the boundary.
         let arr = Array2::from_shape_vec((n, dim), obs_flat)
             .expect("obs batch shape")
             .into_pyarray(py);
@@ -267,6 +272,8 @@ where
             let values = infer_rows_1d(&values, "AlphaZero infer values")?;
             Ok((logits, values))
         });
+        // Callback/extraction failures take precedence; binding-owned shape checks run only after a
+        // successful return and therefore cannot mask the original Python error.
         match extracted {
             Ok((logits, values)) => {
                 let lshape = logits.shape();
@@ -1678,6 +1685,8 @@ fn build_telemetry<'py>(
     telemetry.set_item("infer_rows", stats.infer_rows)?;
     telemetry.set_item("cache_lookups", stats.cache_lookups)?;
     telemetry.set_item("cache_hits", stats.cache_hits)?;
+    // Exact MCTS sim-fate identity: decisions*sims = fresh + hit + shared + terminal + depthcap
+    // - extra_eval_rows; the subtraction removes auxiliary perspective/fan evaluation rows.
     telemetry.set_item("terminal_sims", stats.sum_terminal_sims)?;
     telemetry.set_item("depthcap_sims", stats.sum_depthcap_sims)?;
     telemetry.set_item("shared_rows", stats.sum_shared_rows)?;
@@ -2054,6 +2063,8 @@ enum PolicySpec {
 }
 
 #[derive(Clone)]
+// The factory threads each learner gamma into its paired search config, keeping tree backup and
+// episode targets on the same discount convention.
 enum LearnerSpec {
     TreeStrap {
         gamma: f64,
@@ -2070,6 +2081,7 @@ enum LearnerSpec {
 }
 
 fn check_positive_finite(name: &str, v: f64) -> PyResult<()> {
+    // Scale-like parameters appear in denominators and therefore must be strictly positive.
     if !v.is_finite() || v <= 0.0 {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "{name} must be finite and > 0"
@@ -2079,6 +2091,7 @@ fn check_positive_finite(name: &str, v: f64) -> PyResult<()> {
 }
 
 fn check_nonneg_finite(name: &str, v: f64) -> PyResult<()> {
+    // Exploration strengths and temperatures may be disabled with zero, but never be negative.
     if !v.is_finite() || v < 0.0 {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "{name} must be finite and >= 0"
@@ -2112,6 +2125,8 @@ impl reinfors_core::Rng for ProbeRng {
 }
 
 fn game_is_sequential<G: Game>(game: &G) -> bool {
+    // A declared-deal raw root is Chance and says nothing about turn-taking; probe only after the
+    // root chance chain has been realized or poker/backgammon are silently misclassified.
     matches!(
         game.actor(&reinfors_core::game::realize_initial_state(
             game,
@@ -2123,6 +2138,7 @@ fn game_is_sequential<G: Game>(game: &G) -> bool {
 
 fn check_max_agents<P: Policy, G: Game>(policy: &P, label: &str, game: &G) -> PyResult<()> {
     let num_agents = game.num_agents();
+    // Reject before probing initial_state: a malformed zero-agent game may panic while realizing it.
     if num_agents == 0 {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "num_agents must be > 0",
@@ -2141,6 +2157,7 @@ fn check_max_agents<P: Policy, G: Game>(policy: &P, label: &str, game: &G) -> Py
 }
 
 fn check_information<G: Game>(label: &str, game: &G) -> PyResult<()> {
+    // Keep this Python-facing capability error ahead of Engine::new's assertion backstop.
     if !game.perfect_information() {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "the {label} policy searches the true state and would be clairvoyant on this \
@@ -2194,6 +2211,8 @@ where
     G::State: Send + Sync,
 {
     // Handles intentionally store unchecked params; composition validates them here.
+    // Capability gates below run before Engine::new so unsupported compositions raise ValueError
+    // instead of surfacing the core's invariant assertions as panic exceptions.
     let (c, h, w) = enc.obs_shape();
     let dim = c * h * w;
     let action_count = game.action_count();
@@ -2759,6 +2778,8 @@ struct PyEnv {
 }
 
 impl PyEnv {
+    // Out-of-range agents can panic index-based games and silently select player 0's perspective in
+    // Connect4, so every agent-indexed Python method must pass this boundary check.
     fn check_agent(&self, agent: usize) -> PyResult<()> {
         let n = self.inner.num_agents();
         if agent >= n {
@@ -2937,6 +2958,8 @@ impl PyEnv {
                 "missing action for active agent {agent}; active agents: {active:?}"
             )));
         }
+        // Reject before core dispatch: an illegal backgammon id can decode a move from an empty
+        // source and corrupt or panic the native state transition.
         for (&agent, &action) in &actions {
             let legal = self.inner.legal_actions(agent);
             if !legal.contains(&action) {
@@ -3100,6 +3123,8 @@ impl NativeEvent for StepEvent {
             DeathCause::HeadOn => "head_on",
         });
         d.set_item("death_cause", cause)?;
+        // survived_to_max_ticks is engine-only truncation metadata; Env never sets it, so exposing
+        // the field here would promise a permanently false event value.
         Ok(d.into_any())
     }
 }
@@ -3505,6 +3530,8 @@ fn resolve_reward(reward: Option<PyReward>, schema: &[(&str, f64)]) -> PyResult<
 }
 
 #[pyclass(name = "Box", module = "reinfors.spaces")]
+// Bounds are arrays shaped like the observation even though core currently supplies scalar bounds;
+// this leaves room for per-element bounds without changing the Python type.
 struct PyBox {
     shape: Vec<usize>,
     #[pyo3(get)]
@@ -3875,6 +3902,8 @@ fn cap_err(e: reinfors_core::EnumerationCapExceeded) -> pyo3::PyErr {
 #[pyclass(name = "Cfr")]
 struct PyCfr {
     inner: Box<dyn ErasedCfr>,
+    // Hashes (game parameters, native-unit reward, variant); loading another tuple would silently
+    // reinterpret its tables.
     fingerprint: String,
 }
 
@@ -3998,6 +4027,8 @@ impl PyCfr {
     }
 
     fn save<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
+        // Core payload includes tables, iteration, and sampling RNG, so an MCCFR resume is
+        // bit-identical when this composition fingerprint matches.
         let mut out = Vec::new();
         out.extend_from_slice(CFR_SNAPSHOT_MAGIC);
         out.push(CFR_SNAPSHOT_SCHEMA);

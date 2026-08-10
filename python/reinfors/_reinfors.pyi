@@ -120,7 +120,8 @@ class DeepCfr:
 class GameHandle:
     # One episode is one hand at fresh stacks. Events are zero-sum per-seat chip deltas; `scale`
     # converts units (for example, `rf.Reward(scale=1 / big_blind)` reports rewards in blinds).
-    # Hidden information: search policies reject it; use an observation-only or solver workflow.
+    # The button is redrawn each hand so seats rotate positions. Search policies reject its hidden
+    # state; train with EpsilonGreedyQ + Dqn or use a solver workflow.
     @staticmethod
     def TexasHoldem(
         num_players: int = ...,
@@ -129,12 +130,13 @@ class GameHandle:
         big_blind: int = ...,
         encoder: EncoderHandle | None = ...,
     ) -> GameHandle: ...
-    @staticmethod
-    def KuhnPoker(players: int = ..., encoder: EncoderHandle | None = ...) -> GameHandle: ...
     # 3-card analytic testbed (12 infosets); hidden information; reward key: scale.
     @staticmethod
-    def LeducPoker(encoder: EncoderHandle | None = ...) -> GameHandle: ...
+    def KuhnPoker(players: int = ..., encoder: EncoderHandle | None = ...) -> GameHandle: ...
     # 6-card two-round benchmark; hidden information; reward key: scale.
+    @staticmethod
+    def LeducPoker(encoder: EncoderHandle | None = ...) -> GameHandle: ...
+    # Simultaneous multi-snake game with declared food chance; max_ticks is its rollout horizon.
     @staticmethod
     def Snake(
         grid_size: int = ...,
