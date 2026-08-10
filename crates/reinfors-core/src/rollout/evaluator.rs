@@ -138,8 +138,10 @@ where
     }
 
     /// Account and cache rows forwarded elsewhere for a batch detached via `into_staged`.
-    /// Rows staged under a superseded weights generation are used for their search round but
-    /// never enter the cache — the no-stale-entries contract without a pipeline stall.
+    /// The freshness check compares the batch's staging generation to the cache's last-synced
+    /// one, so an update landing after that sync can still admit a stale insert — but every
+    /// batch synchronizes generations before its first lookup, clearing such entries first.
+    /// The observable guarantee: the cache never SERVES rows from superseded weights.
     pub fn ingest(
         &mut self,
         staged: StagedBatch,
@@ -397,6 +399,61 @@ mod tests {
         let again = eval.forward(&[0, 0], obs, 2);
         assert_eq!(again, vec![2.0, 4.0, 6.0, 8.0]);
         assert_eq!(eval.rows, 2, "second forward should be fully cache-served");
+    }
+
+    #[test]
+    fn ingest_caches_fresh_generation_rows() {
+        let mut infer = double_infer;
+        let generation = Arc::new(AtomicU64::new(0));
+        let mut cache = InferCache::new(64, generation);
+        let mut eval = Evaluator::new(
+            &mut infer,
+            InferMode::Shared,
+            Some(std::slice::from_mut(&mut cache)),
+        );
+        let mut batch = eval.batch();
+        let _ = batch.resolve_or_stage(0, &[1.0, 2.0]);
+        let staged = batch.into_staged();
+        let rows = eval.ingest(staged, vec![2.0, 4.0], 0.5, 1);
+        assert_eq!(rows.row(0), &[2.0, 4.0]);
+        assert_eq!((eval.rows, eval.calls), (1, 1));
+        let mut batch = eval.batch();
+        let Resolve::Resolved(row) = batch.resolve_or_stage(0, &[1.0, 2.0]) else {
+            panic!("fresh-generation ingest must populate the cache");
+        };
+        assert_eq!(row, vec![2.0, 4.0]);
+    }
+
+    #[test]
+    fn ingest_skips_cache_for_superseded_generation() {
+        // weights_updated lands while the batch's rows are in flight on the submitter: the
+        // cache syncs (clears) before the reply is ingested; the stale rows must not enter.
+        let mut infer = double_infer;
+        let generation = Arc::new(AtomicU64::new(0));
+        let shared = generation.clone();
+        let mut cache = InferCache::new(64, generation);
+        let mut eval = Evaluator::new(
+            &mut infer,
+            InferMode::Shared,
+            Some(std::slice::from_mut(&mut cache)),
+        );
+        let mut batch = eval.batch();
+        let _ = batch.resolve_or_stage(0, &[1.0, 2.0]);
+        let staged = batch.into_staged();
+        shared.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // the other group's next round syncs the cache before this reply returns
+        let empty = eval.batch();
+        drop(empty);
+        let rows = eval.ingest(staged, vec![2.0, 4.0], 0.5, 1);
+        assert_eq!(
+            rows.row(0),
+            &[2.0, 4.0],
+            "the round still consumes the rows"
+        );
+        let mut batch = eval.batch();
+        let Resolve::Staged(_) = batch.resolve_or_stage(0, &[1.0, 2.0]) else {
+            panic!("superseded-generation rows must not be served from the cache");
+        };
     }
 
     #[test]

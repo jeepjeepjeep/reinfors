@@ -962,12 +962,15 @@ impl PyEngine {
         // Validate before moving the engine into the worker so bad input cannot forfeit it.
         let (infer, mode) = {
             let borrow = slf.borrow();
-            let num_agents = borrow
-                .inner
-                .as_ref()
-                .ok_or_else(stream_active_err)?
-                .routing();
-            Python::with_gil(|py| engine_callbacks(infer.bind(py), num_agents))?
+            let engine = borrow.inner.as_ref().ok_or_else(stream_active_err)?;
+            let num_agents = engine.routing();
+            let pair = Python::with_gil(|py| engine_callbacks(infer.bind(py), num_agents))?;
+            if engine.n_groups() == 2 && matches!(pair.1, InferMode::PerPlayer) {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "n_groups=2 supports a single shared infer callback",
+                ));
+            }
+            pair
         };
         let mut engine = slf
             .borrow_mut()
@@ -1285,6 +1288,8 @@ trait ErasedEngine: Send + Sync {
     ) -> PyResult<BatchThunk>;
 
     fn routing(&self) -> usize;
+
+    fn n_groups(&self) -> usize;
 }
 
 trait RecordBatch: Sized {
@@ -1837,6 +1842,10 @@ where
 
     fn routing(&self) -> usize {
         self.num_agents
+    }
+
+    fn n_groups(&self) -> usize {
+        self.n_groups
     }
 }
 

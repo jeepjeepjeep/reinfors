@@ -312,6 +312,9 @@ where
             self.game.truncation_horizon().is_none() || !self.learner.uses_episode_tail(),
             "grouped collect does not support truncation-tail bootstrapping"
         );
+        if n_records == 0 {
+            return (Vec::new(), CollectStats::default());
+        }
         let n_games = self.episodes.len();
         let half = n_games / 2;
         let ranges = [0..half, half..n_games];
@@ -397,7 +400,6 @@ where
             let mut slots: [Slot<'_, G>; 2] = [None, None];
             let mut pending: std::collections::VecDeque<usize> = [0usize, 1].into();
             let mut inflight = 0usize;
-            let mut stop = false;
 
             'outer: loop {
                 while let Some(gid) = pending.pop_front() {
@@ -473,7 +475,6 @@ where
                                 &mut stats,
                             );
                             if out.len() >= n_records {
-                                stop = true;
                                 break 'outer;
                             }
                             continue;
@@ -488,7 +489,6 @@ where
                             continue;
                         }
                         if job_tx.send((gid, staged)).is_err() {
-                            stop = true;
                             break 'outer;
                         }
                         inflight += 1;
@@ -507,7 +507,6 @@ where
                 }
                 pending.push_back(gid);
             }
-            let _ = stop;
             drop(job_tx);
             while inflight > 0 {
                 match res_rx.recv() {

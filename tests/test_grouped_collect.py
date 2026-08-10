@@ -113,3 +113,68 @@ def test_rejects_truncation_tail_bootstrapping() -> None:
             n_games=4,
             n_groups=2,
         )
+
+
+def _mcts_engine(n_groups: int, seed: int = 3) -> rf.Engine:
+    return rf.Engine(
+        rf.games.Connect4(),
+        rf.Reward(win=1.0, loss=-1.0),
+        rf.policies.Mcts(num_simulations=12),
+        rf.learners.TreeStrap(gamma=1.0),
+        n_games=4,
+        seed=seed,
+        n_groups=n_groups,
+    )
+
+
+def _q_infer(obs, n=None):
+    return np.zeros((obs.shape[0], 1, _A), dtype=np.float32)
+
+
+def test_mcts_grouped_collect_is_deterministic() -> None:
+    a = _mcts_engine(2).collect(60, _q_infer)
+    b = _mcts_engine(2).collect(60, _q_infer)
+    assert np.array_equal(a.obs, b.obs)
+    assert np.array_equal(a.targets, b.targets)
+    assert np.array_equal(a.masks, b.masks)
+
+
+def test_grouped_collect_stream_runs_and_reproduces() -> None:
+    def first_batch(engine):
+        with engine.collect_stream(40, _uniform_infer) as stream:
+            return stream.next()
+
+    a = first_batch(_engine(2))
+    b = first_batch(_engine(2))
+    assert a.obs.shape[0] >= 40
+    assert np.array_equal(a.obs, b.obs)
+    assert np.array_equal(a.policy_targets, b.policy_targets)
+
+
+def test_grouped_zero_floor_is_a_no_op() -> None:
+    eng = _engine(2)
+    empty = eng.collect(0, _uniform_infer)
+    assert empty.obs.shape[0] == 0
+    assert empty.telemetry["decisions"] == 0
+    # engine state untouched: the next collect matches a fresh engine's
+    after = eng.collect(60, _uniform_infer)
+    fresh = _engine(2).collect(60, _uniform_infer)
+    assert np.array_equal(after.obs, fresh.obs)
+    assert np.array_equal(after.policy_targets, fresh.policy_targets)
+
+
+def test_grouped_rejects_per_player_callbacks_sync() -> None:
+    eng = _engine(2)
+    per_player = [_uniform_infer, _uniform_infer]
+    with pytest.raises(ValueError, match="single shared infer callback"):
+        eng.collect(20, per_player)
+
+
+def test_grouped_rejects_per_player_callbacks_stream_without_forfeiting_engine() -> None:
+    eng = _engine(2)
+    per_player = [_uniform_infer, _uniform_infer]
+    with pytest.raises(ValueError, match="single shared infer callback"):
+        eng.collect_stream(20, per_player)
+    # rejected BEFORE the engine moved into the worker: still usable
+    batch = eng.collect(20, _uniform_infer)
+    assert batch.obs.shape[0] >= 20
