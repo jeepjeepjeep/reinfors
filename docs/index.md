@@ -80,6 +80,11 @@ service without changing the engine.
 
 ## Scope
 
+Reinfors optimizes for strong throughput across a reusable research system, not peak throughput for
+one fixed workload. A bespoke, fully fused JAX/XLA pipeline can be faster; reinfors deliberately
+retains modular games, algorithms, networks, batching, and deployment so researchers can change the
+composition without rebuilding the whole stack.
+
 Reinfors owns native simulation, search, and batched data generation; the caller owns model training
 and deployment. Games currently use
 [fixed discrete action and observation spaces](reference/limits.md#fixed-observation-and-action-spaces),

@@ -15,6 +15,11 @@ hardware placement, and distributed topology remain yours.
 [Benchmarks](docs/benchmarks/index.md) find this boundary negligible beside search and
 training, so an all-Rust training path would sacrifice flexibility for little measured gain.
 
+Reinfors is not designed to maximize throughput at any cost or to outperform a bespoke, fully
+fused JAX/XLA pipeline on the fixed workload it specializes for. It targets a practical balance:
+native simulation, search, and batching, while games, algorithms, networks, and deployment remain
+modular enough for broad experimentation.
+
 ```python
 import numpy as np
 import reinfors as rf

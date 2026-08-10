@@ -4,6 +4,11 @@ This section is intentionally a skeleton while the benchmark suite is rerun on c
 hardware. No historical headline numbers are carried forward without their complete
 configuration and reproducibility artifacts.
 
+These benchmarks are not intended to claim universal throughput leadership. Specialized, fully
+fused implementations may be faster on the workload they were built around; the relevant question
+for reinfors is how much throughput its modular game/search/training boundary preserves, and where
+that flexibility becomes the limiting cost.
+
 The published results will evaluate the claims reinfors is designed around:
 
 - native environment and search throughput;
