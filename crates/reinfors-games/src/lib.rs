@@ -1,6 +1,4 @@
-//! reinfors-games: concrete games implementing reinfors-core's `Game` trait, leaving reinfors-core a
-//! game-free generic framework. Each game is one self-contained module (`snake`, `connect4`,
-//! `gridworld`): its dynamics, observation encoder, reward, actions, and `Game` adapter.
+//! Built-in games, encoders, and rewards.
 
 pub mod backgammon;
 pub mod chess;

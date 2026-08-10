@@ -1,7 +1,3 @@
-//! The AlphaZero (PUCT) planner on real games: it finds a forced connect4 win, priors steer the
-//! search, root noise diversifies it deterministically, and simultaneous games are rejected —
-//! mirroring the UCT suite in `mcts.rs`.
-
 use reinfors_core::{
     alphazero_many, Actor, AlphaZeroConfig, ChanceMode, Evaluator, Game, NoiseScope, Rng,
 };
@@ -41,18 +37,15 @@ fn reward() -> Connect4Reward {
     }
 }
 
-/// Uniform-logits, zero-value evaluator: rows of `A` equal logits + value 0 — PUCT's analogue of the
-/// UCT suite's zeros net (all signal from terminals).
 fn uniform_infer(_p: usize, _obs: Vec<f32>, n: usize) -> Vec<f64> {
-    vec![0.0; n * 8] // A+1 = 8
+    vec![0.0; n * 8]
 }
 
-/// An evaluator whose logits heavily favor one column, value 0 — for prior-steering checks.
 fn sharp_infer(col: usize) -> impl FnMut(usize, Vec<f32>, usize) -> Vec<f64> {
     move |_p, _obs, n| {
         let mut out = vec![0.0; n * 8];
         for row in 0..n {
-            out[row * 8 + col] = 6.0; // softmax -> ~0.87 on `col`
+            out[row * 8 + col] = 6.0;
         }
         out
     }
@@ -64,7 +57,6 @@ fn argmax(v: &[f64]) -> usize {
         .unwrap()
 }
 
-/// Build a position where P0 has three in column 3 and it is P0's move — column 3 wins outright.
 fn forced_win_state() -> reinfors_games::Connect4State {
     let game = Connect4;
     let mut state = game.initial_state();
@@ -99,7 +91,6 @@ fn finds_the_forced_connect4_win() {
 
 #[test]
 fn priors_steer_visits() {
-    // With few sims and no terminal signal from the opening position, visits follow the prior.
     let game = Connect4;
     let state = game.initial_state();
     for col in [2usize, 5] {
@@ -142,20 +133,16 @@ fn search_is_deterministic_per_seed_and_noise_diversifies_across_seeds() {
         .visits
     };
     assert_eq!(run(7, 0.5), run(7, 0.5), "same seed, same noisy search");
-    // Strong noise on a signal-free position: different seeds should shape visits differently.
     let differs = (0..8).any(|s| run(s, 0.9) != run(100 + s, 0.9));
     assert!(
         differs,
         "root noise never changed the visit distribution across seeds"
     );
-    // And noise-off must be seed-independent (nothing else draws randomness).
     assert_eq!(run(1, 0.0), run(2, 0.0));
 }
 
 #[test]
 fn pooled_trees_draw_independent_noise() {
-    // Two identical requests in one pooled call: with noise on, their searches should diverge
-    // (per-tree noise streams), not mirror each other.
     let game = Connect4;
     let state = game.initial_state();
     let evals = alphazero_many(
@@ -175,9 +162,6 @@ fn pooled_trees_draw_independent_noise() {
 
 #[test]
 fn searches_simultaneous_stochastic_snake() {
-    // Snake composes BOTH new tree capabilities: simultaneous moves (decoupled DUCT tables) and
-    // declared respawn chance. Both seats' pooled requests must produce sane per-agent
-    // evaluations, deterministically per seed.
     let snake = Snake {
         num_snakes: 2,
         grid_size: 8,
@@ -187,7 +171,6 @@ fn searches_simultaneous_stochastic_snake() {
         initial_food_count: 1,
         max_ticks: None,
     };
-    // Births are a root chance phase now — searches receive realized decision states.
     let state = reinfors_core::realize_initial_state(&snake, &mut NoRng);
     let reward = reinfors_games::SnakeReward {
         step: 0.0,
@@ -199,7 +182,7 @@ fn searches_simultaneous_stochastic_snake() {
         survival: 0.0,
     };
     let run = |seed: u64| {
-        let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 4]; // A=3 logits + value
+        let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 4];
         alphazero_many(
             &snake,
             &EgocentricSnake { grid_size: 8 },
@@ -245,7 +228,6 @@ fn infer_cache_is_behavior_identical_and_hits() {
     use std::sync::Arc;
     let game = Connect4;
     let state = game.initial_state();
-    // Repeated identical requests in one pool: heavy transposition + within-batch dedup territory.
     let requests: Vec<_> = (0..4).map(|_| (state.clone(), 0)).collect();
     let run = |cache: Option<&mut [InferCache]>| {
         alphazero_many(
@@ -270,7 +252,6 @@ fn infer_cache_is_behavior_identical_and_hits() {
         cache.hits > 0,
         "identical pooled requests must produce cache hits"
     );
-    // Second search over the same position reuses across calls too.
     let before = cache.hits;
     let again = run(Some(std::slice::from_mut(&mut cache)));
     for (p, c) in plain.iter().zip(&again) {
@@ -281,16 +262,12 @@ fn infer_cache_is_behavior_identical_and_hits() {
 
 #[test]
 fn searches_backgammon_dice_chance() {
-    // Backgammon composes wide legal masking (1352 ids, ~15-25 legal) with the narrow declared
-    // dice fan (21 outcomes) — the AlwaysResample showcase regime. Pooled seats, per-seed
-    // deterministic, sane per-agent evaluations.
     use reinfors_games::{Backgammon, BackgammonReward, BackgammonTesauro};
     let g = Backgammon::default();
-    // The opening is a root chance phase now — searches receive realized decision states.
     let state = reinfors_core::realize_initial_state(&g, &mut NoRng);
     let reward = BackgammonReward::default();
     let run = |seed: u64| {
-        let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 1353]; // A logits + value
+        let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 1353];
         alphazero_many(
             &g,
             &BackgammonTesauro,

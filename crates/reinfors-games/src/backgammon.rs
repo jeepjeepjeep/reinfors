@@ -1,26 +1,4 @@
-//! Backgammon — sequential, zero-sum, with declared dice chance. Rules, geometry, action space,
-//! and observation encoding deliberately mirror OpenSpiel's `backgammon` (pinned in the benchmarks
-//! repo) so legal-move sets and encodings can be parity-tested position-for-position against it.
-//!
-//! **Chance modeling**: explicit chance states throughout, and every random element declared
-//! (`initial_state` draws nothing). A completed turn hands off at the AwaitingRoll chance state (dice
-//! unset → `Actor::Chance`); `chance_node` declares the 21 distinct rolls (non-doubles 1/18,
-//! doubles 1/36) and `apply_chance_node(i)` stamps roll `i` in with neutral events. A doubles
-//! turn whose first action used both dice re-arms the SAME dice for the same player (an extra
-//! turn) — a deterministic transition, no chance state. The opening (who starts + first roll,
-//! doubles excluded) is a ROOT chance phase: `initial_state` draws nothing and returns the
-//! pre-roll state; its chance node declares 30 uniform outcomes (0–14 = X starts with roll i,
-//! 15–29 = O starts — OpenSpiel's `turns_ == -1` node), realized at episode birth.
-//!
-//! **Action space** (OpenSpiel-compatible, 1352): one turn = one action encoding two half-moves as
-//! 2 digits base 26 (source 0–23, bar = 24, pass = 25): `dig1 * 26 + dig0`, plus 676 when the LOW
-//! die moves first. Doubles = up to two consecutive actions by the same player. Board geometry:
-//! player X (agent 0) moves 0→23 with home 18–23; O (agent 1) moves 23→0 with home 0–5; the bar
-//! enters at `die - 1` (X) / `24 - die` (O).
-//!
-//! **No doubling cube** (fixed stakes). Outcomes carry the margin: win / gammon (loser bore off
-//! nothing) / backgammon (…and has a checker on the bar or in the winner's home), scored by the
-//! decoupled [`BackgammonReward`] (defaults 1/2/3, zero-sum).
+//! Fixed-stakes backgammon with OpenSpiel-compatible actions and declared dice chance.
 
 use std::collections::BTreeSet;
 
@@ -31,13 +9,12 @@ use reinfors_core::{ActionView, Actor, Game, Reward, StateEncoder, Transition};
 pub const NUM_POINTS: usize = 24;
 pub const NUM_CHECKERS: u8 = 15;
 pub const NUM_ACTIONS: usize = 1352;
-pub const BAR: i32 = 100; // sentinel source: the bar (OpenSpiel's kBarPos)
-pub const PASS: i32 = -1; // sentinel source: pass (OpenSpiel's kPassPos)
-const ENC_BAR: i32 = 24; // bar as an action digit
-const ENC_PASS: i32 = 25; // pass as an action digit
-const SCORE: i32 = 101; // sentinel destination: borne off
+pub const BAR: i32 = 100;
+pub const PASS: i32 = -1;
+const ENC_BAR: i32 = 24;
+const ENC_PASS: i32 = 25;
+const SCORE: i32 = 101;
 
-/// The 21 distinct rolls in OpenSpiel's outcome order: 15 non-doubles then 6 doubles.
 pub const ROLLS: [[u8; 2]; 21] = [
     [1, 2],
     [1, 3],
@@ -62,38 +39,31 @@ pub const ROLLS: [[u8; 2]; 21] = [
     [6, 6],
 ];
 
-/// One half-move: a source (`0..24`, [`BAR`], or [`PASS`]) played with die `num`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct CheckerMove {
     pub pos: i32,
     pub num: u8,
 }
 
-/// Per-agent tick outcome: the game ended with this margin for/against the agent, or continues.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BackgammonEvent {
     Ongoing,
-    /// The agent won with margin 1 (plain), 2 (gammon), or 3 (backgammon).
     Win(u8),
-    /// The agent lost with that margin.
     Loss(u8),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BackgammonState {
-    /// Checker counts per player per point; X (agent 0) travels 0→23, O (agent 1) 23→0.
     pub board: [[u8; NUM_POINTS]; 2],
     pub bar: [u8; 2],
     pub scores: [u8; 2],
     pub to_move: u8,
-    /// The two dice for the mover, 1–6; `die + 6` marks a used die; `[0, 0]` = the AwaitingRoll
-    /// chance state (transient — the framework realizes it before anyone moves).
+    // Zeroes denote a chance state; adding six marks a consumed die.
     pub dice: [u8; 2],
-    /// This action is the second half of a doubles turn (same dice re-armed, no fresh roll).
+    // Doubles are played as two same-player actions using the same roll.
     pub double_turn: bool,
-    /// The root chance phase: the opening draw (starter + first roll) has not happened yet.
-    /// Transient — realized at episode birth; never observable afterwards.
     #[serde(default)]
+    // The opening chance outcome selects both the first player and roll.
     pub opening: bool,
 }
 
@@ -103,8 +73,6 @@ pub struct Backgammon {
 
 impl Default for Backgammon {
     fn default() -> Self {
-        // Weak nets can shuffle checkers for a long time; a generous cap keeps rollouts finite
-        // (the AZ family's truncation tail-bootstrap handles the cut).
         Backgammon {
             max_ticks: Some(1000),
         }
@@ -129,7 +97,6 @@ impl BackgammonState {
         1 - player
     }
 
-    /// Destination of moving `spaces` from `pos` (a point or the bar); [`SCORE`] = off the board.
     fn position_from(player: usize, pos: i32, spaces: u8) -> i32 {
         if pos == BAR {
             return if player == 0 {
@@ -163,8 +130,6 @@ impl BackgammonState {
     }
 
     fn furthest_in_home(&self, player: usize) -> Option<i32> {
-        // "Furthest" = farthest from bearing off: X scans 18→23 ascending distance-from-off, i.e.
-        // the LOWEST occupied home point; O the HIGHEST.
         if player == 0 {
             (18..24).find(|&i| self.board[0][i as usize] > 0)
         } else {
@@ -172,7 +137,6 @@ impl BackgammonState {
         }
     }
 
-    /// The legal single half-moves for the mover with the current (usable) dice — bar first.
     fn legal_checker_moves(&self, player: usize) -> BTreeSet<CheckerMove> {
         let mut moves = BTreeSet::new();
         let dice = self.dice;
@@ -216,15 +180,10 @@ impl BackgammonState {
         moves
     }
 
-    /// Apply one half-move in place (pass does nothing); hits send the opponent to the bar; the
-    /// consumed die is marked used (`+6`).
     fn apply_checker_move(&mut self, player: usize, m: CheckerMove) {
         if m.pos == PASS {
             return;
         }
-        // Loud guards, not u8 wraparound: an illegal half-move (no checker at the source) must
-        // panic with a message, never silently corrupt the board — the searches only produce
-        // legal ids and the Env boundary validates, so these are unreachable backstops.
         let next = if m.pos == BAR {
             assert!(
                 self.bar[player] > 0,
@@ -259,8 +218,6 @@ impl BackgammonState {
         }
     }
 
-    /// All maximal move sequences (the movegen recursion): DFS over per-die legal moves to depth 2,
-    /// collecting every sequence; the caller filters by the forced-move maxims.
     fn rec_legal_moves(
         &self,
         player: usize,
@@ -301,7 +258,6 @@ impl BackgammonState {
         (a.max(b), a.min(b))
     }
 
-    /// Encode a (≤2)-half-move sequence as the OpenSpiel action id.
     fn encode_action(&self, moves: &[CheckerMove]) -> usize {
         let (high, _low) = self.high_low();
         let mut dig0 = ENC_PASS;
@@ -325,7 +281,6 @@ impl BackgammonState {
         action
     }
 
-    /// Decode an action id into its two half-moves (die assignment per the high/low-first flag).
     fn decode_action(&self, action: usize) -> [CheckerMove; 2] {
         debug_assert!(action < NUM_ACTIONS);
         let high_first = action < 676;
@@ -345,13 +300,12 @@ impl BackgammonState {
         moves
     }
 
-    /// The mover's legal action ids under the forced-move maxims: play both dice when possible;
-    /// with only single moves available, only max-die singles; with none, the double-pass.
     fn legal_action_ids(&self, player: usize) -> Vec<usize> {
         let mut movelist = BTreeSet::new();
         let max_moves = self.rec_legal_moves(player, &mut Vec::new(), &mut movelist);
+        // Backgammon forces the maximum number of dice, then the higher die for singles.
         let mut actions: Vec<usize> = match max_moves {
-            0 => vec![self.encode_action(&[])], // dance: the double-pass (id 1351)
+            0 => vec![self.encode_action(&[])],
             1 => {
                 let max_roll = movelist
                     .iter()
@@ -376,19 +330,15 @@ impl BackgammonState {
         actions
     }
 
-    /// Total checkers a player has anywhere (board + bar + borne off) — conserved at 15.
     pub fn total_checkers(&self, player: usize) -> u8 {
         self.board[player].iter().sum::<u8>() + self.bar[player] + self.scores[player]
     }
 
-    /// The loser's margin category given a finished game: 3 = backgammoned (nothing borne off AND
-    /// a checker on the bar or in the winner's home), 2 = gammoned (nothing borne off), 1 = plain.
     fn loss_margin(&self, loser: usize) -> u8 {
         if self.scores[loser] > 0 {
             return 1;
         }
         let in_winner_home = if loser == 0 {
-            // X's checkers in O's home (0–5)? No: the WINNER is O, whose home is 0–5.
             self.board[0][0..6].iter().any(|&c| c > 0)
         } else {
             self.board[1][18..24].iter().any(|&c| c > 0)
@@ -414,8 +364,6 @@ impl Game for Backgammon {
     }
 
     fn actor(&self, state: &BackgammonState) -> Actor {
-        // Unarmed dice mark the AwaitingRoll chance state between turns: nature rolls before
-        // the next player sees the position.
         if state.dice == [0, 0] {
             Actor::Chance
         } else {
@@ -441,10 +389,9 @@ impl Game for Backgammon {
         for m in moves {
             next.apply_checker_move(player, m);
         }
-        // Doubles extra turn: first half of a doubles turn that used BOTH dice re-arms them for
-        // the same player — a deterministic transition (no fresh roll).
         let (d0, d1) = (state.dice[0], state.dice[1]);
         let mut extra_turn = false;
+        // The first doubles action consumes two dice; re-arm them for the remaining pair.
         if !state.double_turn && d0 == d1 && next.dice.iter().all(|&d| d > 6) {
             for d in &mut next.dice {
                 *d -= 6;
@@ -463,7 +410,7 @@ impl Game for Backgammon {
             next.double_turn = true;
         } else {
             next.to_move = 1 - state.to_move;
-            next.dice = [0, 0]; // the AwaitingRoll chance state — nature rolls next
+            next.dice = [0, 0];
             next.double_turn = false;
         }
         Transition {
@@ -476,11 +423,8 @@ impl Game for Backgammon {
     fn chance_node(&self, state: &BackgammonState) -> reinfors_core::ChanceDist {
         debug_assert_eq!(state.dice, [0, 0], "chance only at AwaitingRoll states");
         if state.opening {
-            // The opening: a non-double roll and who starts — 0–14 = X with `ROLLS[i]`,
-            // 15–29 = O with `ROLLS[i - 15]` (OpenSpiel's `turns_ == -1` node).
             return reinfors_core::ChanceDist::Uniform(30);
         }
-        // The 21 distinct rolls in `ROLLS` order: 15 non-doubles at 1/18, 6 doubles at 1/36.
         let mut probs = vec![1.0 / 18.0; 21];
         for p in probs.iter_mut().skip(15) {
             *p = 1.0 / 36.0;
@@ -510,19 +454,15 @@ impl Game for Backgammon {
             };
         }
         next.dice = ROLLS[outcome];
-        // The roll settles nothing by itself — outcomes ride the checker plays it enables.
         Transition::silent(next, 2)
     }
 
     fn initial_state(&self) -> BackgammonState {
-        // The opening is a declared ROOT chance phase (30 uniform outcomes — see `chance_node`);
-        // `initial_state` draws nothing — structural now that it takes no rng. The
-        // framework realizes the draw at episode birth.
         BackgammonState {
             board: BackgammonState::initial_board(),
             bar: [0, 0],
             scores: [0, 0],
-            to_move: 0, // placeholder until the opening draw decides the starter
+            to_move: 0,
             dice: [0, 0],
             double_turn: false,
             opening: true,
@@ -534,9 +474,6 @@ impl Game for Backgammon {
     }
 }
 
-/// The margin-aware zero-sum reward: `win`/`gammon`/`backgammon` are the winner's payoffs for
-/// margins 1/2/3 (the loser scores the negative). Defaults 1/2/3 (OpenSpiel's `full_scoring`);
-/// set `gammon = backgammon = win` for plain win/loss scoring.
 pub struct BackgammonReward {
     pub win: f64,
     pub gammon: f64,
@@ -574,12 +511,9 @@ impl Reward for BackgammonReward {
     }
 }
 
-/// The Tesauro state encoding (OpenSpiel's `ObservationTensor`, 200 dims, player-relative): per
-/// point 4 features for the requesting agent then 4 for the opponent (1/2/3/overflow encodings of
-/// the checker count), then bar/score/is-my-turn for each side, then the two dice values.
 pub struct BackgammonTesauro;
 
-impl ActionView for BackgammonTesauro {} // absolute: identity action view
+impl ActionView for BackgammonTesauro {}
 
 impl StateEncoder for BackgammonTesauro {
     type State = BackgammonState;
@@ -634,8 +568,6 @@ mod tests {
         Backgammon::default()
     }
 
-    /// A hand-built position: X pieces at `x` points, O at `o` (with off-board scores making both
-    /// sides total 15 so the conservation invariant holds in tests that check it).
     fn state(
         x: &[(usize, u8)],
         o: &[(usize, u8)],
@@ -667,7 +599,6 @@ mod tests {
 
     #[test]
     fn opening_covers_thirty_outcomes() {
-        // 0-14 -> X starts with non-double roll i; 15-29 -> O with roll i-15 (OpenSpiel's opening).
         let g = game();
         let mut seen = [[false; 2]; 15];
         for _ in 0..2000 {
@@ -701,12 +632,7 @@ mod tests {
                 let moves = s.decode_action(a);
                 let non_pass: Vec<CheckerMove> =
                     moves.iter().copied().filter(|m| m.pos != PASS).collect();
-                let re = s.encode_action(if non_pass.is_empty() {
-                    &[]
-                } else {
-                    // encode from the SAME slot layout the decode produced
-                    &moves[..]
-                });
+                let re = s.encode_action(if non_pass.is_empty() { &[] } else { &moves[..] });
                 assert_eq!(re, a, "roundtrip failed for action {a} in {s:?}");
             }
             let a = legal[rng.below(legal.len())];
@@ -785,8 +711,6 @@ mod tests {
 
     #[test]
     fn single_playable_die_forces_the_higher() {
-        // X: one checker on 0, rest borne off. O blocks 11 (= 0+5+6 both orders), 5 and 6 open:
-        // either die is playable alone but not both -> only the HIGHER (6) single is legal.
         let s = state(&[(0, 1)], &[(11, 2), (12, 13)], [0, 0], [5, 6], 0);
         let legal = s.legal_action_ids(0);
         let decoded: Vec<[CheckerMove; 2]> = legal.iter().map(|&a| s.decode_action(a)).collect();
@@ -808,8 +732,6 @@ mod tests {
 
     #[test]
     fn bar_checkers_must_enter_first() {
-        // X has a checker on the bar; O blocks entry for die 3 (point 2). Every legal action's
-        // first half-move is a bar entry with die 5 (entry at 4).
         let s = state(&[(11, 14)], &[(2, 2), (12, 13)], [1, 0], [3, 5], 0);
         let legal = s.legal_action_ids(0);
         assert!(!legal.is_empty());
@@ -822,7 +744,6 @@ mod tests {
 
     #[test]
     fn dance_yields_only_the_double_pass() {
-        // O owns every X entry point (0-5): X on the bar cannot move at all.
         let s = state(
             &[(11, 14)],
             &[(0, 2), (1, 2), (2, 2), (3, 2), (4, 2), (5, 2), (12, 3)],
@@ -835,7 +756,6 @@ mod tests {
             vec![1351],
             "the double-pass is the only action"
         );
-        // And it applies as a no-op turn handing over at the AwaitingRoll chance state.
         let g = game();
         let t = g.step(&s, &[1351, 0]);
         assert_eq!(t.next_state.bar[0], 1);
@@ -845,8 +765,6 @@ mod tests {
 
     #[test]
     fn bear_off_exact_and_furthest_rules() {
-        // All X in home: 2@18, 1@20. Dice (6, 3): 18+6=24 exact -> legal; 20+6=26 over -> NOT
-        // legal from 20 (18 is further); 20+3=23 regular move; 18+3=21 regular move.
         let s = state(&[(18, 2), (20, 1)], &[(0, 2), (1, 13)], [0, 0], [6, 3], 0);
         let singles: BTreeSet<CheckerMove> = s.legal_checker_moves(0);
         assert!(
@@ -857,7 +775,6 @@ mod tests {
             !singles.contains(&CheckerMove { pos: 20, num: 6 }),
             "over-shoot only from furthest"
         );
-        // Now clear 18: 20 becomes furthest -> die 6 bears it off despite over-shooting.
         let s2 = state(&[(20, 1), (21, 2)], &[(0, 2), (1, 13)], [0, 0], [6, 3], 0);
         let singles2 = s2.legal_checker_moves(0);
         assert!(
@@ -887,7 +804,6 @@ mod tests {
             !matches!(g.actor(&t.next_state), Actor::Chance),
             "extra turn is deterministic"
         );
-        // The second half of the doubles turn hands over at the AwaitingRoll chance state.
         let legal2 = t.next_state.legal_action_ids(0);
         let t2 = g.step(&t.next_state, &[legal2[0], 0]);
         assert_eq!(t2.next_state.to_move, 1);
@@ -896,7 +812,6 @@ mod tests {
 
     #[test]
     fn hitting_a_blot_sends_it_to_the_bar() {
-        // X plays 0 -> 3 (die 3) onto O's lone checker.
         let s = state(&[(0, 1), (11, 14)], &[(3, 1), (12, 14)], [0, 0], [3, 5], 0);
         let mut ns = s.clone();
         ns.apply_checker_move(0, CheckerMove { pos: 0, num: 3 });
@@ -935,18 +850,15 @@ mod tests {
 
     #[test]
     fn margins_gammon_and_backgammon() {
-        // X bears off its last checker; O has borne off nothing and sits in X's home -> backgammon.
         let g = game();
         let s = state(&[(23, 1)], &[(20, 15)], [0, 0], [1, 2], 0);
         let t = g.step(&s, &[s.legal_action_ids(0)[0], 0]);
         assert!(t.terminal);
         assert_eq!(t.events[0], Some(BackgammonEvent::Win(3)));
         assert_eq!(t.events[1], Some(BackgammonEvent::Loss(3)));
-        // O out of X's home with nothing borne off -> gammon.
         let s2 = state(&[(23, 1)], &[(10, 15)], [0, 0], [1, 2], 0);
         let t2 = g.step(&s2, &[s2.legal_action_ids(0)[0], 0]);
         assert_eq!(t2.events[0], Some(BackgammonEvent::Win(2)));
-        // O has borne off one -> plain win.
         let s3 = state(&[(23, 1)], &[(10, 14)], [0, 0], [1, 2], 0);
         let t3 = g.step(&s3, &[s3.legal_action_ids(0)[0], 0]);
         assert_eq!(t3.events[0], Some(BackgammonEvent::Win(1)));
@@ -970,7 +882,7 @@ mod tests {
     #[test]
     fn the_opening_is_a_declared_root_chance_phase() {
         let g = game();
-        let root = g.initial_state(); // draws nothing: the opening is declared
+        let root = g.initial_state();
         assert!(matches!(g.actor(&root), Actor::Chance));
         assert!(g.legal_actions(&root, 0).is_empty() && g.legal_actions(&root, 1).is_empty());
         let dist = g.chance_node(&root);
@@ -990,7 +902,6 @@ mod tests {
             assert_eq!(s.dice, ROLLS[roll]);
             assert_ne!(s.dice[0], s.dice[1], "the opening roll is never a double");
         }
-        // Birth realization runs the root phase to a realized decision state.
         let born = reinfors_core::game::realize_initial_state(&g, &mut TestRng(3));
         assert!(!born.opening);
         assert!(matches!(g.actor(&born), Actor::Agent(_)));
@@ -1013,7 +924,6 @@ impl reinfors_core::StateCodec for Backgammon {
     type State = BackgammonState;
 
     fn encode(&self, s: &BackgammonState) -> Vec<u8> {
-        // Layout 3: the `opening` root-chance flag joined the state.
         crate::codec_util::serde_encode(3, s)
     }
 
@@ -1021,13 +931,8 @@ impl reinfors_core::StateCodec for Backgammon {
         crate::codec_util::serde_decode(3, bytes)
     }
 
-    // Safety per the narrowed contract: the 15-checker sum bounds every count the move logic
-    // does arithmetic on; ranges cover the indexing paths. Terminality is derived from the
-    // borne-off scores (no state-side flag exists), so the envelope check compares against the
-    // single derived source, not a duplicate.
     fn validate_decoded_state(&self, state: &BackgammonState, done: bool) -> Result<(), String> {
         if state.opening {
-            // The opening draw is realized at episode birth; positions cannot await it.
             return Err("the opening roll is realized at episode birth".to_string());
         }
         if state.to_move > 1 {
@@ -1055,8 +960,6 @@ impl reinfors_core::StateCodec for Backgammon {
         }
         let finished = state.scores.iter().any(|&s| s >= 15);
         if !finished && state.dice == [0, 0] {
-            // AwaitingRoll is a transient chance state the framework realizes inside a tick; a
-            // restored live position must be actionable, not stuck awaiting nature.
             return Err("a live position must carry rolled dice".to_string());
         }
         if finished != done {

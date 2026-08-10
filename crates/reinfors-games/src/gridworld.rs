@@ -1,31 +1,24 @@
-//! GridWorld — a minimal single-agent navigation game, the first non-snake `Game`. It exercises the
-//! framework's single-agent path (`num_agents == 1` — pure MAX + lookahead, no opponent) end to
-//! end through the generic search and rollout engine. Transitions are deterministic; the only
-//! chance is the ROOT phase drawing the uniform non-goal start cell.
+//! Single-agent GridWorld with a uniformly sampled start cell.
 
 use reinfors_core::{ActionView, Actor, Game, Reward, Space, StateEncoder, Transition};
 
 type Pos = (i32, i32);
 
-const N_CHANNELS: usize = 2; // 0 = agent, 1 = goal
-const DELTAS: [Pos; 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)]; // up, down, left, right
+const N_CHANNELS: usize = 2;
+const DELTAS: [Pos; 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GridState {
     pub pos: Pos,
-    /// Reached the goal. Derived (`pos == goal`), so the codec recomputes it at decode rather
-    /// than transporting a second copy of the fact.
     #[serde(skip)]
     pub done: bool,
 }
 
-/// The agent's outcome on one tick: whether it reached the goal (terminal) this tick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct GridEvent {
     pub reached_goal: bool,
 }
 
-/// GridWorld's reward weights: `goal` on reaching the goal (terminal), `step` on every other tick.
 #[derive(Clone, Copy, Debug)]
 pub struct GridWorldReward {
     pub step: f64,
@@ -44,28 +37,17 @@ impl Reward for GridWorldReward {
     }
 }
 
-/// A `size x size` grid: one agent navigates to `goal` (terminal on arrival). The four moves are
-/// always legal; a move into a wall keeps the agent in place. Rules only; the reward is the decoupled
-/// [`GridWorldReward`].
 pub struct GridWorld {
     pub size: i32,
     pub goal: Pos,
-    /// Episode-length cap (the agent can wander indefinitely); the rollout truncates here. `None` =
-    /// never truncate. GridWorld has no survival bonus, so truncation just ends the episode.
     pub max_ticks: Option<usize>,
 }
 
 impl GridWorld {
-    /// Config invariants, checked once at the construction boundary so no input reaches a panic
-    /// later: `size >= 2` (a 1x1 grid has no non-goal start cell — the root chance node would
-    /// declare zero outcomes), the goal inside the grid, and the observation tensor within
-    /// indexable bounds.
     pub fn validate(&self) -> Result<(), String> {
         if self.size < 2 {
             return Err(format!("size must be >= 2, got {}", self.size));
         }
-        // u128 like the other ceilings: for 2 channels the i64 product happens to fit for every
-        // valid i32, but only by a factor of 1.00001 — don't leave it load-bearing
         let cells = self.size as u128 * self.size as u128;
         if N_CHANNELS as u128 * cells > i32::MAX as u128 {
             return Err(format!(
@@ -89,7 +71,7 @@ impl GridWorld {
         if 0 <= nr && nr < self.size && 0 <= nc && nc < self.size {
             (nr, nc)
         } else {
-            (r, c) // wall: stay
+            (r, c)
         }
     }
 }
@@ -108,7 +90,7 @@ impl Game for GridWorld {
 
     fn actor(&self, state: &GridState) -> Actor {
         if state.pos == (-1, -1) {
-            Actor::Chance // the unborn root: the start cell is nature's draw
+            Actor::Chance
         } else {
             Actor::Agent(0)
         }
@@ -133,8 +115,7 @@ impl Game for GridWorld {
     }
 
     fn initial_state(&self) -> GridState {
-        // The start cell is a declared ROOT chance phase (uniform over non-goal cells — see
-        // `chance_node`); `initial_state` draws nothing. `(-1, -1)` marks the unborn state.
+        // The sentinel is resolved by the root chance node before observation.
         GridState {
             pos: (-1, -1),
             done: false,
@@ -151,9 +132,8 @@ impl Game for GridWorld {
         _state: &GridState,
         outcome: usize,
     ) -> Transition<GridState, GridEvent> {
-        // Uniform over non-goal cells: indices at or past the goal's row-major index shift up
-        // by one, so exactly the goal cell is excluded.
         let goal_idx = (self.goal.0 * self.size + self.goal.1) as usize;
+        // Skip exactly the goal in row-major outcome order.
         let i = (outcome + usize::from(outcome >= goal_idx)) as i32;
         Transition::silent(
             GridState {
@@ -167,18 +147,14 @@ impl Game for GridWorld {
     fn truncation_horizon(&self) -> Option<usize> {
         self.max_ticks
     }
-
-    // Transitions are deterministic; the root start-cell phase is the game's only chance.
 }
 
-/// The default GridWorld observation: an agent-position plane and a goal-position plane. Carries
-/// `size`/`goal` (the goal lives on `GridWorld`, not in `GridState`).
 pub struct GridWorldPlanes {
     pub size: i32,
     pub goal: Pos,
 }
 
-impl ActionView for GridWorldPlanes {} // absolute: identity action view
+impl ActionView for GridWorldPlanes {}
 
 impl StateEncoder for GridWorldPlanes {
     type State = GridState;
@@ -198,7 +174,7 @@ impl StateEncoder for GridWorldPlanes {
 
     fn observation_space(&self) -> Space {
         let (c, h, w) = self.obs_shape();
-        Space::unit_box(vec![c, h, w]) // agent + goal one-hot planes: values in [0, 1]
+        Space::unit_box(vec![c, h, w])
     }
 }
 
@@ -276,11 +252,10 @@ mod tests {
             top_k: 4,
             max_depth: 8,
             chance: ChanceMode::Committed { samples: 1 },
-            opponent: Opponent::Uniform, // irrelevant: single-agent, no opponent nodes
+            opponent: Opponent::Uniform,
         }
     }
 
-    // K=2 heads, A=4, leaf value 0 — so the only signal is the terminal goal reward.
     fn zero_infer(_players: &[usize], _obs: Vec<f32>, n: usize) -> Vec<f64> {
         vec![0.0; n * 2 * 4]
     }
@@ -288,7 +263,6 @@ mod tests {
     #[test]
     fn step_moves_clamps_and_reaches_goal() {
         let w = world();
-        // Right from (0,0) lands on the goal (0,1): terminal, goal reward.
         let t = w.step(
             &GridState {
                 pos: (0, 0),
@@ -304,7 +278,6 @@ mod tests {
             }
         );
         assert!(t.terminal && t.events[0].unwrap().reached_goal);
-        // Up from the top row is a wall: stay, non-terminal, no goal reached.
         let t = w.step(
             &GridState {
                 pos: (0, 0),
@@ -346,7 +319,7 @@ mod tests {
                 },
                 1
             )
-            .is_empty()); // no agent 1
+            .is_empty());
         assert!(w
             .legal_actions(
                 &GridState {
@@ -355,14 +328,11 @@ mod tests {
                 },
                 0
             )
-            .is_empty()); // terminal
+            .is_empty());
     }
 
     #[test]
     fn search_finds_the_step_onto_the_goal() {
-        // Agent one cell left of the goal; with zero leaf values the only signal is the terminal goal
-        // reward, so the move that lands on the goal (right = 3) must have the highest root value. This
-        // drives the single-agent `Actor::Agent(0)` MAX path through the generic search.
         let w = world();
         let start = GridState {
             pos: (0, 0),
@@ -378,7 +348,7 @@ mod tests {
             0,
             zero_infer,
         );
-        let values = &results[0].0; // [K][A]
+        let values = &results[0].0;
         for head in values {
             let best = (0..4)
                 .max_by(|&a, &b| head[a].partial_cmp(&head[b]).unwrap())
@@ -396,10 +366,8 @@ mod tests {
 
     #[test]
     fn engine_rolls_out_a_single_agent_game() {
-        // The rollout engine drives a 1-agent game end to end: records have the right shape ([K][A=4])
-        // and episodes finish (reach the goal or truncate). Exercises num_agents == 1 in the engine.
-        let policy = SelectiveExpectimax::new(cfg(), 2, 0.0); // n_heads, epsilon
-        let learner = TreeStrap::new(0.99, 0.3, 1.0, false); // gamma, outcome_weight, bootstrap_p, interior
+        let policy = SelectiveExpectimax::new(cfg(), 2, 0.0);
+        let learner = TreeStrap::new(0.99, 0.3, 1.0, false);
         let params = EngineParams {
             n_games: 3,
             seed: 0,
@@ -416,8 +384,8 @@ mod tests {
         assert!(records.len() >= 50);
         for (obs, tgt, mask, _player) in &records {
             assert_eq!(obs.len(), N_CHANNELS * 25);
-            assert_eq!(tgt.len(), 2); // K heads
-            assert!(tgt.iter().all(|row| row.len() == 4)); // A actions
+            assert_eq!(tgt.len(), 2);
+            assert!(tgt.iter().all(|row| row.len() == 4));
             assert_eq!(mask.len(), 2);
         }
         assert!(stats.decisions > 0);
@@ -425,13 +393,10 @@ mod tests {
 
     #[test]
     fn dqn_engine_collects_well_formed_transitions() {
-        // The model-free DQN algorithm (no search) driven through the same generic Engine + GridWorld:
-        // it emits off-policy transitions (obs, action, reward, next_obs, terminal, mask) instead of
-        // TreeStrap targets — exercising the seam's non-search evaluation + transition-record path.
         use reinfors_core::{Dqn, EpsilonGreedyQ};
 
-        let policy = EpsilonGreedyQ::new(2, 0.0); // 2 heads, no epsilon -> greedy argmax of the head
-        let learner = Dqn::new(2, 1.0); // 2 heads, bootstrap_p = 1 -> all-ones masks
+        let policy = EpsilonGreedyQ::new(2, 0.0);
+        let learner = Dqn::new(2, 1.0);
         let params = EngineParams {
             n_games: 3,
             seed: 0,
@@ -454,7 +419,7 @@ mod tests {
                 dim,
                 "s' is filled for a transition learner"
             );
-            assert_eq!(t.mask, vec![1.0, 1.0]); // bootstrap_p = 1
+            assert_eq!(t.mask, vec![1.0, 1.0]);
             assert!(t.action < 4);
         }
         assert!(
@@ -473,13 +438,13 @@ mod tests {
         assert!(ok(4, (3, 3)).validate().is_ok());
         assert!(ok(2, (0, 1)).validate().is_ok());
         for (size, goal) in [
-            (4, (4, 4)),  // out of grid (the old fixed default vs a smaller size)
-            (4, (-1, 0)), // negative coordinate
-            (1, (0, 0)),  // no non-goal start cell: the root chance fan would be empty
+            (4, (4, 4)),
+            (4, (-1, 0)),
+            (1, (0, 0)),
             (0, (0, 0)),
             (-3, (0, 0)),
-            (40_000, (0, 0)),   // obs tensor would exceed 2^31 elements
-            (i32::MAX, (0, 0)), // the 2*size^2 product must not be trusted to fit i64
+            (40_000, (0, 0)),
+            (i32::MAX, (0, 0)),
         ] {
             assert!(
                 ok(size, goal).validate().is_err(),

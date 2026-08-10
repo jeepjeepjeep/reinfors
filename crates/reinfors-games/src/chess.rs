@@ -1,52 +1,19 @@
-//! Chess via `cozy-chess` (MIT; engine-grade bitboard movegen, perft-validated upstream). The crate
-//! is an implementation detail behind the `Game` trait: reinfors owns the action-id mapping, the
-//! termination policy, events/reward, and the observation encoder; cozy-chess owns move generation,
-//! make-move, and check/checkmate/stalemate detection — the parts where silent bugs poison training
-//! data.
-//!
-//! **Action space: the AlphaZero 8×8×73 = 4672 encoding**, absolute orientation (no per-side board
-//! flip — one convention for both players, matching the absolute observation planes):
-//! `index = from_square·73 + move_type`, with move types
-//!   0..56   ray moves: direction (N, NE, E, SE, S, SW, W, NW) × distance (1..7)
-//!   56..64  knight moves (8 patterns)
-//!   64..73  underpromotions: pawn direction (forward, capture toward file−1, toward file+1) ×
-//!           piece (Knight, Bishop, Rook)
-//! Queen promotions ride the ray encoding (a pawn ray-move onto the last rank decodes with
-//! `promotion = Queen`). Castling needs no special case: cozy-chess encodes it king-takes-own-rook,
-//! which is an ordinary E/W ray move of distance 3–4.
-//!
-//! Only a tiny fraction of the 4672 ids is legal in any position (~35 typical) — the tree searches
-//! consume `legal_actions` and keep nodes sparse, so the width costs the net's policy head, not the
-//! search.
-//!
-//! **Termination**: checkmate (mover wins), stalemate, the fifty-move rule (both via
-//! `Board::status`), threefold repetition (a hash history kept in the state, reset on irreversible
-//! moves), and an insufficient-material draw: bare kings, a lone knight, or any number of
-//! bishops all on same-colored squares. This is the MATERIAL-ONLY sufficient condition of FIDE's
-//! dead-position rule (§5.2.2) — the standard practical subset (OpenSpiel and python-chess score
-//! identically). Full dead-position detection is semantic ("no series of legal moves can ever
-//! mate", including locked pawn fortresses) and is a proof-search problem no engine-adjacent
-//! implementation attempts; such positions cannot be won and fall through to the fifty-move or
-//! repetition draw — the same result FIDE reaches, later. Helpmate-admitting material (KNvKN,
-//! opposite-colored KBvKB) plays on.
-//! An illegal action id (impossible through the masked searches; reachable through a raw `Env`)
-//! is an immediate loss for the mover — the same posture as connect4's full-column rule.
+//! Chess backed by `cozy-chess`, using the AlphaZero 8×8×73 action vocabulary.
 
 use cozy_chess::{Board, Color, File, GameStatus, Move, Piece, Rank, Square};
 use reinfors_core::{ActionView, Actor, Game, Reward, StateEncoder, Transition};
 
-pub const CHESS_ACTIONS: usize = 64 * 73; // 4672
+pub const CHESS_ACTIONS: usize = 64 * 73;
 
-/// (file delta, rank delta) per ray direction, in move-type order.
 const RAY_DIRS: [(i8, i8); 8] = [
-    (0, 1),   // N
-    (1, 1),   // NE
-    (1, 0),   // E
-    (1, -1),  // SE
-    (0, -1),  // S
-    (-1, -1), // SW
-    (-1, 0),  // W
-    (-1, 1),  // NW
+    (0, 1),
+    (1, 1),
+    (1, 0),
+    (1, -1),
+    (0, -1),
+    (-1, -1),
+    (-1, 0),
+    (-1, 1),
 ];
 const KNIGHT_DIRS: [(i8, i8); 8] = [
     (1, 2),
@@ -61,7 +28,7 @@ const KNIGHT_DIRS: [(i8, i8); 8] = [
 const UNDERPROMO_PIECES: [Piece; 3] = [Piece::Knight, Piece::Bishop, Piece::Rook];
 
 fn sq_index(sq: Square) -> usize {
-    sq as usize // LERF: a1 = 0, rank-major
+    sq as usize
 }
 
 fn sq_from(file: i8, rank: i8) -> Option<Square> {
@@ -74,8 +41,6 @@ fn sq_from(file: i8, rank: i8) -> Option<Square> {
     ))
 }
 
-/// Encode a cozy-chess move into its 8×8×73 action id. `side` disambiguates underpromotion
-/// direction (a pawn's "forward" depends on color; the encoding itself stays absolute).
 pub fn encode_move(mv: Move, side: Color) -> usize {
     let from = sq_index(mv.from);
     let (ff, fr) = (mv.from.file() as i8, mv.from.rank() as i8);
@@ -84,20 +49,18 @@ pub fn encode_move(mv: Move, side: Color) -> usize {
 
     let move_type = match mv.promotion {
         Some(p) if p != Piece::Queen => {
-            // Underpromotion: direction relative to the mover's forward.
             let fwd: i8 = if side == Color::White { 1 } else { -1 };
             debug_assert_eq!(dr, fwd);
             let dir = match df {
-                0 => 0,  // push
-                -1 => 1, // capture toward file-1
-                1 => 2,  // capture toward file+1
+                0 => 0,
+                -1 => 1,
+                1 => 2,
                 _ => unreachable!("pawn promotion with |file delta| > 1"),
             };
             let piece = UNDERPROMO_PIECES.iter().position(|&q| q == p).unwrap();
             64 + dir * 3 + piece
         }
         _ => {
-            // Ray or knight move (queen promotions ride the ray encoding).
             if let Some(k) = KNIGHT_DIRS.iter().position(|&(f, r)| f == df && r == dr) {
                 56 + k
             } else {
@@ -115,11 +78,9 @@ pub fn encode_move(mv: Move, side: Color) -> usize {
     from * 73 + move_type
 }
 
-/// Standard-UCI rendering of a cozy move ("e2e4", "e7e8q"). Cozy represents castling as
-/// king-takes-own-rook ("e1h1"); standard UCI wants the king's two-square destination ("e1g1"),
-/// so castling is detected against `board` and re-rendered.
 pub fn move_to_uci(mv: Move, board: &Board) -> String {
     let stm = board.side_to_move();
+    // cozy-chess represents castling as the king taking its own rook.
     let is_castle = (board.pieces(Piece::King) & board.colors(stm)).has(mv.from)
         && (board.pieces(Piece::Rook) & board.colors(stm)).has(mv.to);
     if is_castle {
@@ -134,9 +95,6 @@ pub fn move_to_uci(mv: Move, board: &Board) -> String {
     }
 }
 
-/// The action id of the legal move whose standard-UCI rendering is `uci`, in `board`'s position.
-/// Matching against the LEGAL move list (rather than parsing) disambiguates castling from plain
-/// king moves and pins promotions exactly. `None` if no legal move renders as `uci`.
 pub fn uci_to_action(uci: &str, board: &Board) -> Option<usize> {
     let mut found: Option<Move> = None;
     board.generate_moves(|ms| {
@@ -150,13 +108,9 @@ pub fn uci_to_action(uci: &str, board: &Board) -> Option<usize> {
     found.map(|mv| encode_move(mv, board.side_to_move()))
 }
 
-/// Decode an action id back into a cozy-chess move for `board`'s position. Returns `None` for
-/// out-of-range ids and geometrically impossible ids (off-board targets). NOTE: a decoded move
-/// is not necessarily LEGAL in `board` — callers rendering for users must check `board.is_legal`. Queen promotion is inferred when a pawn
-/// ray-moves onto the last rank.
 pub fn decode_move(action: usize, board: &Board) -> Option<Move> {
     if action >= CHESS_ACTIONS {
-        return None; // out-of-range ids (e.g. OpenSpiel's castling ids 4672/4673) are not moves
+        return None;
     }
     let from_idx = action / 73;
     let move_type = action % 73;
@@ -167,7 +121,6 @@ pub fn decode_move(action: usize, board: &Board) -> Option<Move> {
         let (df, dr) = RAY_DIRS[move_type / 7];
         let dist = (move_type % 7 + 1) as i8;
         let to = sq_from(ff + df * dist, fr + dr * dist)?;
-        // A pawn arriving on the last rank via a ray move is a queen promotion.
         let is_pawn = board.pieces(Piece::Pawn).has(from);
         let last_rank = matches!(to.rank(), Rank::First | Rank::Eighth);
         let promo = if is_pawn && last_rank {
@@ -187,6 +140,7 @@ pub fn decode_move(action: usize, board: &Board) -> Option<Move> {
         let df = [0i8, -1, 1][dir];
         (sq_from(ff + df, fr + fwd)?, Some(UNDERPROMO_PIECES[piece]))
     };
+    // Geometric decoding does not imply legality in this position.
     Some(Move {
         from,
         to,
@@ -194,8 +148,6 @@ pub fn decode_move(action: usize, board: &Board) -> Option<Move> {
     })
 }
 
-/// Board fields serialize as FEN strings (cozy's `Board` is a foreign type; FEN is its
-/// canonical, parse-validated text form).
 mod board_serde {
     use cozy_chess::Board;
     use serde::de::Error as _;
@@ -236,27 +188,17 @@ mod board_serde {
 pub struct ChessState {
     #[serde(with = "board_serde")]
     pub(crate) board: Board,
-    /// Position hashes since the last irreversible move (pawn move / capture / castling-rights
-    /// change resets the halfmove clock, which we mirror) — the threefold-repetition window.
+    // Repetition window since the last irreversible move.
     hashes: Vec<u64>,
-    /// The last up-to-8 positions (newest last) with each position's repetition count AS OF that
-    /// moment (computed against the then-current threefold window, so history planes are exact even
-    /// across irreversible-move resets). Maintained only when the game was built with
-    /// a nonzero `history_len` (the AZ-119 encoder's input); empty otherwise, so the minimal-encoder path
-    /// pays nothing for it in tree-node clones.
     #[serde(with = "board_serde::pairs")]
+    // Counts are stored at each historical moment, not recomputed from today's window.
     recent: Vec<(Board, u8)>,
-    /// Derived by [`position_outcome`] (the same function `step` uses), so the codec recomputes
-    /// it at decode rather than transporting a second copy. The one non-derivable outcome — the
-    /// illegal-action loss, where the board shows no mate — is thereby unrepresentable in a
-    /// snapshot; it is unreachable through the Env/search boundaries anyway.
     #[serde(skip)]
     finished: Option<ChessOutcome>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ChessOutcome {
-    /// The stored agent index won (its opponent is mated or played an illegal action).
     WonBy(usize),
     Draw,
 }
@@ -269,7 +211,6 @@ pub enum ChessEvent {
     Draw,
 }
 
-/// Zero-sum chess reward (defaults win 1 / loss −1 / draw 0, the AlphaZero z).
 pub struct ChessReward {
     pub win: f64,
     pub loss: f64,
@@ -288,14 +229,8 @@ impl Reward for ChessReward {
     }
 }
 
-/// Standard chess. Rules and outcomes only; the reward is the decoupled [`ChessReward`]. The
-/// truncation horizon (`max_ticks`) exists because self-play with weak nets can shuffle
-/// indefinitely inside the fifty-move window.
 pub struct Chess {
     pub max_ticks: Option<usize>,
-    /// Number of recent positions to maintain in the state (the [`ChessPlanesAz119`] encoder's
-    /// input). 0 (the default) keeps none — the factory sets this to the selected encoder's
-    /// `history` exactly when that encoder is chosen, so the two can't drift apart.
     pub history_len: usize,
 }
 
@@ -315,10 +250,6 @@ fn agent_of(color: Color) -> usize {
     }
 }
 
-/// The material-only sufficient condition of FIDE's dead-position rule (OpenSpiel-aligned; see
-/// the module doc for the semantic cases this deliberately does not attempt): with no
-/// pawns/rooks/queens, a draw iff kings only, one lone knight, or any number of bishops all on
-/// same-colored squares. KNvKN and opposite-colored KBvKB admit helpmates, so they play on.
 fn insufficient_material(board: &Board) -> bool {
     if !(board.pieces(Piece::Pawn) | board.pieces(Piece::Rook) | board.pieces(Piece::Queen))
         .is_empty()
@@ -340,13 +271,8 @@ fn insufficient_material(board: &Board) -> bool {
     square_colors.all(|c| c == first)
 }
 
-/// The position's outcome by the rules alone: cozy's status (mate / stalemate / fifty-move) plus
-/// our threefold-repetition and dead-position rules. The single source of terminality — `step`
-/// applies it after each move, and the codec recomputes `finished` from it at decode. Requires a
-/// non-empty hash history (`repetition_count`'s invariant).
 fn position_outcome(state: &ChessState) -> Option<ChessOutcome> {
     match state.board.status() {
-        // The side to move is mated: its opponent won.
         GameStatus::Won => Some(ChessOutcome::WonBy(1 - state.turn())),
         GameStatus::Drawn => Some(ChessOutcome::Draw),
         GameStatus::Ongoing => {
@@ -369,7 +295,6 @@ impl ChessState {
         self.finished.is_some()
     }
 
-    /// The board as a FEN string (for play/debug surfaces).
     pub fn fen(&self) -> String {
         format!("{}", self.board)
     }
@@ -419,8 +344,6 @@ impl Game for Chess {
         let decoded = decode_move(actions[mover], &state.board);
         let legal = decoded.is_some_and(|mv| next.board.try_play(mv).is_ok());
         if !legal {
-            // Unreachable through the masked searches; a raw Env can still submit anything. Same
-            // posture as connect4's full column: an illegal action is an immediate loss.
             next.finished = Some(ChessOutcome::WonBy(other));
             events[mover] = Some(ChessEvent::Loss);
             events[other] = Some(ChessEvent::Win);
@@ -431,7 +354,6 @@ impl Game for Chess {
             };
         }
 
-        // Maintain the repetition window: an irreversible move (halfmove clock reset) clears it.
         if next.board.halfmove_clock() == 0 {
             next.hashes.clear();
         }
@@ -485,18 +407,9 @@ impl Game for Chess {
     }
 }
 
-/// Minimal observation planes `(19, 8, 8)`, absolute orientation (H = rank, W = file, rank 1 at
-/// row 0 — one convention for both players, matching the absolute action encoding):
-///   0..6   White P N B R Q K   6..12  Black P N B R Q K
-///   12     side to move (all-ones when White)
-///   13..17 castling rights: W short, W long, B short, B long (all-ones planes)
-///   17     en-passant file (one-hot column)
-///   18     halfmove clock / 100
-/// A history-carrying AlphaZero-style encoder can land later as a second `StateEncoder` — the
-/// encoder seam is exactly where such views stay configurable.
 pub struct ChessPlanesMinimal;
 
-impl ActionView for ChessPlanesMinimal {} // absolute: identity action view
+impl ActionView for ChessPlanesMinimal {}
 
 impl StateEncoder for ChessPlanesMinimal {
     type State = ChessState;
@@ -541,15 +454,11 @@ impl StateEncoder for ChessPlanesMinimal {
     }
 }
 
-/// Ray-direction index after rank reflection (`dr -> -dr`): N<->S, NE<->SE, NW<->SW, E/W fixed.
 const RAY_REFLECT: [usize; 8] = [4, 3, 2, 1, 0, 7, 6, 5];
-/// Knight-direction index after rank reflection.
 const KNIGHT_REFLECT: [usize; 8] = [3, 2, 1, 0, 7, 6, 5, 4];
 
-/// The role symmetry sigma on an 8x8x73 action id: reflect the from-square's rank and negate every
-/// rank delta. Underpromotion slots encode file direction + piece only ("forward" is
-/// side-implicit), so they are fixed points. An involution: applying it twice is the identity.
 pub(crate) fn reflect_action(action: usize) -> usize {
+    // This must remain the same rank reflection used by ChessPlanesRelative.
     let from = action / 73;
     let mt = action % 73;
     let from_r = (7 - from / 8) * 8 + from % 8;
@@ -563,19 +472,6 @@ pub(crate) fn reflect_action(action: usize) -> usize {
     from_r * 73 + mt_r
 }
 
-/// Mover-relative observation planes `(19, 8, 8)`: the position seen from `agent`'s side — for
-/// agent 1 (Black) the board is rank-reflected and colors swap roles, so both colors present the
-/// net the same "my pieces advance up the board" geometry (role equivariance as an inductive
-/// bias — the AlphaZero paper's convention, vs [`ChessPlanesMinimal`]'s absolute frame). Layout
-/// mirrors the minimal encoder with my/opp planes in place of White/Black:
-///   0..6   my P N B R Q K   6..12  opponent P N B R Q K   (ranks reflected for agent 1)
-///   12     my-turn plane (all-ones when `agent` is to move)
-///   13..17 castling rights: my short, my long, opp short, opp long
-///   17     en-passant file (one-hot column; files are fixed under rank reflection)
-///   18     halfmove clock / 100
-/// The paired `ActionView` applies the SAME sigma to action indexing (`reflect_action` for
-/// agent 1), so observations and the policy/Q head transform together — the seam's coherence
-/// contract, pinned by the equivariance tests below.
 pub struct ChessPlanesRelative;
 
 impl ActionView for ChessPlanesRelative {
@@ -588,7 +484,6 @@ impl ActionView for ChessPlanesRelative {
     }
 
     fn game_action(&self, head: usize, agent: usize) -> usize {
-        // sigma is an involution: the map is its own inverse.
         if agent == 1 {
             reflect_action(head)
         } else {
@@ -653,23 +548,9 @@ impl StateEncoder for ChessPlanesRelative {
     }
 }
 
-/// OpenSpiel's chess observation, replicated exactly `(20, 8, 8)` — the interop/benchmark view
-/// (see reinfors-benchmarks: both frameworks' nets consume identical inputs, making throughput,
-/// learning curves AND infer-cache hit rates commensurable — including their encoding's
-/// en-passant blindness, which merges positions differing only in ep rights into one cache
-/// entry). Layout from the pinned source (`chess.cc::ObservationTensor`, commit d15d49f8):
-///   0..12  piece occupancy interleaved by TYPE in K Q R B N P order: white then black per type
-///   12     empty-square occupancy
-///   13     repetition count of the current position, (rep - 1) / 2 over [1, 3]
-///   14     side to move as their player id (ColorToPlayer: Black=0, White=1) — all-ONES White
-///   15     halfmove clock / 101
-///   16..20 castling rights: W queenside, W kingside, B queenside, B kingside
-/// Square order matches ours (rank-major, a1 = 0), so planes are straight bitboard writes.
-/// Absolute frame: the action view is the identity (native 8x8x73 ids; action encodings are
-/// deliberately NOT translated between frameworks — see the benchmarks ledger).
 pub struct ChessPlanesOpenSpiel;
 
-impl ActionView for ChessPlanesOpenSpiel {} // absolute: identity action view
+impl ActionView for ChessPlanesOpenSpiel {}
 
 impl StateEncoder for ChessPlanesOpenSpiel {
     type State = ChessState;
@@ -702,8 +583,6 @@ impl StateEncoder for ChessPlanesOpenSpiel {
         }
         let rep = (state.repetition_count() as f32 - 1.0) / 2.0;
         obs[13 * PLANE..14 * PLANE].fill(rep);
-        // Their player ids are inverted vs intuition: ColorToPlayer maps Black -> 0, White -> 1,
-        // so the side-to-move plane is all-ONES when White is to move.
         if board.side_to_move() == Color::White {
             obs[14 * PLANE..15 * PLANE].fill(1.0);
         }
@@ -711,7 +590,7 @@ impl StateEncoder for ChessPlanesOpenSpiel {
         for (i, color) in [Color::White, Color::Black].into_iter().enumerate() {
             let rights = board.castle_rights(color);
             if rights.long.is_some() {
-                obs[(16 + i * 2) * PLANE..(17 + i * 2) * PLANE].fill(1.0); // queenside first
+                obs[(16 + i * 2) * PLANE..(17 + i * 2) * PLANE].fill(1.0);
             }
             if rights.short.is_some() {
                 obs[(17 + i * 2) * PLANE..(18 + i * 2) * PLANE].fill(1.0);
@@ -725,22 +604,7 @@ impl StateEncoder for ChessPlanesOpenSpiel {
     }
 }
 
-/// AlphaZero's 119-plane chess observation `(119, 8, 8)`, in this framework's ABSOLUTE orientation
-/// (the paper flips the board to the mover's perspective; a flipped view belongs together with a
-/// flipped action mapping, which is game-level, not encoder-level — so both stay absolute here and
-/// plane 112 carries side-to-move instead):
-///   0..112   8 history steps, NEWEST FIRST (t=0 = current position), 14 planes each:
-///            6 White pieces (P N B R Q K), 6 Black pieces, repeated-once (count >= 2),
-///            repeated-twice (count >= 3) — all-ones indicator planes, counted in the
-///            threefold window. Steps before the game start are all-zero.
-///   112      side to move (all-ones when White)
-///   113      fullmove number / 100
-///   114..118 castling rights: W short, W long, B short, B long
-///   118      halfmove clock / 100
-/// Requires a `Chess` with `history_len == self.history` (the factory pairs them); with history off
-/// only the t=0 step is populated.
 pub struct ChessPlanesAz119 {
-    /// History steps encoded (the paper's 8). Plane count = `14 * history + 7`.
     pub history: usize,
 }
 
@@ -751,8 +615,6 @@ impl Default for ChessPlanesAz119 {
 }
 
 impl ChessPlanesAz119 {
-    /// Piece + repetition planes for one historical position into `obs[base..base + 14*64]`.
-    /// `count` is that position's repetition count as of its own moment.
     fn step_planes(obs: &mut [f32], base: usize, board: &Board, count: usize) {
         const PLANE: usize = 64;
         for (ci, color) in [Color::White, Color::Black].into_iter().enumerate() {
@@ -772,18 +634,16 @@ impl ChessPlanesAz119 {
     }
 }
 
-impl ActionView for ChessPlanesAz119 {} // absolute: identity action view
+impl ActionView for ChessPlanesAz119 {}
 
 impl StateEncoder for ChessPlanesAz119 {
     type State = ChessState;
 
     fn encode(&self, state: &ChessState, _agent: usize) -> Vec<f32> {
         const PLANE: usize = 64;
-        let aux = 14 * self.history; // first auxiliary plane index
+        let aux = 14 * self.history;
         let mut obs = vec![0.0f32; (aux + 7) * PLANE];
         let board = &state.board;
-        // History steps, newest first. `recent` ends with the current position when history is on;
-        // with history off, synthesize the single current step so t=0 is always populated.
         if state.recent.is_empty() {
             Self::step_planes(&mut obs, 0, board, state.repetition_count());
         } else {
@@ -825,8 +685,6 @@ mod tests {
         (game, state)
     }
 
-    /// Perft through OUR wrapper (legal_actions -> decode -> step), so it validates the action-id
-    /// bijection and the Game plumbing on top of cozy-chess's movegen.
     fn perft(game: &Chess, state: &ChessState, depth: usize) -> u64 {
         if depth == 0 {
             return 1;
@@ -837,7 +695,6 @@ mod tests {
             let mut joint = vec![0usize; 2];
             joint[mover] = action;
             let t = game.step(state, &joint);
-            // Terminal positions still count as one node at depth 1 (standard perft counts moves).
             nodes += if depth == 1 || t.terminal {
                 if depth == 1 {
                     1
@@ -892,7 +749,6 @@ mod tests {
     #[test]
     fn threefold_repetition_is_a_draw() {
         let (game, state) = start();
-        // Shuffle knights: the start position recurs after every 4 plies; third recurrence draws.
         let shuffle = ["g1f3", "g8f6", "f3g1", "f6g8"];
         let seq: Vec<&str> = shuffle.iter().cycle().take(8).copied().collect();
         let (s, terminal) = play_uci(&game, state, &seq);
@@ -906,7 +762,7 @@ mod tests {
     #[test]
     fn illegal_action_is_immediate_loss() {
         let (game, state) = start();
-        let bogus = encode_move("e2e4".parse().unwrap(), Color::White) + 1; // e2 ray, wrong slot
+        let bogus = encode_move("e2e4".parse().unwrap(), Color::White) + 1;
         let t = game.step(&state, &[bogus, 0]);
         assert!(t.terminal);
         assert_eq!(t.events[0], Some(ChessEvent::Loss));
@@ -915,8 +771,6 @@ mod tests {
 
     #[test]
     fn encode_decode_round_trips_all_legal_moves_along_a_game() {
-        // Follow a game with promotions/castling flavor; at every position, every legal move must
-        // round-trip through the 4672-id encoding.
         let (game, mut state) = start();
         let line = [
             "e2e4", "d7d5", "e4d5", "c7c6", "d5c6", "g8f6", "c6b7", "e7e6", "b7a8q",
@@ -937,7 +791,6 @@ mod tests {
             let (s, _) = play_uci(&game, state, &[uci]);
             state = s;
         }
-        // The pawn promoted by ray-encoding: confirm a queen appeared for White on a8.
         assert!(state.board.pieces(Piece::Queen).has(Square::A8));
     }
 
@@ -948,21 +801,20 @@ mod tests {
         let obs = enc.encode(&state, 0);
         assert_eq!(obs.len(), 19 * 64);
         let plane = |p: usize| &obs[p * 64..(p + 1) * 64];
-        assert_eq!(plane(0).iter().sum::<f32>(), 8.0); // 8 white pawns
-        assert_eq!(plane(6).iter().sum::<f32>(), 8.0); // 8 black pawns
-        assert_eq!(plane(5).iter().sum::<f32>(), 1.0); // 1 white king
-        assert_eq!(plane(12).iter().sum::<f32>(), 64.0); // white to move
+        assert_eq!(plane(0).iter().sum::<f32>(), 8.0);
+        assert_eq!(plane(6).iter().sum::<f32>(), 8.0);
+        assert_eq!(plane(5).iter().sum::<f32>(), 1.0);
+        assert_eq!(plane(12).iter().sum::<f32>(), 64.0);
         for p in 13..17 {
-            assert_eq!(plane(p).iter().sum::<f32>(), 64.0); // all castling rights
+            assert_eq!(plane(p).iter().sum::<f32>(), 64.0);
         }
-        assert_eq!(plane(17).iter().sum::<f32>(), 0.0); // no en passant
-        assert_eq!(plane(18).iter().sum::<f32>(), 0.0); // halfmove clock 0
+        assert_eq!(plane(17).iter().sum::<f32>(), 0.0);
+        assert_eq!(plane(18).iter().sum::<f32>(), 0.0);
     }
 
     #[test]
     fn insufficient_material_draws() {
         let game = Chess::default();
-        // K+B vs K: capture into bare-minor endgame must draw immediately.
         let board: Board = "8/8/8/3k4/8/2K1B3/8/8 w - - 0 1".parse().unwrap();
         let hashes = vec![board.hash()];
         let state = ChessState {
@@ -972,7 +824,6 @@ mod tests {
             finished: None,
         };
         assert!(insufficient_material(&state.board));
-        // Any legal move keeps insufficient material -> the game should end in a draw on next step.
         let mover = state.turn();
         let action = game.legal_actions(&state, mover)[0];
         let mut joint = vec![0usize; 2];
@@ -1017,7 +868,6 @@ mod az119_tests {
         let az = ChessPlanesAz119::default().encode(&state, 0);
         assert_eq!(az.len(), 119 * PLANE);
         let minimal = ChessPlanesMinimal.encode(&state, 0);
-        // t=0 piece planes (0..12) must equal the minimal encoder's piece planes.
         assert_eq!(&az[..12 * PLANE], &minimal[..12 * PLANE]);
     }
 
@@ -1026,9 +876,7 @@ mod az119_tests {
         let (game, state) = hist_game();
         let before = ChessPlanesAz119::default().encode(&state, 0);
         let after = ChessPlanesAz119::default().encode(&play(&game, state, &["e2e4"]), 0);
-        // t=1 of the new obs = t=0 of the old obs (piece planes).
         assert_eq!(&after[14 * PLANE..26 * PLANE], &before[..12 * PLANE]);
-        // and t=0 changed (the pawn moved).
         assert_ne!(&after[..12 * PLANE], &before[..12 * PLANE]);
     }
 
@@ -1036,17 +884,13 @@ mod az119_tests {
     fn repetition_planes_activate_exactly_when_positions_recur() {
         let (game, state) = hist_game();
         let shuffle = ["g1f3", "g8f6", "f3g1", "f6g8"];
-        // After 4 plies the start position has occurred twice -> t=0 repeated-once plane on.
         let s4 = play(&game, state, &shuffle);
         let obs4 = ChessPlanesAz119::default().encode(&s4, 0);
         assert!(obs4[12 * PLANE..13 * PLANE].iter().all(|&v| v == 1.0));
         assert!(obs4[13 * PLANE..14 * PLANE].iter().all(|&v| v == 0.0));
-        // The half-shuffled positions in between occurred once -> their history rep planes stay 0.
         assert!(obs4[(14 + 12) * PLANE..(14 + 13) * PLANE]
             .iter()
             .all(|&v| v == 0.0));
-        // The start position's FIRST occurrence (t=4 in history) must NOT be flagged — its count
-        // was 1 at the time (the exactness the per-step stored counts buy).
         let t4 = 4 * 14 * PLANE;
         assert!(obs4[t4 + 12 * PLANE..t4 + 13 * PLANE]
             .iter()
@@ -1057,14 +901,14 @@ mod az119_tests {
     fn aux_planes() {
         let (game, state) = hist_game();
         let obs = ChessPlanesAz119::default().encode(&state, 0);
-        assert!(obs[112 * PLANE..113 * PLANE].iter().all(|&v| v == 1.0)); // white to move
-        assert!((obs[113 * PLANE] - 0.01).abs() < 1e-6); // fullmove 1 / 100
+        assert!(obs[112 * PLANE..113 * PLANE].iter().all(|&v| v == 1.0));
+        assert!((obs[113 * PLANE] - 0.01).abs() < 1e-6);
         for p in 114..118 {
-            assert!(obs[p * PLANE..(p + 1) * PLANE].iter().all(|&v| v == 1.0)); // all rights
+            assert!(obs[p * PLANE..(p + 1) * PLANE].iter().all(|&v| v == 1.0));
         }
         let s = play(&game, state, &["e2e4"]);
         let obs = ChessPlanesAz119::default().encode(&s, 0);
-        assert!(obs[112 * PLANE..113 * PLANE].iter().all(|&v| v == 0.0)); // black to move
+        assert!(obs[112 * PLANE..113 * PLANE].iter().all(|&v| v == 0.0));
     }
 
     #[test]
@@ -1074,12 +918,11 @@ mod az119_tests {
             history_len: 2,
         };
         let enc = ChessPlanesAz119 { history: 2 };
-        assert_eq!(enc.obs_shape(), (35, 8, 8)); // 14*2 + 7
+        assert_eq!(enc.obs_shape(), (35, 8, 8));
         let state = game.initial_state();
         let s = play(&game, state, &["e2e4", "e7e5", "g1f3"]);
         let obs = enc.encode(&s, 0);
         assert_eq!(obs.len(), 35 * PLANE);
-        // Ring truncated to 2: both steps populated, aux planes at 28.. (black to move -> side 0).
         assert!(obs[..12 * PLANE].contains(&1.0));
         assert!(obs[14 * PLANE..26 * PLANE].contains(&1.0));
         assert!(obs[28 * PLANE..29 * PLANE].iter().all(|&v| v == 0.0));
@@ -1087,25 +930,20 @@ mod az119_tests {
 
     #[test]
     fn history_off_populates_only_the_current_step() {
-        let game = Chess::default(); // history_len: 0
+        let game = Chess::default();
         let state = game.initial_state();
         let s = play(&game, state, &["e2e4", "e7e5"]);
         let obs = ChessPlanesAz119::default().encode(&s, 0);
-        assert!(obs[..12 * PLANE].contains(&1.0)); // t=0 present
-        assert!(obs[14 * PLANE..112 * PLANE].iter().all(|&v| v == 0.0)); // no history steps
+        assert!(obs[..12 * PLANE].contains(&1.0));
+        assert!(obs[14 * PLANE..112 * PLANE].iter().all(|&v| v == 0.0));
     }
 }
 
 #[cfg(test)]
 mod relative_frame_tests {
-    //! The sigma-coherence suite for the mover-relative encoder: `encode` and the `ActionView`
-    //! must apply the SAME role symmetry. Any drift — reflecting the board but not en passant,
-    //! reflecting observations but not actions, a wrong ray/knight table — fails these.
     use super::*;
     use reinfors_core::check_action_view;
 
-    /// sigma on a FEN: reverse rank rows + swap piece case, flip side to move, swap castling
-    /// case, reflect the en-passant rank (3 <-> 6). Clocks unchanged.
     fn sigma_fen(fen: &str) -> String {
         let parts: Vec<&str> = fen.split(' ').collect();
         let placement: Vec<String> = parts[0]
@@ -1185,9 +1023,6 @@ mod relative_frame_tests {
 
     #[test]
     fn obs_and_actions_transform_together_under_sigma() {
-        // Deterministic pseudo-random walk; at EVERY position s with mover m, against t = sigma(s):
-        //   encode(s, m) == encode(t, 1 - m)                                  (obs equivariance)
-        //   head_index(id(mv in s), m) == head_index(id(sigma(mv) in t), 1-m) (action coherence)
         let enc = ChessPlanesRelative;
         let mut board = Board::default();
         for ply in 0..60 {
@@ -1231,8 +1066,6 @@ mod relative_frame_tests {
 
     #[test]
     fn start_position_is_sigma_symmetric_except_the_turn_plane() {
-        // The initial position equals its own sigma image, so the two perspectives may differ
-        // ONLY in plane 12 (whose turn it is) — a direct, scaffold-free equivariance check.
         let enc = ChessPlanesRelative;
         let s = state_of(Board::default());
         let (w, b) = (enc.encode(&s, 0), enc.encode(&s, 1));
@@ -1260,20 +1093,18 @@ mod openspiel_obs_tests {
         let s = { game.initial_state() };
         let obs = ChessPlanesOpenSpiel.encode(&s, 0);
         let plane = |p: usize| obs[p * 64..(p + 1) * 64].iter().sum::<f32>();
-        // K Q R B N P interleaved white/black
         for (p, n) in [(0, 1.0), (1, 1.0), (2, 1.0), (3, 1.0), (4, 2.0), (5, 2.0)] {
             assert_eq!(plane(p), n, "kings/queens/rooks plane {p}");
         }
-        assert_eq!(plane(10), 8.0); // white pawns
-        assert_eq!(plane(11), 8.0); // black pawns
-        assert_eq!(plane(12), 32.0); // empty squares
-        assert_eq!(plane(13), 0.0); // repetition 1 -> (1-1)/2
-        assert_eq!(plane(14), 64.0); // White to move -> all ONES (their Black=0/White=1 ids)
-        assert_eq!(plane(15), 0.0); // clock 0
+        assert_eq!(plane(10), 8.0);
+        assert_eq!(plane(11), 8.0);
+        assert_eq!(plane(12), 32.0);
+        assert_eq!(plane(13), 0.0);
+        assert_eq!(plane(14), 64.0);
+        assert_eq!(plane(15), 0.0);
         for p in 16..20 {
             assert_eq!(plane(p), 64.0, "castling plane {p}");
         }
-        // a1 is index 0: white queenside rook present in the rook plane at slot 0.
         assert_eq!(obs[4 * 64], 1.0);
     }
 }
@@ -1288,16 +1119,16 @@ mod fide_dead_position_tests {
 
     #[test]
     fn material_boundary_matches_fide() {
-        assert!(dead("8/8/4k3/8/8/3K4/8/8 w - - 0 1")); // K vs K
-        assert!(dead("8/8/4k3/8/8/3KB3/8/8 w - - 0 1")); // K+B vs K
-        assert!(dead("8/8/4kn2/8/8/3K4/8/8 w - - 0 1")); // K vs K+N
-        assert!(dead("8/8/3bk3/8/8/3KB3/8/8 w - - 0 1")); // KB vs KB same-colored squares
-        assert!(dead("8/8/4k3/8/8/3KB3/8/2B5 w - - 0 1")); // K+B+B vs K, same-colored squares
-        assert!(!dead("8/8/2bk4/8/8/3KB3/8/8 w - - 0 1")); // KB vs KB opposite colors: helpmate
-        assert!(!dead("8/8/3nk3/8/8/2NK4/8/8 w - - 0 1")); // KN vs KN: helpmate
-        assert!(!dead("8/8/4k3/8/8/2NKN3/8/8 w - - 0 1")); // KNN vs K
-        assert!(!dead("8/8/4k3/8/8/2NKB3/8/8 w - - 0 1")); // knight + bishop
-        assert!(!dead("8/8/4k3/7p/8/3K4/8/8 w - - 0 1")); // a pawn plays on
+        assert!(dead("8/8/4k3/8/8/3K4/8/8 w - - 0 1"));
+        assert!(dead("8/8/4k3/8/8/3KB3/8/8 w - - 0 1"));
+        assert!(dead("8/8/4kn2/8/8/3K4/8/8 w - - 0 1"));
+        assert!(dead("8/8/3bk3/8/8/3KB3/8/8 w - - 0 1"));
+        assert!(dead("8/8/4k3/8/8/3KB3/8/2B5 w - - 0 1"));
+        assert!(!dead("8/8/2bk4/8/8/3KB3/8/8 w - - 0 1"));
+        assert!(!dead("8/8/3nk3/8/8/2NK4/8/8 w - - 0 1"));
+        assert!(!dead("8/8/4k3/8/8/2NKN3/8/8 w - - 0 1"));
+        assert!(!dead("8/8/4k3/8/8/2NKB3/8/8 w - - 0 1"));
+        assert!(!dead("8/8/4k3/7p/8/3K4/8/8 w - - 0 1"));
     }
 }
 
@@ -1310,8 +1141,6 @@ mod uci_tests {
         let board: Board = "r3k2r/pppqpppp/8/8/8/8/PPPQPPPP/R3K2R w KQkq - 0 1"
             .parse()
             .unwrap();
-        // Standard-UCI castling strings resolve to legal ids; cozy-form strings do NOT exist
-        // in the standard rendering.
         for uci in ["e1g1", "e1c1"] {
             let id = uci_to_action(uci, &board).expect(uci);
             let mv = decode_move(id, &board).unwrap();
@@ -1371,8 +1200,6 @@ impl reinfors_core::StateCodec for Chess {
                 state.hashes.len()
             ));
         }
-        // `repetition_count` (and so the derived outcome) is defined against the current position
-        // sitting at the end of the threefold window.
         if *state.hashes.last().expect("non-empty") != state.board.hash() {
             return Err("hash history does not end at the current position".into());
         }
@@ -1421,17 +1248,17 @@ mod codec_tests {
         let back = game
             .decode(&bytes)
             .unwrap_or_else(|e| panic!("decode failed: {e}"));
-        assert_eq!(game.encode(&back), bytes); // canonical: re-encode is byte-identical
+        assert_eq!(game.encode(&back), bytes);
         game.validate_decoded_state(&back, false).unwrap();
-        assert!(game.decode(&bytes[..bytes.len() - 1]).is_err()); // structural: truncated
-        assert!(game.decode(&[1, 0, 0]).unwrap_err().contains("version")); // old layout rejected
+        assert!(game.decode(&bytes[..bytes.len() - 1]).is_err());
+        assert!(game.decode(&[1, 0, 0]).unwrap_err().contains("version"));
     }
 
     #[test]
     fn safety_invariants_reject_tampered_structs() {
         let (game, s) = played();
         let mut no_tail = s.clone();
-        no_tail.hashes.pop(); // history no longer ends at the current position
+        no_tail.hashes.pop();
         assert!(game
             .validate_decoded_state(&no_tail, false)
             .unwrap_err()
@@ -1442,8 +1269,6 @@ mod codec_tests {
             .validate_decoded_state(&fat_ring, false)
             .unwrap_err()
             .contains("8-slot"));
-        // envelope coherence: a live position under done=true (the outcome is derived, so the
-        // mismatch can only come from the envelope side)
         assert!(game
             .validate_decoded_state(&s, true)
             .unwrap_err()
@@ -1452,8 +1277,6 @@ mod codec_tests {
 
     #[test]
     fn outcome_is_recomputed_at_decode() {
-        // Fool's mate: the decoded state must rediscover the mate through `position_outcome`
-        // (the flag is never on the wire).
         let game = Chess {
             max_ticks: None,
             history_len: 0,

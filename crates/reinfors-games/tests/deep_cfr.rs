@@ -1,9 +1,3 @@
-//! Deep CFR's data generator, validated without any neural network: sample semantics under a
-//! zeros net (uniform play), end-to-end convergence with TABLE-emulated "networks" (a
-//! t-weighted-mean table is the regression optimum a real net approximates, so the emulation
-//! must converge like linear MCCFR), the exploitability instrument's exact pins, determinism,
-//! and the construction gates.
-
 use std::collections::HashMap;
 
 use reinfors_core::DeepCfrSolver;
@@ -32,8 +26,6 @@ fn zeros_net_samples_follow_the_argmax_fallback() {
     for s in &advantage {
         assert_eq!(s.iteration, 1);
         assert_eq!(s.legal.len(), s.targets.len());
-        // A zeros net has no positive advantage, so Brown's fallback plays PURE ARGMAX —
-        // the first action on ties. The baseline is then v(first): its own target is zero.
         assert!(
             s.targets[0].abs() < 1e-12,
             "argmax-fallback baseline: {:?}",
@@ -48,9 +40,6 @@ fn zeros_net_samples_follow_the_argmax_fallback() {
         );
         assert!(s.probs[1..].iter().all(|&p| p == 0.0));
     }
-    // Under a deterministic zeros net the machines stay depth-synchronized, so the sharing
-    // mechanism is WITHIN-ROUND DEDUP (64 traversals collapse to a handful of unique rows);
-    // the cache itself pays once real nets desynchronize the machines. Assert the dedup.
     assert!(
         stats.infer_rows * 4 < stats.cache_lookups,
         "queries dedupe hard on Kuhn: {} rows for {} queries",
@@ -86,13 +75,8 @@ fn traversals_are_deterministic_per_seed() {
 
 #[test]
 fn table_emulated_deep_cfr_converges_on_kuhn() {
-    // Emulate the advantage nets with t-weighted running-mean tables (the regression optimum
-    // a real net trains toward; regret matching is scale-invariant, so mean vs cumulative
-    // regrets yield the same strategies). If the emitted samples carry correct external-
-    // sampling semantics, this loop IS linear MCCFR and must converge toward the Kuhn
-    // equilibrium.
     struct Table {
-        rows: HashMap<Vec<u8>, (Vec<f64>, f64)>, // weighted sums + total weight
+        rows: HashMap<Vec<u8>, (Vec<f64>, f64)>,
     }
     impl Table {
         fn predict(&self, obs: &[f32]) -> Vec<f64> {
@@ -119,7 +103,6 @@ fn table_emulated_deep_cfr_converges_on_kuhn() {
             rows: HashMap::new(),
         },
     ];
-    // The average policy: t-weighted σ accumulation per infoset, keyed by obs bytes.
     let mut policy: HashMap<Vec<u8>, Vec<f64>> = HashMap::new();
     let mut solver = kuhn_solver(11);
     for _ in 0..250 {
@@ -146,7 +129,6 @@ fn table_emulated_deep_cfr_converges_on_kuhn() {
             }
         }
     }
-    // Normalize the average policy and re-key it by information-set key for the instrument.
     let features = solver.infoset_features().unwrap();
     assert_eq!(features.len(), 12, "Kuhn has exactly 12 infosets");
     let mut probs: HashMap<Vec<u8>, Vec<f64>> = HashMap::new();
@@ -169,10 +151,6 @@ fn table_emulated_deep_cfr_converges_on_kuhn() {
 
 #[test]
 fn table_emulated_deep_cfr_plateaus_on_three_player_kuhn() {
-    // The 2p table-emulation argument, at 3 players: with per-player t-weighted mean tables
-    // this loop IS linear external-sampling MCCFR — no Nash guarantee here, so the pin is the
-    // honest one: NashConv falls WELL below the uniform profile's 2.0625 and lands in the
-    // plateau band the tabular solver reaches, never asserted to vanish.
     struct Table {
         rows: HashMap<Vec<u8>, (Vec<f64>, f64)>,
     }
@@ -255,8 +233,6 @@ fn table_emulated_deep_cfr_plateaus_on_three_player_kuhn() {
 
 #[test]
 fn three_player_strategy_samples_follow_the_simple_estimator() {
-    // OpenSpiel's multiplayer simple-averaging rule: each traversal pass records the
-    // strategy of player (traverser + 1) % N only. Rotating the traverser covers everyone.
     let mut solver = DeepCfrSolver::new(
         KuhnPoker { players: 3 },
         Box::new(KuhnEncoder { players: 3 }),
@@ -277,8 +253,6 @@ fn three_player_strategy_samples_follow_the_simple_estimator() {
 
 #[test]
 fn uniform_policy_exploitability_matches_the_known_values() {
-    // No probs at all = uniform everywhere; the exact values are pinned by the tabular CFR
-    // parity harness (iteration-1 CFR averages are uniform).
     let kuhn = kuhn_solver(0);
     let e = kuhn.exploitability_of(&HashMap::new()).unwrap();
     assert!((e - 11.0 / 24.0).abs() < 1e-12, "Kuhn uniform: {e}");
@@ -311,8 +285,6 @@ fn collecting_before_the_first_iteration_is_a_misuse() {
 
 #[test]
 fn the_solver_accepts_more_than_two_players() {
-    // N-player Deep CFR: no Nash guarantee past 2 (documented at the gate), but the machinery
-    // runs — 3-player hold'em constructs and a traversal pass emits samples.
     let game = reinfors_games::TexasHoldem {
         num_players: 3,
         stack: 200,
@@ -352,8 +324,6 @@ fn the_solver_rejects_games_without_information_states() {
     );
 }
 
-/// A fully declared game whose chance ROOT leads to SIMULTANEOUS decisions — the raw-root
-/// probe saw only `Actor::Chance` and let it through to a mid-collect panic (review repro).
 struct ChanceRootSim;
 
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -447,8 +417,6 @@ fn chance_root_simultaneous_games_fail_at_construction() {
 
 #[test]
 fn holdem_traversals_run_at_scale() {
-    // Full hold'em is the target scale: sampled traversals must run (no enumeration
-    // anywhere on this path), with the deal drawn per traversal by the machines' rng.
     let game = reinfors_games::TexasHoldem {
         num_players: 2,
         stack: 200,
@@ -471,9 +439,6 @@ fn holdem_traversals_run_at_scale() {
         "every traversal reaches the traverser"
     );
     assert!(!strategy.is_empty());
-    // Hold'em observations embed hole cards + history: at small K, distinct deals mean
-    // near-zero sharing — batching is the throughput feature here; dedup/caching pay at
-    // Brown-scale K and on small games.
     assert!(stats.infer_calls > 0);
     assert!(
         stats.infer_calls * 5 < stats.infer_rows,

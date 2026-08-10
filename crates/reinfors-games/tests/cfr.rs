@@ -1,7 +1,3 @@
-//! CFR on the small poker testbeds: exploitability convergence, the analytic Kuhn value,
-//! CFR+ acceleration, MCCFR statistical convergence, table persistence, and the construction
-//! gates. (Iteration-exact pyspiel parity lives in the Python harness.)
-
 use reinfors_core::{best_response_value, exploitability, CfrSolver, CfrVariant};
 use reinfors_games::{HoldemReward, KuhnPoker, LeducPoker};
 
@@ -23,7 +19,6 @@ fn vanilla_cfr_approaches_the_kuhn_equilibrium() {
     let fine = solver.exploitability().unwrap();
     assert!(fine < coarse, "exploitability falls: {coarse} -> {fine}");
     assert!(fine < 2e-3, "near-Nash after 1000 iterations: {fine}");
-    // The analytic game value: -1/18 for the first player at equilibrium.
     let v0 = solver.expected_value(0);
     assert!((v0 - (-1.0 / 18.0)).abs() < 2e-3, "P0 value {v0} vs -1/18");
     assert_eq!(solver.num_infosets(), 12, "Kuhn has exactly 12 infosets");
@@ -34,9 +29,6 @@ fn kuhn_equilibrium_has_the_known_structure() {
     let mut solver = kuhn_solver(CfrVariant::Plus);
     solver.iterate(2000);
     assert!(solver.exploitability().unwrap() < 1e-4);
-    // Known equilibrium facts (any alpha in [0, 1/3]): with the JACK facing a bet, player 1
-    // always folds; with the KING facing a bet, player 1 always calls; player 1 having the
-    // KING after player 0 checks always bets.
     let g = KuhnPoker::default();
     let key = |cards: [u8; 2], hist: &[u8], agent: usize| {
         use reinfors_core::Game;
@@ -47,14 +39,14 @@ fn kuhn_equilibrium_has_the_known_structure() {
         g.information_state_key(&state, agent)
     };
     let probs = |k: Vec<u8>| solver.average_strategy(&k).expect("visited").1;
-    let j_facing_bet = probs(key([2, 0], &[1], 1)); // p1 holds J, p0 bet
+    let j_facing_bet = probs(key([2, 0], &[1], 1));
     assert!(j_facing_bet[0] > 0.99, "fold J to a bet: {j_facing_bet:?}");
-    let k_facing_bet = probs(key([0, 2], &[1], 1)); // p1 holds K, p0 bet
+    let k_facing_bet = probs(key([0, 2], &[1], 1));
     assert!(
         k_facing_bet[1] > 0.99,
         "call a bet with K: {k_facing_bet:?}"
     );
-    let k_after_check = probs(key([0, 2], &[0], 1)); // p1 holds K, p0 checked
+    let k_after_check = probs(key([0, 2], &[0], 1));
     assert!(
         k_after_check[1] > 0.99,
         "bet K behind a check: {k_after_check:?}"
@@ -110,7 +102,6 @@ fn tables_round_trip_through_save_load() {
     assert_eq!(restored.num_infosets(), solver.num_infosets());
     assert_eq!(restored.save(), bytes, "canonical serialization");
     assert!((restored.exploitability().unwrap() - solver.exploitability().unwrap()).abs() < 1e-15);
-    // Continuing the solve from the restored tables matches continuing the original.
     solver.iterate(10);
     restored.iterate(10);
     assert_eq!(restored.save(), solver.save());
@@ -119,8 +110,6 @@ fn tables_round_trip_through_save_load() {
 
 #[test]
 fn mccfr_checkpoints_are_exact() {
-    // The payload carries the sampling rng: a restored MCCFR solve continues bit-identically
-    // with the original — the checkpoint property the deterministic variants get for free.
     let mut solver = kuhn_solver(CfrVariant::ExternalMccfr);
     solver.iterate(50);
     let mut restored = kuhn_solver(CfrVariant::ExternalMccfr);
@@ -135,13 +124,11 @@ fn payloads_refuse_incompatible_solvers() {
     let mut plus = kuhn_solver(CfrVariant::Plus);
     plus.iterate(10);
     let payload = plus.save();
-    // A different variant must refuse the payload...
     let mut vanilla = kuhn_solver(CfrVariant::Vanilla);
     assert!(vanilla
         .load(&payload)
         .unwrap_err()
         .contains("different CFR variant"));
-    // ...and so must a game with a different action space (Kuhn: 2, Leduc: 3).
     let mut leduc = CfrSolver::new(
         LeducPoker,
         Box::new(HoldemReward { scale: 1.0 }),
@@ -156,8 +143,6 @@ fn payloads_refuse_incompatible_solvers() {
 
 #[test]
 fn best_response_exploits_a_uniform_profile() {
-    // Uniform play is far from equilibrium; the exact best response must find real value, and
-    // exploitability must be symmetric-positive.
     let uniform = |_key: &[u8], legal: usize| vec![1.0 / legal as f64; legal];
     let g = KuhnPoker::default();
     let r = HoldemReward { scale: 1.0 };
@@ -173,8 +158,6 @@ fn best_response_exploits_a_uniform_profile() {
 
 #[test]
 fn the_solver_accepts_more_than_two_players() {
-    // N-player CFR: no Nash guarantee past 2 players (documented at the gate), but the solver
-    // runs — 3-player hold'em constructs and MCCFR iterates.
     let mut solver = CfrSolver::new(
         reinfors_games::TexasHoldem {
             num_players: 3,
@@ -208,9 +191,6 @@ fn the_solver_rejects_games_without_information_states() {
 #[test]
 #[should_panic(expected = "sequential turn-taking only")]
 fn chance_root_simultaneous_games_fail_at_construction() {
-    // The stub lives in deep_cfr.rs; a minimal inline twin here keeps the two solver gates
-    // independently pinned. Chance root -> simultaneous decisions: the raw-root probe used
-    // to pass this and panic mid-solve.
     struct Sim;
     #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
     struct St {
@@ -276,8 +256,6 @@ fn chance_root_simultaneous_games_fail_at_construction() {
 
 #[test]
 fn mccfr_runs_on_heads_up_holdem() {
-    // Full hold'em is far beyond exact solving, but the sampled traversal must run: tables
-    // grow with visited infosets, chance is drawn rather than enumerated.
     let mut solver = CfrSolver::new(
         reinfors_games::TexasHoldem {
             num_players: 2,
@@ -296,8 +274,6 @@ fn mccfr_runs_on_heads_up_holdem() {
 #[test]
 #[should_panic(expected = "player 2 out of range")]
 fn expected_value_rejects_an_out_of_range_player() {
-    // A fixed-width Vals row exists for every slot up to MAX_CFR_PLAYERS; without the guard,
-    // expected_value(9) on a 2-player game silently returns 0.0.
     let mut solver = kuhn_solver(CfrVariant::Vanilla);
     solver.iterate(1);
     solver.expected_value(2);
