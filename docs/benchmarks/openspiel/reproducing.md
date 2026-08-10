@@ -10,10 +10,10 @@ cloud tooling are outside the library's scope, and a drifting copy would be wors
 pointer.
 
 The blocks below are **command templates**, not verbatim invocations: they run from the
-companion repository's root (except where noted), and angle-bracket values come from the
-tuning tables. Every published result links a pinned companion-repo commit whose run
-manifest contains the exact commands, resolved configurations, and seeds — audit against
-the manifest, not this page.
+companion repository's root (except where noted), and uppercase shell variables come from
+the tuning tables or artifact paths. Every published result links a pinned companion-repo
+commit whose run manifest contains the exact commands, resolved configurations, and seeds
+— audit against the manifest, not this page.
 
 ## One-time setup (per instance)
 
@@ -22,9 +22,11 @@ the manifest, not this page.
 # instrumentation + device patches, builds trainer and head-to-head binaries)
 bash scripts/setup_openspiel_cpp.sh
 
-# from the reinfors checkout: release wheel into the measurement venv (a debug build is
-# refused at runtime)
-maturin develop --release -m crates/reinfors-py/Cargo.toml
+# from sibling checkouts: install a release wheel into the companion measurement venv
+cd ../reinfors
+VIRTUAL_ENV=../reinfors-benchmarks/.venv23 uvx maturin develop --release \
+    -m crates/reinfors-py/Cargo.toml
+cd ../reinfors-benchmarks
 ```
 
 Per-boot: disable SMT (guarded by every script), pull, rebuild the wheel.
@@ -46,15 +48,15 @@ CORES=0-3 WIDTH=256 DEPTH=8 NGAMES="64 128" MINUTES=20 bash scripts/measure_stat
 ```bash
 # two sequential 2h legs (OpenSpiel then reinfors), hard-killed at the deadline,
 # post-run listing of each side's checkpoint artifacts
-MINUTES=120 OS_ACTORS=<from tuning> bash scripts/run_round_chess_gpu.sh
+MINUTES=120 OS_ACTORS="$SELECTED_ACTORS" bash scripts/run_round_chess_gpu.sh
 
 # head-to-head: paired openings, both colors, matched simulations, solver off,
 # PGN export with run metadata for every game
-python benchmarks/openspiel/eval_h2h_chess.py <rf_ckpt> <os_dir> --os-checkpoint <N> \
+python benchmarks/openspiel/eval_h2h_chess.py "$RF_CKPT" "$OS_DIR" --os-checkpoint "$OS_CHECKPOINT" \
     --games 50 --sims 64 --device cuda --az-device /cuda:0
 
 # telemetry comparison panels from both learners' structured logs
-python scripts/plot_round.py <rf_round_dir> <os_round_dir> -o round_panels.png
+python scripts/plot_round.py "$RF_ROUND_DIR" "$OS_ROUND_DIR" -o round_panels.png
 ```
 
 ## Publication artifacts

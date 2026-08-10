@@ -37,14 +37,11 @@ the deadline kill; every game is exported as PGN with full run metadata.
 | score ± SE (paired) | _TBD_ |
 | implied Elo difference (95% CI) | _TBD_ |
 
-Interpretation, fixed in advance: the expected strength edge from a throughput difference
-of this scale after 2 hours is small relative to 50–100-game match resolution, so a
-near-parity score is an expected outcome, not a null result. The match bounds the strength
-cost of the remaining differences.
+Interpretation uses the pair-level standard error and confidence interval above; no result
+is treated as more precise than the match supports.
 
 ## Open items
 
 - **single seed per side** — training-run variance in AlphaZero-style setups is real, and
   match-level precision is not over-interpreted because of it;
-- match length: ~50 games resolves ~±0.05 in score;
 - one game (chess) at one net size.

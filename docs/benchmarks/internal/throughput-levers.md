@@ -56,7 +56,8 @@ throughput, realized rows per call, inference share, and decision latency):
 | n64 × 2 groups | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
 
 Predicted for this operating point: the measured inference share ≈ 0.92 puts the ceiling
-at ≈ +9% (`1/0.92`), with the batch term favorable (two 64-row groups sit at the A10G sweet spot; a single 128-row batch
-pays a measured kernel regression). Boundary costs (submitter spawn per collect, one
-discarded in-flight batch at the record floor) are amortized at round-scale collection and
-measured separately at small collection sizes before any general recommendation.
+at ≈ +9% (`1/0.92`), with a favorable batch term: two 64-row groups sit at the A10G
+sweet spot, while a single 128-row batch pays a measured kernel regression. Boundary costs
+(submitter spawn per collect, one discarded in-flight batch at the record floor) are
+amortized at round-scale collection and measured separately at small collection sizes
+before any general recommendation.

@@ -27,25 +27,23 @@ interior windows after 5-minute warmups). Selection is by completed-game states/
 
 OpenSpiel (actors × inference batch):
 
-| config | states/s | rows/s | learn steps in window |
-|---|---|---|---|
-| 16 actors | _TBD_ | _TBD_ | _TBD_ |
-| 32 actors | _TBD_ | _TBD_ | _TBD_ |
-| 64 actors | _TBD_ | _TBD_ | _TBD_ |
-| 64 actors, batch 32 (decoupling probe) | _TBD_ | _TBD_ | _TBD_ |
+| config | states/s | rows/s | rows/call | learn steps in window |
+|---|---|---|---|---|
+| 16 actors | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+| 32 actors | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+| 64 actors | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+| 64 actors, batch 32 (decoupling probe) | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
 
 reinfors (parallel games):
 
-| config | states/s | net rows/s | learn steps in window |
-|---|---|---|---|
-| n_games 64 | _TBD_ | _TBD_ | _TBD_ |
-| n_games 128 | _TBD_ | _TBD_ | _TBD_ |
+| config | states/s | net rows/s | rows/call | learn steps in window |
+|---|---|---|---|---|
+| n_games 64 | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+| n_games 128 | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
 
-The grids are designed to expose two structural hypotheses, analyzed in
-[design differences](design-differences.md) and quantified when the tables publish:
-that OpenSpiel's completed-game rate and its rows/s move in opposite directions as actors
-rise (batch size coupled to actor count), and that reinfors' grid is decided by the kernel
-batch curve alone (batch size equal to game count, decoupled from per-game progress).
+The grids test how actor or game count changes realized rows per call, per-game progress,
+and completed states/s. The [design differences](design-differences.md) explain why the two
+schedulers may make different trade-offs; the published tables determine whether they do.
 
 ## Selected operating points
 

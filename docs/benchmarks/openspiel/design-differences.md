@@ -18,27 +18,22 @@ it takes the device and performs a full sweep of buffer-sized minibatches, then 
 resume against refreshed weights.
 
 **reinfors** runs a *lockstep pooled search*: all `n_games` games advance together, and
-each simulation round gathers one leaf per game into a single batched callback that returns
-policy and value from one forward. The inference cache is position-keyed and independent of
-call structure. The learner is caller-owned Python running concurrently (records stream out
-per collected batch); weight refreshes are explicit and clear the cache at round
-boundaries. Optionally, games split into two groups whose rounds alternate so tree work
-overlaps inference ([grouped collection](../internal/throughput-levers.md)).
+each simulation round gathers their uncached leaves into one callback that returns policy
+and value from one forward. The inference cache is position-keyed and independent of call
+structure. The learner is caller-owned Python running concurrently (records stream out per
+collected batch); weight refreshes are explicit and clear the cache at round boundaries.
+Optionally, games split into two groups whose rounds alternate so tree work overlaps
+inference ([grouped collection](../internal/throughput-levers.md)).
 
-## Consequence 1: batch size coupled to — or decoupled from — game count
+## Consequence 1: batch formation
 
-In the OpenSpiel design, inference batch size is bounded by actor count: big batches
-require many actors. But many concurrent games each progress slower, and under a deadline,
-slower games mean fewer *completed* games — fewer training states. Its states/s-optimal
-configuration therefore sits at a modest actor count with correspondingly small inference
-batches, paying the small-batch region of the kernel curve. reinfors' lockstep makes batch
-size *equal* to game count while all games advance at one shared rate, so it can sit at
-the device's kernel sweet spot without a completion penalty. This coupling difference is
-hypothesized to be the largest contributor to any measured throughput gap (the published
-ablations quantify it) — and it is a scheduling choice, not an implementation-quality
-difference: per-actor threading is the natural design
-for a library whose algorithms and games vary widely; lockstep pooling is available to
-reinfors because its search contract is narrower.
+OpenSpiel's asynchronous batcher needs enough independently progressing actors to fill a
+large inference batch. reinfors instead stages up to one fresh leaf per active game in a
+synchronized round, making callback sizes more predictable. Neither batch size is simply
+the configured game count: cache hits, terminal simulations, and deduplication remove rows,
+while larger game or actor counts can increase per-game latency and leave more work in
+flight at the deadline. The tuning grids measure whether fuller batches outweigh those
+completion costs.
 
 ## Consequence 2: one inference question per node, or two
 
@@ -52,16 +47,13 @@ comparisons are invalid rather than "clean" — see the [comparison protocol](pr
 
 ## Consequence 3: continuous versus burst training
 
-The reinfors learner trains continuously beside collection; self-play always runs against
-near-current weights, and GPU time interleaves at fine grain. OpenSpiel's learner trains in
-periodic sweeps during which the device prioritizes training; its actors play against
-weights up to one sweep stale, then jump. Neither profile is free — and neither is
-more "canonical" (the original AlphaZero trained asynchronously and continuously; both
-stacks approximate that differently): burst training buys simple synchronization and a
-self-contained learner at some device contention and staleness; continuous training buys
-freshness at the cost of a Python-side training loop sharing the process. The matched training-intensity check (gradient-samples per state,
-verified from telemetry on both sides) exists so this scheduling difference is not
-mistaken for a difference in how much learning happens.
+The reinfors learner trains continuously beside collection; self-play runs against
+near-current weights, and GPU time interleaves at fine grain. OpenSpiel trains in periodic
+sweeps, so actors play against weights up to one sweep stale. Burst training simplifies
+synchronization but introduces device contention and staleness; continuous training keeps
+weights fresher while sharing the process with a Python training loop. Telemetry verifies
+matched gradient-samples per state so this scheduling difference is not mistaken for a
+difference in training intensity.
 
 ## Consequence 4: what a deadline does to in-flight work
 
@@ -69,45 +61,17 @@ Both stacks lose in-flight games at the hard kill; how much is in flight is a de
 consequence — proportional to concurrent games and per-game latency. See the shared
 [methodology](../methodology.md) for why completed-game states/s is the selection metric.
 
-## What reinfors pays for its choices
+## Trade-offs
 
-Symmetry requires the reverse list, stated at the same precision as the forward one.
-
-**Heterogeneous compositions are first-class inside their run infrastructure.** Any object
-satisfying their `Bot` interface slots into an actor loop per seat: their trainer runs
-concurrent *evaluation actors* (current net vs. reference baselines, producing live
-strength curves) during training; mixed-bot matches reuse the identical loop; and a
-no-network rollout evaluator ships in-library. reinfors handles heterogeneity at a
-different layer — the caller-driven `Env` expresses arbitrary bot mixes (this benchmark's
-own head-to-head bridge and referee bots are built on it), and per-player inference with
-`learn_players` covers frozen opponents and per-seat *networks* inside the engine — but
-anything beyond homogeneous self-play forfeits the engine's batching, cache, and telemetry
-machinery. Concretely missing in-engine: concurrent evaluation actors, per-seat *search*
-heterogeneity, and an in-library rollout baseline.
-
-**New search families pay an integration cost for throughput.** In their model, a new bot
-type never touches the run loop; in reinfors, a search that wants the engine's machinery
-must integrate with the pooled round staging, and features like grouped collection extend
-to search families individually. The symmetric caveat: their free
-scheduling is not free *batching* — a custom OpenSpiel bot wanting their inference
-service's batches must integrate with the evaluator queue just the same. Generality with
-free scheduling is not generality with free throughput on either side.
-
-**Per-game latency.** At its throughput-optimal configuration, reinfors' games share each
-search round, so individual games progress slower than under a small-actor OpenSpiel
-configuration that finishes single games faster — a real difference for interactive or
-latency-sensitive uses, immaterial for bulk collection.
-
-**The learner shares a Python runtime.** reinfors' caller-owned training loop lives in
-Python beside collection; OpenSpiel's all-C++ learner never shares a runtime with user
-code. The flip side is flexibility — the training loop being caller-owned is a reinfors
-design goal, not an accident — but the cost is real in workloads with heavy Python-side
-work between collects.
+| dimension | OpenSpiel | reinfors |
+|---|---|---|
+| heterogeneous play | Per-seat `Bot` composition inside its run infrastructure, including evaluation actors and rollout baselines. Batching still requires evaluator integration. | Per-player networks and frozen opponents stay inside `Engine`; arbitrary bot or search mixes use `Env`, outside Engine-provided batching, caching, and telemetry. |
+| new search integration | A new bot can use the actor loop directly; batched network service requires its evaluator queue. | The standard policy seam uses normal collection; `n_groups=2` additionally requires resumable pooled-round support. |
+| per-game latency | Small actor counts can favor individual-game latency. | Throughput-oriented lockstep batches can increase individual-game latency. |
+| training ownership | The C++ learner is self-contained. | The caller-owned Python learner is flexible but shares the process during concurrent collection. |
 
 ## Scope of the claim
 
-The measured gap is the sum of scheduling and interface choices, each of which OpenSpiel
-could adopt at the cost of generality it deliberately keeps, and each of which reinfors
-could lose by broadening scope. The benchmark's claim is correspondingly narrow: on this
-workload, a modular Rust/Python boundary does not have to forfeit throughput to a fused
-C++ design — not that one library outranks the other.
+The benchmark tests whether reinfors preserves throughput across its modular Rust/Python
+boundary on this workload. The published results bound that claim; they do not rank the
+libraries generally.
