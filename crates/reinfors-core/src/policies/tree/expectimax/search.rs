@@ -27,10 +27,11 @@ pub struct SearchConfig {
     pub opponent: Opponent,
 }
 
+/// Shared search accounting. MCTS maintains the exact identity
+/// `expansions = fresh + hit + shared + terminal + depthcap - extra_eval_rows`; the subtraction
+/// removes auxiliary perspective rows from simulation fate.
 #[derive(Default, Clone, Copy, Debug)]
 pub struct SearchStats {
-    // MCTS maintains the exact identity expansions = fresh + hit + shared + terminal + depthcap
-    // - extra_eval_rows; the subtraction removes auxiliary perspective rows from sim fate.
     pub max_depth: i32,
     pub expansions: usize,
     pub leaves: usize,
@@ -551,7 +552,7 @@ fn push_branches<G: Game>(
                     MAX_ENUMERATED_OUTCOMES
                 );
                 assert!(
-                    // As above, check the size after inserting this outcome fan, not before it.
+                    // As above, guard the projected size after this outcome fan is inserted.
                     resolved.len() + work.len() + count <= MAX_ENUMERATED_OUTCOMES,
                     "a chance chain's flattened fan exceeds the enumeration bound ({}); use a \
                      narrower sampling mode",

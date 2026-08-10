@@ -191,8 +191,7 @@ impl<S> Node<S> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TreeMode {
-    // Retained as the 2p default: Connect4 AZ measured ~0.60 head-to-head against forced MaxN at
-    // equal decisions and ~35% less wall time (two seeds). MaxN is the re-measurement seam.
+    // The 2p default; keep its measurement rationale canonical on SequentialBackup.
     SeqNegamax,
     SeqMaxN,
     Sim,
