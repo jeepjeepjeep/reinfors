@@ -1,7 +1,7 @@
 # reinfors
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/jeepjeepjeep/reinfors/main/assets/reinfors-banner.svg" alt="Animated reinfors logo" width="100%">
+  <img src="assets/reinfors-banner.svg" alt="Animated reinfors logo" width="100%">
 </p>
 
 High-throughput reinforcement-learning search and sampling in Rust, with caller-owned
