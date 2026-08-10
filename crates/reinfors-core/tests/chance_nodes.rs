@@ -1,11 +1,3 @@
-//! Explicit chance nodes traversed by the tree searches: fixed-probability plies (never UCB/PUCT
-//! arms), transparent to depth/discount/perspective, whose edges may emit rewards and end the
-//! game. Pinned here: exact expectation under `ExpandAll` (terminal outcomes included), chain
-//! rewards joining their tick undiscounted, statistical convergence under resampling, seeded
-//! determinism under `Committed`, per-agent chance rewards on simultaneous trees, mover handoff
-//! through a chain, the no-net-eval-at-chance-states invariant (the encoder asserts it), and the
-//! cycling-chain backstop.
-
 use reinfors_core::{
     mcts_many, search_many, ActBy, Actor, ChanceDist, ChanceMode, Engine, EngineParams, Evaluator,
     Game, InferMode, Mcts, MctsConfig, Opponent, Reward, SearchConfig, Space, StateEncoder,
@@ -17,8 +9,6 @@ struct St {
     tick: usize,
 }
 
-/// Every game here marks its chance ticks through the guard the encoder holds: a net evaluation
-/// of a chance state is a contract violation, not a wrong number.
 struct GuardEnc(fn(&St) -> bool);
 impl reinfors_core::ActionView for GuardEnc {}
 impl StateEncoder for GuardEnc {
@@ -67,8 +57,6 @@ fn xmax_cfg(gamma: f64, chance: ChanceMode) -> SearchConfig {
     }
 }
 
-/// One decision, then a chance state paying 10 (p=0.25) or 20 (p=0.75) and ending the game.
-/// E = 17.5, decided entirely on the chance edge.
 struct PayoutFan;
 impl Game for PayoutFan {
     type State = St;
@@ -136,9 +124,7 @@ where
 
 #[test]
 fn expand_all_backs_up_the_exact_expectation() {
-    // One simulation under ExpandAll: the fan seeds the decision edge with EXACTLY Σ pᵢ·rᵢ =
-    // 17.5, undiscounted — the payouts belong to the action's own tick, so gamma 0.5 must not
-    // touch them (a wrongly discounted fan would read 8.75).
+    // 0.25*10 + 0.75*20 = 17.5 on this tick; discounting the chance edge would wrongly give 8.75.
     let cfg = mcts_cfg(1, 8, 0.5, ChanceMode::ExpandAll);
     let e = run_mcts(&PayoutFan, fan_chance, &cfg, vec![(St { tick: 0 }, 0)]);
     assert!(
@@ -181,9 +167,6 @@ fn committed_draws_are_seed_deterministic() {
     assert_eq!(a[0].visits, b[0].visits);
 }
 
-/// Tick 1: action (edge emits +1) into a two-edge chance chain emitting +2 then +3. Tick 2: a
-/// second decision whose edge pays +8 and ends the game. With gamma 0.5 the root Q is exactly
-/// (1+2+3) + 0.5·8 = 10: chance edges add no discount and no depth.
 struct ChainTick;
 impl Game for ChainTick {
     type State = St;
@@ -229,7 +212,7 @@ impl Game for ChainTick {
     fn apply_chance_node(&self, s: &St, _outcome: usize) -> Transition<St, f64> {
         Transition {
             next_state: St { tick: s.tick + 1 },
-            events: vec![Some(1.0 + s.tick as f64)], // +2 at tick 1, +3 at tick 2
+            events: vec![Some(1.0 + s.tick as f64)],
             terminal: false,
         }
     }
@@ -243,9 +226,8 @@ fn chain_chance(s: &St) -> bool {
 
 #[test]
 fn chain_rewards_join_their_tick_undiscounted_and_add_no_depth() {
-    // max_depth = 2: the second decision sits at depth 1 (the chain is depth-transparent), so
-    // its terminal edge at depth 2 is still searched. Chance-inflated depth would cap the
-    // search before the +8; per-chance-edge discounting would shrink the +2/+3.
+    // The depth cap is exactly tight: chance-transparent depth reaches the second decision.
+    // Its value is (1+2+3) + 0.5*8 = 10.
     let cfg = mcts_cfg(256, 2, 0.5, ChanceMode::Committed { samples: 1 });
     let e = run_mcts(&ChainTick, chain_chance, &cfg, vec![(St { tick: 0 }, 0)]);
     let q = e[0].values[0][0];
@@ -265,9 +247,8 @@ fn chain_rewards_join_their_tick_undiscounted_and_add_no_depth() {
     assert!((values[0][0] - 10.0).abs() < 1e-9, "{}", values[0][0]);
 }
 
-/// A fan with a terminal outcome: p=0.5 ends the game paying +4, p=0.5 continues to a decision
-/// whose only continuation pays 0. Exact expectation 2. `both_terminal` closes the other branch
-/// too (payout 0), exercising the all-terminal fan (no rows to stage at all).
+/// Half the fan terminates with +4 and half continues at zero, so its exact value is 2. Setting
+/// `both_terminal` makes the second half terminal too and exercises a fan with no staged rows.
 struct MixedFan {
     both_terminal: bool,
 }
@@ -340,8 +321,6 @@ impl Game for MixedFan {
 
 #[test]
 fn expand_all_handles_terminal_outcomes() {
-    // Terminal outcomes stage no rows; their exact value (0) and their chance-edge payout still
-    // enter the fan's expectation: Q = 0.5·4 + 0.5·(0 + γ·0) = 2, exact on the first simulation.
     let cfg = mcts_cfg(1, 8, 0.5, ChanceMode::ExpandAll);
     let e = run_mcts(
         &MixedFan {
@@ -357,7 +336,6 @@ fn expand_all_handles_terminal_outcomes() {
         e[0].values[0][0]
     );
 
-    // The all-terminal fan resolves with no evaluation at all.
     let e = run_mcts(
         &MixedFan {
             both_terminal: true,
@@ -373,8 +351,6 @@ fn expand_all_handles_terminal_outcomes() {
     );
 }
 
-/// Simultaneous joint move into a single-outcome chance edge paying +3 / −3, then terminal —
-/// per-agent chance rewards on the decoupled (DUCT) tree, exact on every simulation.
 struct SimChance;
 impl Game for SimChance {
     type State = St;
@@ -439,8 +415,8 @@ fn simultaneous_trees_take_per_agent_chance_rewards() {
     }
 }
 
-/// P0 moves, a rewardless chance edge hands the turn to P1, whose move ends the game at −1 for
-/// P0 (+1 for P1) — the negamax perspective must flip across the DECISION handoff and only there.
+/// P0 moves, chance hands the turn to P1, then P1 ends at +1: P0's value must flip only at the
+/// decision handoff, never merely while traversing chance.
 struct TurnFlip;
 impl Game for TurnFlip {
     type State = St;
@@ -520,13 +496,10 @@ fn engine_collects_with_search_policies_through_chance() {
     );
     let (records, stats) = engine.collect(4, |_obs: Vec<f32>, n: usize| vec![0.0; n]);
     assert!(records.len() >= 4);
-    // Both decisions of the 2-tick episode leave records; the chance tick leaves none.
     assert!(stats.decisions > 0);
 }
 
-/// A branching chain: p=0.5 pays +2 and ends the game; p=0.5 chains to a SECOND chance state
-/// that pays +6 and ends. E = 4 — under `ExpandAll` the chain flattens into one weighted fan
-/// (compound probabilities, accumulated chance rewards), exactly like expectimax's branch fan.
+/// Half terminates at +2 and half chains to a second chance node paying +6: exact value 4.
 struct BranchChain;
 impl Game for BranchChain {
     type State = St;
@@ -595,8 +568,6 @@ fn branch_chance(s: &St) -> bool {
 
 #[test]
 fn expand_all_flattens_chance_chains() {
-    // The all-terminal flattened fan resolves exactly on the first simulation: Q = 0.5·2 +
-    // 0.5·6 = 4, undiscounted, with the nested chance state folded through at compound weight.
     let cfg = mcts_cfg(1, 8, 0.5, ChanceMode::ExpandAll);
     let e = run_mcts(&BranchChain, branch_chance, &cfg, vec![(St { tick: 0 }, 0)]);
     assert!(
@@ -621,18 +592,13 @@ fn expand_all_flattens_chance_chains() {
 
 #[test]
 fn expand_all_flattens_chains_with_decision_continuations() {
-    // ChainTick's two single-outcome chance edges flatten to ONE leaf (the second decision)
-    // carrying +5 of accumulated chance rewards — same exact root Q = (1+2+3) + 0.5·8 = 10 as
-    // the sampling modes.
+    // Reuses ChainTick's derivation above: (1+2+3) + 0.5*8 = 10.
     let cfg = mcts_cfg(256, 2, 0.5, ChanceMode::ExpandAll);
     let e = run_mcts(&ChainTick, chain_chance, &cfg, vec![(St { tick: 0 }, 0)]);
     let q = e[0].values[0][0];
     assert!(q > 9.9 && q <= 10.0 + 1e-9, "{q}");
 }
 
-/// Seed outcome 0 chains into a cap-sized fan while outcome 1 is still unprocessed: the
-/// aggregate projected-size check must count BOTH, so the flatten rejects — a per-seed bound
-/// would let the fan reach nearly twice the documented cap.
 struct WideChain;
 impl Game for WideChain {
     type State = St;
@@ -694,12 +660,12 @@ impl Game for WideChain {
 #[test]
 #[should_panic(expected = "flattened fan exceeds the enumeration bound")]
 fn the_flattened_fan_cap_counts_unprocessed_outcomes() {
+    // One seed expands to a cap-sized fan while its sibling remains pending; counting only the
+    // expanded seed would admit almost twice the bound.
     let cfg = mcts_cfg(1, 8, 0.5, ChanceMode::ExpandAll);
     let _ = run_mcts(&WideChain, branch_chance, &cfg, vec![(St { tick: 0 }, 0)]);
 }
 
-/// A chance state that always chains to another chance state — the framework must turn the
-/// cycle into a loud panic, not an infinite loop.
 struct Cycler;
 impl Game for Cycler {
     type State = St;

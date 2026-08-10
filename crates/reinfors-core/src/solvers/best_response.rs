@@ -1,14 +1,4 @@
 //! Exact best response and exploitability against a fixed strategy profile.
-//!
-//! The best responder maximizes per INFORMATION SET, not per state: at each of its infosets
-//! the chosen action must be the argmax of the counterfactual-reach-weighted sum over the
-//! member histories (the responder cannot act differently in states it cannot distinguish).
-//! Implementation: enumerate the full game tree once into a fan-capped arena, collect each responder
-//! infoset's members with their opponent-and-chance reach weights, then resolve values with
-//! the infoset argmax memoized (choices at deeper infosets resolve recursively).
-//!
-//! `exploitability` follows pyspiel's definition: the mean of both players' best-response
-//! improvements (NashConv / num_players) — zero exactly at a Nash equilibrium.
 
 use std::collections::HashMap;
 
@@ -16,18 +6,14 @@ use crate::game::{Actor, Game};
 use crate::policy::MAX_ENUMERATED_OUTCOMES;
 use crate::reward::Reward;
 
-/// A strategy profile queried by information-set key: `(key, legal action count) -> probs`
-/// (aligned with the game's `legal_actions` order).
+/// Strategy probabilities aligned with the information set's legal-action order.
 pub type Profile<'a> = dyn Fn(&[u8], usize) -> Vec<f64> + 'a;
 
-/// The arena cap — best response is exact enumeration; past this the game is out of this
-/// instrument's scope.
+/// Maximum nodes in an exact enumeration.
 const MAX_TREE_NODES: usize = 4_000_000;
 
-/// The exact enumeration outgrew a cap — the game is out of exact-metric range. A typed
-/// error rather than a panic: a big-but-valid game is expected input at the public boundary,
-/// and a panic there would either escape it or force callers to catch unwinds (masking
-/// genuine bugs and printing panic diagnostics on the way).
+/// The game tree exceeded the exact-enumeration cap. This is a typed error because an oversized
+/// but valid game is expected public input, not an internal invariant failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnumerationCapExceeded(pub String);
 
@@ -41,9 +27,7 @@ impl std::error::Error for EnumerationCapExceeded {}
 
 enum ArenaNode {
     Terminal,
-    /// `(probability, per-player edge rewards, child)` per outcome.
     Chance(Vec<(f64, Vec<f64>, usize)>),
-    /// A decision: `(actor, infoset key, (per-player edge rewards, child) per legal action)`.
     Decision {
         who: usize,
         key: Vec<u8>,
@@ -65,8 +49,7 @@ fn build_arena<G: Game>(
         nodes: Vec<ArenaNode>,
     }
     impl<G: Game> Builder<'_, G> {
-        /// Every arena node — interior AND terminal — charges the cap: it is a hard bound
-        /// on total construction work, so a wide terminal fan cannot slip past it.
+        // Terminal nodes count because the cap bounds construction work, not recursion depth.
         fn ensure_capacity(&self) -> Result<(), EnumerationCapExceeded> {
             if self.nodes.len() >= MAX_TREE_NODES {
                 return Err(EnumerationCapExceeded(format!(
@@ -79,7 +62,7 @@ fn build_arena<G: Game>(
         fn add(&mut self, state: &G::State) -> Result<usize, EnumerationCapExceeded> {
             self.ensure_capacity()?;
             let idx = self.nodes.len();
-            self.nodes.push(ArenaNode::Terminal); // placeholder, patched below
+            self.nodes.push(ArenaNode::Terminal);
             let node = match self.game.actor(state) {
                 Actor::Chance => {
                     let dist = self.game.chance_node(state);
@@ -154,14 +137,12 @@ struct BrPass<'a> {
     arena: &'a Arena,
     profile: &'a Profile<'a>,
     br_player: usize,
-    /// Per responder infoset: member arena nodes with their counterfactual reach weights.
     members: HashMap<Vec<u8>, Vec<(usize, f64)>>,
     choice: HashMap<Vec<u8>, usize>,
 }
 
 impl BrPass<'_> {
-    /// Collect responder-infoset members weighted by opponent-and-chance reach (the
-    /// responder's own reach deliberately excluded — counterfactual).
+    /// Collect infoset members with counterfactual reach weights.
     fn collect(&mut self, idx: usize, weight: f64) {
         match &self.arena.nodes[idx] {
             ArenaNode::Terminal => {}
@@ -189,8 +170,8 @@ impl BrPass<'_> {
         }
     }
 
-    /// The responder's value at `idx` with infoset-level argmax choices (memoized; deeper
-    /// choices resolve recursively — perfect recall makes the recursion well-founded).
+    /// Resolve values while sharing one action choice across each information set.
+    // Perfect recall makes recursive resolution of deeper infoset choices well-founded.
     fn value(&mut self, idx: usize) -> f64 {
         match &self.arena.nodes[idx] {
             ArenaNode::Terminal => 0.0,
@@ -251,8 +232,7 @@ impl BrPass<'_> {
     }
 }
 
-/// The exact best-response value for `br_player` against `profile` (expected utility from the
-/// root when the responder plays the infoset-argmax reply).
+/// Exact best-response value for one player.
 pub fn best_response_value<G: Game>(
     game: &G,
     reward: &dyn Reward<Event = G::Event>,
@@ -263,7 +243,6 @@ pub fn best_response_value<G: Game>(
     Ok(br_value_in(&arena, profile, br_player))
 }
 
-/// One player's best-response value on an already-built arena.
 fn br_value_in(arena: &Arena, profile: &Profile<'_>, br_player: usize) -> f64 {
     let mut pass = BrPass {
         arena,
@@ -276,11 +255,9 @@ fn br_value_in(arena: &Arena, profile: &Profile<'_>, br_player: usize) -> f64 {
     pass.value(0)
 }
 
-/// Every reachable information set, with one exemplar state and the acting agent — the
-/// enumeration behind the net-policy exploitability instrument (a full capped tree walk over
-/// declared chance nodes; enumerable games only). First-visit exemplar per key; the key
-/// contract guarantees every member state yields the same features and ordered legal list.
 /// `(infoset key, exemplar state, acting agent)` per reachable infoset.
+/// One first-visited state per information key. The information-state contract guarantees every
+/// member has the same features and ordered legal actions, so any member is a valid exemplar.
 pub type InfosetExemplars<S> = Vec<(Vec<u8>, S, usize)>;
 
 pub fn enumerate_infosets<G: Game>(
@@ -293,8 +270,7 @@ pub fn enumerate_infosets<G: Game>(
         visited: usize,
     }
     impl<G: Game> Walk<'_, G> {
-        /// Every traversed transition charges the budget — terminal leaves included, so a
-        /// wide terminal fan is real work the cap must see.
+        // Terminal transitions count because the cap bounds traversal work.
         fn charge(&mut self) -> Result<(), EnumerationCapExceeded> {
             self.visited += 1;
             if self.visited >= MAX_TREE_NODES {
@@ -353,7 +329,7 @@ pub fn enumerate_infosets<G: Game>(
     Ok(walk.out)
 }
 
-/// Every player's exact best-response value against the others playing `profile`.
+/// Exact best-response value for every player.
 pub fn best_response_values<G: Game>(
     game: &G,
     reward: &dyn Reward<Event = G::Event>,
@@ -365,7 +341,7 @@ pub fn best_response_values<G: Game>(
         .collect())
 }
 
-/// Every player's expected value when EVERYONE plays `profile` (one arena walk).
+/// Expected value for every player under `profile`.
 pub fn profile_values<G: Game>(
     game: &G,
     reward: &dyn Reward<Event = G::Event>,
@@ -375,7 +351,6 @@ pub fn profile_values<G: Game>(
     Ok(profile_values_in(&arena, profile, game.num_agents()))
 }
 
-/// Every player's on-policy value on an already-built arena.
 fn profile_values_in(arena: &Arena, profile: &Profile<'_>, n: usize) -> Vec<f64> {
     fn go(arena: &Arena, profile: &Profile<'_>, idx: usize, n: usize) -> Vec<f64> {
         match &arena.nodes[idx] {
@@ -406,9 +381,7 @@ fn profile_values_in(arena: &Arena, profile: &Profile<'_>, n: usize) -> Vec<f64>
     go(arena, profile, 0, n)
 }
 
-/// NashConv: `Σᵢ (brᵢ − vᵢ)` — every player's exact unilateral improvement over `profile`,
-/// summed. Zero exactly at a Nash equilibrium; for more than 2 players a positive plateau is
-/// the expected outcome (regret minimization carries no equilibrium guarantee there).
+/// Sum of every player's unilateral best-response improvement.
 pub fn nash_conv<G: Game>(
     game: &G,
     reward: &dyn Reward<Event = G::Event>,
@@ -422,8 +395,7 @@ pub fn nash_conv<G: Game>(
         .sum())
 }
 
-/// pyspiel's exploitability: NashConv / num_players — for a 2-player zero-sum game exactly
-/// the historical `(br_0 + br_1) / 2`.
+/// NashConv divided by the number of players.
 pub fn exploitability<G: Game>(
     game: &G,
     reward: &dyn Reward<Event = G::Event>,
@@ -438,8 +410,6 @@ mod cap_tests {
     use crate::game::Transition;
     use crate::reward::Reward;
 
-    /// One decision node fanning straight into `fan` TERMINAL children — the shape that
-    /// creates arbitrarily many nodes/edges while barely creating interior states.
     struct WideFan {
         fan: usize,
     }

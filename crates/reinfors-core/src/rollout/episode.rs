@@ -1,8 +1,4 @@
-//! `Episode` — one game's live, mutable slice: the current `State` and the env-chance RNG, plus the
-//! single-game mechanics (step / observe / which agents act). Shared by the two rollout drivers —
-//! the caller-driven [`Env`](crate::Env) (which holds one) and the autonomous [`Engine`](crate::Engine)
-//! (which holds N). It runs against *borrowed* rules (`Game`) + encoder, so those can be shared across
-//! many episodes (the `Engine` keeps one of each; an `Env` owns its own).
+//! Mutable state for one live episode.
 
 use crate::encoder::StateEncoder;
 use crate::game::{realize_initial_state, step_env, Actor, Game};
@@ -24,9 +20,7 @@ impl<G: Game> Episode<G> {
         self.state = realize_initial_state(game, &mut self.rng);
     }
 
-    /// Restored start-distribution states must be realized DECISION states — a chance-node
-    /// start from a custom distribution would leave every consumer actor-less (empty active
-    /// set, a collect that gathers nothing) rather than fail loudly.
+    /// Construct from an already-realized decision state.
     pub(crate) fn assert_decision_state(game: &G, state: &G::State) {
         assert!(
             !matches!(game.actor(state), Actor::Chance),
@@ -53,9 +47,7 @@ impl<G: Game> Episode<G> {
         encoder.encode(&self.state, agent)
     }
 
-    /// Advance through the env tick, updating `state`; returns this tick's `(ordered (agent,
-    /// event) trace, terminal)`. A [`Reward`](crate::Reward) (held by the caller, not the
-    /// `Episode`) maps each emitted event to a scalar; the tick's reward is the sum.
+    /// Advance one tick and return its ordered event trace and terminal status.
     pub(crate) fn advance(
         &mut self,
         game: &G,

@@ -1,7 +1,4 @@
-//! The framework's PRNG. One splitmix64 implementation, shared by the rollout engine (per-game
-//! environment chance, Thompson-head, epsilon draws) and the search (per-search chance sampling), so
-//! every stochastic draw in the system comes from the same generator — keeping runs reproducible from
-//! a seed without pulling in an RNG dependency.
+//! Deterministic random-number generation.
 
 use crate::game::Rng;
 
@@ -16,8 +13,6 @@ impl SplitMix64 {
         SplitMix64 { state: seed }
     }
 
-    /// The raw generator state — with `from_state`, the snapshot/restore seam (an exact resume
-    /// point, unlike `new`, whose argument is a seed about to be advanced).
     pub(crate) fn state(&self) -> u64 {
         self.state
     }
@@ -35,8 +30,7 @@ impl SplitMix64 {
     }
 }
 
-/// Draw an index proportional to `probs` (one `unit()` draw; numeric fallback lands on the last
-/// positive-mass entry). Shared by every search's chance-outcome sampling.
+/// Draw an index proportional to `probs`.
 pub(crate) fn weighted_index(rng: &mut dyn Rng, probs: &[f64]) -> usize {
     let total: f64 = probs.iter().sum();
     let mut r = rng.unit() * total;
@@ -62,15 +56,15 @@ impl Rng for SplitMix64 {
     }
 }
 
-/// Standard normal via Box–Muller over `unit()` draws (the trait's only continuous primitive).
 fn normal(rng: &mut dyn Rng) -> f64 {
-    let u1 = rng.unit().max(f64::MIN_POSITIVE); // unit() ∈ [0,1); keep ln finite
+    // Box-Muller; clamp away zero so the logarithm remains finite.
+    let u1 = rng.unit().max(f64::MIN_POSITIVE);
     let u2 = rng.unit();
     (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
 }
 
-/// Gamma(alpha, 1) via Marsaglia–Tsang, with the alpha<1 boost `Gamma(a) = Gamma(a+1)·U^(1/a)`.
 fn gamma_sample(rng: &mut dyn Rng, alpha: f64) -> f64 {
+    // Marsaglia-Tsang, with the standard alpha<1 boost.
     if alpha < 1.0 {
         let u = rng.unit().max(f64::MIN_POSITIVE);
         return gamma_sample(rng, alpha + 1.0) * u.powf(1.0 / alpha);
@@ -83,6 +77,7 @@ fn gamma_sample(rng: &mut dyn Rng, alpha: f64) -> f64 {
         if v <= 0.0 {
             continue;
         }
+        // The log-domain acceptance test must never see ln(0), which can poison Dirichlet noise.
         let u = rng.unit().max(f64::MIN_POSITIVE);
         if u < 1.0 - 0.0331 * x.powi(4) || u.ln() < 0.5 * x * x + d * (1.0 - v + v.ln()) {
             return d * v;
@@ -90,13 +85,12 @@ fn gamma_sample(rng: &mut dyn Rng, alpha: f64) -> f64 {
     }
 }
 
-/// A symmetric Dirichlet(alpha) draw of dimension `k` — normalized Gamma(alpha) draws. AlphaZero's
-/// root-noise distribution.
+/// Draw from a symmetric Dirichlet distribution.
 pub(crate) fn dirichlet(rng: &mut dyn Rng, alpha: f64, k: usize) -> Vec<f64> {
     let draws: Vec<f64> = (0..k).map(|_| gamma_sample(rng, alpha)).collect();
     let total: f64 = draws.iter().sum();
     if total <= 0.0 {
-        return vec![1.0 / k as f64; k]; // all-zero draws (vanishingly rare): fall back to uniform
+        return vec![1.0 / k as f64; k];
     }
     draws.into_iter().map(|d| d / total).collect()
 }
@@ -113,12 +107,11 @@ mod tests {
         assert!(d.iter().all(|&x| x >= 0.0));
         assert!((d.iter().sum::<f64>() - 1.0).abs() < 1e-12);
         let mut rng2 = SplitMix64::new(42);
-        assert_eq!(d, dirichlet(&mut rng2, 0.3, 7)); // same seed, same draw
+        assert_eq!(d, dirichlet(&mut rng2, 0.3, 7));
     }
 
     #[test]
     fn dirichlet_mean_is_uniform_for_symmetric_alpha() {
-        // E[Dir(α)_i] = 1/k regardless of α; check the empirical mean over many draws.
         let mut rng = SplitMix64::new(7);
         let k = 4;
         let mut mean = vec![0.0; k];
@@ -135,8 +128,6 @@ mod tests {
 
     #[test]
     fn small_alpha_concentrates_mass() {
-        // α << 1 puts most mass on one coordinate per draw — the property root noise relies on.
-        // Reference (numpy, α=0.05, k=7): P(max > 0.5) ≈ 0.96.
         let mut rng = SplitMix64::new(3);
         let mut peaked = 0;
         for _ in 0..200 {

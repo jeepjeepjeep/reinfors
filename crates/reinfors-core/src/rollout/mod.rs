@@ -1,8 +1,4 @@
-//! The data-generation runtime: an autonomous N-game [`Engine`](engine::Engine) and a
-//! caller-driven [`Env`](env::Env), both realizing episodes through the shared
-//! `Episode` machinery, with pooled inference
-//! ([`Evaluator`](evaluator::Evaluator) + cache) and start-state distributions.
-//! Algorithm-agnostic: policies act, learners train, this module only rolls out.
+//! Rollout collection and caller-driven environments.
 
 pub mod engine;
 pub mod env;

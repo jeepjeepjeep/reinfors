@@ -1,23 +1,4 @@
-//! Parallel rollout collector — the generic data-generation substrate. It is algorithm-agnostic: the
-//! acting algorithm lives behind the [`Policy`] seam (evaluate the options + select an action) and the
-//! training-record production behind the [`Learner`] seam (immediate records + episode-end records);
-//! the Engine owns only what is common to every synchronous rollout.
-//!
-//! An `Engine<G, P, L>` holds N independent games of an arbitrary [`Game`]. Each `collect` step gathers
-//! one request per active agent across every game, has the `Policy` evaluate them all in one pooled
-//! pass (one batched `infer` per round), then per decision: folds the policy's
-//! telemetry, lets the `Learner` emit its immediate records, has the `Policy` `select` an action, and
-//! buffers the step; finally it advances every game and flushes finished ones' trajectories through the
-//! `Learner` for their episode-end records.
-//!
-//! Per-game diversity comes from each game's own per-episode policy state and
-//! its own RNG environment chance: games start from the same deterministic
-//! placement, so without this they would be identical. The framework realizes env chance
-//! (`game::step_env`, one draw from the game's DECLARED distribution) from each game's own RNG —
-//! the same declared chance nodes the searches consume from their own seeded streams, so env
-//! and search share one chance model by construction. When a game hits its
-//! `truncation_horizon`, the engine has it `mark_truncation` the tick's events (e.g. snake's survival
-//! flag) so the `Reward` scores the bonus, which the `Learner`'s z-mix carries back to earlier steps.
+//! Batched rollout and training-record collection.
 
 use std::collections::HashMap;
 
@@ -33,10 +14,7 @@ use crate::rollout::evaluator::{Evaluator, InferMode};
 use crate::rollout::infer_cache::InferCache;
 use crate::rollout::start::{AlwaysInitialState, Start, StartDistribution};
 
-/// One finished episode's outcome, for logging: per-agent total realized reward (one entry per
-/// agent), the episode length in ticks, and whether it was seeded from the start-state buffer (a
-/// `StartDistribution::Restore`) rather than a fresh `initial_state` — so off-`d₀` episodes can be kept
-/// out of the true-start learning curves.
+/// Summary of one finished episode.
 #[derive(Clone)]
 pub struct EpisodeSummary {
     pub reward: Vec<f64>,
@@ -44,7 +22,7 @@ pub struct EpisodeSummary {
     pub seeded: bool,
 }
 
-/// Telemetry for one `collect` call: finished-episode summaries and aggregated search diagnostics.
+/// Telemetry for one collection call.
 #[derive(Default, Clone)]
 pub struct CollectStats {
     pub episodes: Vec<EpisodeSummary>,
@@ -55,22 +33,11 @@ pub struct CollectStats {
     pub sum_expansions: f64,
     pub sum_sigma: f64,
     pub sum_disagreement: f64,
-    // Global Evaluator throughput for this collect — every forward from every consumer (search
-    // leaves, episode-tail bootstraps, plain policy forwards), measured at the single choke point.
-    // Timing the `collect()` call and subtracting `infer_seconds` gives the search (game sim + tree
-    // expansion + assembly) cost; `infer_rows / infer_calls` is the mean batch size. With the infer
-    // cache enabled, `infer_rows` counts only MISS rows, so rows-per-state falls as the hit rate
-    // rises. `cache_lookups`/`cache_hits` are likewise global (0 when the cache is disabled).
     pub infer_seconds: f64,
     pub infer_calls: usize,
     pub infer_rows: usize,
     pub cache_lookups: usize,
     pub cache_hits: usize,
-    // Tree-search sim fates summed over the collect (0 for non-tree policies), counted by the
-    // trees themselves — see `SearchStats`. These alone assemble the exact per-collect identity
-    // `decisions × num_simulations =
-    //   sum_fresh_rows + sum_hit_rows + sum_shared_rows + sum_terminal_sims + sum_depthcap_sims`;
-    // no global counter appears in it, so non-search forwards cannot unbalance it.
     pub sum_terminal_sims: usize,
     pub sum_depthcap_sims: usize,
     pub sum_shared_rows: usize,
@@ -79,8 +46,7 @@ pub struct CollectStats {
     pub sum_extra_eval_rows: usize,
 }
 
-/// Engine-level rollout knobs. The truncation horizon is the game's (`truncation_horizon`), not an
-/// engine knob — the engine only counts ticks and enforces it.
+/// Engine-level rollout parameters.
 pub struct EngineParams {
     pub n_games: usize,
     pub seed: u64,
@@ -94,33 +60,18 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     learner: L,
     episodes: Vec<Episode<G>>,
     search_rng: SplitMix64,
-    // Where each fresh episode starts (default: the game's `initial_state`). Its RNG is a stream
-    // disjoint from `search_rng` and the per-game env RNGs, so an enabled buffer never perturbs the
-    // env-chance draw order — and `AlwaysInitialState` never draws it, so it stays bit-identical.
     start_dist: Box<dyn StartDistribution<G::State>>,
-    // Optional net-evaluation cache (see `infer_cache`), applied inside the per-collect
-    // `Evaluator` — the single path every consumer's forwards take. Lifetime spans collects;
-    // cleared when the shared weights generation is bumped (`weights_updated` at the binding).
-    /// Slot 0: the shared-network cache. Slots 1..=num_agents: per-player caches (used only
-    /// under `InferMode::PerPlayer`; two networks must never share an observation-keyed slot).
+    // Slot 0 is shared; slots 1..=N isolate per-player networks.
     infer_caches: Option<Vec<InferCache>>,
-    /// Which players' decisions become training records (default: all). Frozen opponents are
-    /// skipped at SOURCE — their transitions are nobody's off-policy data; telemetry stays
-    /// complete via the episode-return accumulator, which is independent of steps.
     learn_mask: Vec<bool>,
-    // Per-agent running return for the current episode, accumulated on every reward event
-    // independently of step attribution. The episode summary cannot be derived from buffered
-    // steps: an agent can be scored without ever acting (poker's big blind wins a fold-out
-    // before its first decision). Step rewards are purely a training-data concern.
+    // Returns cannot be derived from steps: an agent may be rewarded before ever acting.
     episode_returns: Vec<Vec<f64>>,
-    // The game's decision dynamics (probed once from the initial state): sequential games with
-    // N>2 agents buffer value-only steps for non-mover perspectives (see `collect`).
     sequential: bool,
     buffer_rng: SplitMix64,
-    seeded: Vec<bool>, // per game: was the current episode seeded from the start buffer?
-    policy_states: Vec<P::PolicyState>, // per-game acting state for the current episode (Thompson head)
+    seeded: Vec<bool>,
+    policy_states: Vec<P::PolicyState>,
     ticks: Vec<usize>,
-    traj: Vec<Vec<Vec<Step<P::Evaluation>>>>, // [game][agent] decisions awaiting episode-end records
+    traj: Vec<Vec<Vec<Step<P::Evaluation>>>>,
 }
 
 impl<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> Engine<G, P, L>
@@ -147,10 +98,6 @@ where
                 )
             })
             .collect();
-        // Real asserts, not debug ones: an unsupported composition doesn't fail loudly later, it
-        // silently computes wrong values (or overflows the joint space). The binding pre-checks
-        // and errors; these are the backstops for direct core callers. Dynamics are probed from
-        // the initial state (games are uniformly one dynamics; the searches assert mixing).
         let sequential = episodes
             .first()
             .is_some_and(|ep| matches!(game.actor(&ep.state), Actor::Agent(_)));
@@ -177,7 +124,7 @@ where
             .collect();
         let search_rng = SplitMix64::new(params.seed ^ 0xD1B5_4A32_D192_ED03);
         let buffer_rng = SplitMix64::new(params.seed ^ 0x2545_F491_4F6C_DD1D);
-        let seeded = vec![false; params.n_games]; // the initial episodes are fresh
+        let seeded = vec![false; params.n_games];
         Engine {
             game,
             encoder,
@@ -199,10 +146,7 @@ where
         }
     }
 
-    /// Override the start-state distribution (default [`AlwaysInitialState`]). A
-    /// [`ReachedStateBuffer`](crate::ReachedStateBuffer) seeds some episodes from previously-reached
-    /// states to flatten start-state coverage. Consuming builder, so the common (default) `new` path
-    /// stays untouched.
+    /// Override the start-state distribution.
     pub fn with_start_distribution(
         mut self,
         start_dist: Box<dyn StartDistribution<G::State>>,
@@ -211,10 +155,7 @@ where
         self
     }
 
-    /// Enable the net-evaluation cache (consuming builder, like `with_start_distribution`).
-    /// Restrict training-record emission to `players` (frozen opponents keep acting but leave
-    /// no records). Records also carry their player, so the unrestricted default supports
-    /// routing each player's records to its own buffer.
+    /// Restrict training-record emission to selected players.
     pub fn with_learn_players(mut self, players: &[usize]) -> Self {
         assert!(!players.is_empty(), "at least one player must learn");
         let n = self.game.num_agents();
@@ -227,9 +168,7 @@ where
         self
     }
 
-    /// Enable the net-evaluation cache. One cache per slot — slot 0 serves the shared-network
-    /// mode, slots 1..=N the per-player networks (each with its own weights generation, so
-    /// per-player nets invalidate independently; unused slots allocate nothing).
+    /// Install one shared cache followed by one cache per player.
     pub fn with_infer_caches(mut self, caches: Vec<InferCache>) -> Self {
         assert_eq!(
             caches.len(),
@@ -240,12 +179,7 @@ where
         self
     }
 
-    /// Roll the games forward until at least `n_records` training records have been collected,
-    /// returning each record's observation (a flat `[C*H*W]` buffer), per-head target `[K][A]`,
-    /// and per-head bootstrap mask `[K]`. Executed decisions are z-mixed at episode end; interior MAX
-    /// nodes (when enabled) are emitted immediately. `infer` is the value-network forward.
-    /// Collect with ONE shared network — the historical entry point, byte-identical to the
-    /// pre-routing behavior. Per-player networks go through [`collect_routed`](Self::collect_routed).
+    /// Collect at least `n_records` using one shared network callback.
     pub fn collect<F>(&mut self, n_records: usize, mut infer: F) -> (Vec<L::Record>, CollectStats)
     where
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
@@ -255,10 +189,7 @@ where
         })
     }
 
-    /// Collect with the given routing: `infer(player, obs, rows)` serves each row's PLAYER —
-    /// under [`InferMode::PerPlayer`] rows batch per player and cache per player, enabling
-    /// frozen opponents and simultaneous heterogeneous training (records carry their player;
-    /// see `learn_players` for skipping frozen players' records at source).
+    /// Collect with shared or per-player inference routing.
     pub fn collect_routed<F>(
         &mut self,
         n_records: usize,
@@ -272,29 +203,22 @@ where
         let mut stats = CollectStats::default();
         let num_agents = self.game.num_agents();
         let collect_interior = self.learner.needs_interior();
-        // Take the cache out of `self` for the collect so the Evaluator (which lives across the
-        // whole loop) can hold it without pinning a long-lived borrow of `self`; restored at the end.
+        // Move caches out so the long-lived evaluator does not borrow all of `self`.
         let mut caches = self.infer_caches.take();
         if let Some(c) = caches.as_mut() {
             for cache in c.iter_mut() {
                 cache.begin_collect();
             }
         }
-        // Slot 0 serves Shared mode; slots 1..=N serve the per-player networks (allocation is
-        // lazy inside the cache maps, so the unused slots cost nothing).
         let cache_slice = caches.as_mut().map(|c| match mode {
             InferMode::Shared => &mut c[..1],
             InferMode::PerPlayer => &mut c[1..],
         });
-        // The single evaluation service for this collect: every consumer's forwards (search
-        // leaves, episode-tail bootstraps, plain policy forwards) route through it, picking up
-        // caching, within-batch dedup, and throughput telemetry uniformly.
         let mut evaluator = Evaluator::new(&mut infer, mode, cache_slice);
 
         while out.len() < n_records {
-            // 1. Gather one search request per active agent across all games.
             let mut requests: Vec<(G::State, usize)> = Vec::new();
-            let mut meta: Vec<(usize, usize)> = Vec::new(); // (game index, agent index)
+            let mut meta: Vec<(usize, usize)> = Vec::new();
             for (gi, ep) in self.episodes.iter().enumerate() {
                 for si in 0..num_agents {
                     if ep.agent_active(&self.game, si) {
@@ -307,7 +231,6 @@ where
                 break;
             }
 
-            // 2. The policy evaluates them all in one pooled pass
             let search_seed = self.search_rng.next_u64();
             let evals = self.policy.evaluate(
                 &self.game,
@@ -319,17 +242,12 @@ where
                 &mut evaluator,
             );
 
-            // 3. Per decision: fold its telemetry, emit the learner's immediate records,
-            //    choose the action, and buffer the step. `acted[gi][si]` records the
-            //    chosen action index for an agent that decided this tick.
             let mut acted: Vec<Vec<Option<usize>>> =
                 vec![vec![None; num_agents]; self.episodes.len()];
             for (mut eval, &(gi, si)) in evals.into_iter().zip(meta.iter()) {
                 stats.decisions += 1;
                 self.policy.fold_telemetry(&eval, &mut stats);
                 if !self.learn_mask[si] {
-                    // A frozen player acts but leaves no records: its transitions are nobody's
-                    // training data (episode telemetry stays complete via `episode_returns`).
                     let rel = self.policy.select(
                         &eval,
                         &mut self.policy_states[gi],
@@ -354,21 +272,14 @@ where
                     obs: self.episodes[gi].observe(&*self.encoder, si),
                     evaluation: eval,
                     action: rel,
-                    reward: 0.0, // filled in from this tick's transition after advancing
-                    next_obs: Vec::new(), // filled below when the learner needs it
+                    reward: 0.0,
+                    next_obs: Vec::new(),
                     next_legal: Vec::new(),
                     terminal: false,
                 });
             }
 
-            // 3b. Sequential N>2 general-sum: every non-mover perspective of this real self-play
-            //    state gets a VALUE-ONLY step in its own trajectory (its observation now; its own
-            //    reward stream stamps it below, exactly per tick) — so the per-perspective leaf
-            //    values Max^N consumes are supervised. The learner opts in by supplying the
-            //    placeholder evaluation; its records carry policy weight 0. Perspectives are
-            //    emitted only where the search consumes them: 2p-sequential (negamax reads the
-            //    mover row only) and simultaneous games (all active agents hold real steps)
-            //    buffer nothing extra.
+            // MaxN consumers require value supervision for non-mover perspectives too.
             if self
                 .policy
                 .evaluates_all_perspectives(self.sequential, num_agents)
@@ -376,7 +287,7 @@ where
                 let action_count = self.game.action_count();
                 for (gi, agents) in acted.iter().enumerate() {
                     if agents.iter().all(|s| s.is_none()) {
-                        continue; // no decision this tick
+                        continue;
                     }
                     for (si, slot) in agents.iter().enumerate() {
                         if slot.is_none() && self.learn_mask[si] {
@@ -387,7 +298,7 @@ where
                                     obs: self.episodes[gi].observe(&*self.encoder, si),
                                     evaluation,
                                     action: 0,
-                                    reward: 0.0, // stamped from this tick's transition below
+                                    reward: 0.0,
                                     next_obs: Vec::new(),
                                     next_legal: Vec::new(),
                                     terminal: false,
@@ -398,13 +309,8 @@ where
                 }
             }
 
-            // 4. Advance every game via the env transition (sampling its chance from the per-game RNG);
-            //    record the executed decisions' rewards; flush finished games' trajectories with
-            //    z-mixing and reset them. On a truncation tick the game stamps the truncation outcome
-            //    onto the events (`mark_truncation`), so the survival reward flows through `step_reward`
-            //    like any other outcome — no separate truncation-reward path.
             let horizon = self.game.truncation_horizon();
-            let mut finished: Vec<(usize, bool)> = Vec::new(); // (game index, terminal?)
+            let mut finished: Vec<(usize, bool)> = Vec::new();
             for (gi, agents) in acted.into_iter().enumerate() {
                 let joint: Vec<usize> = agents.iter().map(|a| a.unwrap_or(0)).collect();
                 let (mut trace, terminal) = self.episodes[gi].advance(&self.game, &joint);
@@ -418,8 +324,6 @@ where
                         "mark_truncation pushed an event for an out-of-range agent"
                     );
                 }
-                // Fold the tick's trace into per-agent rewards once: events are per-edge and
-                // incremental, so the tick's reward is the sum over its emissions.
                 let mut tick_rewards = vec![0.0; num_agents];
                 for (agent, e) in &trace {
                     tick_rewards[*agent] += self.reward.step_reward(e, *agent);
@@ -444,17 +348,11 @@ where
                             step.terminal = terminal;
                         }
                     } else if let Some(step) = self.traj[gi][si].last_mut() {
-                        // An agent that did not act this tick can still be scored by it — in a
-                        // sequential game the loser's terminal event fires on the winner's move.
-                        // Fold the reward into their last buffered step (their previous decision;
-                        // or, when value-only steps are on, THIS tick's value step — per-tick
-                        // exact) and mark it terminal so the outcome reaches their trajectory.
+                        // Sequential terminal events may reward an agent that did not act this tick.
                         step.reward += reward;
                         step.terminal |= terminal;
                     }
                 }
-                // Buffer the reached state for start-state coverage — non-terminal states only (you
-                // can't restart from a terminal one). A no-op under `AlwaysInitialState` (default).
                 if !terminal {
                     self.start_dist
                         .observe(&self.episodes[gi].state, &mut self.buffer_rng);
@@ -470,13 +368,10 @@ where
             (evaluator.seconds, evaluator.calls, evaluator.rows);
         (stats.cache_lookups, stats.cache_hits) =
             (evaluator.cache_lookups(), evaluator.cache_hits());
-        self.infer_caches = caches; // the evaluator's borrow ends above; put the caches back
+        self.infer_caches = caches;
         (out, stats)
     }
 
-    /// Flush each finished game's buffered trajectories: z-mix the executed-action targets with the
-    /// realized return (tail-seeded by the net's value of the final state on truncation), emit the
-    /// records, then reset the game and resample its head + initial chance.
     fn flush_finished<F>(
         &mut self,
         finished: &[(usize, bool)],
@@ -506,20 +401,13 @@ where
                     &mut self.episodes[gi].rng,
                 ));
             }
-            // Tag the summary with the finishing episode's seeded flag (set at its start) BEFORE the
-            // reset below overwrites it for the next episode.
             stats.episodes.push(EpisodeSummary {
                 reward: ep_reward,
                 length: self.ticks[gi],
                 seeded: self.seeded[gi],
             });
-            // Start the next episode: the buffer either restores a reached state or falls back to a
-            // fresh `initial_state`. `AlwaysInitialState` always chooses `Fresh` and draws no buffer
-            // RNG, so this is the current reset path unchanged.
             match self.start_dist.choose(&mut self.buffer_rng) {
                 Start::Restore(state) => {
-                    // A public injection seam: a custom distribution must restore REALIZED
-                    // decision states (fresh starts realize the root chance chain to one).
                     Episode::assert_decision_state(&self.game, &state);
                     self.episodes[gi].state = state;
                     self.seeded[gi] = true;
@@ -534,11 +422,6 @@ where
         }
     }
 
-    /// Per-(game, agent) z-tail: the net's per-head value `max_a Q(final_obs)` for agents still active
-    /// at a truncation (terminal episodes and inactive agents seed with 0, so they are absent here).
-    /// Empty when `outcome_weight == 0`, where the tail never enters the (no-op) blend.
-    /// An ordinary [`Evaluator`](Evaluator) consumer: the final state was almost
-    /// always just evaluated by the last search, so with the cache on this is typically hit-served.
     fn tail_values<F>(
         &mut self,
         finished: &[(usize, bool)],
@@ -553,11 +436,7 @@ where
         }
         let a = self.game.action_count();
         let num_agents = self.game.num_agents();
-        // Under the value-only regime every perspective holds a per-tick trajectory and the
-        // search consumes every perspective's value at the final state — so every non-empty
-        // trajectory gets its own tail V_i(final_state), active or not (a sequential non-mover
-        // has no legal actions there, but the AZ tail reads the value slot, not the legal set).
-        // Off the regime, the active-only condition is unchanged.
+        // Value-only trajectories need a tail for every consumed perspective, not only the mover.
         let all_perspectives = self
             .policy
             .evaluates_all_perspectives(self.sequential, num_agents)
@@ -579,20 +458,18 @@ where
         }
         if !meta.is_empty() {
             let players: Vec<usize> = meta.iter().map(|&(_, si)| si).collect();
-            let q = evaluator.forward(&players, obs_flat, meta.len()); // one flat row per state; layout = the family's contract
+            let q = evaluator.forward(&players, obs_flat, meta.len());
             let stride = q.len() / meta.len();
             for (i, &(gi, si)) in meta.iter().enumerate() {
                 let row = &q[i * stride..(i + 1) * stride];
-                // The learner knows its family's row layout (default: [K][A] Q-rows, per-head max
-                // over the state's LEGAL actions — the mover-convention set, so a truncation tail
-                // on a sparse-action game cannot bootstrap a phantom illegal Q).
                 let state = &self.episodes[gi].state;
+                // Sequential non-mover rows still bootstrap over the mover's available actions;
+                // using `si` here would turn a valid sparse-action tail into an empty one.
                 let legal = match self.game.actor(state) {
                     Actor::Agent(mover) => self.game.legal_actions(state, mover),
                     Actor::Simultaneous => self.game.legal_actions(state, si),
                     Actor::Chance => unreachable!("chance actors are not searched"),
                 };
-                // The row was encoded for `si`, so the gather maps game ids through si's frame.
                 tails.insert(
                     (gi, si),
                     self.learner
@@ -604,12 +481,7 @@ where
     }
 }
 
-/// Exact-resume snapshot/restore of the engine's MUTABLE collection state. Immutable composition
-/// (game/reward/policy/learner/encoder config) is NOT here — it is reconstructed from the resolved
-/// config, and the binding gates restore on the config fingerprint. The infer cache is deliberately
-/// excluded: cache hits return bit-identical rows to the forwards they replace, so collected
-/// RECORDS after restore are byte-identical with a cold cache — the guarantee is record-exact,
-/// not inference-call-pattern-exact.
+/// Snapshot and restore mutable collection state.
 impl<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> Engine<G, P, L>
 where
     G::State: Send,
@@ -619,7 +491,7 @@ where
         codec: &dyn StateCodec<State = G::State>,
     ) -> Result<Vec<u8>, String> {
         use crate::codec::bytes::*;
-        let mut out = vec![2u8]; // engine payload layout version (2: + per-agent episode returns)
+        let mut out = vec![2u8];
         let n_games = self.episodes.len();
         let num_agents = self.game.num_agents();
         put_u32(&mut out, n_games as u32);
@@ -687,8 +559,7 @@ where
                 other => Err(format!("byte {other} is not a bool")),
             }
         };
-        // Decode EVERYTHING before mutating anything: a malformed snapshot must leave the engine
-        // untouched.
+        // Decode completely before mutation so restore is transactional.
         struct GameSlice<S, E, PS> {
             state: S,
             rng: u64,
@@ -702,7 +573,6 @@ where
             Vec::with_capacity(n_games);
         for _ in 0..n_games {
             let state = codec.decode(r.blob()?)?;
-            // Engine episodes are always live (terminal episodes flush and reset immediately).
             codec.validate_decoded_state(&state, false)?;
             let rng = r.u64()?;
             let tick = r.u64()? as usize;
@@ -783,12 +653,9 @@ where
         }
         let start_blob = r.blob()?.to_vec();
         r.done()?;
-        // The first mutation on a still-fallible path: the trait contract requires implementors
-        // to restore transactionally (decode fully, then swap), so an Err here leaves the
-        // distribution — and everything below, not yet touched — unchanged.
         self.start_dist.restore_bytes(&start_blob, &|b| {
             let s = codec.decode(b)?;
-            codec.validate_decoded_state(&s, false)?; // buffered start states are mid-episode: live
+            codec.validate_decoded_state(&s, false)?;
             Ok(s)
         })?;
         self.search_rng = SplitMix64::from_state(search_rng);
@@ -802,8 +669,7 @@ where
             self.policy_states[gi] = slice.policy_state;
             self.traj[gi] = slice.traj;
         }
-        // The cache may hold rows from OTHER weights at a numerically equal generation — stale
-        // rows would silently break the record-exact restore contract. Cold cache = same records.
+        // Numeric generations do not identify weights across restored processes.
         if let Some(caches) = self.infer_caches.as_mut() {
             for cache in caches.iter_mut() {
                 cache.force_clear();

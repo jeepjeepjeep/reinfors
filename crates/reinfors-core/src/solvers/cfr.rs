@@ -1,38 +1,15 @@
-//! Counterfactual regret minimization for N players: vanilla CFR, CFR+, and
-//! external-sampling MCCFR over one traversal core.
-//!
-//! CFR decomposes overall regret into per-information-set counterfactual regrets and
-//! minimizes each locally by regret matching; the time-AVERAGED strategy profile converges to
-//! a Nash equilibrium in 2-PLAYER ZERO-SUM games (the current strategies oscillate — the
-//! average is the output). **Past two players that guarantee is GONE**: the same procedure is
-//! plain per-player regret minimization, and its average profile is measured — not certified —
-//! by [`nash_conv`](CfrSolver::nash_conv) (`Σᵢ (brᵢ − vᵢ)`, zero exactly at Nash), which
-//! empirically falls to a positive PLATEAU. That empirical regime is what modern multiplayer
-//! poker agents (Pluribus-style) run in; use it with that understanding. The vanilla/CFR+ update scheme deliberately mirrors OpenSpiel's
-//! `cfr.py` (alternating player passes; the current policy is a table materialized from
-//! regrets AFTER each pass, not regret-matched on the fly; CFR+ adds regret-matching+
-//! clamping after each pass and linear averaging) so exploitability trajectories are
-//! ITERATION-EXACT against pyspiel — the parity harness pins this.
-//!
-//! Requirements, asserted at construction: `2..=MAX_CFR_PLAYERS` players; `Game::information_states` (tables are
-//! keyed by information-set bytes — what forces the learned strategy to be measurable with
-//! respect to each player's information). Chance is consumed through declared chance nodes
-//! (root deals and interior states alike — `initial_state` is rng-free, so a game cannot
-//! sample privately):
-//! enumerated by the exact variants (fan-capped at [`MAX_ENUMERATED_OUTCOMES`]) and sampled by
-//! MCCFR. Use the compatibility catalogue for built-in Python compositions.
+//! Tabular vanilla CFR, CFR+, and external-sampling MCCFR for sequential games. Vanilla and CFR+
+//! deliberately mirror OpenSpiel's alternating passes: `current` is materialized after each pass,
+//! not regret-matched on demand. The parity harness pins iteration-exact trajectories.
 
 use std::collections::HashMap;
 
 use crate::game::{Actor, Game, Rng, Transition};
 
-/// The player-count ceiling for the tabular solvers. Fixed stack arrays keep the hot recursion
-/// allocation-free at any supported N.
+/// Player-count ceiling for tabular solvers.
 pub const MAX_CFR_PLAYERS: usize = 10;
 
-/// Per-player values; the first `num_agents` entries are live.
 type Vals = [f64; MAX_CFR_PLAYERS];
-/// Player reach probabilities, with the CHANCE reach at the fixed last slot.
 type Reach = [f64; MAX_CFR_PLAYERS + 1];
 const CHANCE: usize = MAX_CFR_PLAYERS;
 use crate::policy::MAX_ENUMERATED_OUTCOMES;
@@ -42,19 +19,13 @@ use crate::solvers::best_response;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CfrVariant {
-    /// Alternating-update vanilla CFR (matches pyspiel's `CFRSolver`).
     Vanilla,
-    /// CFR+: regret-matching+ (regrets clamped at zero after each pass), alternating updates,
-    /// linear averaging (matches pyspiel's `CFRPlusSolver`).
     Plus,
-    /// External-sampling MCCFR: chance and opponent actions sampled, the traverser's actions
-    /// enumerated. Unbiased counterfactual regret estimates; the only variant that scales past
-    /// enumerable chance fans.
     ExternalMccfr,
 }
 
 impl CfrVariant {
-    /// Stable payload identity (part of the serialized checkpoint).
+    // Persisted in solver payloads; changing an id is a wire-format break.
     fn id(self) -> u8 {
         match self {
             CfrVariant::Vanilla => 0,
@@ -65,13 +36,10 @@ impl CfrVariant {
 }
 
 struct Node {
-    /// Legal action ids at this information set (identical for every member state, by the
-    /// definition of an information set — debug-asserted on revisit).
+    // Every state in an information set must expose this same ordered action list.
     actions: Vec<usize>,
     regrets: Vec<f64>,
-    /// Cumulative (reach-weighted) strategy — the AVERAGE strategy is its normalization.
     cumulative: Vec<f64>,
-    /// The materialized current policy (regret-matched after each pass; uniform at birth).
     current: Vec<f64>,
 }
 
@@ -86,7 +54,6 @@ impl Node {
         }
     }
 
-    /// Regret matching: play proportionally to positive regret, uniform when none is positive.
     fn regret_matched(regrets: &[f64]) -> Vec<f64> {
         let positive: f64 = regrets.iter().map(|r| r.max(0.0)).sum();
         if positive > 0.0 {
@@ -112,7 +79,7 @@ pub struct CfrSolver<G: Game> {
     variant: CfrVariant,
     nodes: HashMap<Vec<u8>, Node>,
     iterations: u64,
-    rng: SplitMix64, // MCCFR's sampling stream
+    rng: SplitMix64,
 }
 
 impl<G: Game> CfrSolver<G> {
@@ -133,8 +100,7 @@ impl<G: Game> CfrSolver<G> {
             game.information_states(),
             "CFR requires information-state keys (Game::information_states)"
         );
-        // Gate on the REALIZED root — the raw root of a declared game is commonly a chance
-        // node, which says nothing about decision dynamics (see the same gate in Deep CFR).
+        // A chance root does not reveal the game's decision dynamics.
         let realized = crate::game::realize_initial_state(&game, &mut SplitMix64::new(0x0517_B0BE));
         assert!(
             !matches!(game.actor(&realized), Actor::Simultaneous),
@@ -162,7 +128,7 @@ impl<G: Game> CfrSolver<G> {
         self.game.num_agents()
     }
 
-    /// Run `n` iterations (one iteration = one regret/strategy pass per player).
+    /// Run `n` full player-pass iterations.
     pub fn iterate(&mut self, n: u64) {
         for _ in 0..n {
             self.iterations += 1;
@@ -174,7 +140,7 @@ impl<G: Game> CfrSolver<G> {
                         if self.variant == CfrVariant::Plus {
                             for node in self.nodes.values_mut() {
                                 for r in &mut node.regrets {
-                                    *r = r.max(0.0); // regret-matching+
+                                    *r = r.max(0.0);
                                 }
                             }
                         }
@@ -193,33 +159,29 @@ impl<G: Game> CfrSolver<G> {
         }
     }
 
-    /// The average strategy at an information-set key: `(action ids, probabilities)`, or
-    /// `None` for a key the solve never visited (play uniform there).
+    /// Average strategy and action ids at a visited information set.
     pub fn average_strategy(&self, key: &[u8]) -> Option<(Vec<usize>, Vec<f64>)> {
         self.nodes
             .get(key)
             .map(|n| (n.actions.clone(), n.average()))
     }
 
-    /// Exploitability of the current AVERAGE profile: NashConv / num_players (pyspiel's
-    /// definition). Zero exactly at a Nash equilibrium; for more than 2 players it measures
-    /// distance from equilibrium with NO convergence guarantee — expect a fall to a plateau.
+    /// NashConv divided by the number of players.
     pub fn exploitability(&self) -> Result<f64, best_response::EnumerationCapExceeded> {
         best_response::exploitability(&self.game, &*self.reward, &self.profile())
     }
 
-    /// NashConv of the average profile: `Σᵢ (brᵢ − vᵢ)` — every player's exact unilateral
-    /// improvement, summed. Zero exactly at a Nash equilibrium.
+    /// Sum of every player's unilateral best-response improvement.
     pub fn nash_conv(&self) -> Result<f64, best_response::EnumerationCapExceeded> {
         best_response::nash_conv(&self.game, &*self.reward, &self.profile())
     }
 
-    /// Each player's exact best-response value against the others' average profile.
+    /// Exact best-response value for every player.
     pub fn best_response_values(&self) -> Result<Vec<f64>, best_response::EnumerationCapExceeded> {
         best_response::best_response_values(&self.game, &*self.reward, &self.profile())
     }
 
-    /// The queryable average profile (uniform at never-visited infosets).
+    /// Average profile, uniform at unvisited information sets.
     fn profile(&self) -> impl Fn(&[u8], usize) -> Vec<f64> + '_ {
         |key, legal| {
             self.average_strategy(key)
@@ -228,8 +190,7 @@ impl<G: Game> CfrSolver<G> {
         }
     }
 
-    /// Expected value for `player` when EVERY player plays the average profile (full
-    /// enumeration).
+    /// Expected value for `player` under the average profile.
     pub fn expected_value(&self, player: usize) -> f64 {
         assert!(
             player < self.num_players(),
@@ -240,23 +201,20 @@ impl<G: Game> CfrSolver<G> {
         self.profile_value(&root)[player]
     }
 
-    /// Serialize the solve state — tables, iteration counter, AND the sampling rng — for
-    /// `load`: an exact checkpoint (a restored MCCFR solve continues bit-identically). The
-    /// payload identifies the CFR variant and the game's action-space width so it cannot be
-    /// silently loaded into an incompatible solver; full composition identity (game
-    /// parameters, reward) is the binding's job, mirroring engine/env snapshots.
+    /// Serialize the complete solve state for exact continuation.
     pub fn save(&self) -> Vec<u8> {
         let width = |x: usize, what: &str| -> u32 {
             u32::try_from(x).unwrap_or_else(|_| panic!("{what} exceeds the u32 payload bound"))
         };
-        let mut out = vec![1u8]; // layout version
+        let mut out = vec![1u8]; // payload layout version
         out.push(self.variant.id());
         out.extend_from_slice(&width(self.game.action_count(), "action_count").to_le_bytes());
         out.extend_from_slice(&self.rng.state().to_le_bytes());
         out.extend_from_slice(&self.iterations.to_le_bytes());
         out.extend_from_slice(&(self.nodes.len() as u64).to_le_bytes());
         let mut keys: Vec<&Vec<u8>> = self.nodes.keys().collect();
-        keys.sort(); // canonical order: equal solves serialize identically
+        // HashMap iteration is unstable; canonical order makes equivalent solves byte-identical.
+        keys.sort();
         for key in keys {
             let node = &self.nodes[key];
             out.extend_from_slice(&width(key.len(), "an information-set key").to_le_bytes());
@@ -328,11 +286,7 @@ impl<G: Game> CfrSolver<G> {
         Ok(())
     }
 
-    // ---------------- exact traversal (vanilla / CFR+) ----------------
-
-    /// Per-player expected values of `state` under the CURRENT profile, updating `player`'s
-    /// regrets and cumulative strategy. `reach` = per-player reaches with chance at the fixed
-    /// last slot; the first `num_agents` value entries are live.
+    /// Traverse exactly under the current profile and update one player's regrets.
     fn enumerate_values(&mut self, state: &G::State, reach: Reach, player: usize) -> Vals {
         let n = self.game.num_agents();
         match self.game.actor(state) {
@@ -394,7 +348,7 @@ impl<G: Game> CfrSolver<G> {
                     child_values.push(child);
                 }
                 if who == player {
-                    // Counterfactual reach: chance times every OTHER player's reach.
+                    // Counterfactual reach deliberately excludes the updating player.
                     let mut cf_reach = reach[CHANCE];
                     for (j, r) in reach.iter().enumerate().take(n) {
                         if j != who {
@@ -402,7 +356,7 @@ impl<G: Game> CfrSolver<G> {
                         }
                     }
                     let weight = if self.variant == CfrVariant::Plus {
-                        self.iterations as f64 // linear averaging
+                        self.iterations as f64
                     } else {
                         1.0
                     };
@@ -418,8 +372,6 @@ impl<G: Game> CfrSolver<G> {
         }
     }
 
-    /// Fold a realized transition into the recursion: edge rewards + terminal stop + the child
-    /// state (chance-node states recurse through the `Actor::Chance` arm).
     fn transition_values(
         &mut self,
         t: &Transition<G::State, G::Event>,
@@ -445,14 +397,7 @@ impl<G: Game> CfrSolver<G> {
         r
     }
 
-    // ---------------- external-sampling MCCFR ----------------
-
-    /// The traverser's sampled value: chance and the other players sampled, the traverser's
-    /// actions enumerated. Regrets updated at traverser infosets; cumulative strategy updated
-    /// only at player `(traverser + 1) % N` along the sampled path — OpenSpiel's "simple"
-    /// average estimator, which at N=2 is exactly the classic scheme. Updating EVERY sampled
-    /// non-traverser would double-count players reached under other traversers' passes;
-    /// unbiased full averaging needs a separate reach-weighted pass we don't do.
+    /// External sampling with the traverser's actions enumerated.
     fn sample_values(&mut self, state: &G::State, player: usize) -> f64 {
         match self.game.actor(state) {
             Actor::Chance => {
@@ -487,6 +432,7 @@ impl<G: Game> CfrSolver<G> {
                     }
                     v
                 } else {
+                    // OpenSpiel's simple average estimator records one successor player.
                     if who == (player + 1) % self.game.num_agents() {
                         let node = self.nodes.get_mut(&key).expect("created above");
                         for (ai, &s) in sigma.iter().enumerate() {
@@ -512,9 +458,6 @@ impl<G: Game> CfrSolver<G> {
         r + self.sample_values(&t.next_state, player)
     }
 
-    // ---------------- profile evaluation ----------------
-
-    /// Expected values when EVERY player plays the average profile.
     fn profile_value(&self, state: &G::State) -> Vals {
         let n = self.game.num_agents();
         match self.game.actor(state) {
