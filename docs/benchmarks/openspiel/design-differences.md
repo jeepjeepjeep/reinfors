@@ -54,10 +54,11 @@ comparisons are invalid rather than "clean" — see [methodology](../methodology
 reinfors's learner trains continuously beside collection; self-play always runs against
 near-current weights, and GPU time interleaves at fine grain. OpenSpiel's learner trains in
 periodic sweeps during which the device prioritizes training; its actors play against
-weights up to one sweep stale, then jump. Neither profile is free: burst training buys
-simple synchronization and faithful-to-paper semantics at some device contention and
-staleness; continuous training buys freshness at the cost of a Python-side training loop
-sharing the process. The matched training-intensity check (gradient-samples per state,
+weights up to one sweep stale, then jump. Neither profile is free — and neither is
+more "canonical" (the original AlphaZero trained asynchronously and continuously; both
+stacks approximate that differently): burst training buys simple synchronization and a
+self-contained learner at some device contention and staleness; continuous training buys
+freshness at the cost of a Python-side training loop sharing the process. The matched training-intensity check (gradient-samples per state,
 verified from telemetry on both sides) exists so this scheduling difference is not
 mistaken for a difference in how much learning happens.
 
