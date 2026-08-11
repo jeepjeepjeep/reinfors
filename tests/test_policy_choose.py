@@ -87,6 +87,22 @@ def test_duplicate_envs_dedupe_to_one_root_row() -> None:
     assert rows_per_call[0] == 1, f"duplicate roots must dedupe: {rows_per_call}"
 
 
+def test_choose_never_reuses_rows_across_calls() -> None:
+    # dedup is within-batch only: a second call re-infers everything
+    rows_per_call = []
+
+    def counting_infer(obs, n=None):
+        rows_per_call.append(obs.shape[0])
+        return _az_infer(obs)
+
+    envs = _envs(2)
+    _az().choose(envs, counting_infer, gamma=1.0)
+    first = list(rows_per_call)
+    rows_per_call.clear()
+    _az().choose(envs, counting_infer, gamma=1.0)
+    assert rows_per_call == first, "second call must re-infer identically"
+
+
 def test_gamma_must_be_a_unit_interval_discount() -> None:
     envs = _envs(1)
     for bad in (1.5, -0.1, float("nan"), float("inf")):

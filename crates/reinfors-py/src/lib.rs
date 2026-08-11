@@ -3468,7 +3468,6 @@ fn run_choose<G, P>(
     requests: Vec<(G::State, usize)>,
     seed: u64,
     mut states: Vec<P::PolicyState>,
-    cache_rows: usize,
     infer: &mut dyn FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
 ) -> PyResult<Vec<usize>>
 where
@@ -3477,14 +3476,9 @@ where
     P: Policy,
 {
     let mut infer_fn = |p: usize, o: Vec<f32>, n: usize| infer(p, o, n);
-    // Call-scoped: dedupes and transposition-serves within this call, then drops.
-    let generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let mut cache = InferCache::new(cache_rows.max(2), generation);
-    let mut evaluator = Evaluator::new(
-        &mut infer_fn,
-        InferMode::Shared,
-        Some(std::slice::from_mut(&mut cache)),
-    );
+    // Within-batch dedup only: no store, nothing survives a round, stochastic
+    // inference is never frozen across rounds.
+    let mut evaluator = Evaluator::with_batch_dedup(&mut infer_fn, InferMode::Shared);
     let evals = policy.evaluate(game, enc, reward, requests, seed, false, &mut evaluator);
     let mut out = Vec::with_capacity(evals.len());
     for (i, eval) in evals.iter().enumerate() {
@@ -3595,10 +3589,7 @@ where
                 let states: Vec<usize> = (0..impls.len())
                     .map(|i| policy.begin_episode(&mut choose_env_rng(seed, i, CHOOSE_HEAD_SALT)))
                     .collect();
-                let cache_rows = requests.len() * (expansion_budget + 2);
-                run_choose(
-                    &policy, game, enc, reward, requests, seed, states, cache_rows, infer,
-                )
+                run_choose(&policy, game, enc, reward, requests, seed, states, infer)
             }
             PolicySpec::EpsilonGreedyQ { n_heads, epsilon } => {
                 let policy = qgreedy_from_spec(n_heads, epsilon)?;
@@ -3606,10 +3597,7 @@ where
                 let states: Vec<usize> = (0..impls.len())
                     .map(|i| policy.begin_episode(&mut choose_env_rng(seed, i, CHOOSE_HEAD_SALT)))
                     .collect();
-                let cache_rows = requests.len();
-                run_choose(
-                    &policy, game, enc, reward, requests, seed, states, cache_rows, infer,
-                )
+                run_choose(&policy, game, enc, reward, requests, seed, states, infer)
             }
             PolicySpec::Mcts {
                 num_simulations,
@@ -3641,10 +3629,7 @@ where
                             .map_err(pyo3::exceptions::PyValueError::new_err)
                     })
                     .collect::<PyResult<Vec<u32>>>()?;
-                let cache_rows = requests.len() * (num_simulations + 2);
-                run_choose(
-                    &policy, game, enc, reward, requests, seed, states, cache_rows, infer,
-                )
+                run_choose(&policy, game, enc, reward, requests, seed, states, infer)
             }
             PolicySpec::AlphaZero {
                 num_simulations,
@@ -3682,10 +3667,7 @@ where
                             .map_err(pyo3::exceptions::PyValueError::new_err)
                     })
                     .collect::<PyResult<Vec<u32>>>()?;
-                let cache_rows = requests.len() * (num_simulations + 2);
-                run_choose(
-                    &policy, game, enc, reward, requests, seed, states, cache_rows, infer,
-                )
+                run_choose(&policy, game, enc, reward, requests, seed, states, infer)
             }
         }
     }

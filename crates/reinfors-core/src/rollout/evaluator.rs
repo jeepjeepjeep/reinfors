@@ -14,6 +14,9 @@ pub enum InferMode {
 /// How an evaluator reaches its cache: exclusively owned, shared sharded slots, or none.
 pub enum CacheAccess<'a> {
     None,
+    /// Within-batch key deduplication with no store: identical rows in one batch resolve
+    /// to one inference row, and nothing survives the batch.
+    BatchDedup,
     Exclusive(&'a mut [InferCache]),
     Shared(&'a [ShardedInferCache]),
 }
@@ -80,6 +83,20 @@ where
     }
 
     /// Grouped-collection constructor: shared sharded cache slots (one per routing slot).
+    /// Batch-deduplicating cacheless evaluator (the `choose` composition).
+    pub fn with_batch_dedup(infer: &'a mut F, mode: InferMode) -> Self {
+        Evaluator {
+            infer,
+            mode,
+            cache: CacheAccess::BatchDedup,
+            shared_lookups: 0,
+            shared_hits: 0,
+            rows: 0,
+            calls: 0,
+            seconds: 0.0,
+        }
+    }
+
     pub fn with_shared_cache(
         infer: &'a mut F,
         mode: InferMode,
@@ -169,7 +186,7 @@ where
         match &self.cache {
             CacheAccess::Exclusive(c) => c.iter().map(|x| x.lookups).sum(),
             CacheAccess::Shared(_) => self.shared_lookups,
-            CacheAccess::None => 0,
+            CacheAccess::None | CacheAccess::BatchDedup => 0,
         }
     }
 
@@ -177,7 +194,7 @@ where
         match &self.cache {
             CacheAccess::Exclusive(c) => c.iter().map(|x| x.hits).sum(),
             CacheAccess::Shared(_) => self.shared_hits,
-            CacheAccess::None => 0,
+            CacheAccess::None | CacheAccess::BatchDedup => 0,
         }
     }
 }
@@ -258,6 +275,7 @@ where
             let key = self.eval.row_key(player, obs);
             let mut staging_generation = None;
             let hit = match &mut self.eval.cache {
+                CacheAccess::BatchDedup => None,
                 CacheAccess::Exclusive(_) => self
                     .eval
                     .cache_slot(player)
@@ -348,7 +366,7 @@ where
                     );
                 }
             }
-            CacheAccess::None => {}
+            CacheAccess::None | CacheAccess::BatchDedup => {}
         }
         CommittedRows { out, stride }
     }
@@ -416,6 +434,30 @@ mod tests {
         let again = eval.forward(&[0, 0], obs, 2);
         assert_eq!(again, vec![2.0, 4.0, 6.0, 8.0]);
         assert_eq!(eval.rows, 2, "second forward should be fully cache-served");
+    }
+
+    #[test]
+    fn batch_dedup_dedupes_within_a_batch_and_stores_nothing() {
+        let mut infer = double_infer;
+        let mut eval = Evaluator::with_batch_dedup(&mut infer, InferMode::Shared);
+        let mut batch = eval.batch();
+        let a = batch.resolve_or_stage(0, &[1.0, 2.0]);
+        let b = batch.resolve_or_stage(0, &[1.0, 2.0]);
+        let (Resolve::Staged(ta), Resolve::Staged(tb)) = (a, b) else {
+            panic!("both stage");
+        };
+        assert_eq!(ta, tb, "identical rows must share one ticket");
+        let rows = batch.commit();
+        assert_eq!(rows.row(ta), &[2.0, 4.0]);
+        assert_eq!(eval.rows, 1, "one inference row for the duplicate pair");
+
+        let mut batch = eval.batch();
+        assert!(
+            matches!(batch.resolve_or_stage(0, &[1.0, 2.0]), Resolve::Staged(_)),
+            "nothing survives the batch: the next round re-infers"
+        );
+        drop(batch);
+        assert_eq!(eval.cache_lookups(), 0);
     }
 
     #[test]
