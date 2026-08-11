@@ -32,18 +32,18 @@
       <text class="wm" x="276.5" y="185" textLength="109.9" lengthAdjust="spacing" font-size="82" fill="#000" stroke="#000" stroke-width="6" stroke-linejoin="round">RE</text>
       <text class="wm" x="409" y="185" text-anchor="middle" font-size="82" fill="#000" stroke="#000" stroke-width="6" stroke-linejoin="round">&#305;</text>
       <text class="wm" x="431.5" y="185" textLength="301.1" lengthAdjust="spacing" font-size="82" fill="#000" stroke="#000" stroke-width="6" stroke-linejoin="round">NFORS</text>
-      <circle cx="409" cy="128" r="5.95" fill="#000"/>
-      <circle cx="549" cy="58" r="7.70" fill="#000"/>
-      <circle cx="549" cy="152" r="7.70" fill="#000"/>
-      <circle cx="549" cy="246" r="7.70" fill="#000"/>
-      <circle cx="674" cy="30" r="7.10" fill="#000"/>
-      <circle cx="674" cy="116" r="7.10" fill="#000"/>
-      <circle cx="674" cy="196" r="7.10" fill="#000"/>
-      <circle cx="674" cy="274" r="7.10" fill="#000"/>
-      <circle cx="799" cy="74" r="6.50" fill="#000"/>
-      <circle cx="799" cy="152" r="6.50" fill="#000"/>
-      <circle cx="799" cy="224" r="6.50" fill="#000"/>
-      <circle cx="799" cy="296" r="6.50" fill="#000"/>
+      <circle cx="409" cy="128" r="4.70" fill="#000"/>
+      <circle cx="549" cy="58" r="5.90" fill="#000"/>
+      <circle cx="549" cy="152" r="5.90" fill="#000"/>
+      <circle cx="549" cy="246" r="5.90" fill="#000"/>
+      <circle cx="674" cy="30" r="5.90" fill="#000"/>
+      <circle cx="674" cy="116" r="5.90" fill="#000"/>
+      <circle cx="674" cy="196" r="5.90" fill="#000"/>
+      <circle cx="674" cy="274" r="5.90" fill="#000"/>
+      <circle cx="799" cy="74" r="5.90" fill="#000"/>
+      <circle cx="799" cy="152" r="5.90" fill="#000"/>
+      <circle cx="799" cy="224" r="5.90" fill="#000"/>
+      <circle cx="799" cy="296" r="5.90" fill="#000"/>
       <circle cx="934" cy="46" r="5.90" fill="#000"/>
       <circle cx="934" cy="130" r="5.90" fill="#000"/>
       <circle cx="934" cy="200" r="5.90" fill="#000"/>
@@ -51,28 +51,28 @@
     </mask>
     <mask id="nofog-text" maskUnits="userSpaceOnUse" x="0" y="0" width="1009" height="320">
       <rect width="1009" height="320" fill="#fff"/>
-      <text class="wm" x="276.5" y="185" textLength="109.9" lengthAdjust="spacing" font-size="82" fill="#000">RE</text>
-      <text class="wm" x="409" y="185" text-anchor="middle" font-size="82" fill="#000">&#305;</text>
-      <text class="wm" x="431.5" y="185" textLength="301.1" lengthAdjust="spacing" font-size="82" fill="#000">NFORS</text>
+      <text class="wm" x="276.5" y="185" textLength="109.9" lengthAdjust="spacing" font-size="82" fill="#000" stroke="#fff" stroke-width="3" stroke-linejoin="round">RE</text>
+      <text class="wm" x="409" y="185" text-anchor="middle" font-size="82" fill="#000" stroke="#fff" stroke-width="3" stroke-linejoin="round">&#305;</text>
+      <text class="wm" x="431.5" y="185" textLength="301.1" lengthAdjust="spacing" font-size="82" fill="#000" stroke="#fff" stroke-width="3" stroke-linejoin="round">NFORS</text>
     </mask>
     <mask id="nofog-nodes" maskUnits="userSpaceOnUse" x="0" y="0" width="1009" height="320">
       <rect width="1009" height="320" fill="#fff"/>
-      <circle cx="549" cy="58" r="9.6" fill="#000"/>
-      <circle cx="549" cy="152" r="9.6" fill="#000"/>
-      <circle cx="549" cy="246" r="9.6" fill="#000"/>
-      <circle cx="674" cy="30" r="9.0" fill="#000"/>
-      <circle cx="674" cy="116" r="9.0" fill="#000"/>
-      <circle cx="674" cy="196" r="9.0" fill="#000"/>
-      <circle cx="674" cy="274" r="9.0" fill="#000"/>
-      <circle cx="799" cy="74" r="8.4" fill="#000"/>
-      <circle cx="799" cy="152" r="8.4" fill="#000"/>
-      <circle cx="799" cy="224" r="8.4" fill="#000"/>
-      <circle cx="799" cy="296" r="8.4" fill="#000"/>
-      <circle cx="934" cy="46" r="7.8" fill="#000"/>
-      <circle cx="934" cy="130" r="7.8" fill="#000"/>
-      <circle cx="934" cy="200" r="7.8" fill="#000"/>
-      <circle cx="934" cy="276" r="7.8" fill="#000"/>
-      <circle cx="409" cy="128" r="8.2" fill="#000"/>
+      <circle cx="549" cy="58" r="7.80" fill="#000"/>
+      <circle cx="549" cy="152" r="7.80" fill="#000"/>
+      <circle cx="549" cy="246" r="7.80" fill="#000"/>
+      <circle cx="674" cy="30" r="7.80" fill="#000"/>
+      <circle cx="674" cy="116" r="7.80" fill="#000"/>
+      <circle cx="674" cy="196" r="7.80" fill="#000"/>
+      <circle cx="674" cy="274" r="7.80" fill="#000"/>
+      <circle cx="799" cy="74" r="7.80" fill="#000"/>
+      <circle cx="799" cy="152" r="7.80" fill="#000"/>
+      <circle cx="799" cy="224" r="7.80" fill="#000"/>
+      <circle cx="799" cy="296" r="7.80" fill="#000"/>
+      <circle cx="934" cy="46" r="7.80" fill="#000"/>
+      <circle cx="934" cy="130" r="7.80" fill="#000"/>
+      <circle cx="934" cy="200" r="7.80" fill="#000"/>
+      <circle cx="934" cy="276" r="7.80" fill="#000"/>
+      <circle cx="409" cy="128" r="6.95" fill="#000"/>
     </mask>
   </defs>
   <style>
@@ -108,9 +108,9 @@
     .g3,.g3 *{animation-delay:7.0s}   .g4,.g4 *{animation-delay:10.5s}
 
     .wm{ font-family:&#39;Avenir Next&#39;,&#39;Futura&#39;,&#39;Century Gothic&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif; font-weight:500; }
-    .wm-halo{ fill:none; stroke:url(#txtneon); stroke-width:5;
+    .wm-halo{ fill:none; stroke:url(#txtneon); stroke-width:4.6;
               stroke-linejoin:round; filter:url(#softglow); }
-    .wm-core{ fill:none; stroke:url(#txtneon); stroke-width:5; stroke-linejoin:round;
+    .wm-core{ fill:none; stroke:url(#txtneon); stroke-width:4.6; stroke-linejoin:round;
              shape-rendering:geometricPrecision; }
 
     @keyframes life{ 0%{opacity:0} 0.09%{opacity:1} 16.43%{opacity:1} 21.79%{opacity:0} 100%{opacity:0} }
@@ -142,135 +142,135 @@
   <g mask="url(#clearing)">
     <g class="tree">
       <g class="edge">
-        <path d="M419.5,122.8 L537.3,63.9"/>
-        <path d="M420.5,130.0 L536.1,149.8"/>
-        <path d="M417.9,135.5 L539.0,237.6"/>
-        <path d="M561.8,55.1 L661.8,32.7"/>
-        <path d="M560.9,63.5 L662.7,110.7"/>
-        <path d="M561.6,148.4 L662.0,119.5"/>
-        <path d="M561.4,156.3 L662.2,191.8"/>
-        <path d="M561.2,241.1 L662.4,200.6"/>
-        <path d="M561.8,248.9 L661.8,271.3"/>
-        <path d="M685.8,34.2 L787.8,70.0"/>
-        <path d="M685.8,112.0 L787.7,77.8"/>
-        <path d="M686.0,119.5 L787.6,148.7"/>
-        <path d="M685.8,191.8 L787.8,156.0"/>
-        <path d="M686.2,198.7 L787.4,221.4"/>
-        <path d="M685.6,269.4 L788.0,228.4"/>
-        <path d="M686.3,276.2 L787.3,293.9"/>
-        <path d="M810.7,71.6 L922.9,48.3"/>
-        <path d="M810.0,78.6 L923.6,125.7"/>
-        <path d="M810.7,150.1 L922.8,131.8"/>
-        <path d="M810.2,156.0 L923.4,196.2"/>
-        <path d="M810.7,221.9 L922.9,202.0"/>
-        <path d="M810.1,228.3 L923.5,271.9"/>
+        <path d="M418.3,123.3 L538.9,63.1"/>
+        <path d="M419.3,129.8 L537.9,150.1"/>
+        <path d="M417.0,134.7 L540.4,238.7"/>
+        <path d="M560.0,55.5 L663.0,32.5"/>
+        <path d="M559.3,62.8 L663.7,111.2"/>
+        <path d="M559.9,148.9 L663.1,119.1"/>
+        <path d="M559.7,155.8 L663.3,192.2"/>
+        <path d="M559.5,241.8 L663.5,200.2"/>
+        <path d="M560.0,248.5 L663.0,271.5"/>
+        <path d="M684.7,33.8 L788.3,70.2"/>
+        <path d="M684.7,112.4 L788.3,77.6"/>
+        <path d="M684.9,119.1 L788.1,148.9"/>
+        <path d="M684.7,192.2 L788.3,155.8"/>
+        <path d="M685.0,198.5 L788.0,221.5"/>
+        <path d="M684.5,269.8 L788.5,228.2"/>
+        <path d="M685.1,276.0 L787.9,294.0"/>
+        <path d="M810.1,71.7 L922.9,48.3"/>
+        <path d="M809.4,78.3 L923.6,125.7"/>
+        <path d="M810.2,150.2 L922.8,131.8"/>
+        <path d="M809.6,155.8 L923.4,196.2"/>
+        <path d="M810.1,222.0 L922.9,202.0"/>
+        <path d="M809.5,228.1 L923.5,271.9"/>
       </g>
       <g class="dot">
-        <circle class="" cx="549" cy="58" r="9.6"/>
-        <circle class="" cx="549" cy="152" r="9.6"/>
-        <circle class="" cx="549" cy="246" r="9.6"/>
-        <circle class="" cx="674" cy="30" r="9.0"/>
-        <circle class="" cx="674" cy="116" r="9.0"/>
-        <circle class="" cx="674" cy="196" r="9.0"/>
-        <circle class="" cx="674" cy="274" r="9.0"/>
-        <circle class="" cx="799" cy="74" r="8.4"/>
-        <circle class="" cx="799" cy="152" r="8.4"/>
-        <circle class="" cx="799" cy="224" r="8.4"/>
-        <circle class="" cx="799" cy="296" r="8.4"/>
+        <circle class="" cx="549" cy="58" r="7.8"/>
+        <circle class="" cx="549" cy="152" r="7.8"/>
+        <circle class="" cx="549" cy="246" r="7.8"/>
+        <circle class="" cx="674" cy="30" r="7.8"/>
+        <circle class="" cx="674" cy="116" r="7.8"/>
+        <circle class="" cx="674" cy="196" r="7.8"/>
+        <circle class="" cx="674" cy="274" r="7.8"/>
+        <circle class="" cx="799" cy="74" r="7.8"/>
+        <circle class="" cx="799" cy="152" r="7.8"/>
+        <circle class="" cx="799" cy="224" r="7.8"/>
+        <circle class="" cx="799" cy="296" r="7.8"/>
         <circle class="" cx="934" cy="46" r="7.8"/>
         <circle class="" cx="934" cy="130" r="7.8"/>
         <circle class="" cx="934" cy="200" r="7.8"/>
         <circle class="" cx="934" cy="276" r="7.8"/>
       </g>
     </g>
-    <circle class="tittle-halo" mask="url(#nofog-nodes)" cx="409" cy="128" r="8.2"/>
-    <circle class="tittle-core" cx="409" cy="128" r="8.2"/>
+    <circle class="tittle-halo" mask="url(#nofog-nodes)" cx="409" cy="128" r="6.95"/>
+    <circle class="tittle-core" cx="409" cy="128" r="6.95"/>
     <g class="bolt g1">
-      <path class="hl e1" pathLength="100" d="M420.4,122.3 L536.4,64.3"/>
-      <path class="hl e2" pathLength="100" d="M562.8,54.9 L660.8,33.0"/>
-      <path class="hl e3" pathLength="100" d="M686.7,34.5 L786.8,69.7"/>
-      <path class="hl e4" pathLength="100" d="M810.9,78.9 L922.6,125.3"/>
-      <path class="flash" d="M422.3,121.3 L549.0,58.0 L674.0,30.0 L799.0,74.0 L920.6,124.4"/>
-      <path class="bp" pathLength="100" d="M922.3,125.1 L799.0,74.0 L674.0,30.0 L549.0,58.0 L420.7,122.1"/>
-      <circle class="hnode-halo np0" mask="url(#nofog-nodes)" cx="409" cy="128" r="8.2"/>
-      <circle class="hnode-halo np1" mask="url(#nofog-nodes)" cx="549" cy="58" r="9.6"/>
-      <circle class="hnode-halo np2" mask="url(#nofog-nodes)" cx="674" cy="30" r="9.0"/>
-      <circle class="hnode-halo np3" mask="url(#nofog-nodes)" cx="799" cy="74" r="8.4"/>
+      <path class="hl e1" pathLength="100" d="M419.2,122.9 L538.0,63.5"/>
+      <path class="hl e2" pathLength="100" d="M561.0,55.3 L662.0,32.7"/>
+      <path class="hl e3" pathLength="100" d="M685.6,34.1 L787.4,69.9"/>
+      <path class="hl e4" pathLength="100" d="M810.4,78.7 L922.6,125.3"/>
+      <path class="flash" d="M421.2,121.9 L549.0,58.0 L674.0,30.0 L799.0,74.0 L920.6,124.4"/>
+      <path class="bp" pathLength="100" d="M922.3,125.1 L799.0,74.0 L674.0,30.0 L549.0,58.0 L419.6,122.7"/>
+      <circle class="hnode-halo np0" mask="url(#nofog-nodes)" cx="409" cy="128" r="6.95"/>
+      <circle class="hnode-halo np1" mask="url(#nofog-nodes)" cx="549" cy="58" r="7.8"/>
+      <circle class="hnode-halo np2" mask="url(#nofog-nodes)" cx="674" cy="30" r="7.8"/>
+      <circle class="hnode-halo np3" mask="url(#nofog-nodes)" cx="799" cy="74" r="7.8"/>
       <circle class="hnode-halo np4" mask="url(#nofog-nodes)" cx="934" cy="130" r="7.8"/>
-      <circle class="hnode-core np0" cx="409" cy="128" r="8.2"/>
-      <circle class="hnode-core np1" cx="549" cy="58" r="9.6"/>
-      <circle class="hnode-core np2" cx="674" cy="30" r="9.0"/>
-      <circle class="hnode-core np3" cx="799" cy="74" r="8.4"/>
+      <circle class="hnode-core np0" cx="409" cy="128" r="6.95"/>
+      <circle class="hnode-core np1" cx="549" cy="58" r="7.8"/>
+      <circle class="hnode-core np2" cx="674" cy="30" r="7.8"/>
+      <circle class="hnode-core np3" cx="799" cy="74" r="7.8"/>
       <circle class="hnode-core np4" cx="934" cy="130" r="7.8"/>
-      <circle class="ping pg0" cx="409" cy="128" r="12.0"/>
-      <circle class="ping pg1" cx="549" cy="58" r="13.4"/>
-      <circle class="ping pg2" cx="674" cy="30" r="12.8"/>
-      <circle class="ping pg3" cx="799" cy="74" r="12.2"/>
+      <circle class="ping pg0" cx="409" cy="128" r="10.75"/>
+      <circle class="ping pg1" cx="549" cy="58" r="11.6"/>
+      <circle class="ping pg2" cx="674" cy="30" r="11.6"/>
+      <circle class="ping pg3" cx="799" cy="74" r="11.6"/>
       <circle class="ping pg4" cx="934" cy="130" r="11.6"/>
     </g>
     <g class="bolt g2">
-      <path class="hl e1" pathLength="100" d="M418.7,136.2 L538.2,236.9"/>
-      <path class="hl e2" pathLength="100" d="M562.8,249.1 L660.8,271.0"/>
-      <path class="hl e3" pathLength="100" d="M687.3,276.3 L786.3,293.8"/>
-      <path class="flash" d="M420.4,137.6 L549.0,246.0 L674.0,274.0 L784.1,293.4"/>
-      <path class="bp" pathLength="100" d="M785.9,293.7 L674.0,274.0 L549.0,246.0 L419.0,136.4"/>
-      <circle class="hnode-halo np0" mask="url(#nofog-nodes)" cx="409" cy="128" r="8.2"/>
-      <circle class="hnode-halo np1" mask="url(#nofog-nodes)" cx="549" cy="246" r="9.6"/>
-      <circle class="hnode-halo np2" mask="url(#nofog-nodes)" cx="674" cy="274" r="9.0"/>
-      <circle class="hnode-halo np3" mask="url(#nofog-nodes)" cx="799" cy="296" r="8.4"/>
-      <circle class="hnode-core np0" cx="409" cy="128" r="8.2"/>
-      <circle class="hnode-core np1" cx="549" cy="246" r="9.6"/>
-      <circle class="hnode-core np2" cx="674" cy="274" r="9.0"/>
-      <circle class="hnode-core np3" cx="799" cy="296" r="8.4"/>
-      <circle class="ping pg0" cx="409" cy="128" r="12.0"/>
-      <circle class="ping pg1" cx="549" cy="246" r="13.4"/>
-      <circle class="ping pg2" cx="674" cy="274" r="12.8"/>
-      <circle class="ping pg3" cx="799" cy="296" r="12.2"/>
+      <path class="hl e1" pathLength="100" d="M417.8,135.4 L539.6,238.1"/>
+      <path class="hl e2" pathLength="100" d="M561.0,248.7 L662.0,271.3"/>
+      <path class="hl e3" pathLength="100" d="M686.1,276.1 L786.9,293.9"/>
+      <path class="flash" d="M419.4,136.8 L549.0,246.0 L674.0,274.0 L784.7,293.5"/>
+      <path class="bp" pathLength="100" d="M786.5,293.8 L674.0,274.0 L549.0,246.0 L418.1,135.6"/>
+      <circle class="hnode-halo np0" mask="url(#nofog-nodes)" cx="409" cy="128" r="6.95"/>
+      <circle class="hnode-halo np1" mask="url(#nofog-nodes)" cx="549" cy="246" r="7.8"/>
+      <circle class="hnode-halo np2" mask="url(#nofog-nodes)" cx="674" cy="274" r="7.8"/>
+      <circle class="hnode-halo np3" mask="url(#nofog-nodes)" cx="799" cy="296" r="7.8"/>
+      <circle class="hnode-core np0" cx="409" cy="128" r="6.95"/>
+      <circle class="hnode-core np1" cx="549" cy="246" r="7.8"/>
+      <circle class="hnode-core np2" cx="674" cy="274" r="7.8"/>
+      <circle class="hnode-core np3" cx="799" cy="296" r="7.8"/>
+      <circle class="ping pg0" cx="409" cy="128" r="10.75"/>
+      <circle class="ping pg1" cx="549" cy="246" r="11.6"/>
+      <circle class="ping pg2" cx="674" cy="274" r="11.6"/>
+      <circle class="ping pg3" cx="799" cy="296" r="11.6"/>
     </g>
     <g class="bolt g3">
-      <path class="hl e1" pathLength="100" d="M421.5,130.1 L535.1,149.6"/>
-      <path class="hl e2" pathLength="100" d="M562.5,148.1 L661.0,119.7"/>
-      <path class="hl e3" pathLength="100" d="M686.8,111.7 L786.8,78.1"/>
-      <path class="hl e4" pathLength="100" d="M811.6,71.4 L922.0,48.5"/>
-      <path class="flash" d="M423.7,130.5 L549.0,152.0 L674.0,116.0 L799.0,74.0 L919.8,48.9"/>
-      <path class="bp" pathLength="100" d="M921.6,48.6 L799.0,74.0 L674.0,116.0 L549.0,152.0 L421.9,130.2"/>
-      <circle class="hnode-halo np0" mask="url(#nofog-nodes)" cx="409" cy="128" r="8.2"/>
-      <circle class="hnode-halo np1" mask="url(#nofog-nodes)" cx="549" cy="152" r="9.6"/>
-      <circle class="hnode-halo np2" mask="url(#nofog-nodes)" cx="674" cy="116" r="9.0"/>
-      <circle class="hnode-halo np3" mask="url(#nofog-nodes)" cx="799" cy="74" r="8.4"/>
+      <path class="hl e1" pathLength="100" d="M420.3,129.9 L536.9,149.9"/>
+      <path class="hl e2" pathLength="100" d="M560.8,148.6 L662.2,119.4"/>
+      <path class="hl e3" pathLength="100" d="M685.7,112.1 L787.3,77.9"/>
+      <path class="hl e4" pathLength="100" d="M811.0,71.5 L922.0,48.5"/>
+      <path class="flash" d="M422.5,130.3 L549.0,152.0 L674.0,116.0 L799.0,74.0 L919.8,48.9"/>
+      <path class="bp" pathLength="100" d="M921.6,48.6 L799.0,74.0 L674.0,116.0 L549.0,152.0 L420.7,130.0"/>
+      <circle class="hnode-halo np0" mask="url(#nofog-nodes)" cx="409" cy="128" r="6.95"/>
+      <circle class="hnode-halo np1" mask="url(#nofog-nodes)" cx="549" cy="152" r="7.8"/>
+      <circle class="hnode-halo np2" mask="url(#nofog-nodes)" cx="674" cy="116" r="7.8"/>
+      <circle class="hnode-halo np3" mask="url(#nofog-nodes)" cx="799" cy="74" r="7.8"/>
       <circle class="hnode-halo np4" mask="url(#nofog-nodes)" cx="934" cy="46" r="7.8"/>
-      <circle class="hnode-core np0" cx="409" cy="128" r="8.2"/>
-      <circle class="hnode-core np1" cx="549" cy="152" r="9.6"/>
-      <circle class="hnode-core np2" cx="674" cy="116" r="9.0"/>
-      <circle class="hnode-core np3" cx="799" cy="74" r="8.4"/>
+      <circle class="hnode-core np0" cx="409" cy="128" r="6.95"/>
+      <circle class="hnode-core np1" cx="549" cy="152" r="7.8"/>
+      <circle class="hnode-core np2" cx="674" cy="116" r="7.8"/>
+      <circle class="hnode-core np3" cx="799" cy="74" r="7.8"/>
       <circle class="hnode-core np4" cx="934" cy="46" r="7.8"/>
-      <circle class="ping pg0" cx="409" cy="128" r="12.0"/>
-      <circle class="ping pg1" cx="549" cy="152" r="13.4"/>
-      <circle class="ping pg2" cx="674" cy="116" r="12.8"/>
-      <circle class="ping pg3" cx="799" cy="74" r="12.2"/>
+      <circle class="ping pg0" cx="409" cy="128" r="10.75"/>
+      <circle class="ping pg1" cx="549" cy="152" r="11.6"/>
+      <circle class="ping pg2" cx="674" cy="116" r="11.6"/>
+      <circle class="ping pg3" cx="799" cy="74" r="11.6"/>
       <circle class="ping pg4" cx="934" cy="46" r="11.6"/>
     </g>
     <g class="bolt g4">
-      <path class="hl e1" pathLength="100" d="M420.4,122.3 L536.4,64.3"/>
-      <path class="hl e2" pathLength="100" d="M561.8,63.9 L661.8,110.3"/>
-      <path class="hl e3" pathLength="100" d="M686.8,111.7 L786.8,78.1"/>
-      <path class="hl e4" pathLength="100" d="M811.6,71.4 L922.0,48.5"/>
-      <path class="flash" d="M422.3,121.3 L549.0,58.0 L674.0,116.0 L799.0,74.0 L919.8,48.9"/>
-      <path class="bp" pathLength="100" d="M921.6,48.6 L799.0,74.0 L674.0,116.0 L549.0,58.0 L420.7,122.1"/>
-      <circle class="hnode-halo np0" mask="url(#nofog-nodes)" cx="409" cy="128" r="8.2"/>
-      <circle class="hnode-halo np1" mask="url(#nofog-nodes)" cx="549" cy="58" r="9.6"/>
-      <circle class="hnode-halo np2" mask="url(#nofog-nodes)" cx="674" cy="116" r="9.0"/>
-      <circle class="hnode-halo np3" mask="url(#nofog-nodes)" cx="799" cy="74" r="8.4"/>
+      <path class="hl e1" pathLength="100" d="M419.2,122.9 L538.0,63.5"/>
+      <path class="hl e2" pathLength="100" d="M560.2,63.2 L662.8,110.8"/>
+      <path class="hl e3" pathLength="100" d="M685.7,112.1 L787.3,77.9"/>
+      <path class="hl e4" pathLength="100" d="M811.0,71.5 L922.0,48.5"/>
+      <path class="flash" d="M421.2,121.9 L549.0,58.0 L674.0,116.0 L799.0,74.0 L919.8,48.9"/>
+      <path class="bp" pathLength="100" d="M921.6,48.6 L799.0,74.0 L674.0,116.0 L549.0,58.0 L419.6,122.7"/>
+      <circle class="hnode-halo np0" mask="url(#nofog-nodes)" cx="409" cy="128" r="6.95"/>
+      <circle class="hnode-halo np1" mask="url(#nofog-nodes)" cx="549" cy="58" r="7.8"/>
+      <circle class="hnode-halo np2" mask="url(#nofog-nodes)" cx="674" cy="116" r="7.8"/>
+      <circle class="hnode-halo np3" mask="url(#nofog-nodes)" cx="799" cy="74" r="7.8"/>
       <circle class="hnode-halo np4" mask="url(#nofog-nodes)" cx="934" cy="46" r="7.8"/>
-      <circle class="hnode-core np0" cx="409" cy="128" r="8.2"/>
-      <circle class="hnode-core np1" cx="549" cy="58" r="9.6"/>
-      <circle class="hnode-core np2" cx="674" cy="116" r="9.0"/>
-      <circle class="hnode-core np3" cx="799" cy="74" r="8.4"/>
+      <circle class="hnode-core np0" cx="409" cy="128" r="6.95"/>
+      <circle class="hnode-core np1" cx="549" cy="58" r="7.8"/>
+      <circle class="hnode-core np2" cx="674" cy="116" r="7.8"/>
+      <circle class="hnode-core np3" cx="799" cy="74" r="7.8"/>
       <circle class="hnode-core np4" cx="934" cy="46" r="7.8"/>
-      <circle class="ping pg0" cx="409" cy="128" r="12.0"/>
-      <circle class="ping pg1" cx="549" cy="58" r="13.4"/>
-      <circle class="ping pg2" cx="674" cy="116" r="12.8"/>
-      <circle class="ping pg3" cx="799" cy="74" r="12.2"/>
+      <circle class="ping pg0" cx="409" cy="128" r="10.75"/>
+      <circle class="ping pg1" cx="549" cy="58" r="11.6"/>
+      <circle class="ping pg2" cx="674" cy="116" r="11.6"/>
+      <circle class="ping pg3" cx="799" cy="74" r="11.6"/>
       <circle class="ping pg4" cx="934" cy="46" r="11.6"/>
     </g>
   </g>
@@ -278,7 +278,7 @@
   <text class="wm wm-halo" mask="url(#nofog-text)" x="276.5" y="185" textLength="109.9" lengthAdjust="spacing" font-size="82">RE</text>
   <text class="wm wm-halo" mask="url(#nofog-text)" x="409" y="185" text-anchor="middle" font-size="82">&#305;</text>
   <text class="wm wm-halo" mask="url(#nofog-text)" x="431.5" y="185" textLength="301.1" lengthAdjust="spacing" font-size="82">NFORS</text>
-  <text class="wm wm-core" x="276.5" y="185" textLength="109.9" lengthAdjust="spacing" font-size="82">RE</text>
-  <text class="wm wm-core" x="409" y="185" text-anchor="middle" font-size="82">&#305;</text>
-  <text class="wm wm-core" x="431.5" y="185" textLength="301.1" lengthAdjust="spacing" font-size="82">NFORS</text>
+  <text class="wm wm-core" mask="url(#nofog-text)" x="276.5" y="185" textLength="109.9" lengthAdjust="spacing" font-size="82">RE</text>
+  <text class="wm wm-core" mask="url(#nofog-text)" x="409" y="185" text-anchor="middle" font-size="82">&#305;</text>
+  <text class="wm wm-core" mask="url(#nofog-text)" x="431.5" y="185" textLength="301.1" lengthAdjust="spacing" font-size="82">NFORS</text>
 </svg>
