@@ -19,8 +19,8 @@ The CUDA grids behind the [throughput levers](throughput-levers.md) tables (f32 
 cache capacity, the `n_groups` grid) run through the companion benchmark repository's
 trainer, on the same instance and under the same protocol as the cross-framework
 comparison. As on the [comparison reproduction page](../openspiel/reproducing.md), these
-are command templates; raw telemetry for the published cells is archived in the companion
-workspace:
+are command templates; raw telemetry for the published cells is public under the
+companion repository's `published/` directory:
 
 ```bash
 # from the companion repository root

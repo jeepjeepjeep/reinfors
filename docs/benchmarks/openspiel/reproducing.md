@@ -3,9 +3,11 @@
 The cross-framework harness lives in the companion benchmark repository
 ([reinfors-benchmarks](https://github.com/jeepjeepjeep/reinfors-benchmarks)), published
 alongside this library: the OpenSpiel source-build
-machinery and its documented patches, and the measurement, round-orchestration, and
-head-to-head scripts. Raw telemetry of the published runs is archived in the companion
-workspace. That material
+machinery and its documented patches, the measurement, round-orchestration, and
+head-to-head scripts, and — under its `published/` directory — the per-run artifacts of
+every published number: learner telemetry, resolved configurations, head-to-head logs and
+PGNs, each with a provenance record (dates, commit pins, command). Deadline checkpoints
+distribute as release assets. That material
 is deliberately not vendored into reinfors — third-party patches, training loops, and
 cloud tooling are outside the library's scope, and a drifting copy would be worse than a
 pointer.
@@ -66,7 +68,8 @@ python scripts/plot_round.py "$RF_ROUND_DIR" "$OS_ROUND_DIR" -o round_panels.png
 
 ## Publication artifacts
 
-Archived per published run: both learners' structured telemetry (the interior-window
-counters every table reduces), head-to-head logs and PGNs, and — for Arena-protocol
-matches — the appended run manifest. Tables state their provenance inline; commands here
+Public per published run (companion `published/`): both learners' structured telemetry
+(the interior-window counters every table reduces), resolved configurations, run stdout,
+head-to-head logs and PGNs, and a provenance record; Arena-protocol matches additionally
+append machine-readable manifests. Tables state their provenance inline; commands here
 plus the [tuning tables](tuning.md) reconstruct any cell.
