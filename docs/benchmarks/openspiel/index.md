@@ -24,7 +24,7 @@ a result.
 ## Results at a glance
 
 At the matched 2-hour round (single runs per seed, replicated across two independent
-training seeds; the formal 3-repeat refresh is still open): reinfors sustained
+training seeds): reinfors sustained
 **204.1 / 203.2 states/s** against OpenSpiel's **147.2 / 150.7** (+39% / +35%), and the
 resulting nets scored **0.556 ± 0.022** against OpenSpiel's over 250 paired-opening games
 (~+39 Elo, 95% CI +9 to +70). Full tables, protocol, and caveats:

@@ -10,9 +10,7 @@ each other.
 Figures below are from single 2-hour runs per (seed, side) on the shared
 [environment](../setup.md) (g5.2xlarge, August 2026), with the headline quantities
 replicated across two independent training seeds. Sustained rates use the interior
-window (minutes 5–115, counter deltas). These runs predate the run-manifest tooling;
-the [3-repeat frozen-commit protocol](../methodology.md) remains the bar for the next
-refresh of this table.
+window (minutes 5–115, counter deltas). These runs predate the run-manifest tooling.
 
 ## Training throughput
 
@@ -75,7 +73,7 @@ is treated as more precise than the match supports.
 
 ## Open items
 
-- **single run per (seed, configuration)** — the seed-1 replicate addresses training-draw
-  variance for the headline claims, but the formal 3-repeat protocol at a frozen commit
-  has not yet been run;
+- **single run per (seed, configuration)** — the two-seed replicate addresses
+  training-draw variance for the headline claims; per-cell precision is bounded by one
+  run each;
 - one game (chess) at one net size.
