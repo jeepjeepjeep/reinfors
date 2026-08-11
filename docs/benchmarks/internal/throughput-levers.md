@@ -24,8 +24,9 @@ capacity only up to a saturation point — see the [capacity curve](index.md).
 
 ## Grouped collection (`n_groups=2`)
 
-Splits the games into two fixed groups whose search rounds alternate, so one group's tree
-work overlaps the other's inference (which runs on a dedicated submitter thread). Full
+Splits the games into two fixed groups, each collecting on its own worker thread with
+inference forwarded to a service thread that owns the callback, so one group's tree work
+overlaps the other's inference. Full
 semantics in the [training guide](../../guides/training.md#overlapping-search-and-inference-n_groups).
 
 The model, validated empirically: with per-round search time `S` and inference time `I`,
@@ -62,6 +63,6 @@ record emission, batch packing, and runtime interplay with a concurrent learner 
 the engine side of the cycle — and therefore understate the gain. The batch term at this
 operating point is favorable: two 64-row groups sit at the A10G sweet spot, while a single
 128-row batch pays a measured kernel regression. Boundary costs
-(submitter spawn per collect, one discarded in-flight batch at the record floor) are
-amortized at round-scale collection and measured separately at small collection sizes
+(worker and service thread spawns per collect, one channel round-trip per inference call)
+are amortized at round-scale collection and measured separately at small collection sizes
 before any general recommendation.

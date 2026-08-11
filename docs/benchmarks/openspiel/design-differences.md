@@ -22,7 +22,8 @@ each simulation round gathers their uncached leaves into one callback that retur
 and value from one forward. The inference cache is position-keyed and independent of call
 structure. The learner is caller-owned Python running concurrently (records stream out per
 collected batch); weight refreshes are explicit and clear the cache at round boundaries.
-Optionally, games split into two groups whose rounds alternate so tree work overlaps
+Optionally, games split into two groups, each collecting on its own worker thread with
+inference forwarded to a service thread that owns the callback, so tree work overlaps
 inference ([grouped collection](../internal/throughput-levers.md)).
 
 ## Consequence 1: batch formation
@@ -66,7 +67,7 @@ consequence — proportional to concurrent games and per-game latency. See the s
 | dimension | OpenSpiel | reinfors |
 |---|---|---|
 | heterogeneous play | Per-seat `Bot` composition inside its run infrastructure, including evaluation actors and rollout baselines. Batching still requires evaluator integration. | Per-player networks and frozen opponents stay inside `Engine`; arbitrary bot or search mixes use `Env`, outside Engine-provided batching, caching, and telemetry. |
-| new search integration | A new bot can use the actor loop directly; batched network service requires its evaluator queue. | The standard policy seam uses normal collection; `n_groups=2` additionally requires resumable pooled-round support. |
+| new search integration | A new bot can use the actor loop directly; batched network service requires its evaluator queue. | The standard policy seam uses normal collection, including under `n_groups=2` (group workers run any policy's search opaquely). |
 | per-game latency | Small actor counts can favor individual-game latency. | Throughput-oriented lockstep batches can increase individual-game latency. |
 | training ownership | The C++ learner is self-contained. | The caller-owned Python learner is flexible but shares the process during concurrent collection. |
 
