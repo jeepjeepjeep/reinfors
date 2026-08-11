@@ -11,19 +11,14 @@ use crate::rollout::evaluator::Evaluator;
 use super::expectimax::search::{search_many, Opponent, SearchConfig};
 use super::expectimax::{decode_search_eval, encode_search_eval, SearchEvaluation};
 
-/// Classical full-width, depth-limited minimax over two-player zero-sum sequential games, with
-/// expectation backup at declared chance nodes (expectiminimax). Frontier leaves are scored by
-/// the pooled inference callback's single-head Q row, collapsed over the leaf mover's legal set;
-/// a zero callback yields the horizon-perfect terminal-reward baseline. Deterministic given its
-/// evaluator: selection is a pure argmax and draws no randomness.
+/// Depth-limited minimax/expectiminimax with callback-scored frontier leaves; deterministic
+/// given its evaluator.
 pub struct Minimax {
     cfg: SearchConfig,
 }
 
 impl Minimax {
-    /// `depth`: plies of lookahead (>= 1). `move_cap`: optional per-node beam width below the
-    /// root, ordered by each node's own leaf evaluation. `gamma` is threaded from the paired
-    /// learner so search backup and episode targets share one discount.
+    /// `gamma` is the paired learner's: search backup and episode targets share one discount.
     pub fn new(depth: i32, move_cap: Option<usize>, chance: ChanceMode, gamma: f64) -> Self {
         assert!(depth >= 1, "minimax needs at least one ply of lookahead");
         assert!(
@@ -37,8 +32,8 @@ impl Minimax {
         Minimax {
             cfg: SearchConfig {
                 gamma,
-                // Value-of-information ordering is irrelevant: every frontier node is expanded.
-                beta: 1.0,
+                beta: 1.0, // frontier ordering is irrelevant: every node is expanded
+
                 expansion_budget: usize::MAX,
                 top_k: usize::MAX,
                 max_depth: depth,
@@ -64,8 +59,7 @@ impl Policy for Minimax {
     }
 
     fn max_agents(&self, sequential: bool) -> Option<usize> {
-        // Adversarial backup is defined between exactly one searcher and one opponent; the
-        // binding additionally requires two players, and simultaneous decisions are rejected.
+        // Some(0) rejects every simultaneous game; the binding additionally requires two players.
         if sequential {
             Some(2)
         } else {

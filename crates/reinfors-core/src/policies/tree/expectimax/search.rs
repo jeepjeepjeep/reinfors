@@ -16,10 +16,8 @@ pub enum Opponent {
         temperature: f64,
         floor: f64,
     },
-    /// Adversarial (minimax) backup: sequential opponent decisions take the minimum over the
-    /// opponent's moves instead of an expectation over a belief model. `move_cap` bounds the
-    /// per-node beam width below the root (`usize::MAX` = full width); moves are ordered by the
-    /// node's own leaf evaluation from the round that created it.
+    /// Minimax: opponent decisions back up as a minimum over their moves; `move_cap` beams
+    /// non-root nodes by their own leaf evaluation (`usize::MAX` = full width).
     Adversarial {
         move_cap: usize,
     },
@@ -84,11 +82,9 @@ struct Node<S> {
     path_weight: f64,
     // True only at the searcher's decisions; opponent nodes must not become TreeStrap targets.
     max_node: bool,
-    // Adversarial mode only: back this node up as a minimum over its edges (a sequential opponent
-    // decision). All values stay in the searcher's perspective, so no sign flip is involved.
+    // Minimum over edges; values stay in the searcher's perspective — no sign flip anywhere.
     min_node: bool,
-    // Adversarial beam only: game-frame head-mean of this node's own leaf evaluation, kept from
-    // the round that created it so a later expansion can order and cap its moves.
+    // Adversarial beam only: this node's own leaf evaluation, kept to order a later expansion.
     q_row: Vec<f64>,
 }
 
@@ -189,8 +185,7 @@ fn expand_round<G: Game>(
     s.opp_legal.clear();
     s.new_leaves.clear();
     let agent = s.agent;
-    // Full-width modes have no expansion budget; bound the realized tree instead so a deep,
-    // wide composition fails loudly rather than allocating without limit.
+    // Full-width modes have no expansion budget; the realized tree is the bound.
     assert!(
         s.arena.len() <= MAX_ENUMERATED_OUTCOMES,
         "search tree exceeds {} nodes; lower depth or set top_k",
@@ -413,9 +408,7 @@ fn evaluate<S, L>(
                 }
                 full
             }
-            Opponent::Uniform => Vec::new(),
-            // Adversarial opponents route no belief rows: their moves become edges, not weights.
-            Opponent::Adversarial { .. } => Vec::new(),
+            Opponent::Uniform | Opponent::Adversarial { .. } => Vec::new(),
         })
         .collect();
 
@@ -436,7 +429,7 @@ fn evaluate<S, L>(
         arena[li].bootstrap = boot;
         if let Opponent::Adversarial { move_cap } = cfg.opponent {
             if move_cap != usize::MAX {
-                // Retain the game-frame head-mean so a later expansion can order its beam.
+                // Game-frame head-mean, retained to order this node's later beamed expansion.
                 let mut q_row = vec![f64::NEG_INFINITY; a];
                 for &aid in &legal {
                     q_row[aid] = (0..k)
@@ -758,8 +751,7 @@ fn expand_node<G: Game>(
             (edges, true)
         }
         Actor::Agent(mover) => match cfg.opponent {
-            // Adversarial: one edge per opponent move so the backup can take a minimum of
-            // per-move expectations; a chance fan below a move still averages inside its edge.
+            // One edge per opponent move: min of per-move expectations, not a weighted sum.
             Opponent::Adversarial { move_cap } => {
                 let legal = beamed_legal(arena, game, &state, ni, mover, depth, move_cap, false);
                 let mut edges = Vec::with_capacity(legal.len().max(1));
@@ -842,10 +834,8 @@ fn expand_node<G: Game>(
     arena[ni].max_node = max_node;
 }
 
-/// The node's legal moves under the adversarial beam: capped at `move_cap` below the root,
-/// keeping the mover's best moves — descending in the searcher's leaf evaluation at the
-/// searcher's decisions, ascending at the opponent's. The root is never capped, and a node
-/// evaluated before `q_row` retention (or a first-round root) keeps its full width.
+/// Beam-capped legal moves: descending in the searcher's leaf evaluation at its own decisions,
+/// ascending at the opponent's. The root, and nodes without a retained `q_row`, keep full width.
 #[allow(clippy::too_many_arguments)]
 fn beamed_legal<G: Game>(
     arena: &[Node<G::State>],
@@ -1014,8 +1004,7 @@ fn collect_interior_targets<S, L>(
         return;
     }
     // Only searcher-choice nodes yield policy targets; opponent expectations are internal.
-    // A beam-capped node's edges cover a strict subset of its legal actions, so a dense target
-    // row would train the unsearched remainder toward zero — emit nothing from those nodes.
+    // Beamed nodes emit nothing: a dense row would train unsearched actions toward zero.
     if arena[idx].max_node
         && arena[idx].edges.as_ref().unwrap().len() == legal_of(&arena[idx].state).len()
     {

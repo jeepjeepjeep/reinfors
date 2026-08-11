@@ -2448,9 +2448,8 @@ fn check_information<G: Game>(label: &str, game: &G) -> PyResult<()> {
     Ok(())
 }
 
-// Minimax composes only two-player sequential zero-sum games. Width is deliberately not bounded
-// statically: the action vocabulary wildly overestimates realized legal branching on games like
-// chess, so the search bounds the realized tree instead and fails loudly past it.
+// No static width bound on purpose: the action vocabulary wildly overestimates realized legal
+// branching (chess: 4672 vs ~35), so the search bounds the realized tree instead.
 fn check_minimax_composition<G: Game>(game: &G) -> PyResult<()> {
     if game.num_agents() != 2 || !game_is_sequential(game) {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -4989,10 +4988,6 @@ impl PolicyHandle {
     }
 
     #[staticmethod]
-    // Classical depth-limited minimax/expectiminimax for two-player zero-sum sequential games:
-    // deterministic, full-width to `depth` plies (optionally `top_k`-beamed below the root),
-    // leaves scored by the callback's single-head Q row. A zero callback is the horizon-perfect
-    // terminal-reward baseline. Pairs with the TreeStrap learner — the TreeStrap(minimax) setting.
     #[pyo3(signature = (depth=4, top_k=None, chance=None))]
     #[pyo3(name = "Minimax")]
     fn minimax(
