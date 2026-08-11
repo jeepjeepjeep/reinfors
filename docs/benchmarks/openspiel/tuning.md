@@ -1,8 +1,9 @@
 # Operating-point tuning
 
 No head-to-head ran until each side's configuration was selected by measurement on the
-target hardware. This page records the selection experiments; the numbers populate as the
-final runs are re-executed at publication commit.
+target hardware. Selection cells were single 20-minute interior legs under the full round
+workload (August 2026, decision-grade rather than repeat-derived — the margins between
+candidates were far outside window noise).
 
 ## Workload
 
@@ -27,29 +28,47 @@ interior windows after 5-minute warmups). Selection is by completed-game states/
 
 OpenSpiel (actors × inference batch):
 
-| config | states/s | rows/s | rows/call | learn steps in window |
-|---|---|---|---|---|
-| 16 actors | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| 32 actors | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| 64 actors | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| 64 actors, batch 32 (decoupling probe) | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+| config | states/s | achieved batch |
+|---|---|---|
+| 16 actors | **146.3** | 16 (full fill) |
+| 32 actors | 111.6 | 32 |
+| 64 actors | 62.9 | ~64 |
+| 64 actors, batch 32 (decoupling probe) | 63.2 | 32 |
 
-reinfors (parallel games):
+Their states/s falls monotonically with actor count on this 4-core box: per-game progress
+decelerates faster than batching gains (per-game rates 9.2 / 6.4 / 3.5 across the column),
+and the decoupling probe shows the batch size is not the cause. The bracketing rules out
+both a8 (deceleration) and a24 (interpolation).
 
-| config | states/s | net rows/s | rows/call | learn steps in window |
-|---|---|---|---|---|
-| n_games 64 | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| n_games 128 | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+reinfors (parallel games, ungrouped — grouped collection was adopted later via the
+[lever grid](../internal/throughput-levers.md)):
 
-The grids test how actor or game count changes realized rows per call, per-game progress,
-and completed states/s. The [design differences](design-differences.md) explain why the two
-schedulers may make different trade-offs; the published tables determine whether they do.
+| config | states/s | rows/call |
+|---|---|---|
+| n_games 64 | **164.6** | ~56 |
+| n_games 128 | 158.8 | ~110 |
+
+Identical rows-per-state across the two cells (53.3) isolates the difference as the pure
+batch-128 kernel regression.
+
+The grids answered the mechanism question directly: at each side's optimum, OpenSpiel pays
+128.4 µs/row (full-fill batch-16 calls — its batching-vs-completion coupling forces small
+batches at its states/s optimum, with its single inference thread 89% saturated) against
+reinfors' 89.8 µs/row at the batch-64 sweet spot. The
+[design differences](design-differences.md) trace why the two schedulers land on different
+trade-offs.
 
 ## Selected operating points
 
 | | OpenSpiel | reinfors |
 |---|---|---|
-| topology | _TBD_ | _TBD_ |
-| inference batch | _TBD_ | _TBD_ |
-| cache capacity | own default | own measured optimum |
+| topology | 16 actors | 128 games × 2 groups |
+| inference batch | 16 | ~56-row calls (64-row groups) |
+| cache capacity | 262,144 (own default) | 262,144 (matched; hit rate is monotone in capacity) |
 | net | w256 d8 (identical) | w256 d8 (identical) |
+
+reinfors' selection proceeded in two steps: `n_games=64` won the ungrouped grid above,
+then grouped collection's [matched-rows comparison](../internal/throughput-levers.md)
+moved the operating point to `n_games=128, n_groups=2` (same ~56-row calls, tree work
+overlapped with inference). The seed-0 round ran both points; the seed-1 round and the
+published headline use the grouped one.
