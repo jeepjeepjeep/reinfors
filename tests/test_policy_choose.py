@@ -70,6 +70,69 @@ def test_choose_does_not_mutate_envs() -> None:
     assert [e.ticks for e in envs] == [1, 1, 1]
 
 
+def test_duplicate_envs_dedupe_to_one_root_row() -> None:
+    rows_per_call = []
+
+    def counting_infer(obs, n=None):
+        rows_per_call.append(obs.shape[0])
+        return _az_infer(obs)
+
+    twins = []
+    for _ in range(2):
+        env = rf.Env(rf.games.Connect4(), _R, seed=11)
+        env.step({0: 3})
+        twins.append(env)
+    actions = _az().choose(twins, counting_infer, gamma=1.0)
+    assert actions[0] == actions[1]
+    assert rows_per_call[0] == 1, f"duplicate roots must dedupe: {rows_per_call}"
+
+
+def test_gamma_must_be_a_unit_interval_discount() -> None:
+    envs = _envs(1)
+    for bad in (1.5, -0.1, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="gamma"):
+            _az().choose(envs, _az_infer, gamma=bad)
+
+
+def test_ply_counter_range_is_enforced() -> None:
+    with pytest.raises(ValueError, match="out of range"):
+        _az().choose(_envs(1), _az_infer, plies=[2**32 - 1], gamma=1.0)
+
+
+def test_mcts_choose_batches_and_returns_legal() -> None:
+    rows_per_call = []
+
+    def q_infer(obs, n=None):
+        rows_per_call.append(obs.shape[0])
+        return np.zeros((obs.shape[0], 1, _A), dtype=np.float32)
+
+    envs = _envs(4)
+    policy = rf.policies.Mcts(num_simulations=8)
+    actions = policy.choose(envs, q_infer, gamma=1.0)
+    for env, action in zip(envs, actions, strict=True):
+        assert action in env.legal_actions(env.active_agents()[0])
+    assert max(rows_per_call) >= 4
+
+
+def test_chess_choose_actions_are_legal() -> None:
+    # exercises the relative action-view encoder end to end
+    chess_a = rf.games.Chess().action_space().n
+
+    def az_infer(obs, n=None):
+        m = obs.shape[0]
+        return np.zeros((m, chess_a), dtype=np.float32), np.zeros(m, dtype=np.float32)
+
+    envs = []
+    for i in range(3):
+        env = rf.Env(rf.games.Chess(), _R, seed=i)
+        legal = env.legal_actions(env.active_agents()[0])
+        env.step({env.active_agents()[0]: legal[i]})
+        envs.append(env)
+    actions = _az().choose(envs, az_infer, gamma=1.0)
+    for env, action in zip(envs, actions, strict=True):
+        assert action in env.legal_actions(env.active_agents()[0])
+
+
 def test_choose_batches_across_envs() -> None:
     rows_per_call = []
 

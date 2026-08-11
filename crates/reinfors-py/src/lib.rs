@@ -3468,6 +3468,7 @@ fn run_choose<G, P>(
     requests: Vec<(G::State, usize)>,
     seed: u64,
     mut states: Vec<P::PolicyState>,
+    cache_rows: usize,
     infer: &mut dyn FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
 ) -> PyResult<Vec<usize>>
 where
@@ -3476,7 +3477,14 @@ where
     P: Policy,
 {
     let mut infer_fn = |p: usize, o: Vec<f32>, n: usize| infer(p, o, n);
-    let mut evaluator = Evaluator::new(&mut infer_fn, InferMode::Shared, None);
+    // Call-scoped: dedupes and transposition-serves within this call, then drops.
+    let generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let mut cache = InferCache::new(cache_rows.max(2), generation);
+    let mut evaluator = Evaluator::new(
+        &mut infer_fn,
+        InferMode::Shared,
+        Some(std::slice::from_mut(&mut cache)),
+    );
     let evals = policy.evaluate(game, enc, reward, requests, seed, false, &mut evaluator);
     let mut out = Vec::with_capacity(evals.len());
     for (i, eval) in evals.iter().enumerate() {
@@ -3587,7 +3595,10 @@ where
                 let states: Vec<usize> = (0..impls.len())
                     .map(|i| policy.begin_episode(&mut choose_env_rng(seed, i, CHOOSE_HEAD_SALT)))
                     .collect();
-                run_choose(&policy, game, enc, reward, requests, seed, states, infer)
+                let cache_rows = requests.len() * (expansion_budget + 2);
+                run_choose(
+                    &policy, game, enc, reward, requests, seed, states, cache_rows, infer,
+                )
             }
             PolicySpec::EpsilonGreedyQ { n_heads, epsilon } => {
                 let policy = qgreedy_from_spec(n_heads, epsilon)?;
@@ -3595,7 +3606,10 @@ where
                 let states: Vec<usize> = (0..impls.len())
                     .map(|i| policy.begin_episode(&mut choose_env_rng(seed, i, CHOOSE_HEAD_SALT)))
                     .collect();
-                run_choose(&policy, game, enc, reward, requests, seed, states, infer)
+                let cache_rows = requests.len();
+                run_choose(
+                    &policy, game, enc, reward, requests, seed, states, cache_rows, infer,
+                )
             }
             PolicySpec::Mcts {
                 num_simulations,
@@ -3627,7 +3641,10 @@ where
                             .map_err(pyo3::exceptions::PyValueError::new_err)
                     })
                     .collect::<PyResult<Vec<u32>>>()?;
-                run_choose(&policy, game, enc, reward, requests, seed, states, infer)
+                let cache_rows = requests.len() * (num_simulations + 2);
+                run_choose(
+                    &policy, game, enc, reward, requests, seed, states, cache_rows, infer,
+                )
             }
             PolicySpec::AlphaZero {
                 num_simulations,
@@ -3665,7 +3682,10 @@ where
                             .map_err(pyo3::exceptions::PyValueError::new_err)
                     })
                     .collect::<PyResult<Vec<u32>>>()?;
-                run_choose(&policy, game, enc, reward, requests, seed, states, infer)
+                let cache_rows = requests.len() * (num_simulations + 2);
+                run_choose(
+                    &policy, game, enc, reward, requests, seed, states, cache_rows, infer,
+                )
             }
         }
     }
@@ -5014,11 +5034,7 @@ impl PolicyHandle {
                 "choose takes a single shared infer callable",
             ));
         }
-        if !(gamma.is_finite() && gamma >= 0.0) {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "gamma must be finite and >= 0",
-            ));
-        }
+        check_unit("gamma", gamma)?;
         let borrowed: Vec<PyRef<'_, PyEnv>> = envs.iter().map(|e| e.borrow(py)).collect();
         let fingerprint = borrowed[0].fingerprint.clone();
         for env in &borrowed {

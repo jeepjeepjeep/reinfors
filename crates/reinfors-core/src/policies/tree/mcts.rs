@@ -1713,7 +1713,11 @@ impl Policy for Mcts {
     }
 
     fn policy_state_from_u64(&self, v: u64) -> Result<u32, String> {
-        u32::try_from(v).map_err(|_| format!("acting-ply counter {v} out of range"))
+        // select() advances the counter, so the maximum value must stay unreachable.
+        match u32::try_from(v) {
+            Ok(x) if x < u32::MAX => Ok(x),
+            _ => Err(format!("acting-ply counter {v} out of range")),
+        }
     }
 
     fn begin_episode(&self, _rng: &mut dyn Rng) -> u32 {
