@@ -1284,7 +1284,7 @@ where
 /// A pooled search whose round loop is owned by the caller: `stage_round` drives every tree
 /// until it stages rows (or finishes), the caller commits the batch however it likes, and
 /// `apply_rows` distributes the results. Schedulers can interleave rounds of several pools.
-pub struct PooledSearch<'c, G: Game> {
+struct PooledSearch<'c, G: Game> {
     game: &'c G,
     enc: &'c dyn StateEncoder<State = G::State>,
     reward: &'c dyn Reward<Event = G::Event>,
