@@ -72,6 +72,8 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     episode_returns: Vec<Vec<f64>>,
     sequential: bool,
     n_groups: usize,
+    group_rngs: Vec<SplitMix64>,
+    sharded_caches: Option<Vec<crate::rollout::infer_cache::ShardedInferCache>>,
     buffer_rng: SplitMix64,
     seeded: Vec<bool>,
     policy_states: Vec<P::PolicyState>,
@@ -137,6 +139,16 @@ where
             .map(|_| (0..num_agents).map(|_| Vec::new()).collect())
             .collect();
         let search_rng = SplitMix64::new(params.seed ^ 0xD1B5_4A32_D192_ED03);
+        // Persistent per-group streams: results must not depend on collection chunking.
+        let group_rngs = (0..params.n_groups)
+            .map(|gi| {
+                SplitMix64::new(
+                    params.seed
+                        ^ 0x7F4A_7C15_9E37_79B9_u64.wrapping_mul(gi as u64 + 1)
+                        ^ 0xA076_1D64_78BD_642F,
+                )
+            })
+            .collect();
         let buffer_rng = SplitMix64::new(params.seed ^ 0x2545_F491_4F6C_DD1D);
         let seeded = vec![false; params.n_games];
         Engine {
@@ -153,6 +165,8 @@ where
             episode_returns: vec![vec![0.0; num_agents]; params.n_games],
             sequential,
             n_groups: params.n_groups,
+            group_rngs,
+            sharded_caches: None,
             buffer_rng,
             seeded,
             policy_states,
@@ -180,6 +194,21 @@ where
             mask[p] = true;
         }
         self.learn_mask = mask;
+        self
+    }
+
+    /// Install shared sharded caches for grouped collection (slot layout as
+    /// [`Self::with_infer_caches`]: shared slot then one per player).
+    pub fn with_sharded_infer_caches(
+        mut self,
+        caches: Vec<crate::rollout::infer_cache::ShardedInferCache>,
+    ) -> Self {
+        assert_eq!(
+            caches.len(),
+            self.game.num_agents() + 1,
+            "one cache per slot: shared + one per player"
+        );
+        self.sharded_caches = Some(caches);
         self
     }
 
@@ -566,54 +595,17 @@ where
     where
         F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
-        let mut tails: HashMap<(usize, usize), Vec<f64>> = HashMap::new();
-        if !self.learner.uses_episode_tail() {
-            return tails;
-        }
-        let a = self.game.action_count();
-        let num_agents = self.game.num_agents();
-        // Value-only trajectories need a tail for every consumed perspective, not only the mover.
-        let all_perspectives = self
-            .policy
-            .evaluates_all_perspectives(self.sequential, num_agents)
-            && self.learner.value_only_evaluation(a).is_some();
-        let mut obs_flat: Vec<f32> = Vec::new();
-        let mut meta: Vec<(usize, usize)> = Vec::new();
-        for &(gi, terminal) in finished {
-            if terminal {
-                continue;
-            }
-            for si in 0..num_agents {
-                if (all_perspectives || self.episodes[gi].agent_active(&self.game, si))
-                    && !self.traj[gi][si].is_empty()
-                {
-                    obs_flat.extend(self.episodes[gi].observe(&*self.encoder, si));
-                    meta.push((gi, si));
-                }
-            }
-        }
-        if !meta.is_empty() {
-            let players: Vec<usize> = meta.iter().map(|&(_, si)| si).collect();
-            let q = evaluator.forward(&players, obs_flat, meta.len());
-            let stride = q.len() / meta.len();
-            for (i, &(gi, si)) in meta.iter().enumerate() {
-                let row = &q[i * stride..(i + 1) * stride];
-                let state = &self.episodes[gi].state;
-                // Sequential non-mover rows still bootstrap over the mover's available actions;
-                // using `si` here would turn a valid sparse-action tail into an empty one.
-                let legal = match self.game.actor(state) {
-                    Actor::Agent(mover) => self.game.legal_actions(state, mover),
-                    Actor::Simultaneous => self.game.legal_actions(state, si),
-                    Actor::Chance => unreachable!("chance actors are not searched"),
-                };
-                tails.insert(
-                    (gi, si),
-                    self.learner
-                        .tail_from_row(row, a, &legal, &*self.encoder, si),
-                );
-            }
-        }
-        tails
+        tail_values_parts(
+            finished,
+            &self.game,
+            &self.policy,
+            &self.learner,
+            &*self.encoder,
+            self.sequential,
+            &mut self.episodes,
+            &self.traj,
+            evaluator,
+        )
     }
 }
 
@@ -627,13 +619,17 @@ where
         codec: &dyn StateCodec<State = G::State>,
     ) -> Result<Vec<u8>, String> {
         use crate::codec::bytes::*;
-        let mut out = vec![2u8];
+        let mut out = vec![3u8];
         let n_games = self.episodes.len();
         let num_agents = self.game.num_agents();
         put_u32(&mut out, n_games as u32);
         put_u32(&mut out, num_agents as u32);
         put_u64(&mut out, self.search_rng.state());
         put_u64(&mut out, self.buffer_rng.state());
+        put_u32(&mut out, self.group_rngs.len() as u32);
+        for rng in &self.group_rngs {
+            put_u64(&mut out, rng.state());
+        }
         for gi in 0..n_games {
             put_blob(&mut out, &codec.encode(&self.episodes[gi].state));
             put_u64(&mut out, self.episodes[gi].rng.state());
@@ -672,7 +668,8 @@ where
     ) -> Result<(), String> {
         use crate::codec::bytes::*;
         let mut r = Reader::new(bytes);
-        if r.u8()? != 2 {
+        let version = r.u8()?;
+        if !matches!(version, 2 | 3) {
             return Err("unsupported engine snapshot layout version".into());
         }
         let n_games = r.u32()? as usize;
@@ -684,6 +681,19 @@ where
         }
         let search_rng = r.u64()?;
         let buffer_rng = r.u64()?;
+        let mut group_rng_states: Vec<u64> = Vec::new();
+        if version >= 3 {
+            let n = r.u32()? as usize;
+            if n != self.group_rngs.len() {
+                return Err(format!(
+                    "snapshot has {n} group rng streams; the engine has {}",
+                    self.group_rngs.len()
+                ));
+            }
+            for _ in 0..n {
+                group_rng_states.push(r.u64()?);
+            }
+        }
         let (c, h, w) = self.encoder.obs_shape();
         let obs_dim = c * h * w;
         let action_count = self.game.action_count();
@@ -796,6 +806,10 @@ where
         })?;
         self.search_rng = SplitMix64::from_state(search_rng);
         self.buffer_rng = SplitMix64::from_state(buffer_rng);
+        // Version-2 snapshots predate group streams; construction defaults stay in place.
+        for (rng, state) in self.group_rngs.iter_mut().zip(&group_rng_states) {
+            *rng = SplitMix64::from_state(*state);
+        }
         for (gi, slice) in slices.into_iter().enumerate() {
             self.episodes[gi].state = slice.state;
             self.episodes[gi].rng = SplitMix64::from_state(slice.rng);
@@ -1007,4 +1021,68 @@ fn flush_finished_parts<G, P, L>(
         ticks[gi] = 0;
         policy_states[gi] = policy.begin_episode(&mut episodes[gi].rng);
     }
+}
+
+/// Truncation-tail bootstrapping, field-split like [`process_tick`].
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::needless_range_loop)]
+fn tail_values_parts<G, P, L, F>(
+    finished: &[(usize, bool)],
+    game: &G,
+    policy: &P,
+    learner: &L,
+    encoder: &dyn StateEncoder<State = G::State>,
+    sequential: bool,
+    episodes: &mut [Episode<G>],
+    traj: &[Vec<Vec<Step<P::Evaluation>>>],
+    evaluator: &mut Evaluator<'_, F>,
+) -> HashMap<(usize, usize), Vec<f64>>
+where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
+    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+{
+    let mut tails: HashMap<(usize, usize), Vec<f64>> = HashMap::new();
+    if !learner.uses_episode_tail() {
+        return tails;
+    }
+    let a = game.action_count();
+    let num_agents = game.num_agents();
+    // Value-only trajectories need a tail for every consumed perspective, not only the mover.
+    let all_perspectives = policy.evaluates_all_perspectives(sequential, num_agents)
+        && learner.value_only_evaluation(a).is_some();
+    let mut obs_flat: Vec<f32> = Vec::new();
+    let mut meta: Vec<(usize, usize)> = Vec::new();
+    for &(gi, terminal) in finished {
+        if terminal {
+            continue;
+        }
+        for si in 0..num_agents {
+            if (all_perspectives || episodes[gi].agent_active(game, si)) && !traj[gi][si].is_empty()
+            {
+                obs_flat.extend(episodes[gi].observe(encoder, si));
+                meta.push((gi, si));
+            }
+        }
+    }
+    if !meta.is_empty() {
+        let players: Vec<usize> = meta.iter().map(|&(_, si)| si).collect();
+        let q = evaluator.forward(&players, obs_flat, meta.len());
+        let stride = q.len() / meta.len();
+        for (i, &(gi, si)) in meta.iter().enumerate() {
+            let row = &q[i * stride..(i + 1) * stride];
+            let state = &episodes[gi].state;
+            // Sequential non-mover rows still bootstrap over the mover's available actions;
+            // using `si` here would turn a valid sparse-action tail into an empty one.
+            let legal = match game.actor(state) {
+                Actor::Agent(mover) => game.legal_actions(state, mover),
+                Actor::Simultaneous => game.legal_actions(state, si),
+                Actor::Chance => unreachable!("chance actors are not searched"),
+            };
+            tails.insert((gi, si), learner.tail_from_row(row, a, &legal, encoder, si));
+        }
+    }
+    tails
 }
