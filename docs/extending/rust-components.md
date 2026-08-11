@@ -90,7 +90,8 @@ impl StateEncoder for MyEncoder {
 
 `encode` returns a flat channel-major buffer matching `(C, H, W)`. Override `ActionView` when an
 agent-relative observation also changes how actions map to the network head. Test that mapping with
-`reinfors_core::check_action_view`.
+`reinfors_core::check_action_view`. For a complete alternative-view example, follow
+[Add an encoder](encoders.md).
 
 Implement `Reward` from `crates/reinfors-core/src/reward.rs` separately from the rules:
 

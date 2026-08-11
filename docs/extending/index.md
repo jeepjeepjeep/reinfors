@@ -12,7 +12,8 @@ familiarity and a working native build; they are not an introduction to Rust or 
 
 ## Choose the smallest extension
 
-- A different observation or action-head view of an existing game is usually an `Encoder`.
+- A different observation or action-head view of an existing game is usually an
+  [`Encoder`](encoders.md).
 - Different scalar objectives over existing events are usually a `Reward`.
 - A new action-selection/search procedure is a `Policy`.
 - A new record schema or trajectory target is a `Learner`.
@@ -20,7 +21,8 @@ familiarity and a working native build; they are not an introduction to Rust or 
   an architectural category rather than a shared Rust trait or Python registry.
 - New rules, state, legal actions, actors, or chance distributions require a `Game`.
 
-For a new game, follow [Add a game](rust-components.md), then
+For an alternative view of an existing game, follow [Add an encoder](encoders.md). For a new game,
+follow [Add a game](rust-components.md), then
 [register its Python binding](python-bindings.md#register-a-built-in-game). Policy, learner, encoder,
 reward, chance-mode, and noise authors should continue through the
 [native component contracts](component-contracts.md), then the

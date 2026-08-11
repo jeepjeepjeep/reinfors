@@ -26,6 +26,8 @@ Use the [worked game walkthrough](rust-components.md) for the complete implement
 `StateEncoder` maps `(state, agent)` to a fixed-shape `float32` observation. Its `ActionView`
 supertrait maps canonical game-action ids into the network-head frame. Perspective-relative
 implementations may transform both; test the action mapping with `reinfors_core::check_action_view`.
+The [worked encoder walkthrough](encoders.md) adds an alternative observation and non-identity
+action view to an existing game.
 
 ## `Reward`
 
@@ -67,6 +69,7 @@ discriminants, and safety preconditions, but does not replay a game to prove rea
 ## Next steps
 
 - Add a game with the [end-to-end walkthrough](rust-components.md).
+- Add an alternative view with the [encoder walkthrough](encoders.md).
 - Expose policies, learners, encoders, rewards, chance modes, and noise through the
   [handle-based binding path](python-bindings.md#other-handle-based-components).
 - Run the repository gates from [development setup](../development/setup.md).
