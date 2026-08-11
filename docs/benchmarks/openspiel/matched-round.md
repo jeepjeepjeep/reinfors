@@ -82,4 +82,6 @@ training draws is evidenced by the seed-1 replication, not by the interval.
 - **single run per (seed, configuration)** — the two-seed replicate addresses
   training-draw variance for the headline claims; per-cell precision is bounded by one
   run each;
-- one game (chess) at one net size.
+- one game (chess) at one net size;
+- the OpenSpiel actor grid stops at 16 — a8 is argued against by extrapolation, not
+  measured ([tuning](tuning.md)).

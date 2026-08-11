@@ -1,8 +1,8 @@
 # reinfors vs. OpenSpiel
 
 A controlled comparison against OpenSpiel's C++ libtorch AlphaZero on a fixed cloud GPU
-instance: each stack trains chess from scratch for the same wall-clock at its own measured
-best configuration, and the resulting models play each other.
+instance: each stack trains chess from scratch for the same wall-clock at its best
+measured configuration, and the resulting models play each other.
 
 ## What this comparison is — and is not
 
@@ -17,7 +17,7 @@ remains comparable while keeping the pluggable game/encoder/search/learner seams
 reinfors' design goal — the published tables decide it. Where the numbers differ, the
 differences trace to identifiable structural design choices on each side, not to one
 implementation being "better engineered" — see [design differences](design-differences.md).
-Both stacks were measured at their own best configuration, on the same hardware, under the
+Both stacks were measured at their best measured configuration, on the same hardware, under the
 same protocol, with every mismatch we found treated as a bug in the benchmark rather than
 a result.
 
@@ -48,7 +48,7 @@ covered in [setup](../setup.md).
 ## Contents
 
 - [Comparison protocol](protocol.md) — the fairness rules layered on the shared
-  methodology: matched knobs, each side its own best configuration, cache semantics,
+  methodology: matched knobs, each side its best measured configuration, cache semantics,
   deadline artifacts, paired scoring.
 - [Operating-point tuning](tuning.md) — how each side's configuration was selected
   empirically, under the full round workload, before any head-to-head.

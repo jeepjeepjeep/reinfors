@@ -39,8 +39,12 @@ OpenSpiel (actors × inference batch):
 
 Their states/s falls monotonically with actor count on this 4-core box: per-game progress
 decelerates faster than batching gains (per-game rates 9.2 / 6.4 / 3.5 across the column),
-and the decoupling probe shows the batch size is not the cause. The bracketing rules out
-both a8 (deceleration) and a24 (interpolation).
+and the decoupling probe shows the batch size is not the cause. 16 actors is the best
+**measured** configuration; a24 is excluded by interpolation between measured neighbors.
+Eight actors was **not measured** — extrapolating the per-game trend argues against it
+(each halving of the actor count improved the per-game rate by a shrinking factor, ×1.83
+then ×1.44, and a8 would need ×2.0 just to tie a16), but that is an extrapolation, and
+the a8 cell remains an open measurement.
 
 reinfors (parallel games, ungrouped — grouped collection was adopted later via the
 [lever grid](../internal/throughput-levers.md)):
