@@ -244,16 +244,53 @@ def test_rejects_bad_scheduler_params() -> None:
         rf.Arena(rf.games.Snake(), rf.Reward(food=1.0), [seat, seat])
 
 
-def test_on_action_failure_surfaces() -> None:
+def test_on_action_failure_surfaces_and_still_closes() -> None:
+    bots = []
+
     class BadObserver:
+        def __init__(self):
+            self.closed = False
+            bots.append(self)
+
         def act(self, view):
             return view.legal_actions[0]
 
         def on_action(self, action):
             raise RuntimeError("pipe broke")
 
-    with pytest.raises(RuntimeError, match="on_action failed"):
+        def close(self):
+            self.closed = True
+
+    with pytest.raises(RuntimeError, match=r"on_action fail|failed finishing"):
         _arena([(_az(), _flat_infer, 1.0), rf.arena.External(BadObserver)]).play(2)
+    assert bots and all(b.closed for b in bots), "close must be attempted on failure"
+
+
+def test_timeout_must_be_finite_positive() -> None:
+    for bad in (0.0, -1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="timeout"):
+            rf.arena.External(FirstLegalBot, timeout=bad)
+
+
+def test_slow_close_does_not_stall_or_leak_lanes() -> None:
+    closes = []
+
+    class SlowishCloser(FirstLegalBot):
+        def close(self):
+            time.sleep(0.2)
+            closes.append(monotonic_stamp())
+            super().close()
+
+    def monotonic_stamp():
+        return time.monotonic()
+
+    FirstLegalBot.reset_counters()
+    result = _arena(
+        [(_az(), _flat_infer, 1.0), rf.arena.External(SlowishCloser, workers=1, timeout=10)],
+        n_slots=4,
+    ).play(4)
+    assert len(result.games) == 4
+    assert len(closes) == 4  # every agent closed, lanes reused serially
 
 
 def test_hung_close_times_out() -> None:

@@ -64,8 +64,10 @@ class External:
     feed these to stdin-driven engines) and ``close()``. At most ``workers`` agents are
     live at once; each worker lane runs its game's calls serially, so pipe I/O never
     stalls the Arena loop and per-game call order is preserved. ``timeout`` (seconds)
-    bounds every agent call — ``act``, pending ``on_action`` batches at game end, and
-    ``close`` — so a hung agent fails the run instead of hanging it.
+    is a total per-turn budget measured from dispatch — it covers queued ``on_action``
+    notifications ahead of the ``act`` call as well as the call itself — and equally
+    bounds end-of-game finalization (pending notifications plus ``close``), so a hung
+    agent fails the run instead of hanging it.
     """
 
     def __init__(
@@ -76,8 +78,8 @@ class External:
     ) -> None:
         if workers < 1:
             raise ValueError("workers must be >= 1")
-        if timeout is not None and timeout <= 0:
-            raise ValueError("timeout must be positive")
+        if timeout is not None and not (isfinite(timeout) and timeout > 0):
+            raise ValueError("timeout must be finite and positive")
         self.factory = factory
         self.workers = workers
         self.timeout = timeout
@@ -169,6 +171,16 @@ class _Game:
     notifications: list[Future[Any]] = field(default_factory=list)
 
 
+@dataclass
+class _Finalizing:
+    """A finished game whose lane is still working off notifications and close()."""
+
+    game: _Game
+    ci: int
+    futures: list[Future[Any]]
+    deadline: float | None
+
+
 class Arena:
     """See the module docstring. ``contestants`` entries are either
     ``(policy, infer, gamma)`` — a searched seat, with gamma the discount the model was
@@ -217,24 +229,32 @@ class Arena:
             ci: [_Lane() for _ in range(c.workers)] for ci, c in enumerate(self._contestants) if isinstance(c, External)
         }
         active: list[_Game] = []
+        finalizing: list[_Finalizing] = []
         try:
-            return self._play(n_games, lanes, active)
+            return self._play(n_games, lanes, active, finalizing)
         finally:
-            self._shutdown(active)
+            self._shutdown(active, finalizing)
             for lane_pool in lanes.values():
                 for lane in lane_pool:
                     lane.stop()
 
     # scheduling ---------------------------------------------------------------
 
-    def _play(self, n_games: int, lanes: dict[int, list[_Lane]], active: list[_Game]) -> ArenaResult:
+    def _play(
+        self,
+        n_games: int,
+        lanes: dict[int, list[_Lane]],
+        active: list[_Game],
+        finalizing: list[_Finalizing],
+    ) -> ArenaResult:
         openings: dict[int, tuple[Any, list[int]]] = {}
         free_lanes = {ci: list(pool) for ci, pool in lanes.items()}
         choose_calls = dict.fromkeys(range(len(self._contestants)), 0)
         next_game = 0
         finished: list[GameResult] = []
 
-        while len(finished) < n_games:
+        while len(finished) < n_games or finalizing:
+            self._poll_finalizing(finalizing, free_lanes)
             while next_game < n_games and len(active) < self._n_slots:
                 game = self._start_game(next_game, openings, free_lanes)
                 if game is None:
@@ -242,21 +262,21 @@ class Arena:
                 active.append(game)
                 next_game += 1
 
-            self._drain_external(active, finished, free_lanes)
+            self._drain_external(active, finished, free_lanes, finalizing)
             # externals first: their engines compute while the GPU searches below
             self._dispatch_external(active)
             ready = self._searched_ready(active)
             if ready and self._batch_delay > 0 and self._external_pending(active):
                 sleep(self._batch_delay)
-                self._drain_external(active, finished, free_lanes)
+                self._drain_external(active, finished, free_lanes, finalizing)
                 self._dispatch_external(active)
                 ready = self._searched_ready(active)
             if ready:
                 for ci, games in sorted(ready.items()):
                     choose_calls[ci] += 1
-                    self._choose_and_step(ci, choose_calls[ci], games, active, finished, free_lanes)
+                    self._choose_and_step(ci, choose_calls[ci], games, active, finished, finalizing)
                 continue
-            self._await_external(active)
+            self._await_external(active, finalizing)
 
         finished.sort(key=lambda g: g.game_id)
         return ArenaResult(games=finished)
@@ -331,13 +351,13 @@ class Arena:
         games: list[_Game],
         active: list[_Game],
         finished: list[GameResult],
-        free_lanes: dict[int, list[_Lane]],
+        finalizing: list[_Finalizing],
     ) -> None:
         policy, infer, gamma = self._contestants[ci]
         seed = _mix64(self._seed, ci, 3, call_no)
         actions = policy.choose([g.env for g in games], infer, seed=seed, gamma=gamma)
         for game, action in zip(games, actions, strict=True):
-            self._step(game, action, active, finished, free_lanes)
+            self._step(game, action, active, finished, finalizing)
 
     def _dispatch_external(self, active: list[_Game]) -> None:
         for game in active:
@@ -360,8 +380,10 @@ class Arena:
             game.pending = game.lane.submit(partial(bot.act, view))
             game.pending_since = monotonic()
 
-    def _await_external(self, active: list[_Game]) -> None:
+    def _await_external(self, active: list[_Game], finalizing: list[_Finalizing]) -> None:
         pending = [g.pending for g in active if g.pending is not None]
+        for entry in finalizing:
+            pending.extend(f for f in entry.futures if not f.done())
         if not pending:
             return
         timeouts = [c.timeout for c in self._contestants if isinstance(c, External) and c.timeout]
@@ -396,6 +418,7 @@ class Arena:
         active: list[_Game],
         finished: list[GameResult],
         free_lanes: dict[int, list[_Lane]],
+        finalizing: list[_Finalizing],
     ) -> None:
         for game in list(active):
             self._check_notifications(game)
@@ -409,7 +432,7 @@ class Arena:
             agent_seat = game.env.active_agents()[0]
             if action not in game.env.legal_actions(agent_seat):
                 raise RuntimeError(f"external contestant chose illegal action {action} in game {game.game_id}")
-            self._step(game, action, active, finished, free_lanes)
+            self._step(game, action, active, finished, finalizing)
         self._check_timeouts(active)
 
     def _step(
@@ -418,7 +441,7 @@ class Arena:
         action: int,
         active: list[_Game],
         finished: list[GameResult],
-        free_lanes: dict[int, list[_Lane]],
+        finalizing: list[_Finalizing],
     ) -> None:
         agent_seat = game.env.active_agents()[0]
         game.env.step({agent_seat: action})
@@ -431,14 +454,14 @@ class Arena:
             assert game.lane is not None
             game.notifications.append(game.lane.submit(partial(game.agent.on_action, action)))
         if game.env.done():
-            self._finish(game, active, finished, free_lanes)
+            self._finish(game, active, finished, finalizing)
 
     def _finish(
         self,
         game: _Game,
         active: list[_Game],
         finished: list[GameResult],
-        free_lanes: dict[int, list[_Lane]],
+        finalizing: list[_Finalizing],
     ) -> None:
         active.remove(game)
         payoffs_by_contestant = [0.0, 0.0]
@@ -456,25 +479,44 @@ class Arena:
         )
         if game.agent is None:
             return
+        # Nonblocking handoff: close is queued NOW (the lane runs it after the pending
+        # notifications, even if one of them fails), and the scheduler reclaims the lane
+        # once the lane works the queue off — completions never stall GPU batches.
         ci = self._external_contestant(game)
         timeout = self._contestants[ci].timeout
-        bot, lane = game.agent, game.lane
-        assert lane is not None
-        try:
-            for future in game.notifications:
-                future.result(timeout=timeout)
-            if hasattr(bot, "close"):
-                lane.submit(bot.close).result(timeout=timeout)
-        except TimeoutError as e:
-            raise TimeoutError(
-                f"external contestant {ci} exceeded its {timeout}s timeout finishing game {game.game_id}"
-            ) from e
-        except Exception as e:
-            raise RuntimeError(f"external contestant {ci} failed finishing game {game.game_id}: {e}") from e
+        futures = list(game.notifications)
+        if hasattr(game.agent, "close"):
+            assert game.lane is not None
+            futures.append(game.lane.submit(game.agent.close))
         game.notifications = []
-        game.agent = None
-        game.lane = None
-        free_lanes[ci].append(lane)
+        finalizing.append(
+            _Finalizing(
+                game=game,
+                ci=ci,
+                futures=futures,
+                deadline=None if timeout is None else monotonic() + timeout,
+            )
+        )
+
+    def _poll_finalizing(self, finalizing: list[_Finalizing], free_lanes: dict[int, list[_Lane]]) -> None:
+        for entry in list(finalizing):
+            for future in entry.futures:
+                if future.done() and future.exception() is not None:
+                    error = future.exception()
+                    raise RuntimeError(
+                        f"external contestant {entry.ci} failed finishing game {entry.game.game_id}: {error}"
+                    ) from error
+            if all(f.done() for f in entry.futures):
+                lane = entry.game.lane
+                assert lane is not None
+                entry.game.agent = None
+                entry.game.lane = None
+                free_lanes[entry.ci].append(lane)
+                finalizing.remove(entry)
+            elif entry.deadline is not None and monotonic() > entry.deadline:
+                raise TimeoutError(
+                    f"external contestant {entry.ci} exceeded its timeout finishing game {entry.game.game_id}"
+                )
 
     def _external_contestant(self, game: _Game) -> int:
         for ci, c in enumerate(self._contestants):
@@ -482,7 +524,7 @@ class Arena:
                 return ci
         raise AssertionError("external bookkeeping on a game with no external contestant")
 
-    def _shutdown(self, active: list[_Game]) -> None:
+    def _shutdown(self, active: list[_Game], finalizing: list[_Finalizing]) -> None:
         """Best-effort agent cleanup on abort: serialized through each lane, bounded,
         and silent — the primary error is already propagating."""
         closing = []
@@ -492,5 +534,10 @@ class Arena:
                     closing.append(game.lane.submit(game.agent.close))
                 game.agent = None
                 game.lane = None
+        for entry in finalizing:
+            # close is already queued on the lane; just give it the grace window
+            closing.extend(f for f in entry.futures if not f.done())
+            entry.game.agent = None
+            entry.game.lane = None
         if closing:
             wait(closing, timeout=_ABORT_GRACE)
