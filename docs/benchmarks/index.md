@@ -24,6 +24,7 @@ Each family carries its own reproduction guide:
 [internal](internal/reproducing.md) (this repository) and
 [comparison](openspiel/reproducing.md) (the companion benchmark repository).
 
-Numeric results are being populated as the final long-form runs complete; tables marked
-_TBD_ are structural placeholders whose protocol is already frozen. Every published number
-links to the commit, resolved configuration, command line, and raw logs that produced it.
+Every table states its own provenance inline — hardware, measurement window, and run
+type (repeat-derived spread or explicit single-run label). The commands that produce each
+family's numbers are in the reproduction guides; raw learner telemetry for the published
+runs is archived in the benchmark workspace.
