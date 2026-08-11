@@ -5597,7 +5597,11 @@ fn core_build_profile() -> &'static str {
 fn build_info(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("git_sha", env!("REINFORS_GIT_SHA"))?;
-    d.set_item("git_dirty", env!("REINFORS_GIT_DIRTY") == "1")?;
+    match env!("REINFORS_GIT_DIRTY") {
+        "true" => d.set_item("git_dirty", true)?,
+        "false" => d.set_item("git_dirty", false)?,
+        _ => d.set_item("git_dirty", "unknown")?,
+    }
     let tag = env!("REINFORS_GIT_TAG");
     d.set_item("git_tag", if tag.is_empty() { None } else { Some(tag) })?;
     d.set_item("profile", core_build_profile())?;

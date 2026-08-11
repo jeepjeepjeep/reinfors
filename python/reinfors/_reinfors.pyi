@@ -16,11 +16,14 @@ def core_version() -> str: ...
 # cozy-chess's internal king-takes-rook form). ValueError on bad FEN / illegal move.
 def chess_uci_action(uci: str, fen: str) -> int: ...
 def chess_action_uci(action: int, fen: str) -> str: ...
+
+# "debug" | "release"; perf numbers are only valid on "release".
 def core_build_profile() -> str: ...
 
-# Source identity baked at compile time: git_sha ("unknown" without a checkout),
-# git_dirty, git_tag (None unless HEAD is exactly a tag), profile.
-def build_info() -> dict[str, Any]: ...  # "debug" | "release"; perf numbers are only valid on "release"
+# Source identity baked at compile time, anchored to the reinfors repository root:
+# git_sha ("unknown" without a checkout), git_dirty (True | False | "unknown"),
+# git_tag (None unless HEAD is exactly a tag), profile.
+def build_info() -> dict[str, Any]: ...
 
 class EngineSnapshot:
     # Quiescent engine capture (episodes, RNGs, policy state, partial trajectories, start

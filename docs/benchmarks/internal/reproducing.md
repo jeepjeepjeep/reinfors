@@ -1,7 +1,7 @@
 # Reproducing the internal benchmarks
 
-The internal family makes claims about reinfors against itself, so its reproduction
-surface lives in this repository.
+The internal family makes claims about reinfors against itself; its harnesses live in
+the companion benchmark repository so one checkout carries every measurement.
 
 ## Harness location
 
