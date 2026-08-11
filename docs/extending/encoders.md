@@ -84,7 +84,9 @@ impl StateEncoder for MirroredConnect4Planes {
 
 `encode` returns a flat channel-major buffer matching `(C, H, W)`. `head_index` maps a canonical
 game action into the network head; `game_action` is its inverse. Both action maps must be pure
-functions of `(action, agent)`, never of the current state.
+functions of `(action, agent)`, never of the current state. `StateEncoder` defaults to an unbounded
+observation space derived from `obs_shape`; override `observation_space` when the planes have known
+bounds so adapters and other bound-reading consumers can normalize them correctly.
 
 ## 2. Test the representation contract
 
