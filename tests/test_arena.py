@@ -56,8 +56,11 @@ class FirstLegalBot:
             cls.peak = max(cls.peak, cls.live)
         self.seen: list[int] = []
         self.closed = False
+        self.first_act_after = -1
 
     def act(self, view) -> int:
+        if self.first_act_after < 0:
+            self.first_act_after = len(self.seen)
         return view.legal_actions[0]
 
     def on_action(self, action) -> None:
@@ -84,8 +87,11 @@ def test_searched_vs_searched_plays_and_pairs() -> None:
         assert a.opening_id == b.opening_id == k
         assert a.seats == (0, 1) and b.seats == (1, 0)
     for g in result.games:
-        assert g.length > 2 and len(g.actions) == g.length - 2
+        assert g.length > 2 and len(g.actions) == g.length  # opening moves included
         assert abs(sum(g.payoffs)) < 1e-9  # zero-sum reward
+    for k in range(4):
+        a, b = result.games[2 * k], result.games[2 * k + 1]
+        assert a.actions[:2] == b.actions[:2]  # pair games share the opening
 
 
 def test_searched_only_runs_are_reproducible() -> None:
@@ -185,9 +191,82 @@ def test_rejects_bad_configs() -> None:
 
 
 def test_opening_generator_resamples_and_caps() -> None:
-    snap = rf.starts.RandomStartingMoves(3).generate(rf.games.Connect4(), _R, seed=5)
+    snap, actions = rf.starts.RandomStartingMoves(3).generate(rf.games.Connect4(), _R, seed=5)
     env = rf.Env(rf.games.Connect4(), _R)
     env.restore(snap)
     assert env.ticks == 3 and not env.done()
+    assert len(actions) == 3
     with pytest.raises(ValueError, match="could not draw"):
         rf.starts.RandomStartingMoves(60).generate(rf.games.Connect4(), _R, seed=5)
+
+
+def test_opening_actions_replay_to_the_snapshot_position() -> None:
+    snap, actions = rf.starts.RandomStartingMoves(4).generate(rf.games.Connect4(), _R, seed=9)
+    restored = rf.Env(rf.games.Connect4(), _R)
+    restored.restore(snap)
+    replayed = rf.Env(rf.games.Connect4(), _R)
+    for action in actions:
+        replayed.step({replayed.active_agents()[0]: action})
+    assert replayed.state() == restored.state()
+
+
+def test_external_agent_sees_opening_before_first_act() -> None:
+    FirstLegalBot.reset_counters()
+    bots = []
+
+    def factory():
+        bot = FirstLegalBot()
+        bots.append(bot)
+        return bot
+
+    result = _arena(
+        [(_az(), _flat_infer, 1.0), rf.arena.External(factory, workers=2)],
+        start=rf.starts.RandomStartingMoves(2),
+    ).play(4)
+    for g in result.games:
+        bot = bots[g.game_id]
+        assert bot.seen == g.actions  # opening + every move, in order
+    assert all(b.first_act_after >= 2 for b in bots)  # no act() before the replay
+
+
+def test_rejects_two_external_contestants() -> None:
+    with pytest.raises(ValueError, match="at most one External"):
+        _arena([rf.arena.External(FirstLegalBot), rf.arena.External(FirstLegalBot)])
+
+
+def test_rejects_bad_scheduler_params() -> None:
+    seat = (_az(), _flat_infer, 1.0)
+    with pytest.raises(ValueError, match="n_slots"):
+        _arena([seat, seat], n_slots=0)
+    with pytest.raises(ValueError, match="batch_delay"):
+        _arena([seat, seat], batch_delay=-1.0)
+    with pytest.raises(ValueError, match="sequential"):
+        rf.Arena(rf.games.Snake(), rf.Reward(food=1.0), [seat, seat])
+
+
+def test_on_action_failure_surfaces() -> None:
+    class BadObserver:
+        def act(self, view):
+            return view.legal_actions[0]
+
+        def on_action(self, action):
+            raise RuntimeError("pipe broke")
+
+    with pytest.raises(RuntimeError, match="on_action failed"):
+        _arena([(_az(), _flat_infer, 1.0), rf.arena.External(BadObserver)]).play(2)
+
+
+def test_hung_close_times_out() -> None:
+    class SlowCloser:
+        def act(self, view):
+            return view.legal_actions[0]
+
+        def close(self):
+            time.sleep(60)
+
+    start = time.monotonic()
+    with pytest.raises(TimeoutError, match="finishing game"):
+        _arena(
+            [(_az(), _flat_infer, 1.0), rf.arena.External(SlowCloser, timeout=0.3)],
+        ).play(2)
+    assert time.monotonic() - start < 30

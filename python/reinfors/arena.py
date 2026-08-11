@@ -5,7 +5,8 @@ Openings are generated once per game pair and both games restore the same snapsh
 seats swapped, so opening imbalance cancels out of the relative score. Searched
 contestants decide through ``PolicyHandle.choose`` — one pooled search per contestant per
 scheduler round, leaves batched into a single ``infer`` call. External contestants
-(``External``) run their own engines on worker lanes.
+(``External``) run their own engines on worker lanes; external moves are dispatched
+before searched batches run, so external engines compute while the GPU searches.
 
 Determinism: a searched-only Arena run is exactly reproducible per master seed (its
 scheduling and batch composition are deterministic). External-seat runs are
@@ -22,7 +23,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, wait
 from dataclasses import dataclass, field
 from functools import partial
-from math import sqrt
+from math import isfinite, sqrt
 from time import monotonic, sleep
 from typing import Any
 
@@ -30,6 +31,7 @@ from . import _reinfors
 
 _MIX = 0x9E3779B97F4A7C15
 _MASK = (1 << 64) - 1
+_ABORT_GRACE = 5.0  # best-effort close budget when a run is already failing
 
 
 def _mix64(*parts: int) -> int:
@@ -58,11 +60,12 @@ class External:
     """An externally-driven contestant: ``factory()`` builds one agent per game.
 
     An agent must provide ``act(view) -> int`` and may provide ``on_action(action)``
-    (called, in order, for every action executed in its game — feed these to stdin-driven
-    engines) and ``close()``. At most ``workers`` agents are live at once; each worker
-    lane runs its game's calls serially, so pipe I/O never stalls the Arena loop and
-    per-game call order is preserved. ``timeout`` (seconds) bounds a single ``act`` call;
-    a hung agent fails the run instead of hanging it.
+    (called, in order, for every action executed in its game — opening moves included —
+    feed these to stdin-driven engines) and ``close()``. At most ``workers`` agents are
+    live at once; each worker lane runs its game's calls serially, so pipe I/O never
+    stalls the Arena loop and per-game call order is preserved. ``timeout`` (seconds)
+    bounds every agent call — ``act``, pending ``on_action`` batches at game end, and
+    ``close`` — so a hung agent fails the run instead of hanging it.
     """
 
     def __init__(
@@ -117,7 +120,7 @@ class GameResult:
     seats: tuple[int, ...]  # seats[agent] = contestant index
     payoffs: tuple[float, ...]  # by contestant index
     length: int
-    actions: list[int]
+    actions: list[int]  # the full game, opening moves included
 
 
 @dataclass
@@ -163,12 +166,13 @@ class _Game:
     lane: _Lane | None = None
     pending: Future[Any] | None = None
     pending_since: float = 0.0
+    notifications: list[Future[Any]] = field(default_factory=list)
 
 
 class Arena:
     """See the module docstring. ``contestants`` entries are either
     ``(policy, infer, gamma)`` — a searched seat, with gamma the discount the model was
-    trained with — or an ``External``."""
+    trained with — or an ``External`` (at most one in v1)."""
 
     def __init__(
         self,
@@ -182,8 +186,14 @@ class Arena:
     ) -> None:
         if len(contestants) != 2:
             raise ValueError("Arena v1 takes exactly two contestants")
+        if sum(isinstance(c, External) for c in contestants) > 1:
+            raise ValueError("Arena v1 supports at most one External contestant")
+        if n_slots < 1:
+            raise ValueError("n_slots must be >= 1")
+        if not (isfinite(batch_delay) and batch_delay >= 0.0):
+            raise ValueError("batch_delay must be finite and >= 0")
         probe = _reinfors.Env(game, reward, seed=0)
-        if probe.num_agents() != 2:
+        if probe.num_agents() != 2 or len(probe.active_agents()) != 1:
             raise ValueError("Arena v1 plays 2-agent sequential games")
         for c in contestants:
             if isinstance(c, External):
@@ -206,20 +216,22 @@ class Arena:
         lanes: dict[int, list[_Lane]] = {
             ci: [_Lane() for _ in range(c.workers)] for ci, c in enumerate(self._contestants) if isinstance(c, External)
         }
+        active: list[_Game] = []
         try:
-            return self._play(n_games, lanes)
+            return self._play(n_games, lanes, active)
         finally:
+            self._shutdown(active)
             for lane_pool in lanes.values():
                 for lane in lane_pool:
                     lane.stop()
 
     # scheduling ---------------------------------------------------------------
 
-    def _play(self, n_games: int, lanes: dict[int, list[_Lane]]) -> ArenaResult:
-        openings: dict[int, Any] = {}
+    def _play(self, n_games: int, lanes: dict[int, list[_Lane]], active: list[_Game]) -> ArenaResult:
+        openings: dict[int, tuple[Any, list[int]]] = {}
         free_lanes = {ci: list(pool) for ci, pool in lanes.items()}
+        choose_calls = dict.fromkeys(range(len(self._contestants)), 0)
         next_game = 0
-        active: list[_Game] = []
         finished: list[GameResult] = []
 
         while len(finished) < n_games:
@@ -231,16 +243,19 @@ class Arena:
                 next_game += 1
 
             self._drain_external(active, finished, free_lanes)
+            # externals first: their engines compute while the GPU searches below
+            self._dispatch_external(active)
             ready = self._searched_ready(active)
             if ready and self._batch_delay > 0 and self._external_pending(active):
                 sleep(self._batch_delay)
                 self._drain_external(active, finished, free_lanes)
+                self._dispatch_external(active)
                 ready = self._searched_ready(active)
             if ready:
                 for ci, games in sorted(ready.items()):
-                    self._choose_and_step(ci, games, active, finished, free_lanes)
+                    choose_calls[ci] += 1
+                    self._choose_and_step(ci, choose_calls[ci], games, active, finished, free_lanes)
                 continue
-            self._dispatch_external(active)
             self._await_external(active)
 
         finished.sort(key=lambda g: g.game_id)
@@ -249,7 +264,7 @@ class Arena:
     def _start_game(
         self,
         game_id: int,
-        openings: dict[int, Any],
+        openings: dict[int, tuple[Any, list[int]]],
         free_lanes: dict[int, list[_Lane]],
     ) -> _Game | None:
         opening_id = game_id // 2
@@ -259,24 +274,39 @@ class Arena:
             if not free_lanes[ci]:
                 return None
         env = _reinfors.Env(self._game, self._reward, seed=_mix64(self._seed, game_id, 1))
+        opening_actions: list[int] = []
         if self._start is not None:
             if opening_id not in openings:
                 openings[opening_id] = self._start.generate(self._game, self._reward, _mix64(self._seed, opening_id, 2))
-            env.restore(openings[opening_id])
+            snapshot, opening_actions = openings[opening_id]
+            env.restore(snapshot)
         game = _Game(
             game_id=game_id,
             opening_id=opening_id,
             seats=seats,
             env=env,
             payoffs=[0.0, 0.0],
+            actions=list(opening_actions),
         )
         for ci in external:
-            game.lane = free_lanes[ci].pop()
-            game.agent = self._contestants[ci].factory()
+            lane = free_lanes[ci].pop()
+            try:
+                game.agent = self._contestants[ci].factory()
+            except Exception as e:
+                free_lanes[ci].append(lane)
+                raise RuntimeError(f"external contestant {ci} factory failed for game {game_id}: {e}") from e
+            game.lane = lane
+            # a stdin-driven engine must see the opening before its first act()
+            if opening_actions and hasattr(game.agent, "on_action"):
+                for action in opening_actions:
+                    game.notifications.append(lane.submit(partial(game.agent.on_action, action)))
         return game
 
     def _mover(self, game: _Game) -> int:
-        seat: int = game.env.active_agents()[0]
+        agents = game.env.active_agents()
+        if len(agents) != 1:
+            raise RuntimeError(f"game {game.game_id}: {len(agents)} active agents — Arena plays sequential games")
+        seat: int = agents[0]
         return game.seats[seat]
 
     def _searched_ready(self, active: list[_Game]) -> dict[int, list[_Game]]:
@@ -297,13 +327,14 @@ class Arena:
     def _choose_and_step(
         self,
         ci: int,
+        call_no: int,
         games: list[_Game],
         active: list[_Game],
         finished: list[GameResult],
         free_lanes: dict[int, list[_Lane]],
     ) -> None:
         policy, infer, gamma = self._contestants[ci]
-        seed = _mix64(self._seed, ci, 3, len(finished), games[0].game_id)
+        seed = _mix64(self._seed, ci, 3, call_no)
         actions = policy.choose([g.env for g in games], infer, seed=seed, gamma=gamma)
         for game, action in zip(games, actions, strict=True):
             self._step(game, action, active, finished, free_lanes)
@@ -315,12 +346,13 @@ class Arena:
             ci = self._mover(game)
             if not isinstance(self._contestants[ci], External):
                 continue
+            self._check_notifications(game)
             env = game.env
-            agent = game.env.active_agents()[0]
+            agent_seat = env.active_agents()[0]
             view = View(
-                obs=env.observe(agent),
-                legal_actions=env.legal_actions(agent),
-                agent=agent,
+                obs=env.observe(agent_seat),
+                legal_actions=env.legal_actions(agent_seat),
+                agent=agent_seat,
                 ticks=env.ticks,
             )
             bot = game.agent
@@ -334,8 +366,7 @@ class Arena:
             return
         timeouts = [c.timeout for c in self._contestants if isinstance(c, External) and c.timeout]
         wait(pending, timeout=min(timeouts) if timeouts else None, return_when=FIRST_COMPLETED)
-        if all(f is not None and not f.done() for f in pending) and timeouts:
-            self._check_timeouts(active)
+        self._check_timeouts(active)
 
     def _check_timeouts(self, active: list[_Game]) -> None:
         now = monotonic()
@@ -345,10 +376,20 @@ class Arena:
             ci = self._mover(game)
             timeout = self._contestants[ci].timeout
             if timeout is not None and now - game.pending_since > timeout:
-                self._close_agents(active)
                 raise TimeoutError(
                     f"external contestant {ci} exceeded its {timeout}s move timeout in game {game.game_id}"
                 )
+
+    def _check_notifications(self, game: _Game) -> None:
+        remaining = []
+        for future in game.notifications:
+            if not future.done():
+                remaining.append(future)
+                continue
+            error = future.exception()
+            if error is not None:
+                raise RuntimeError(f"external contestant on_action failed in game {game.game_id}: {error}") from error
+        game.notifications = remaining
 
     def _drain_external(
         self,
@@ -357,17 +398,16 @@ class Arena:
         free_lanes: dict[int, list[_Lane]],
     ) -> None:
         for game in list(active):
+            self._check_notifications(game)
             if game.pending is None or not game.pending.done():
                 continue
             future, game.pending = game.pending, None
             try:
                 action = future.result()
             except Exception as e:
-                self._close_agents(active)
                 raise RuntimeError(f"external contestant {self._mover(game)} failed in game {game.game_id}: {e}") from e
-            agent = game.env.active_agents()[0]
-            if action not in game.env.legal_actions(agent):
-                self._close_agents(active)
+            agent_seat = game.env.active_agents()[0]
+            if action not in game.env.legal_actions(agent_seat):
                 raise RuntimeError(f"external contestant chose illegal action {action} in game {game.game_id}")
             self._step(game, action, active, finished, free_lanes)
         self._check_timeouts(active)
@@ -380,17 +420,16 @@ class Arena:
         finished: list[GameResult],
         free_lanes: dict[int, list[_Lane]],
     ) -> None:
-        agent = game.env.active_agents()[0]
-        game.env.step({agent: action})
+        agent_seat = game.env.active_agents()[0]
+        game.env.step({agent_seat: action})
         game.actions.append(action)
         rewards = game.env.rewards
         if rewards is not None:
             for seat, r in enumerate(rewards):
                 game.payoffs[seat] += r
         if game.agent is not None and hasattr(game.agent, "on_action"):
-            bot = game.agent
             assert game.lane is not None
-            game.lane.submit(partial(bot.on_action, action))
+            game.notifications.append(game.lane.submit(partial(game.agent.on_action, action)))
         if game.env.done():
             self._finish(game, active, finished, free_lanes)
 
@@ -415,26 +454,43 @@ class Arena:
                 actions=game.actions,
             )
         )
-        if game.agent is not None:
-            bot, lane = game.agent, game.lane
-            assert lane is not None
+        if game.agent is None:
+            return
+        ci = self._external_contestant(game)
+        timeout = self._contestants[ci].timeout
+        bot, lane = game.agent, game.lane
+        assert lane is not None
+        try:
+            for future in game.notifications:
+                future.result(timeout=timeout)
             if hasattr(bot, "close"):
-                lane.submit(bot.close).result()
-            ci = self._mover_contestant_for_lane(game)
-            free_lanes[ci].append(lane)
-            game.agent = None
-            game.lane = None
+                lane.submit(bot.close).result(timeout=timeout)
+        except TimeoutError as e:
+            raise TimeoutError(
+                f"external contestant {ci} exceeded its {timeout}s timeout finishing game {game.game_id}"
+            ) from e
+        except Exception as e:
+            raise RuntimeError(f"external contestant {ci} failed finishing game {game.game_id}: {e}") from e
+        game.notifications = []
+        game.agent = None
+        game.lane = None
+        free_lanes[ci].append(lane)
 
-    def _mover_contestant_for_lane(self, game: _Game) -> int:
+    def _external_contestant(self, game: _Game) -> int:
         for ci, c in enumerate(self._contestants):
             if isinstance(c, External) and ci in game.seats:
                 return ci
-        raise AssertionError("lane held by a game with no external contestant")
+        raise AssertionError("external bookkeeping on a game with no external contestant")
 
-    def _close_agents(self, active: list[_Game]) -> None:
+    def _shutdown(self, active: list[_Game]) -> None:
+        """Best-effort agent cleanup on abort: serialized through each lane, bounded,
+        and silent — the primary error is already propagating."""
+        closing = []
         for game in active:
-            if game.agent is not None and hasattr(game.agent, "close"):
-                try:
-                    game.agent.close()
-                except Exception:
-                    pass
+            if game.agent is not None and game.lane is not None:
+                if hasattr(game.agent, "close"):
+                    closing.append(game.lane.submit(game.agent.close))
+                game.agent = None
+                game.lane = None
+        if closing:
+            wait(closing, timeout=_ABORT_GRACE)
