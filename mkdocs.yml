@@ -63,6 +63,7 @@ nav:
   - Extending reinfors:
       - extending/index.md
       - Component contracts: extending/component-contracts.md
+      - Add an encoder: extending/encoders.md
       - Add a game: extending/rust-components.md
       - Python bindings: extending/python-bindings.md
   - Benchmarks:
