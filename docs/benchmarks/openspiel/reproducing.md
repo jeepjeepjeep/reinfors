@@ -3,8 +3,9 @@
 The cross-framework harness lives in the companion benchmark repository
 ([reinfors-benchmarks](https://github.com/jeepjeepjeep/reinfors-benchmarks)), published
 alongside this library: the OpenSpiel source-build
-machinery and its documented patches, the measurement and round-orchestration scripts, the
-head-to-head bridge, and the raw logs and artifacts of every published run. That material
+machinery and its documented patches, and the measurement, round-orchestration, and
+head-to-head scripts. Raw telemetry of the published runs is archived in the companion
+workspace. That material
 is deliberately not vendored into reinfors — third-party patches, training loops, and
 cloud tooling are outside the library's scope, and a drifting copy would be worse than a
 pointer.
@@ -51,7 +52,11 @@ MINUTES=120 OS_ACTORS=16 RF_NGAMES=128 RF_NGROUPS=2 ROUND_SEED="$SEED" \
     bash scripts/run_round_chess_gpu.sh
 
 # head-to-head: paired openings, both colors, matched simulations, solver off,
-# PGN export with run metadata for every game
+# PGN export with run metadata for every game.
+# The PUBLISHED matches ran the pre-Arena bridge — companion commit 7ed1120 — whose
+# results are not poolable with the current Arena-protocol script; to reproduce them,
+# run the script at that commit. Matches from the Arena protocol onward use the current
+# script (batched search, appended run manifests).
 python benchmarks/openspiel/eval_h2h_chess.py "$RF_CKPT" "$OS_DIR" --os-checkpoint "$OS_CHECKPOINT" \
     --games 100 --sims 64 --seed "$MATCH_SEED" --device cuda --az-device /cuda:0
 
