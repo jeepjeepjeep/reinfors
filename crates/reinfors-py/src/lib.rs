@@ -2460,6 +2460,33 @@ fn check_minimax_composition<G: Game>(game: &G) -> PyResult<()> {
     Ok(())
 }
 
+// The adversarial negation is sound only for antisymmetric rewards. Backgammon's events carry
+// the sign themselves (Loss(m) = -magnitude), so any weights stay zero-sum; chess and connect4
+// weight win/loss/draw independently and must be constrained.
+fn check_minimax_zero_sum(game: &GameSpec, weights: Option<&HashMap<String, f64>>) -> PyResult<()> {
+    if !matches!(game, GameSpec::Chess { .. } | GameSpec::Connect4) {
+        return Ok(());
+    }
+    let effective = |key: &str| -> f64 {
+        weights
+            .and_then(|m| m.get(key).copied())
+            .unwrap_or_else(|| {
+                reward_schema(game)
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, default)| *default)
+                    .expect("schema names its outcome keys")
+            })
+    };
+    if effective("win") + effective("loss") != 0.0 || effective("draw") != 0.0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "Minimax's zero-sum negation requires an antisymmetric reward: set loss = -win and \
+             draw = 0",
+        ));
+    }
+    Ok(())
+}
+
 fn minimax_from_spec(depth: i32, top_k: Option<usize>, chance: ChanceMode, gamma: f64) -> Minimax {
     Minimax::new(depth, top_k, chance, gamma)
 }
@@ -2793,6 +2820,9 @@ fn build_engine(
     infer_caches: Option<CacheSet>,
     learn_players: Option<Vec<usize>>,
 ) -> PyResult<Box<dyn ErasedEngine>> {
+    if matches!(policy, PolicySpec::Minimax { .. }) {
+        check_minimax_zero_sum(&game, reward.as_ref().map(|r| &r.weights))?;
+    }
     let reward = build_reward(&game, reward)?;
     if start_buffer.is_some() && !matches!(game, GameSpec::Snake { .. }) {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -5144,6 +5174,9 @@ impl PolicyHandle {
         }
         check_unit("gamma", gamma)?;
         let borrowed: Vec<PyRef<'_, PyEnv>> = envs.iter().map(|e| e.borrow(py)).collect();
+        if matches!(self.spec, PolicySpec::Minimax { .. }) {
+            check_minimax_zero_sum(&borrowed[0].game_spec, borrowed[0].reward_weights.as_ref())?;
+        }
         let fingerprint = borrowed[0].fingerprint.clone();
         for env in &borrowed {
             if env.fingerprint != fingerprint {

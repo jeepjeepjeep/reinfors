@@ -112,6 +112,47 @@ def test_rejects_non_treestrap_learners() -> None:
         )
 
 
+def test_rejects_non_zero_sum_rewards() -> None:
+    for bad in (
+        rf.Reward(win=1.0, loss=0.0),
+        rf.Reward(win=1.0, loss=-1.0, draw=0.5),
+    ):
+        with pytest.raises(ValueError, match="antisymmetric"):
+            rf.Engine(
+                rf.games.Connect4(),
+                bad,
+                rf.policies.Minimax(depth=2),
+                rf.learners.TreeStrap(),
+                n_games=1,
+            )
+
+
+def test_accepts_zero_sum_rewards_and_backgammon_margins() -> None:
+    # Scaled antisymmetric weights pass; None uses the zero-sum schema defaults.
+    for reward in (rf.Reward(win=2.0, loss=-2.0, draw=0.0), None):
+        rf.Engine(
+            rf.games.Connect4(),
+            reward,
+            rf.policies.Minimax(depth=2),
+            rf.learners.TreeStrap(),
+            n_games=1,
+        )
+    # Backgammon events carry their own sign, so any margin weights stay zero-sum.
+    rf.Engine(
+        rf.games.Backgammon(),
+        rf.Reward(win=1.0, gammon=4.0, backgammon=9.0),
+        rf.policies.Minimax(depth=2),
+        rf.learners.TreeStrap(),
+        n_games=1,
+    )
+
+
+def test_choose_rejects_non_zero_sum_env_rewards() -> None:
+    envs = [rf.Env(rf.games.Connect4(), reward=rf.Reward(win=1.0, loss=0.0), seed=0)]
+    with pytest.raises(ValueError, match="antisymmetric"):
+        rf.policies.Minimax(depth=2).choose(envs, zero_infer, gamma=1.0)
+
+
 def test_constructor_validation() -> None:
     with pytest.raises(ValueError, match="at least one ply"):
         rf.policies.Minimax(depth=0)

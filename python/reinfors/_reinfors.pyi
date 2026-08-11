@@ -275,6 +275,8 @@ class PolicyHandle:
     # width to `depth` plies. Frontier leaves are scored by the callback's single-head Q row
     # `(rows, 1, actions)`, each requested for the leaf's own mover and negated across turn
     # changes (zero-sum) — a self-play network only serves the on-turn inputs TreeStrap trains.
+    # Construction rejects reward mappings that break the zero-sum negation (chess/connect4
+    # need loss = -win and draw = 0; backgammon margins are antisymmetric by construction).
     # A zero callback plays horizon-perfectly from terminal rewards alone
     # (the fixed-strength baseline); `top_k` beams each non-root node to its best moves by that
     # node's own leaf evaluation. Pairs with `rf.learners.TreeStrap` (TreeStrap(minimax));
