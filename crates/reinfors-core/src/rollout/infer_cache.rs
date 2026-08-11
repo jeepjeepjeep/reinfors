@@ -153,6 +153,15 @@ impl ShardedInferCache {
             shards.is_power_of_two(),
             "shard count must be a power of two"
         );
+        // Small budgets shrink the active shard count instead of inflating the total:
+        // the floor matches the exclusive cache's (2 entries), never 2 * shards.
+        let cap_bound = (capacity / 2).max(1);
+        let cap_shards = if cap_bound.is_power_of_two() {
+            cap_bound
+        } else {
+            cap_bound.next_power_of_two() / 2
+        };
+        let shards = shards.min(cap_shards).max(1);
         let per_shard = (capacity / shards).max(2);
         ShardedInferCache {
             shards: (0..shards)
@@ -360,12 +369,19 @@ mod sharded_tests {
 
     #[test]
     fn total_capacity_is_divided_not_multiplied() {
-        let (c, _g) = cache(256);
-        for i in 0..4096u32 {
-            let k = InferCache::key(&[i as f32, 0.5]);
-            c.insert(k, &[1.0], 0);
+        for capacity in [1usize, 8, 31, 256] {
+            let (c, _g) = cache(capacity);
+            for i in 0..4096u32 {
+                let k = InferCache::key(&[i as f32, 0.5]);
+                c.insert(k, &[1.0], 0);
+            }
+            let budget = capacity.max(2);
+            assert!(
+                c.len() <= budget,
+                "capacity {capacity}: stored {} > budget {budget}",
+                c.len()
+            );
         }
-        assert!(c.len() <= 256, "stored {} > configured total 256", c.len());
     }
 
     #[test]
