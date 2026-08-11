@@ -59,6 +59,7 @@ pub struct StagedBatch {
     pub dim: usize,
     keys: Vec<u128>,
     generation: u64,
+    row_generations: Vec<u64>,
 }
 
 pub struct CommittedRows {
@@ -228,7 +229,11 @@ where
                         InferMode::Shared => 0,
                         InferMode::PerPlayer => player,
                     };
-                    slots[idx].insert(key, &out[i * stride..(i + 1) * stride], staged.generation);
+                    slots[idx].insert(
+                        key,
+                        &out[i * stride..(i + 1) * stride],
+                        staged.row_generations[i],
+                    );
                 }
             }
             CacheAccess::None => {}
@@ -431,6 +436,7 @@ where
             dim: self.dim,
             keys: self.keys,
             generation: self.generation,
+            row_generations: self.row_generations,
         }
     }
 }
@@ -552,6 +558,39 @@ mod tests {
         let Resolve::Staged(_) = batch.resolve_or_stage(0, &[1.0, 2.0]) else {
             panic!("superseded-generation rows must not be served from the cache");
         };
+    }
+
+    #[test]
+    fn detached_staging_preserves_per_slot_generations() {
+        use crate::rollout::infer_cache::ShardedInferCache;
+        let gen0 = Arc::new(AtomicU64::new(0));
+        let gen1 = Arc::new(AtomicU64::new(0));
+        let slots = [
+            ShardedInferCache::new(1024, 16, gen0),
+            ShardedInferCache::new(1024, 16, gen1.clone()),
+        ];
+        let mut infer = double_infer;
+        let mut eval = Evaluator::with_shared_cache(&mut infer, InferMode::PerPlayer, &slots);
+
+        let mut batch = eval.batch();
+        let _ = batch.resolve_or_stage(0, &[1.0, 2.0]);
+        let _ = batch.resolve_or_stage(1, &[3.0, 4.0]);
+        let staged = batch.into_staged();
+        // player 1's slot advances while the rows are in flight; player 0's does not
+        gen1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = eval.ingest(staged, vec![2.0, 4.0, 6.0, 8.0], 0.0, 1);
+
+        let mut batch = eval.batch();
+        assert!(
+            matches!(batch.resolve_or_stage(0, &[1.0, 2.0]), Resolve::Resolved(_)),
+            "player 0's row staged under its own (unchanged) generation must be cached"
+        );
+        drop(batch);
+        let mut batch = eval.batch();
+        assert!(
+            matches!(batch.resolve_or_stage(1, &[3.0, 4.0]), Resolve::Staged(_)),
+            "player 1's row staged under a superseded generation must be rejected"
+        );
     }
 
     #[test]

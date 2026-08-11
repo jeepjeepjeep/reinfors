@@ -199,6 +199,12 @@ impl ShardedInferCache {
         }
     }
 
+    pub fn force_clear(&self) {
+        for shard in &self.shards {
+            shard.lock().expect("cache shard poisoned").force_clear();
+        }
+    }
+
     pub fn lookups(&self) -> usize {
         self.shards
             .iter()
@@ -374,6 +380,17 @@ mod sharded_tests {
                 c.len()
             );
         }
+    }
+
+    #[test]
+    fn force_clear_empties_every_shard() {
+        let (c, _g) = cache(256);
+        for i in 0..64u32 {
+            c.insert(InferCache::key(&[i as f32, 0.5]), &[1.0], 0);
+        }
+        assert!(!c.is_empty());
+        c.force_clear();
+        assert_eq!(c.len(), 0);
     }
 
     #[test]
