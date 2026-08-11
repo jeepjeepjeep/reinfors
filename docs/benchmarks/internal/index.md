@@ -7,33 +7,43 @@ guide configuration choices for your own workload, and the calibration curves th
 
 ## Device characterization
 
-The pure-forward kernel ceiling of the benchmark network, measured outside any engine —
-the ceiling every configuration approaches and the batch-size curve that drives sizing
-decisions everywhere else (engine batch, grouped-collection group size):
+The pure-forward kernel ceiling of the benchmark network (w256 d8, A10G), measured
+outside any engine at the operating-point batch, is the ceiling every configuration
+approaches:
 
-| batch | rows/s (A10G, chess net w256 d8) | µs/row |
+| | rows/s | µs/row |
 |---|---|---|
-| 32 | _TBD_ | _TBD_ |
-| 64 | _TBD_ | _TBD_ |
-| 128 | _TBD_ | _TBD_ |
+| pure forward, batch 64 | 15.2k | 65.8 |
+
+The batch-size curve that drives sizing decisions (engine batch, grouped-collection
+group size) was measured end-to-end through the engine, internally timed — same shape,
+lower absolute:
+
+| batch (`n_games`) | rows/s (engine, A10G, w256 d8) |
+|---|---|
+| 32 | 10,952 |
+| 64 | **12,367** |
+| 128 | 11,620 |
 
 The A10G's sweet spot for this net sits at batch 64, with a measurable per-row
 *regression* at batch 128. Batch curves are strongly device- and net-dependent (the same
 sweep on Apple silicon keeps improving well past 100 rows) — measure yours before sizing
 anything against it.
 
-Inference-cache hit rate versus capacity (chess self-play):
+Inference-cache hit rate versus capacity (chess self-play, early-training net):
 
 | capacity | hit rate |
 |---|---|
-| 4,096 | _TBD_ |
-| 32,768 | _TBD_ |
-| 262,144 | _TBD_ |
-| 2M | _TBD_ |
+| 4,096 | 6.6% |
+| 32,768 | 13.6% |
+| 262,144 | 14.1% |
+| 2M | 14.5% |
 
 Hit rate is monotone in capacity but flattens sharply, and — worth knowing — *rises as
-training progresses*: a stronger net concentrates its own play. Capacity is a throughput
-choice unless host memory binds.
+training progresses*: a stronger net concentrates its own play (the same 262,144-entry
+configuration reaches 26–27% after two hours of training in the
+[matched round](../openspiel/matched-round.md)). Capacity is a throughput choice unless
+host memory binds.
 
 ## Configuration levers
 
