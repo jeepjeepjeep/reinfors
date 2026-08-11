@@ -73,6 +73,8 @@ pip install "reinfors[gym]"   # Gymnasium and PettingZoo adapters
 pip install "reinfors[train]" # PyTorch examples
 ```
 
+Contributing or building from source? See the [development setup guide](docs/development/setup.md).
+
 Reinfors is pre-1.0. Public contracts are documented, but breaking changes may still occur.
 
 ## Where next?
