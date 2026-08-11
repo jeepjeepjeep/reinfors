@@ -57,9 +57,9 @@ curve, splitting below the sweet spot made grouping net-negative — both signs 
 the model.
 
 A10G grid at the benchmark operating point (v2 scheduler at the merged tip, 12-minute
-interior windows on the round-true workload — early-training games make the absolute
-rates read below the 2-hour round numbers; the grid measures the levers' *relative*
-effects):
+legs on the round-true workload reduced over the interior window, minutes 5 to 11.5 —
+early-training games make the absolute rates read below the 2-hour round numbers; the
+grid measures the levers' *relative* effects):
 
 | config | states/s | rows/s | rows/call | infer share |
 |---|---|---|---|---|

@@ -1,9 +1,10 @@
 # Operating-point tuning
 
 No head-to-head ran until each side's configuration was selected by measurement on the
-target hardware. Selection cells were single 20-minute interior legs under the full round
-workload (August 2026, decision-grade rather than repeat-derived — the margins between
-candidates were far outside window noise).
+target hardware. Selection cells were single 20-minute legs under the full round workload,
+reduced over the interior window (minutes 5 to 19.5, counter deltas) — August 2026,
+decision-grade rather than repeat-derived; the margins between candidates were far outside
+window noise.
 
 ## Workload
 
@@ -24,7 +25,8 @@ regression at 128) and the cache capacity curve.
 The decisive measurement. Each candidate topology runs the **full round workload** — cache
 on at its own capacity, learner training and checkpoint writes sharing the GPU — for
 windows long enough to contain several learn steps and several game-lengths (20-minute
-interior windows after 5-minute warmups). Selection is by completed-game states/s.
+legs; the reduced interior window spans minutes 5 to 19.5). Selection is by
+completed-game states/s.
 
 OpenSpiel (actors × inference batch):
 
