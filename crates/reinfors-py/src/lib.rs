@@ -5592,6 +5592,18 @@ fn core_build_profile() -> &'static str {
     }
 }
 
+/// Source identity baked at compile time; "unknown" for builds without a git checkout.
+#[pyfunction]
+fn build_info(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("git_sha", env!("REINFORS_GIT_SHA"))?;
+    d.set_item("git_dirty", env!("REINFORS_GIT_DIRTY") == "1")?;
+    let tag = env!("REINFORS_GIT_TAG");
+    d.set_item("git_tag", if tag.is_empty() { None } else { Some(tag) })?;
+    d.set_item("profile", core_build_profile())?;
+    Ok(d)
+}
+
 #[pymodule]
 fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
@@ -5600,6 +5612,7 @@ fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chess_uci_action, m)?)?;
     m.add_function(wrap_pyfunction!(chess_action_uci, m)?)?;
     m.add_function(wrap_pyfunction!(core_build_profile, m)?)?;
+    m.add_function(wrap_pyfunction!(build_info, m)?)?;
     m.add_class::<PyEngine>()?;
     m.add_class::<PyEnv>()?;
     m.add_class::<PyCfr>()?;

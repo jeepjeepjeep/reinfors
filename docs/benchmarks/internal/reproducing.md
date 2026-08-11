@@ -3,13 +3,16 @@
 The internal family makes claims about reinfors against itself, so its reproduction
 surface lives in this repository.
 
-## In-repo today
+## Harness location
+
+All benchmarking scripts live in the companion repository — including the CPU /
+parallel-scaling sweeps (`benchmarks/internal/benchmark.py`) and the cross-framework
+connect4 tracks (`benchmarks/internal/benchmark_vs.py`) — so one checkout carries every
+measurement. The maintained reinfors examples remain the reference for engine-level
+configuration, e.g.:
 
 ```bash
-# CPU / parallel-scaling sweeps (records/sec vs n_games, engine modes, stepping ceiling)
-uv run python scripts/benchmark.py
-
-# engine-level configuration through the maintained examples, e.g. grouped collection
+# in this repository
 uv run --with torch python examples/train_alphazero_example.py --n-games 128 --n-groups 2
 ```
 
