@@ -28,11 +28,13 @@ automatically.
 bash scripts/setup_openspiel_cpp.sh
 
 # from the reinfors checkout: release wheel into the measurement venv (a debug build is
-# refused at runtime)
-maturin develop --release -m crates/reinfors-py/Cargo.toml
+# refused at runtime). The nonce forces build.rs to refresh the baked git identity even
+# when only unstaged edits changed (those touch no git metadata cargo can watch).
+REINFORS_BUILD_NONCE=$(date +%s) maturin develop --release -m crates/reinfors-py/Cargo.toml
 ```
 
-Per-boot: disable SMT (guarded by every script), pull, rebuild the wheel.
+Per-boot: disable SMT (guarded by every script), pull, rebuild the wheel with a fresh
+nonce; the companion repo's preflight cross-checks `rf.build_info()` against the checkout.
 
 ## Operating-point measurements
 
