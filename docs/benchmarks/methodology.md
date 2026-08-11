@@ -31,5 +31,5 @@ while the two-hour rounds are **single runs per (seed, side)**, with the headlin
 quantities replicated across independent training seeds and stated as such wherever
 their results appear. Match results report a standard error (computed over opening
 pairs); sweep-derived selections state the margin between the chosen configuration and
-the runner-up. No published number appears without either a repeat-derived spread or a
-single-run label.
+the runner-up. No published number appears without a repeat-derived spread, a
+repeat-median label, or a single-run label.

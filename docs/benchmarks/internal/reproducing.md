@@ -28,8 +28,16 @@ companion repository's `published/` directory:
 CORES=0-3 WIDTH=256 DEPTH=8 NGAMES="64 128" NGROUPS=1 MINUTES=12 bash scripts/measure_states_rf.sh
 CORES=0-3 WIDTH=256 DEPTH=8 NGAMES="128 64" NGROUPS=2 MINUTES=12 bash scripts/measure_states_rf.sh
 
-# kernel ceiling + f32-vs-f64 callback arms (pure-forward and engine modes)
-python benchmarks/openspiel/phase0_gpu_sweep.py  # modes, widths, batch grids per --help
+# kernel ceiling (pure forward at the operating shape)
+python benchmarks/openspiel/phase0_gpu_sweep.py --mode net --game chess --devices cuda \
+    --widths 256 --depths 8 --batches 64
+
+# f32-vs-f64 callback arms (engine mode at the published cells): one leg per arm per
+# cycle, three alternating cycles, medians published
+python benchmarks/openspiel/phase0_gpu_sweep.py --mode engine --game chess --devices cuda \
+    --widths 256,128 --depths 8 --n-games 64 --infer-dtype f64 --engine-leg-seconds 120
+python benchmarks/openspiel/phase0_gpu_sweep.py --mode engine --game chess --devices cuda \
+    --widths 256,128 --depths 8 --n-games 64 --infer-dtype f32 --engine-leg-seconds 120
 
 # cache capacity curve: the trainer at fixed conditions across --infer-cache values
 for CAP in 4096 32768 262144 2097152; do

@@ -49,8 +49,9 @@ head-to-head quality.
 ## Head-to-head
 
 Protocol: the two final models play a match at 64 simulations per move on both sides,
-their side running its own unmodified game runner (search solver disabled, so the match is
-net-vs-net), our side driven through a bridge that mirrors the game state and submits moves
+their side running its own unmodified game runner with its native chess solver disabled
+(search-plus-network against search-plus-network at matched simulation budgets, with no
+solver assist), our side driven through a bridge that mirrors the game state and submits moves
 over its human-input interface. Openings are seeded uniform-random fixed lines, each played
 once per color (paired scoring); artifacts are each side's last complete checkpoint before
 the deadline kill; every game is exported as PGN with full run metadata.
@@ -72,7 +73,9 @@ replicates across the independent seed-1 training draw:
 | seed 1 | rf `n128×2` leg vs OS | 100 | 26 / 58 / 16 | 0.550 ± 0.034 |
 
 Interpretation uses the pair-level standard error and confidence interval above; no result
-is treated as more precise than the match supports.
+is treated as more precise than the match supports. The interval quantifies
+match-sampling uncertainty for these fixed trained checkpoints — robustness across
+training draws is evidenced by the seed-1 replication, not by the interval.
 
 ## Open items
 

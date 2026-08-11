@@ -8,8 +8,9 @@ guide configuration choices for your own workload, and the calibration curves th
 ## Device characterization
 
 The pure-forward kernel ceiling of the benchmark network (w256 d8, A10G), measured
-outside any engine at the operating-point batch, is the ceiling every configuration
-approaches:
+outside any engine at the operating-point batch and reproduced across two independent
+probes (torch harness and a tch-rs probe, 15.21–15.25k), is the ceiling every
+configuration approaches:
 
 | | rows/s | µs/row |
 |---|---|---|
@@ -17,7 +18,8 @@ approaches:
 
 The batch-size curve that drives sizing decisions (engine batch, grouped-collection
 group size) was measured end-to-end through the engine (120-second internally timed
-legs, cache off — a within-stack comparison) — same shape, lower absolute:
+legs, one leg per cell, cache off — a within-stack comparison) — same shape, lower
+absolute:
 
 | batch (`n_games`) | rows/s (engine, A10G, w256 d8) |
 |---|---|
@@ -30,7 +32,8 @@ The A10G's sweet spot for this net sits at batch 64, with a measurable per-row
 sweep on Apple silicon keeps improving well past 100 rows) — measure yours before sizing
 anything against it.
 
-Inference-cache hit rate versus capacity (chess self-play, early-training net):
+Inference-cache hit rate versus capacity (chess self-play, early-training net; one
+probe leg per capacity):
 
 | capacity | hit rate |
 |---|---|

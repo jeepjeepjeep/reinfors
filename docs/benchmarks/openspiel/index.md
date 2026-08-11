@@ -26,8 +26,8 @@ a result.
 At the matched 2-hour round (single runs per seed, replicated across two independent
 training seeds): reinfors sustained
 **204.1 / 203.2 states/s** against OpenSpiel's **147.2 / 150.7** (+39% / +35%), and the
-resulting nets scored **0.556 ± 0.022** against OpenSpiel's over 250 paired-opening games
-(~+39 Elo, 95% CI +9 to +70). Full tables, protocol, and caveats:
+resulting nets scored **0.556 ± 0.022** against OpenSpiel's across 250 games (125
+opening pairs; ~+39 Elo, 95% CI +9 to +70). Full tables, protocol, and caveats:
 [the matched round](matched-round.md).
 
 ## The comparison target
@@ -53,7 +53,7 @@ covered in [setup](../setup.md).
 - [Operating-point tuning](tuning.md) — how each side's configuration was selected
   empirically, under the full round workload, before any head-to-head.
 - [The matched round](matched-round.md) — 2h training throughput, the head-to-head
-  protocol and results, strength-over-time, and the open items.
+  protocol and results, and the open items.
 - [Design differences](design-differences.md) — both architectures, and each measured
   difference traced to its structural origin, in both directions.
 

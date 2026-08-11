@@ -25,6 +25,6 @@ Each family carries its own reproduction guide:
 [comparison](openspiel/reproducing.md) (the companion benchmark repository).
 
 Every table states its own provenance inline — hardware, measurement window, and run
-type (repeat-derived spread or explicit single-run label). The commands that produce each
+type (a repeat-derived spread, a repeat-median label, or an explicit single-run label). The commands that produce each
 family's numbers are in the reproduction guides; raw learner telemetry for the published
 runs is archived in the benchmark workspace.

@@ -10,8 +10,9 @@ exactly in Rust (bit-identical to the caller converting to `float64`, without th
 conversion and double-width transfer), including padded policy widths so torch heads sized
 past the action space return whole tensors without a device-side slice.
 
-A10G, 3-cycle medians, within-stack comparison (the callback drops its `.double()` and
-returns native f32; everything else identical):
+A10G, medians over three alternating cycles, within-stack comparison (the callback
+drops its `.double()` and returns native f32; everything else identical; per-cycle
+spreads were not retained in the archive):
 
 | config (chess, CUDA) | f64 path rows/s | f32 path rows/s | gain |
 |---|---|---|---|
