@@ -14,7 +14,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 LINK = re.compile(r"(?<!!)\[[^]]*]\(([^)]+)\)")
 HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$")
-SYNCED_EXAMPLES = [(Path("docs/guides/training.md"), Path("examples/train_gridworld.py"))]
+SYNCED_EXAMPLES = [
+    (Path("docs/guides/training.md"), Path("examples/train_gridworld.py")),
+    (Path("docs/guides/arena.md"), Path("examples/eval_arena.py")),
+]
 
 
 def slug(text: str) -> str:

@@ -57,9 +57,9 @@ expose them through Python.
   decisions, N-player rewards, and imperfect information.
 - **Native simulation, flexible models.** Games and search components run in Rust while Python
   supplies networks, optimization, replay, and deployment logic.
-- **Direct play and standalone solving.** `Env` supports caller-driven evaluation and interactive
-  play; solvers own algorithm-specific traversals outside the policy/learner collection model
-  (currently including tabular and deep CFR workflows).
+- **Evaluation, direct play, and standalone solving.** `Arena` runs concurrent paired matches with
+  pooled search; `Env` supports caller-driven and interactive play; solvers own algorithm-specific
+  traversals outside the policy/learner collection model.
 - **Experiment lifecycle.** Resolved configurations, configuration fingerprints, exact engine
   snapshots, environment forks, structured telemetry, and per-player record routing are
   part of the public surface.

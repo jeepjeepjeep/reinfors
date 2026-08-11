@@ -4,11 +4,20 @@ Use the evaluation path that matches the trained object:
 
 | What you have | Evaluation path | Maintained example |
 | --- | --- | --- |
-| Policy or network | Referee games through `Env` | [AlphaZero head-to-head example](../examples/index.md#alphazero-head-to-head) |
+| Deployed search policy | Concurrent paired matches through `Arena` | [Arena evaluation](arena.md#run-the-maintained-example) |
+| Raw policy or network | Referee games through `Env` | [AlphaZero head-to-head example](../examples/index.md#alphazero-head-to-head) |
 | Tabular CFR strategy | Solver value and best-response metrics | [CFR solving example](../examples/index.md#solve-leduc) |
 | Scripted or human agent | Direct action selection through `Env` | [Terminal Connect4 example](../examples/index.md#play-connect4) |
 
-## Compare trained policies
+## Compare deployed search policies
+
+`Arena` runs the native policy used by training, pools search leaves across concurrent games, swaps
+seats over paired openings, and reports pair-level uncertainty. It can compare two searched
+contestants or one searched contestant against a subprocess or scripted external agent. See the
+[Arena guide](arena.md) for the complete example, concurrency controls, external-agent lifecycle,
+results, and current limits.
+
+## Compare raw networks
 
 `Env` is the referee: it owns one game and its chance stream, while the caller chooses each action.
 The maintained AlphaZero example loads two checkpoints, alternates their seats, samples several
@@ -25,9 +34,8 @@ seconds on a typical laptop, with the exact time printed at completion. The sear
 usually much faster. For a quick plumbing check, use fewer training iterations and `--games 20`;
 those settings are not enough for a meaningful strength comparison.
 
-The referee deliberately uses the networks' raw policy heads. If the deployed agent includes search,
-adapt the same loop to choose actions through that search policy and report its budget with the
-result.
+The referee deliberately uses the networks' raw policy heads. Use `Arena` instead when search is part
+of the agent being evaluated, and report the complete search configuration with the result.
 
 ## Evaluate a DQN greedily
 
@@ -131,6 +139,7 @@ construction, rewards, action masks, and truncation behavior.
 ## Next steps
 
 - Find the maintained referee and solver scripts in the [examples catalogue](../examples/index.md).
+- Evaluate deployed search configurations with the [Arena guide](arena.md).
 - Preserve evaluated model/configuration pairs with
   [configuration and checkpoints](configuration-and-checkpoints.md).
 - Log arena returns, lengths, seeds, and model versions in the caller. `Env` does not produce Engine

@@ -12,8 +12,12 @@ Reinfors keeps the public composition surface small and typed.
 | `reinfors.noise` | Root exploration-noise handles |
 | `reinfors.solvers` | CFR and Deep CFR constructors |
 | `reinfors.spaces` | `Box` and `Discrete` descriptors |
+| `reinfors.starts` | Arena opening generators, including `RandomStartingMoves` |
 | `reinfors.gym` | Optional Gymnasium and PettingZoo adapters |
 | `Engine` | Parallel policy-driven collection |
+| `Arena` | Concurrent paired evaluation with pooled searched contestants |
+| `reinfors.arena.External`, `reinfors.arena.View` | External-agent configuration and the input passed to `act` |
+| `reinfors.arena.ArenaResult`, `reinfors.arena.GameResult` | Pair-level aggregates and per-game Arena records |
 | `CollectStream` | Background collection handle returned by `Engine.collect_stream` |
 | `EngineSnapshot`, `EnvSnapshot` | Opaque continuation and environment snapshots |
 | `Env` | Caller-driven single-game play |
@@ -50,6 +54,9 @@ Collection uses `collect(n_records=..., infer=...)`; concurrent collection uses
 `collect_stream(collect_size=..., infer=..., depth=...)`. Read the
 [inference contract](inference-contract.md) before implementing the callback and the
 [streaming guide](../guides/streaming.md) before sharing mutable model weights with a collector.
+
+`Arena` uses `(policy, infer, gamma)` searched contestants and optional `arena.External` agents. See
+the [Arena guide](../guides/arena.md) for its scheduling, result, and lifecycle contracts.
 
 ## Policy and learner knobs
 

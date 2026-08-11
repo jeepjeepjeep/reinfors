@@ -93,7 +93,7 @@ CALLER-OWNED PYTHON
                                   └──────────────► next collection cycle
 ```
 
-## The two primary execution surfaces
+## The primary execution surfaces
 
 `Engine` owns many active episodes. A policy asks for evaluations, the engine pools those
 requests, and a learner converts completed decisions or trajectories into training records.
@@ -103,6 +103,10 @@ search-guided methods (for example, DQN, TreeStrap, and AlphaZero).
 `Env` owns one game instance and lets the caller supply each decision. Use it for evaluation,
 interactive play, custom agents, and Gymnasium/PettingZoo adapters. It exposes observations,
 legal actions, active agents, event traces, rewards, snapshots, and forks.
+
+`Arena` owns concurrent, paired evaluation games. It pools native policy search across ready games
+and can place one external contestant on bounded worker lanes. Use it when the deployed agent
+includes search or when a subprocess engine must play alongside searched contestants.
 
 Algorithms whose traversal does not fit policy-driven episode collection use standalone solvers (e.g. CFR).
 
@@ -116,6 +120,7 @@ Algorithms whose traversal does not fit policy-driven episode collection use sta
 | `Policy` | Choose decisions and define any search/evaluation process used to do so. |
 | `Learner` | Decide which training records a policy trajectory produces. |
 | `Engine` | Run games concurrently, batch inference, assemble records, cache evaluations, and report telemetry. |
+| `Arena` | Run paired evaluation games, pool searched inference, and schedule external agents. |
 | `Env` | Expose one caller-controlled game instance. |
 | `Solver` | Own algorithm-specific traversals and persistent state outside the policy/learner engine model. |
 
