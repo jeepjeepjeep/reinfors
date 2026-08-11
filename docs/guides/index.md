@@ -7,7 +7,8 @@ training loop, then follow the path relevant to your run:
 2. Add [telemetry and TensorBoard](telemetry.md).
 3. Overlap sampling and optimization with [concurrent collection](streaming.md).
 4. Persist the complete run with [configuration and checkpoints](configuration-and-checkpoints.md).
-5. Compare trained agents through [evaluation](evaluation.md).
+5. Compare trained agents through [evaluation](evaluation.md) and run concurrent searched matches
+   with [Arena](arena.md).
 
 Use the [Gymnasium and PettingZoo adapters](adapters.md) when downstream tooling expects an ecosystem
 environment API instead of reinfors' native `Env` or batched `Engine`.

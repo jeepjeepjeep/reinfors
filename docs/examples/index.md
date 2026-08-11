@@ -147,6 +147,18 @@ sampled opening diversity.
 python examples/eval_az_h2h.py a.pt b.pt --games 200 --opening-plies 4
 ```
 
+### Arena evaluation
+
+`examples/eval_arena.py` runs paired, seat-swapped Connect Four matches across concurrent slots. It
+demonstrates batched AlphaZero search against an external agent, seeded openings, timeouts, and
+pair-level uncertainty without optional dependencies.
+
+**Runtime:** seconds for the default CPU smoke run.
+
+```bash
+python examples/eval_arena.py --games 20 --simulations 32 --slots 8
+```
+
 ## Adapters and validation
 
 Start with the [Gymnasium and PettingZoo guide](../guides/adapters.md); the adapter tests under
@@ -156,5 +168,6 @@ consult [batch formats](../reference/batch-formats.md) before copying a loss.
 ## Next steps
 
 - Build from the smallest DQN example with the [training guide](../guides/training.md).
-- Compare saved agents with the [evaluation guide](../guides/evaluation.md).
+- Compare saved agents with the [evaluation guide](../guides/evaluation.md) and
+  [Arena guide](../guides/arena.md).
 - Add experiment metrics with [telemetry and TensorBoard](../guides/telemetry.md).

@@ -49,6 +49,8 @@ print(batch.obs.shape, batch.targets.shape, batch.telemetry)
 - `collect` supports a simple synchronous loop; `collect_stream` runs parallel Rust search
   concurrently with Python training, with configurable queueing and bounded backpressure.
 - Networks are injectable per player and are not tied to a framework or device topology.
+- [`Arena`](docs/guides/arena.md) runs paired evaluation matches across concurrent slots, pooling
+  native search while subprocess-backed external agents compute on bounded worker lanes.
 - Composable Rust traits make new games and algorithms straightforward to add, with safer,
   simpler native extension than comparable C++ infrastructure.
 - [Game semantics](docs/catalogue/games.md) cover single- and multi-agent, zero-sum,
@@ -84,6 +86,7 @@ Reinfors is pre-1.0. Public contracts are documented, but breaking changes may s
 - [Choose a game](docs/catalogue/games.md), [algorithm](docs/catalogue/algorithms.md), or
   [built-in composition](docs/catalogue/compatibility.md)
 - [Run the examples](docs/examples/index.md)
+- [Evaluate searched agents with Arena](docs/guides/arena.md)
 - [Add a Rust game or algorithm](docs/extending/index.md)
 - [Read the complete documentation](docs/index.md)
 

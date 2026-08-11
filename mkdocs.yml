@@ -49,6 +49,7 @@ nav:
       - Concurrent collection: guides/streaming.md
       - Configuration and checkpoints: guides/configuration-and-checkpoints.md
       - Evaluation: guides/evaluation.md
+      - Arena: guides/arena.md
       - Gymnasium and PettingZoo: guides/adapters.md
   - Concepts:
       - concepts/index.md
