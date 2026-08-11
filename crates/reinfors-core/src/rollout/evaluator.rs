@@ -11,8 +11,7 @@ pub enum InferMode {
     PerPlayer,
 }
 
-/// How an evaluator reaches its cache: exclusively owned (the classic single-worker
-/// path — behavior untouched), shared sharded slots (grouped collection), or none.
+/// How an evaluator reaches its cache: exclusively owned, shared sharded slots, or none.
 pub enum CacheAccess<'a> {
     None,
     Exclusive(&'a mut [InferCache]),
@@ -23,9 +22,8 @@ pub struct Evaluator<'a, F> {
     infer: &'a mut F,
     mode: InferMode,
     cache: CacheAccess<'a>,
-    // Shared-cache traffic attributable to THIS evaluator: the sharded cache's own
-    // counters are global across every accessor, so per-evaluator telemetry (folded per
-    // group) must be tracked locally or it double-counts.
+    // The sharded cache's own counters are global across accessors; per-evaluator
+    // telemetry must be local or folding double-counts.
     shared_lookups: usize,
     shared_hits: usize,
     pub rows: usize,
@@ -47,8 +45,8 @@ pub struct EvalBatch<'e, 'a, F> {
     n: usize,
     dim: usize,
     generation: u64,
-    // Per-row staging generations (shared path): per-player slots advance their
-    // generations independently, so one batch-level value is wrong across slots.
+    // Shared path: per-player slots advance generations independently, so staging
+    // generations are per row.
     row_generations: Vec<u64>,
 }
 
@@ -135,8 +133,7 @@ where
     }
 
     pub fn batch<'e>(&'e mut self) -> EvalBatch<'e, 'a, F> {
-        // Exclusive caches sync at batch boundaries (the classic contract). Shared shards
-        // sync lazily per access — locking every shard per round would serialize groups.
+        // Shared shards sync lazily per access; locking all per round would serialize.
         let generation = match &mut self.cache {
             CacheAccess::Exclusive(caches) => {
                 for cache in caches.iter_mut() {
@@ -242,8 +239,6 @@ where
     pub fn cache_lookups(&self) -> usize {
         match &self.cache {
             CacheAccess::Exclusive(c) => c.iter().map(|x| x.lookups).sum(),
-            // Evaluator-local: the sharded cache's own counters are global across all
-            // accessors; read those centrally, exactly once, if totals are wanted.
             CacheAccess::Shared(_) => self.shared_lookups,
             CacheAccess::None => 0,
         }

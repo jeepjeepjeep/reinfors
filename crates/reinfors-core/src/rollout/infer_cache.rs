@@ -130,16 +130,9 @@ impl InferCache {
     }
 }
 
-/// Concurrent cache for grouped collection: the key space is partitioned across
-/// independently locked shards, so accessors collide only within a shard. Not a replica
-/// set — an entry lives in exactly one shard, chosen by key hash, so there is no
-/// cross-shard coherence. Generations synchronize lazily per access; the serve guarantee
-/// is per-read (stronger than the exclusive cache's batch-boundary window). Total
-/// configured capacity is divided across shards, so sharded eviction differs from the
-/// exclusive cache — grouped digests are a distinct composition by design.
-///
-/// Lock discipline: every operation acquires exactly one shard lock, never holds two,
-/// and never spans inference or channel work.
+/// Concurrent cache for grouped collection: key-hash-partitioned shards, each its own
+/// lock, generations synchronized lazily per access. Every operation takes exactly one
+/// shard lock and never spans inference or channel work.
 pub struct ShardedInferCache {
     shards: Vec<Mutex<InferCache>>,
     generation: Arc<AtomicU64>,
@@ -147,14 +140,13 @@ pub struct ShardedInferCache {
 }
 
 impl ShardedInferCache {
-    /// `capacity` is the TOTAL entry budget, divided across `shards` (a power of two).
+    /// `capacity` is the total entry budget, divided across up to `shards`.
     pub fn new(capacity: usize, shards: usize, generation: Arc<AtomicU64>) -> Self {
         assert!(
             shards.is_power_of_two(),
             "shard count must be a power of two"
         );
-        // Small budgets shrink the active shard count instead of inflating the total:
-        // the floor matches the exclusive cache's (2 entries), never 2 * shards.
+        // Small budgets shrink the shard count so the floor stays 2, never 2 * shards.
         let cap_bound = (capacity / 2).max(1);
         let cap_shards = if cap_bound.is_power_of_two() {
             cap_bound
@@ -187,8 +179,8 @@ impl ShardedInferCache {
         shard.lookup(key)
     }
 
-    /// Insert a row computed under weights generation `staged`. Rejected when the shard
-    /// has advanced past `staged` — rows from superseded weights never enter.
+    /// Insert a row computed under weights generation `staged`; rejected once the shard
+    /// has advanced past it.
     pub fn insert(&self, key: u128, row: &[f64], staged: u64) {
         let mut shard = self.shard(key).lock().expect("cache shard poisoned");
         shard.sync_generation();
