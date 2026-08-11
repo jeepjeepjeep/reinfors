@@ -12,10 +12,12 @@ Reinfors keeps the public composition surface small and typed.
 | `reinfors.noise` | Root exploration-noise handles |
 | `reinfors.solvers` | CFR and Deep CFR constructors |
 | `reinfors.spaces` | `Box` and `Discrete` descriptors |
+| `reinfors.starts` | Arena opening generators, including `RandomStartingMoves` |
 | `reinfors.gym` | Optional Gymnasium and PettingZoo adapters |
 | `Engine` | Parallel policy-driven collection |
 | `Arena` | Concurrent paired evaluation with pooled searched contestants |
-| `reinfors.arena.External` | Per-game external-agent factory and worker-lane configuration |
+| `reinfors.arena.External`, `reinfors.arena.View` | External-agent configuration and the input passed to `act` |
+| `reinfors.arena.ArenaResult`, `reinfors.arena.GameResult` | Pair-level aggregates and per-game Arena records |
 | `CollectStream` | Background collection handle returned by `Engine.collect_stream` |
 | `EngineSnapshot`, `EnvSnapshot` | Opaque continuation and environment snapshots |
 | `Env` | Caller-driven single-game play |

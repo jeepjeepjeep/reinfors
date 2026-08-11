@@ -55,7 +55,9 @@ def main() -> None:
     result = arena.play(args.games)
     mean, stderr = result.payoff(0)
     score = mean / 2.0 + 0.5
-    print(f"searched score={score:.3f} +/- {stderr / 2.0:.3f} over {len(result.games) // 2} opening pairs")
+    pairs = len(result.games) // 2
+    pair_label = "pair" if pairs == 1 else "pairs"
+    print(f"searched score={score:.3f} +/- {stderr / 2.0:.3f} over {pairs} opening {pair_label}")
     print(f"searched payoff by seat: {result.seat_payoffs(0)}")
 
 

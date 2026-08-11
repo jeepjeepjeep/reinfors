@@ -77,7 +77,9 @@ def main() -> None:
     result = arena.play(args.games)
     mean, stderr = result.payoff(0)
     score = mean / 2.0 + 0.5
-    print(f"searched score={score:.3f} +/- {stderr / 2.0:.3f} over {len(result.games) // 2} opening pairs")
+    pairs = len(result.games) // 2
+    pair_label = "pair" if pairs == 1 else "pairs"
+    print(f"searched score={score:.3f} +/- {stderr / 2.0:.3f} over {pairs} opening {pair_label}")
     print(f"searched payoff by seat: {result.seat_payoffs(0)}")
 
 
@@ -105,7 +107,7 @@ Each factory instance must implement `act(view) -> action`. `view` contains `obs
 `agent`, and `ticks`. An instance may also implement:
 
 - `on_action(action)`, called in order for every move in its game, including opening moves;
-- `close()`, called after pending notifications when the game finishes or cleanup begins.
+- `close()`, queued after pending notifications when the game finishes or cleanup begins.
 
 This supports stateful stdin/stdout engines: launch one subprocess in the factory, submit positions or
 moves from `on_action`, and read its next move in `act`. Exceptions, illegal actions, and timeouts fail
@@ -114,8 +116,13 @@ the match with game context.
 Worker lanes are Python threads. They suit subprocess and other blocking I/O because those operations
 release the GIL; CPU-bound Python agents do not gain multicore execution and should own worker
 processes instead. A timeout bounds Arena's wait, but cannot forcibly interrupt arbitrary agent code.
-External agents must make their resources cancellable and terminate child processes in `close()` or
-their own failure path.
+
+`close()` is best-effort during an abort. Calls on one lane are serialized, so if `act()` or
+`on_action()` blocks, the queued `close()` cannot run; after the abort grace period Arena stops waiting
+and the daemon lane may remain blocked. A subprocess-backed agent must therefore provide out-of-band
+cleanup rather than rely on `close()`: for example, register every child when it starts and terminate
+its process group from the caller's own `finally`. `close()` remains the ordinary-completion cleanup
+path.
 
 ## Concurrency and batching
 
@@ -131,7 +138,9 @@ search configuration, and device placement with evaluation results.
 
 `play(n_games)` requires an even number. `RandomStartingMoves(n)` draws one seeded legal opening per
 pair, restores its snapshot for both games, and swaps the contestants' seats. Openings that finish the
-game are resampled. External agents receive the opening through `on_action` before their first `act`.
+game are resampled. If no live opening is found within `max_retries`, generation raises `ValueError`;
+an opening length that games rarely survive should therefore fail loudly rather than hang. External
+agents receive the opening through `on_action` before their first `act`.
 
 `ArenaResult.games` is ordered by game id. Each `GameResult` contains its opening id, seat map,
 contestant-ordered payoffs, length, and complete action trace. `result.payoff(i)` returns contestant
