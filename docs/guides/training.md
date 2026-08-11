@@ -177,7 +177,8 @@ inference cache, the start buffer, and weight refreshes — which is the same st
 accelerator training already has. With deterministic inference and none of those in play
 (e.g. cacheless test configurations) they are exact: per-group record floors and
 persistent per-group rng streams (carried in snapshots) make results independent of
-scheduling and of collection chunking. Reproduce anomalies with `n_groups=1`, which stays
+scheduling. Splitting one collect into several remains observable — record floors reset
+per call. Reproduce anomalies with `n_groups=1`, which stays
 exactly deterministic. Digests differ from `n_groups=1` — it is a different composition,
 and `resolved_config()`/`config_fingerprint()` record it.
 On a weight refresh (`weights_updated()`), rows already in flight finish their round. Once

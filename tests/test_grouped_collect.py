@@ -118,19 +118,21 @@ def test_truncation_tail_bootstrapping_works_grouped() -> None:
         m = obs.shape[0]
         return (
             np.zeros((m, chess_a), dtype=np.float32),
-            np.zeros(m, dtype=np.float32),
+            np.full(m, 0.7, dtype=np.float32),
         )
 
     eng = rf.Engine(
-        rf.games.Chess(max_ticks=40),
+        rf.games.Chess(max_ticks=12),
         rf.Reward(win=1.0, loss=-1.0),
         rf.policies.AlphaZero(num_simulations=8),
         rf.learners.AlphaZero(gamma=1.0),
         n_games=4,
         n_groups=2,
     )
-    batch = eng.collect(100, az_infer)
-    assert batch.obs.shape[0] >= 100
+    batch = eng.collect(40, az_infer)
+    assert batch.obs.shape[0] >= 40
+    # truncated episodes bootstrap from the 0.7 tail value; gamma=1 keeps it exact
+    assert np.any(np.isclose(np.abs(batch.value_targets), 0.7))
 
 
 def test_grouped_callback_error_propagates_without_hanging() -> None:
@@ -221,3 +223,53 @@ def test_grouped_rejects_per_player_callbacks_stream_without_forfeiting_engine()
     # rejected BEFORE the engine moved into the worker: still usable
     batch = eng.collect(20, _uniform_infer)
     assert batch.obs.shape[0] >= 20
+
+
+def test_dqn_grouped_collect_works() -> None:
+    def q_infer(obs, n=None):
+        return np.zeros((obs.shape[0], 1, _A), dtype=np.float32)
+
+    eng = rf.Engine(
+        rf.games.Connect4(),
+        rf.Reward(win=1.0, loss=-1.0),
+        rf.policies.EpsilonGreedyQ(),
+        rf.learners.Dqn(),
+        n_games=4,
+        n_groups=2,
+    )
+    batch = eng.collect(60, q_infer)
+    assert batch.obs.shape[0] >= 60
+
+
+def test_start_buffer_grouped_collect_works() -> None:
+    game = rf.games.Snake()
+    a = game.action_space().n
+
+    def infer(obs, n=None):
+        return np.zeros((obs.shape[0], 1, a), dtype=np.float32)
+
+    eng = rf.Engine(
+        game,
+        rf.Reward(food=1.0),
+        rf.policies.SelectiveExpectimax(expansion_budget=16),
+        rf.learners.TreeStrap(gamma=0.99),
+        n_games=4,
+        n_groups=2,
+        start_buffer=True,
+    )
+    for _ in range(2):
+        batch = eng.collect(60, infer)
+        assert batch.obs.shape[0] >= 60
+
+
+def test_uneven_groups_and_tiny_floor() -> None:
+    eng = rf.Engine(
+        rf.games.Connect4(),
+        rf.Reward(win=1.0, loss=-1.0),
+        rf.policies.AlphaZero(num_simulations=8),
+        rf.learners.AlphaZero(gamma=1.0),
+        n_games=5,
+        n_groups=2,
+    )
+    batch = eng.collect(1, _uniform_infer)
+    assert batch.obs.shape[0] >= 1

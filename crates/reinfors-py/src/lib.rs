@@ -1796,7 +1796,26 @@ where
                     "n_groups=2 supports a single shared infer callback",
                 ));
             }
-            self.inner.collect_grouped(n_records, mode, &mut infer_fn)
+            let err_probe = callback_err.clone();
+            let mut grouped_fn = move |p: usize, o: Vec<f32>, n: usize| -> Vec<f64> {
+                let out = infer_fn(p, o, n);
+                if err_probe.lock().unwrap().is_some() {
+                    // Unwinds into the service's catch, cancelling both workers promptly.
+                    std::panic::panic_any("python infer callback raised".to_string());
+                }
+                out
+            };
+            let inner = &mut self.inner;
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                inner.collect_grouped(n_records, mode, &mut grouped_fn)
+            }));
+            if let Some(e) = callback_err.lock().unwrap().take() {
+                return Err(e);
+            }
+            match outcome {
+                Ok(v) => v,
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
         } else {
             self.inner.collect_routed(n_records, mode, &mut infer_fn)
         };
@@ -1834,12 +1853,28 @@ where
                 stop,
                 callback_err.clone(),
             );
+            let err_probe = callback_err.clone();
+            let mut grouped_fn = move |p: usize, o: Vec<f32>, n: usize| -> Vec<f64> {
+                let out = infer_fn(p, o, n);
+                if err_probe.lock().unwrap().is_some() {
+                    // Unwinds into the service's catch, cancelling both workers promptly.
+                    std::panic::panic_any("python infer callback raised".to_string());
+                }
+                out
+            };
             let inner = &mut self.inner;
-            let (records, stats) =
-                py.allow_threads(|| inner.collect_grouped(n_records, mode, &mut infer_fn));
+            let outcome = py.allow_threads(|| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    inner.collect_grouped(n_records, mode, &mut grouped_fn)
+                }))
+            });
             if let Some(e) = callback_err.lock().unwrap().take() {
                 return Err(e);
             }
+            let (records, stats) = match outcome {
+                Ok(v) => v,
+                Err(payload) => std::panic::resume_unwind(payload),
+            };
             let telemetry = build_telemetry(py, &stats)?;
             return L::Record::into_py_batch(records, py, self.dim, self.n_heads, telemetry);
         }

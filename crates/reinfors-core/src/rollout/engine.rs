@@ -418,61 +418,71 @@ where
             let (res_a, res_b) = std::thread::scope(|scope| {
                 scope.spawn(move || run_service(&mut infer, &req_rx, svc));
                 let handle_a = scope.spawn(move || {
-                    run_group_worker(
-                        game,
-                        encoder,
-                        reward,
-                        policy,
-                        learner,
-                        learn_mask,
-                        sequential,
-                        collect_interior,
-                        mode,
-                        floors[0],
-                        ep_a,
-                        tr_a,
-                        tk_a,
-                        ps_a,
-                        er_a,
-                        sd_a,
-                        &mut rng_a[0],
-                        slots,
-                        tx_a,
-                        svc,
-                        start,
-                    )
+                    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run_group_worker(
+                            game,
+                            encoder,
+                            reward,
+                            policy,
+                            learner,
+                            learn_mask,
+                            sequential,
+                            collect_interior,
+                            mode,
+                            floors[0],
+                            ep_a,
+                            tr_a,
+                            tk_a,
+                            ps_a,
+                            er_a,
+                            sd_a,
+                            &mut rng_a[0],
+                            slots,
+                            tx_a,
+                            svc,
+                            start,
+                        )
+                    }));
+                    if res.is_err() {
+                        svc.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    res
                 });
                 let handle_b = scope.spawn(move || {
-                    run_group_worker(
-                        game,
-                        encoder,
-                        reward,
-                        policy,
-                        learner,
-                        learn_mask,
-                        sequential,
-                        collect_interior,
-                        mode,
-                        floors[1],
-                        ep_b,
-                        tr_b,
-                        tk_b,
-                        ps_b,
-                        er_b,
-                        sd_b,
-                        &mut rng_b[0],
-                        slots,
-                        tx_b,
-                        svc,
-                        start,
-                    )
+                    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run_group_worker(
+                            game,
+                            encoder,
+                            reward,
+                            policy,
+                            learner,
+                            learn_mask,
+                            sequential,
+                            collect_interior,
+                            mode,
+                            floors[1],
+                            ep_b,
+                            tr_b,
+                            tk_b,
+                            ps_b,
+                            er_b,
+                            sd_b,
+                            &mut rng_b[0],
+                            slots,
+                            tx_b,
+                            svc,
+                            start,
+                        )
+                    }));
+                    if res.is_err() {
+                        svc.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    res
                 });
-                let res_a = handle_a.join();
-                if res_a.is_err() {
-                    svc.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-                let res_b = handle_b.join();
-                (res_a, res_b)
+                (
+                    handle_a.join().and_then(|r| r),
+                    handle_b.join().and_then(|r| r),
+                )
             });
             for (slot, res) in group_results.iter_mut().zip([res_a, res_b]) {
                 match res {
@@ -633,6 +643,13 @@ where
         if !matches!(version, 2 | 3) {
             return Err("unsupported engine snapshot layout version".into());
         }
+        if version == 2 && self.n_groups > 1 {
+            return Err(
+                "version-2 snapshot predates per-group rng streams; restore it into an \
+                 n_groups=1 engine"
+                    .into(),
+            );
+        }
         let n_games = r.u32()? as usize;
         let num_agents = r.u32()? as usize;
         if n_games != self.episodes.len() || num_agents != self.game.num_agents() {
@@ -783,6 +800,11 @@ where
         // Numeric generations do not identify weights across restored processes.
         if let Some(caches) = self.infer_caches.as_mut() {
             for cache in caches.iter_mut() {
+                cache.force_clear();
+            }
+        }
+        if let Some(caches) = self.sharded_caches.as_ref() {
+            for cache in caches {
                 cache.force_clear();
             }
         }
@@ -1060,6 +1082,8 @@ fn fold_stats(mut a: CollectStats, b: CollectStats) -> CollectStats {
     a.sum_leaves += b.sum_leaves;
     a.sum_rounds += b.sum_rounds;
     a.sum_expansions += b.sum_expansions;
+    a.sum_sigma += b.sum_sigma;
+    a.sum_disagreement += b.sum_disagreement;
     a.sum_terminal_sims += b.sum_terminal_sims;
     a.sum_depthcap_sims += b.sum_depthcap_sims;
     a.sum_shared_rows += b.sum_shared_rows;
@@ -1104,16 +1128,18 @@ where
 {
     use std::sync::atomic::Ordering;
     let cancel = &svc.cancel;
+    // run_service answers every accepted request exactly once, so one reply channel
+    // serves the worker's lifetime.
+    let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
     let mut service_infer = |player: usize, obs: Vec<f32>, n: usize| -> Vec<f64> {
         if cancel.load(Ordering::Relaxed) {
             return Vec::new();
         }
-        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
         let request = crate::rollout::infer_service::InferRequest {
             player,
             obs,
             n,
-            reply: reply_tx,
+            reply: reply_tx.clone(),
         };
         if req_tx.send(request).is_err() {
             return Vec::new();
@@ -1211,4 +1237,154 @@ where
         );
     }
     (out, stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policies::tree::alphazero::{AlphaZero, AlphaZeroConfig};
+    use crate::policies::tree::mcts::{NoiseScope, SequentialBackup};
+    use crate::rollout::infer_cache::{InferCache, ShardedInferCache};
+    use crate::{Actor, AlphaZeroLearner, ChanceMode, Space, StateCodec, Transition};
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct St {
+        tick: usize,
+    }
+    struct Count;
+    impl Game for Count {
+        type State = St;
+        type Event = ();
+        fn num_agents(&self) -> usize {
+            1
+        }
+        fn action_count(&self) -> usize {
+            2
+        }
+        fn actor(&self, _s: &St) -> Actor {
+            Actor::Agent(0)
+        }
+        fn legal_actions(&self, _s: &St, _agent: usize) -> Vec<usize> {
+            vec![0, 1]
+        }
+        fn step(&self, s: &St, _a: &[usize]) -> Transition<St, ()> {
+            Transition {
+                next_state: St { tick: s.tick + 1 },
+                events: vec![None],
+                terminal: s.tick + 1 >= 3,
+            }
+        }
+        fn initial_state(&self) -> St {
+            St { tick: 0 }
+        }
+    }
+    struct Enc;
+    impl crate::ActionView for Enc {}
+    impl StateEncoder for Enc {
+        type State = St;
+        fn encode(&self, s: &St, _agent: usize) -> Vec<f32> {
+            vec![s.tick as f32, 1.0]
+        }
+        fn obs_shape(&self) -> (usize, usize, usize) {
+            (1, 1, 2)
+        }
+        fn observation_space(&self) -> Space {
+            Space::unit_box(vec![1, 1, 2])
+        }
+    }
+    struct Zero;
+    impl Reward for Zero {
+        type Event = ();
+        fn step_reward(&self, _e: &(), _agent: usize) -> f64 {
+            0.0
+        }
+    }
+    struct Codec;
+    impl StateCodec for Codec {
+        type State = St;
+        fn encode(&self, s: &St) -> Vec<u8> {
+            (s.tick as u64).to_le_bytes().to_vec()
+        }
+        fn decode(&self, b: &[u8]) -> Result<St, String> {
+            let arr: [u8; 8] = b.try_into().map_err(|_| "bad state".to_string())?;
+            Ok(St {
+                tick: u64::from_le_bytes(arr) as usize,
+            })
+        }
+        fn validate_decoded_state(&self, s: &St, _done: bool) -> Result<(), String> {
+            if s.tick <= 3 {
+                Ok(())
+            } else {
+                Err("tick out of range".into())
+            }
+        }
+    }
+
+    fn engine(n_groups: usize) -> Engine<Count, AlphaZero, AlphaZeroLearner> {
+        Engine::new(
+            Count,
+            Box::new(Enc),
+            Box::new(Zero),
+            AlphaZero::new(AlphaZeroConfig {
+                num_simulations: 6,
+                c_puct: 1.5,
+                gamma: 1.0,
+                max_depth: 64,
+                noise_epsilon: 0.25,
+                noise_alpha: 0.5,
+                temperature: 1.0,
+                temperature_drop: 4,
+                chance: ChanceMode::AlwaysResample,
+                noise_scope: NoiseScope::Requester,
+                sequential_backup: SequentialBackup::Auto,
+            }),
+            AlphaZeroLearner::new(1.0),
+            EngineParams {
+                n_games: 4,
+                seed: 5,
+                n_groups,
+            },
+        )
+    }
+
+    fn downgrade_to_v2(mut bytes: Vec<u8>) -> Vec<u8> {
+        bytes[0] = 2;
+        let off = 1 + 4 + 4 + 8 + 8;
+        let count = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
+        bytes.drain(off..off + 4 + 8 * count);
+        bytes
+    }
+
+    #[test]
+    fn v2_snapshot_rejected_for_grouped_engine() {
+        let mut eng = engine(2);
+        let v2 = downgrade_to_v2(eng.snapshot_bytes(&Codec).unwrap());
+        let err = eng.restore_bytes(&Codec, &v2).unwrap_err();
+        assert!(err.contains("n_groups=1"), "{err}");
+    }
+
+    #[test]
+    fn v2_snapshot_accepted_for_ungrouped_engine() {
+        let mut eng = engine(1);
+        let v2 = downgrade_to_v2(eng.snapshot_bytes(&Codec).unwrap());
+        eng.restore_bytes(&Codec, &v2).unwrap();
+    }
+
+    #[test]
+    fn restore_clears_sharded_caches() {
+        let generation = Arc::new(AtomicU64::new(0));
+        let caches = vec![
+            ShardedInferCache::new(64, 4, generation.clone()),
+            ShardedInferCache::new(64, 4, generation),
+        ];
+        let mut eng = engine(2).with_sharded_infer_caches(caches);
+        let snap = eng.snapshot_bytes(&Codec).unwrap();
+        let slot = &eng.sharded_caches.as_ref().unwrap()[0];
+        slot.insert(InferCache::key(&[1.0, 2.0]), &[0.5], 0);
+        assert_eq!(slot.len(), 1);
+        eng.restore_bytes(&Codec, &snap).unwrap();
+        assert_eq!(eng.sharded_caches.as_ref().unwrap()[0].len(), 0);
+    }
 }

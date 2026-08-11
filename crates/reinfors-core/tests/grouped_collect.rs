@@ -133,3 +133,87 @@ fn grouped_collect_rejects_ungrouped_engine() {
 fn constructor_rejects_single_game_grouping() {
     let _ = engine(1, 2, 0);
 }
+
+struct PanicEnc {
+    owner: std::sync::Mutex<Option<std::thread::ThreadId>>,
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+impl reinfors_core::ActionView for PanicEnc {}
+impl StateEncoder for PanicEnc {
+    type State = St;
+    fn encode(&self, s: &St, _agent: usize) -> Vec<f32> {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let me = std::thread::current().id();
+        let mut owner = self.owner.lock().unwrap();
+        match *owner {
+            None => *owner = Some(me),
+            Some(t) if t != me => panic!("peer group panicked"),
+            _ => {}
+        }
+        vec![s.tick as f32, 1.0]
+    }
+    fn obs_shape(&self) -> (usize, usize, usize) {
+        (1, 1, 2)
+    }
+    fn observation_space(&self) -> Space {
+        Space::unit_box(vec![1, 1, 2])
+    }
+}
+
+#[test]
+fn worker_panic_cancels_the_peer_group_promptly() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let enc = PanicEnc {
+        owner: std::sync::Mutex::new(None),
+        calls: calls.clone(),
+    };
+    let mut eng = Engine::new(
+        Count,
+        Box::new(enc),
+        Box::new(Zero),
+        AlphaZero::new(AlphaZeroConfig {
+            num_simulations: 6,
+            c_puct: 1.5,
+            gamma: 1.0,
+            max_depth: 64,
+            noise_epsilon: 0.25,
+            noise_alpha: 0.5,
+            temperature: 1.0,
+            temperature_drop: 4,
+            chance: reinfors_core::ChanceMode::AlwaysResample,
+            noise_scope: reinfors_core::policies::tree::mcts::NoiseScope::Requester,
+            sequential_backup: reinfors_core::policies::tree::mcts::SequentialBackup::Auto,
+        }),
+        AlphaZeroLearner::new(1.0),
+        EngineParams {
+            n_games: 4,
+            seed: 7,
+            n_groups: 2,
+        },
+    );
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        eng.collect_grouped(50_000, InferMode::Shared, infer)
+    }));
+    let payload = match res {
+        Err(payload) => payload,
+        Ok(_) => panic!("collect should have panicked"),
+    };
+    let msg = payload.downcast_ref::<&str>().copied().unwrap_or("");
+    assert_eq!(msg, "peer group panicked");
+    let seen = calls.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        seen < 5_000,
+        "peer group not cancelled promptly: {seen} encodes"
+    );
+}
+
+#[test]
+#[should_panic(expected = "grouped collect infer callback failed")]
+fn callback_panic_surfaces_without_hanging() {
+    let _ = engine(4, 2, 1).collect_grouped(
+        16,
+        InferMode::Shared,
+        |_p: usize, _o: Vec<f32>, _n: usize| -> Vec<f64> { panic!("boom") },
+    );
+}
