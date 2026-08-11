@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="540" viewBox="0 0 760 540" role="img" aria-labelledby="title desc">
+  <title id="title">Interactive Connect4 terminal example</title>
+  <desc id="desc">An animated terminal shows numbered keyboard input advancing a Connect4 board until player X wins.</desc>
+  <style>
+    .frame { opacity: 0; }
+    .frame-1 { animation: frame-1 12s infinite; }
+    .frame-2 { animation: frame-2 12s infinite; }
+    .frame-3 { animation: frame-3 12s infinite; }
+    .frame-4 { animation: frame-4 12s infinite; }
+    .prompt { font: 18px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #e5e7eb; }
+    .typed { fill: #a7f3d0; font-weight: 700; }
+    .label { font: 16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #9ca3af; }
+    .x { fill: #facc15; stroke: #fef08a; stroke-width: 2; }
+    .o { fill: #ef4444; stroke: #fecaca; stroke-width: 2; }
+    @keyframes frame-1 { 0%, 23% { opacity: 1; } 25%, 100% { opacity: 0; } }
+    @keyframes frame-2 { 0%, 24% { opacity: 0; } 26%, 48% { opacity: 1; } 50%, 100% { opacity: 0; } }
+    @keyframes frame-3 { 0%, 49% { opacity: 0; } 51%, 73% { opacity: 1; } 75%, 100% { opacity: 0; } }
+    @keyframes frame-4 { 0%, 74% { opacity: 0; } 76%, 98% { opacity: 1; } 100% { opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) {
+      .frame { animation: none; opacity: 0; }
+      .frame-4 { opacity: 1; }
+    }
+  </style>
+  <defs>
+    <circle id="slot" r="23" fill="#111827"/>
+    <g id="board">
+      <rect x="140" y="105" width="448" height="384" rx="12" fill="#2563eb"/>
+      <g>
+        <use href="#slot" x="172" y="137"/><use href="#slot" x="236" y="137"/><use href="#slot" x="300" y="137"/><use href="#slot" x="364" y="137"/><use href="#slot" x="428" y="137"/><use href="#slot" x="492" y="137"/><use href="#slot" x="556" y="137"/>
+        <use href="#slot" x="172" y="201"/><use href="#slot" x="236" y="201"/><use href="#slot" x="300" y="201"/><use href="#slot" x="364" y="201"/><use href="#slot" x="428" y="201"/><use href="#slot" x="492" y="201"/><use href="#slot" x="556" y="201"/>
+        <use href="#slot" x="172" y="265"/><use href="#slot" x="236" y="265"/><use href="#slot" x="300" y="265"/><use href="#slot" x="364" y="265"/><use href="#slot" x="428" y="265"/><use href="#slot" x="492" y="265"/><use href="#slot" x="556" y="265"/>
+        <use href="#slot" x="172" y="329"/><use href="#slot" x="236" y="329"/><use href="#slot" x="300" y="329"/><use href="#slot" x="364" y="329"/><use href="#slot" x="428" y="329"/><use href="#slot" x="492" y="329"/><use href="#slot" x="556" y="329"/>
+        <use href="#slot" x="172" y="393"/><use href="#slot" x="236" y="393"/><use href="#slot" x="300" y="393"/><use href="#slot" x="364" y="393"/><use href="#slot" x="428" y="393"/><use href="#slot" x="492" y="393"/><use href="#slot" x="556" y="393"/>
+        <use href="#slot" x="172" y="457"/><use href="#slot" x="236" y="457"/><use href="#slot" x="300" y="457"/><use href="#slot" x="364" y="457"/><use href="#slot" x="428" y="457"/><use href="#slot" x="492" y="457"/><use href="#slot" x="556" y="457"/>
+      </g>
+      <text class="label" x="172" y="520" text-anchor="middle">1</text><text class="label" x="236" y="520" text-anchor="middle">2</text><text class="label" x="300" y="520" text-anchor="middle">3</text><text class="label" x="364" y="520" text-anchor="middle">4</text><text class="label" x="428" y="520" text-anchor="middle">5</text><text class="label" x="492" y="520" text-anchor="middle">6</text><text class="label" x="556" y="520" text-anchor="middle">7</text>
+    </g>
+  </defs>
+
+  <rect width="760" height="540" rx="14" fill="#0b1020"/>
+  <circle cx="24" cy="24" r="6" fill="#ef4444"/><circle cx="44" cy="24" r="6" fill="#facc15"/><circle cx="64" cy="24" r="6" fill="#22c55e"/>
+  <text class="label" x="380" y="29" text-anchor="middle">python examples/play_connect4.py</text>
+
+  <g class="frame frame-1">
+    <text class="prompt" x="70" y="75">Player X — choose column [1, 2, 3, 4, 5, 6, 7]: <tspan class="typed">1</tspan></text>
+    <use href="#board"/>
+    <circle class="o" cx="556" cy="457" r="21"/><circle class="x" cx="172" cy="457" r="21"/>
+  </g>
+  <g class="frame frame-2">
+    <text class="prompt" x="70" y="75">Computer O chooses column <tspan class="typed">4</tspan>.</text>
+    <use href="#board"/>
+    <circle class="o" cx="556" cy="457" r="21"/><circle class="o" cx="364" cy="457" r="21"/>
+    <circle class="x" cx="172" cy="457" r="21"/><circle class="x" cx="172" cy="393" r="21"/>
+  </g>
+  <g class="frame frame-3">
+    <text class="prompt" x="70" y="75">Player X — choose column [1, 2, 3, 4, 5, 6, 7]: <tspan class="typed">1</tspan></text>
+    <use href="#board"/>
+    <circle class="o" cx="556" cy="457" r="21"/><circle class="o" cx="364" cy="457" r="21"/><circle class="o" cx="556" cy="393" r="21"/>
+    <circle class="x" cx="172" cy="457" r="21"/><circle class="x" cx="172" cy="393" r="21"/><circle class="x" cx="172" cy="329" r="21"/>
+  </g>
+  <g class="frame frame-4">
+    <text class="prompt typed" x="70" y="75">Player X wins!</text>
+    <use href="#board"/>
+    <circle class="o" cx="556" cy="457" r="21"/><circle class="o" cx="364" cy="457" r="21"/><circle class="o" cx="556" cy="393" r="21"/>
+    <circle class="x" cx="172" cy="457" r="21"/><circle class="x" cx="172" cy="393" r="21"/><circle class="x" cx="172" cy="329" r="21"/><circle class="x" cx="172" cy="265" r="21"/>
+  </g>
+</svg>

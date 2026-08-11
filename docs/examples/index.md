@@ -113,6 +113,18 @@ python examples/train_deep_cfr.py
 
 ## Solving and evaluation
 
+### Play Connect4
+
+`examples/play_connect4.py` renders a terminal board and accepts numbered keyboard input through
+`Env`. It plays against a seeded random opponent by default; pass `--opponent human` for two people.
+No optional dependencies are required.
+
+**Runtime:** continues until the game ends or the player enters `q`.
+
+```bash
+python examples/play_connect4.py
+```
+
 ### Solve Leduc
 
 `examples/solve_leduc.py` runs tabular CFR, CFR+, or external-sampling MCCFR and reports exact
