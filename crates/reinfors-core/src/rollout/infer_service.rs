@@ -1,7 +1,6 @@
-//! Inference service for grouped collection: one thread owns the callback; group workers
-//! submit tagged requests over a bounded channel and block on one-shot `Result` replies.
-//! On callback panic the service records the message, flips the shared cancel flag, and
-//! answers every pending and future request with `Err` so no worker deadlocks.
+//! Inference service for grouped collection: one thread owns the callback; workers block
+//! on one-shot `Result` replies. Callback panics cancel the run and answer every pending
+//! request with `Err` so no worker deadlocks.
 
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};

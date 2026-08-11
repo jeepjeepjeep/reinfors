@@ -1,8 +1,4 @@
-"""Grouped collect (n_groups=2): engine-owned scheduler — properties, config, validation.
-
-Cacheless grouped collects with deterministic inference are exact (per-group floors +
-persistent per-group rng streams); with the shared sharded cache live they are run-to-run
-nondeterministic by declaration, so cache-on tests assert properties, not equality."""
+"""Grouped collect (n_groups=2): properties, config surface, and validation."""
 
 import numpy as np
 import pytest
@@ -38,8 +34,7 @@ def test_grouped_collect_is_deterministic_per_seed() -> None:
 
 
 def test_grouped_collect_with_cache_is_sane() -> None:
-    # The shared sharded cache makes grouped collects run-to-run nondeterministic by
-    # declaration; assert the properties instead of equality.
+    # cache-on grouped collects are nondeterministic: assert properties, not equality
     eng = rf.Engine(
         rf.games.Connect4(),
         rf.Reward(win=1.0, loss=-1.0),
@@ -97,7 +92,6 @@ def test_rejects_single_game_grouping() -> None:
 
 
 def test_expectimax_grouped_collect_works() -> None:
-    # v2 is policy-agnostic: no grouping hooks, expectimax included.
     game = rf.games.Snake()
     a = game.action_space().n
 
@@ -118,7 +112,6 @@ def test_expectimax_grouped_collect_works() -> None:
 
 
 def test_truncation_tail_bootstrapping_works_grouped() -> None:
-    # v1 excluded tail bootstrapping; the v2 service serves tail forwards like any other.
     chess_a = rf.games.Chess().action_space().n
 
     def az_infer(obs, n=None):
@@ -151,8 +144,7 @@ def test_grouped_callback_error_propagates_without_hanging() -> None:
 
 
 def test_grouped_snapshot_restore_continues_exactly() -> None:
-    # cacheless + deterministic infer: grouped collects are exact, and per-group rng
-    # streams live in the snapshot (schema v3) — a restored engine continues bit-for-bit.
+    # cacheless + deterministic infer: exact, and group rng streams ride the snapshot
     a1 = _engine(2, seed=7)
     b1 = _engine(2, seed=7)
     _ = a1.collect(60, _uniform_infer)

@@ -46,8 +46,7 @@ pub struct CollectStats {
     pub sum_extra_eval_rows: usize,
 }
 
-/// Start-distribution access shared across group workers (uncontended in the classic
-/// single-worker path).
+/// Start-distribution access shared across group workers.
 pub(crate) struct StartParts<'a, S> {
     pub dist: &'a mut dyn StartDistribution<S>,
     pub rng: &'a mut SplitMix64,
@@ -58,9 +57,8 @@ pub(crate) type StartAccess<'a, S> = std::sync::Mutex<StartParts<'a, S>>;
 pub struct EngineParams {
     pub n_games: usize,
     pub seed: u64,
-    /// 1 = the classic lockstep collect; 2 = double-buffered collect (two fixed game groups
-    /// alternating rounds so tree work overlaps inference). Gated by the binding on policies
-    /// with a pooled search.
+    /// 1 = the classic lockstep collect; 2 = grouped collect (two game groups on worker
+    /// threads so search overlaps inference).
     pub n_groups: usize,
 }
 
@@ -330,13 +328,9 @@ where
         (out, stats)
     }
 
-    /// Grouped collect: games split into fixed groups, each running the classic collect
-    /// loop on its own worker thread over its own state slice, with all inference
-    /// forwarded to a service thread owning the callback. Policy/learner-agnostic. When
-    /// shared state is live (sharded cache, start buffer, weight refreshes) grouped
-    /// collects are run-to-run nondeterministic — the same status as real accelerator
-    /// training; with deterministic inference and no shared state they are exact.
-    /// Reproduce anomalies with `n_groups=1`.
+    /// Grouped collect: each group runs the classic collect loop on its own worker thread,
+    /// with inference forwarded to a service thread owning the callback. Run-to-run
+    /// nondeterministic when shared state is live; reproduce anomalies with `n_groups=1`.
     pub fn collect_grouped<F>(
         &mut self,
         n_records: usize,
@@ -359,8 +353,7 @@ where
         }
         let n_games = self.episodes.len();
         let half = n_games / 2;
-        // Deterministic per-group floors: proportional shares, merged in group order, so
-        // which group finishes first never changes what is collected.
+        // Proportional per-group floors: finish order never changes what is collected.
         let floor = |size: usize| (n_records * size).div_ceil(n_games);
         let floors = [floor(half), floor(n_games - half)];
 
@@ -798,8 +791,7 @@ where
 }
 
 /// One decision tick for `games`: record emission, action selection, stepping, and
-/// reward attribution. Field-split from `Engine` so grouped collects can run it while
-/// pooled searches hold shared borrows of the game context. Returns finished episodes.
+/// reward attribution. Field-split from `Engine` so group workers can run it.
 #[allow(clippy::too_many_arguments)]
 fn process_tick<G, P, L>(
     game: &G,
@@ -1078,9 +1070,8 @@ fn fold_stats(mut a: CollectStats, b: CollectStats) -> CollectStats {
     a
 }
 
-/// One group's classic collect loop over its own state slice (local indices), with all
-/// inference forwarded through the service. Stops at its deterministic floor, when its
-/// games are exhausted, or on cancellation.
+/// One group's collect loop over its own state slice (local indices). Stops at its
+/// floor, when its games are exhausted, or on cancellation.
 #[allow(clippy::too_many_arguments)]
 fn run_group_worker<G, P, L>(
     game: &G,
