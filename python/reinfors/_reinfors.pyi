@@ -270,6 +270,21 @@ class PolicyHandle:
     # act_by: "value" | "visits".
     # temperature > 0 (AlphaZero-style) samples the first temperature_drop plies of each episode
     # ∝ visits^(1/temperature) for training self-play diversity (None = whole episode); 0 = greedy.
+    # Classical depth-limited minimax for two-player zero-sum sequential games, with expectation
+    # backup at declared chance nodes (expectiminimax). Deterministic given its evaluator: full
+    # width to `depth` plies, frontier leaves scored by the callback's single-head Q row
+    # `(rows, 1, actions)`. A zero callback plays horizon-perfectly from terminal rewards alone
+    # (the fixed-strength baseline); `top_k` beams each non-root node to its best moves by that
+    # node's own leaf evaluation. Pairs with `rf.learners.TreeStrap` (TreeStrap(minimax));
+    # `chance=` accepts Committed(samples=...) or ExpandAll() — AlwaysResample is rejected
+    # (expand-once search has no traversal event to redraw on). No quiescence search: fixed-depth
+    # play is subject to the horizon effect in tactically sharp positions.
+    @staticmethod
+    def Minimax(
+        depth: int = 4,
+        top_k: int | None = None,
+        chance: ChanceModeHandle | None = ...,
+    ) -> PolicyHandle: ...
     # `chance=` accepts AlwaysResample() (fresh draw per descent; unbiased default),
     # Committed(samples=...) (freeze that many draws per edge for depth on wide fans), or
     # ExpandAll() (evaluate every outcome; exact for narrow fans).

@@ -3,3 +3,4 @@
 pub mod alphazero;
 pub mod expectimax;
 pub mod mcts;
+pub mod minimax;

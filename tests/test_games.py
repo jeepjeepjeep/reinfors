@@ -160,7 +160,7 @@ def test_registries_list_the_built_in_names() -> None:
         "snake",
         "texas_holdem",
     ]
-    assert rf.registered_policies() == ["alphazero", "epsilon_greedy_q", "mcts", "selective_expectimax"]
+    assert rf.registered_policies() == ["alphazero", "epsilon_greedy_q", "mcts", "minimax", "selective_expectimax"]
     assert rf.registered_learners() == ["alphazero", "dqn", "treestrap"]
 
 

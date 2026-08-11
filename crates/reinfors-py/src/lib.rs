@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use reinfors_core::{
     ActBy, AlphaZero, AlphaZeroConfig, AlphaZeroLearner, AlphaZeroRecord, AlwaysInitialState,
     ChanceMode, Dqn, DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Evaluator, Game,
-    InferCache, InferMode, Learner, Mcts, MctsConfig, NoiseScope, Opponent, Policy,
+    InferCache, InferMode, Learner, Mcts, MctsConfig, Minimax, NoiseScope, Opponent, Policy,
     ReachedStateBuffer, Reward, SearchConfig, SelectiveExpectimax, Space, SplitMix64,
     StartDistribution, StateCodec, StateEncoder, TreeStrap, TreeStrapRecord,
 };
@@ -513,9 +513,23 @@ fn policy_cfg(spec: &PolicySpec) -> Value {
                     m.insert("opp_temperature".into(), json!(temperature));
                     m.insert("opp_floor".into(), json!(floor));
                 }
+                Opponent::Adversarial { .. } => {
+                    unreachable!("SelectiveExpectimax never stores an adversarial opponent")
+                }
             }
             v
         }
+        PolicySpec::Minimax {
+            depth,
+            top_k,
+            chance,
+        } => json!({
+            "name": "minimax",
+            "depth": depth,
+            // None renders null so an omitted beam cannot split fingerprints.
+            "top_k": top_k,
+            "chance": chance_cfg(chance),
+        }),
         PolicySpec::EpsilonGreedyQ { n_heads, epsilon } => {
             json!({"name": "epsilon_greedy_q", "n_heads": n_heads, "epsilon": epsilon})
         }
@@ -2158,6 +2172,11 @@ enum PolicySpec {
         n_heads: usize,
         epsilon: f64,
     },
+    Minimax {
+        depth: i32,
+        top_k: Option<usize>,
+        chance: ChanceMode,
+    },
     Mcts {
         num_simulations: usize,
         uct_c: f64,
@@ -2429,6 +2448,23 @@ fn check_information<G: Game>(label: &str, game: &G) -> PyResult<()> {
     Ok(())
 }
 
+// Minimax composes only two-player sequential zero-sum games. Width is deliberately not bounded
+// statically: the action vocabulary wildly overestimates realized legal branching on games like
+// chess, so the search bounds the realized tree instead and fails loudly past it.
+fn check_minimax_composition<G: Game>(game: &G) -> PyResult<()> {
+    if game.num_agents() != 2 || !game_is_sequential(game) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Minimax requires a two-player sequential game; see {}",
+            reinfors_core::COMPATIBILITY_DOCS
+        )));
+    }
+    Ok(())
+}
+
+fn minimax_from_spec(depth: i32, top_k: Option<usize>, chance: ChanceMode, gamma: f64) -> Minimax {
+    Minimax::new(depth, top_k, chance, gamma)
+}
+
 fn check_joint_space<G: Game>(label: &str, game: &G, movers: usize) -> PyResult<()> {
     // `movers` is family-specific: all agents for dense MCTS/AZ tables, but
     // only co-movers for expectimax's per-MAX-edge product. A wrong exponent
@@ -2549,6 +2585,49 @@ where
                 dim,
                 action_count,
                 n_heads,
+                layout: InferLayout::ValueHeads,
+                num_agents,
+            }))
+        }
+        (
+            PolicySpec::Minimax {
+                depth,
+                top_k,
+                chance,
+            },
+            LearnerSpec::TreeStrap {
+                gamma,
+                outcome_weight,
+                bootstrap_p,
+                interior_targets,
+            },
+        ) => {
+            check_unit("outcome_weight", outcome_weight)?;
+            check_unit("bootstrap_p", bootstrap_p)?;
+            let policy = minimax_from_spec(depth, top_k, chance, gamma);
+            check_information("Minimax", &game)?;
+            check_minimax_composition(&game)?;
+            check_max_agents(&policy, "Minimax", &game)?;
+            let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
+            Ok(Box::new(EngineImpl {
+                codec: codec.take(),
+                n_groups: engine_params.n_groups,
+                inner: {
+                    let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
+                        .with_start_distribution(start_dist);
+                    match infer_caches {
+                        Some(CacheSet::Exclusive(c)) => e = e.with_infer_caches(c),
+                        Some(CacheSet::Sharded(c)) => e = e.with_sharded_infer_caches(c),
+                        None => {}
+                    }
+                    if let Some(lp) = learn_players {
+                        e = e.with_learn_players(&lp);
+                    }
+                    e
+                },
+                dim,
+                action_count,
+                n_heads: 1,
                 layout: InferLayout::ValueHeads,
                 num_agents,
             }))
@@ -3597,6 +3676,18 @@ where
                 let states: Vec<usize> = (0..impls.len())
                     .map(|i| policy.begin_episode(&mut choose_env_rng(seed, i, CHOOSE_HEAD_SALT)))
                     .collect();
+                run_choose(&policy, game, enc, reward, requests, seed, states, infer)
+            }
+            PolicySpec::Minimax {
+                depth,
+                top_k,
+                chance,
+            } => {
+                let policy = minimax_from_spec(depth, top_k, chance, gamma);
+                check_information("Minimax", game)?;
+                check_minimax_composition(game)?;
+                check_max_agents(&policy, "Minimax", game)?;
+                let states = vec![(); impls.len()];
                 run_choose(&policy, game, enc, reward, requests, seed, states, infer)
             }
             PolicySpec::Mcts {
@@ -4898,6 +4989,44 @@ impl PolicyHandle {
     }
 
     #[staticmethod]
+    // Classical depth-limited minimax/expectiminimax for two-player zero-sum sequential games:
+    // deterministic, full-width to `depth` plies (optionally `top_k`-beamed below the root),
+    // leaves scored by the callback's single-head Q row. A zero callback is the horizon-perfect
+    // terminal-reward baseline. Pairs with the TreeStrap learner — the TreeStrap(minimax) setting.
+    #[pyo3(signature = (depth=4, top_k=None, chance=None))]
+    #[pyo3(name = "Minimax")]
+    fn minimax(
+        depth: i32,
+        top_k: Option<usize>,
+        chance: Option<ChanceModeHandle>,
+    ) -> PyResult<Self> {
+        if depth < 1 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "minimax needs at least one ply of lookahead (depth >= 1)",
+            ));
+        }
+        if top_k == Some(0) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "top_k must keep at least one move per node",
+            ));
+        }
+        let chance = chance.map_or(ChanceMode::Committed { samples: 1 }, |c| c.mode);
+        if !Minimax::supports_chance_mode(chance) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Minimax expands each node exactly once and cannot express per-traversal \
+                 chance modes; use Committed or ExpandAll",
+            ));
+        }
+        Ok(PolicyHandle {
+            spec: PolicySpec::Minimax {
+                depth,
+                top_k,
+                chance,
+            },
+        })
+    }
+
+    #[staticmethod]
     #[pyo3(signature = (n_heads=1, epsilon=0.1))]
     #[pyo3(name = "EpsilonGreedyQ")]
     fn epsilon_greedy_q(n_heads: usize, epsilon: f64) -> PyResult<Self> {
@@ -5054,6 +5183,7 @@ impl PolicyHandle {
             PolicySpec::Mcts { .. } => (1, InferLayout::ValueHeads),
             PolicySpec::SelectiveExpectimax { n_heads, .. } => (*n_heads, InferLayout::ValueHeads),
             PolicySpec::EpsilonGreedyQ { n_heads, .. } => (*n_heads, InferLayout::ValueHeads),
+            PolicySpec::Minimax { .. } => (1, InferLayout::ValueHeads),
         };
         let dim = borrowed[0].inner.obs_dim();
         let action_count = borrowed[0].inner.action_count();

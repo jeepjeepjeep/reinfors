@@ -11,6 +11,7 @@ Choose a workflow first: Engine algorithms emit training records while standalon
 | DQN | Engine | `rf.policies.EpsilonGreedyQ` | `rf.learners.Dqn` | [`DqnBatch`](../reference/batch-formats.md#dqnbatch) | [GridWorld DQN training example](../examples/index.md#train-gridworld) |
 | TreeStrap + selective expectimax | Engine | `rf.policies.SelectiveExpectimax` | `rf.learners.TreeStrap` | [`TreeStrapBatch`](../reference/batch-formats.md#treestrapbatch) | [TreeStrap training example](../examples/index.md#treestrap-snake) |
 | TreeStrap + UCT MCTS | Engine | `rf.policies.Mcts` | `rf.learners.TreeStrap` | [`TreeStrapBatch`](../reference/batch-formats.md#treestrapbatch) | [TreeStrap MCTS training example](../examples/index.md#treestrap-snake) |
+| Minimax | Engine | `rf.policies.Minimax` | `rf.learners.TreeStrap` | [`TreeStrapBatch`](../reference/batch-formats.md#treestrapbatch) | [Interactive play and evaluation examples](../examples/index.md#solving-and-evaluation) |
 | AlphaZero | Engine | `rf.policies.AlphaZero` | `rf.learners.AlphaZero` | [`AlphaZeroBatch`](../reference/batch-formats.md#alphazerobatch) | [AlphaZero training example](../examples/index.md#alphazero-connect-4) |
 | CFR / CFR+ | Standalone solver | `rf.solvers.Cfr` | — | Internal strategy tables | [CFR solving example](../examples/index.md#solve-leduc) |
 | External-sampling MCCFR | Standalone solver | `rf.solvers.Cfr(variant="external_mccfr")` | — | Internal strategy tables | [MCCFR solving example](../examples/index.md#solve-leduc) |
@@ -25,6 +26,7 @@ Engine rows name the exact policy/learner handles passed to `rf.Engine`. Standal
 | DQN | Engine | Any N | Sequential or simultaneous | Sampled by the engine | Perfect or imperfect | Q values: (rows, heads, actions) |
 | TreeStrap + selective expectimax | Engine | Any N | Sequential or simultaneous | Committed or ExpandAll | Perfect only | Ensemble action values |
 | TreeStrap + UCT MCTS | Engine | Sequential <=2; simultaneous N | Sequential or simultaneous | AlwaysResample, Committed, or ExpandAll | Perfect only | One ensemble head of action values |
+| Minimax | Engine | 2 | Sequential | Committed or ExpandAll | Perfect only | Q values (rows, 1, actions) |
 | AlphaZero | Engine | Any N | Sequential or simultaneous | AlwaysResample, Committed, or ExpandAll | Perfect only | Policy logits (rows, actions) plus values (rows,) |
 | CFR / CFR+ | Standalone solver | 2-10 | Sequential | Exact enumeration | Imperfect-information native | No network |
 | External-sampling MCCFR | Standalone solver | 2-10 | Sequential | Sampled | Imperfect-information native | No network |
@@ -49,6 +51,12 @@ Best-first search whose backed-up values become supervised learning targets.
 UCT for sequential games and decoupled UCT for simultaneous multiplayer games.
 
 **Sources:** [UCT](https://doi.org/10.1007/11871842_29).
+
+### Minimax
+
+Deterministic depth-limited minimax with expectation backup at declared chance nodes (expectiminimax) and callback-scored frontier leaves. A zero callback plays horizon-perfectly from terminal rewards alone, making this the classical fixed-strength baseline; no quiescence search, so fixed-depth play is subject to the horizon effect. Paired with TreeStrap this is the original TreeStrap(minimax) setting.
+
+**Sources:** [Bootstrapping from Game Tree Search](https://cgi.cse.unsw.edu.au/~blair/pubs/2009VenessSilverUtherBlairNIPS.pdf).
 
 ### AlphaZero
 

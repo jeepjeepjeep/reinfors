@@ -33,6 +33,7 @@ pub use policies::tree::expectimax::{SearchEvaluation, SelectiveExpectimax};
 pub use policies::tree::mcts::{
     mcts_many, ActBy, Mcts, MctsConfig, NoiseScope, SequentialBackup, MAX_JOINT_SLOTS,
 };
+pub use policies::tree::minimax::Minimax;
 pub use policy::{ChanceMode, Policy, SearchPolicy, MAX_ENUMERATED_OUTCOMES};
 pub use reward::Reward;
 pub use rng::SplitMix64;
