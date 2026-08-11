@@ -18,9 +18,10 @@ past the action space return whole tensors without a device-side slice.
 ## Inference cache
 
 Position-keyed reuse of network rows across the search, cleared on weight refresh. Effect
-depends on the game's transposition structure (measured hit rates: chess low-teens percent
-and *rising* as the net strengthens; small-board connect-style games far higher) and on
-capacity only up to a saturation point — see the [capacity curve](index.md).
+depends on the game's transposition structure (measured at the chess benchmark operating
+point: mid-teens early, 26–27% by two hours of training, *rising* as the net strengthens;
+small-board connect-style games far higher) and on capacity only up to a saturation
+point — see the [capacity curve](index.md).
 
 ## Grouped collection (`n_groups=2`)
 
@@ -46,15 +47,22 @@ of a theoretical ×1.72 ceiling, and at an inference-dominated point with a stee
 curve, splitting below the sweet spot made grouping net-negative — both signs predicted by
 the model.
 
-A10G grid at the benchmark operating point (n64×1 / n128×1 / n128×2 / n64×2, reporting
-throughput, realized rows per call, inference share, and decision latency):
+A10G grid at the benchmark operating point (v2 scheduler at the merged tip, 12-minute
+interior windows on the round-true workload — early-training games make the absolute
+rates read below the 2-hour round numbers; the grid measures the levers' *relative*
+effects):
 
 | config | states/s | rows/s | rows/call | infer share |
 |---|---|---|---|---|
-| n64 × 1 group | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| n128 × 1 group | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| n128 × 2 groups | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
-| n64 × 2 groups | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+| n64 × 1 group | 148.3 | 8,307 | 55.8 | 0.78 |
+| n128 × 1 group | 151.6 | 8,105 | 109.9 | 0.76 |
+| n128 × 2 groups | **185.8** | 10,200 | 56.4 | 0.98 |
+| n64 × 2 groups | 149.7 | 8,078 | 28.3 | 0.94 |
+
+The matched-rows comparison (n64×1 → n128×2) realized ×1.25 against the ×1.28 ceiling
+that the ungrouped inference share (0.78) predicts, with the grouped service near
+saturation (share 0.98); the matched-games comparison (n64×1 → n64×2) gained little, as
+the batch-curve term predicts for 28-row calls.
 
 The ceiling prediction uses the inference share measured **in the target condition**,
 from the same telemetry the grid reports (per-round wall against callback time). Shares
