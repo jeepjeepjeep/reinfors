@@ -272,8 +272,10 @@ class PolicyHandle:
     # ∝ visits^(1/temperature) for training self-play diversity (None = whole episode); 0 = greedy.
     # Classical depth-limited minimax for two-player zero-sum sequential games, with expectation
     # backup at declared chance nodes (expectiminimax). Deterministic given its evaluator: full
-    # width to `depth` plies, frontier leaves scored by the callback's single-head Q row
-    # `(rows, 1, actions)`. A zero callback plays horizon-perfectly from terminal rewards alone
+    # width to `depth` plies. Frontier leaves are scored by the callback's single-head Q row
+    # `(rows, 1, actions)`, each requested for the leaf's own mover and negated across turn
+    # changes (zero-sum) — a self-play network only serves the on-turn inputs TreeStrap trains.
+    # A zero callback plays horizon-perfectly from terminal rewards alone
     # (the fixed-strength baseline); `top_k` beams each non-root node to its best moves by that
     # node's own leaf evaluation. Pairs with `rf.learners.TreeStrap` (TreeStrap(minimax));
     # `chance=` defaults to ExpandAll() (exact expectation backup — true expectiminimax);

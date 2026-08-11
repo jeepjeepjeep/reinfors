@@ -551,13 +551,14 @@ mod tests {
 
     #[test]
     fn a_one_move_beam_keeps_the_leaf_ranked_reply() {
-        // The opponent-node leaf row scores head 0 far below head 1, so an ascending beam keeps
-        // reply 0; the deeper truth is that reply 1 pays -4.
+        // The opponent-node leaf row (the opponent's own values) ranks reply 0 as their best,
+        // so a one-move beam keeps it (paying us -1); the deeper truth is reply 1 at -4, which
+        // full width still finds.
         let infer = |_players: &[usize], obs: Vec<f32>, n: usize| -> Vec<f64> {
             (0..n)
                 .flat_map(|i| {
                     if obs[i * 2] as u8 == 1 {
-                        vec![-9.0, 9.0]
+                        vec![9.0, -9.0]
                     } else {
                         vec![0.0, 0.0]
                     }
@@ -588,11 +589,15 @@ mod tests {
     }
 
     #[test]
-    fn an_opponent_horizon_collapses_with_min_not_max() {
-        // Depth 1 ends on the opponent's turn. The leaf after root action 0 scores [-10, +10]
-        // and after action 1 scores [-2, +1]; a max collapse would prefer action 0 at +10, the
-        // adversarial value is action 1 at -2.
-        let infer = |_players: &[usize], obs: Vec<f32>, n: usize| -> Vec<f64> {
+    fn opponent_horizons_are_evaluated_on_turn_and_negated() {
+        // Depth 1 ends on the opponent's turn. Each leaf row is requested FOR the opponent
+        // (player 1 — the same on-turn distribution TreeStrap trains) and holds the opponent's
+        // own values: after root action 0 their best is +10, after action 1 it is +1, so the
+        // searcher's zero-sum values are -10 and -1.
+        use std::cell::RefCell;
+        let routed: RefCell<Vec<usize>> = RefCell::new(Vec::new());
+        let infer = |players: &[usize], obs: Vec<f32>, n: usize| -> Vec<f64> {
+            routed.borrow_mut().extend_from_slice(players);
             (0..n)
                 .flat_map(|i| {
                     if obs[i * 2 + 1] == 0.0 {
@@ -614,8 +619,13 @@ mod tests {
             infer,
         );
         let v = &results[0].0[0];
-        assert!((v[0] - -10.0).abs() < 1e-12, "min collapse: {v:?}");
-        assert!((v[1] - -2.0).abs() < 1e-12, "min collapse: {v:?}");
+        assert!((v[0] - -10.0).abs() < 1e-12, "negated mover max: {v:?}");
+        assert!((v[1] - -1.0).abs() < 1e-12, "negated mover max: {v:?}");
+        assert_eq!(
+            *routed.borrow(),
+            vec![1, 1],
+            "opponent-horizon rows must be requested for the opponent"
+        );
     }
 
     #[test]

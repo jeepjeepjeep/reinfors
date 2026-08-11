@@ -22,7 +22,7 @@ particular contiguity on input; make it contiguous if your framework requires it
 | `EpsilonGreedyQ` | Q values, `(rows, heads, actions)` |
 | `Mcts` with TreeStrap | Q values, `(rows, 1, actions)`—one ensemble head |
 | `SelectiveExpectimax` | Ensemble Q values, `(rows, heads, actions)` |
-| `Minimax` | Q values, `(rows, 1, actions)`—one ensemble head; leaves collapse to the masked max (searcher to move) or min (opponent) over the leaf mover's legal set |
+| `Minimax` | Q values, `(rows, 1, actions)`—one ensemble head. Every frontier row is requested for the leaf's own mover (that player id appears in per-player routing) and collapsed by the masked max over its legal set; opponent horizons negate back to the searcher under the zero-sum contract, so a self-play network only ever serves on-turn inputs — the same distribution the paired TreeStrap learner trains |
 | `AlphaZero` | Tuple of policy logits `(rows, width)` where `width >= actions`, and values `(rows,)`; logit columns after `actions` are ignored |
 
 Every output array may be `float32` or `float64`. Returning the network's native `float32` is the
