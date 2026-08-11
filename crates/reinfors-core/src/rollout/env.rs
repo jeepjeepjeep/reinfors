@@ -11,6 +11,7 @@ pub struct Env<G: Game> {
     encoder: Box<dyn StateEncoder<State = G::State>>,
     episode: Episode<G>,
     done: bool,
+    ticks: usize,
 }
 
 impl<G: Game> Env<G> {
@@ -21,12 +22,19 @@ impl<G: Game> Env<G> {
             encoder,
             episode,
             done: false,
+            ticks: 0,
         }
     }
 
     pub fn reset(&mut self) {
         self.episode.reset(&self.game);
         self.done = false;
+        self.ticks = 0;
+    }
+
+    /// Completed steps this episode (the current decision's ply in sequential games).
+    pub fn ticks(&self) -> usize {
+        self.ticks
     }
 
     pub fn num_agents(&self) -> usize {
@@ -41,6 +49,10 @@ impl<G: Game> Env<G> {
         &self.episode.state
     }
 
+    pub fn encoder(&self) -> &dyn StateEncoder<State = G::State> {
+        &*self.encoder
+    }
+
     pub fn game(&self) -> &G {
         &self.game
     }
@@ -50,19 +62,21 @@ impl<G: Game> Env<G> {
     }
 
     /// Clone the mutable environment state for snapshots or forks.
-    pub fn parts(&self) -> (G::State, u64, bool) {
+    pub fn parts(&self) -> (G::State, u64, bool, usize) {
         (
             self.episode.state.clone(),
             self.episode.rng.state(),
             self.done,
+            self.ticks,
         )
     }
 
     /// Restore mutable state at a step boundary.
-    pub fn set_parts(&mut self, state: G::State, rng_state: u64, done: bool) {
+    pub fn set_parts(&mut self, state: G::State, rng_state: u64, done: bool, ticks: usize) {
         self.episode.state = state;
         self.episode.rng = SplitMix64::from_state(rng_state);
         self.done = done;
+        self.ticks = ticks;
     }
 
     /// Active agents, or an empty list after the episode ends.
@@ -98,6 +112,7 @@ impl<G: Game> Env<G> {
         );
         let (trace, terminal) = self.episode.advance(&self.game, actions);
         self.done = terminal;
+        self.ticks += 1;
         trace
     }
 }
@@ -178,8 +193,23 @@ mod tests {
         let mut e = env();
         e.step(&[1]);
         e.step(&[1]);
+        assert_eq!(e.ticks(), 2);
         e.reset();
         assert!(!e.done() && *e.state() == 0 && e.observe(0) == vec![0.0]);
+        assert_eq!(e.ticks(), 0);
+    }
+
+    #[test]
+    fn parts_round_trip_carries_ticks() {
+        let mut e = env();
+        e.step(&[0]);
+        e.step(&[1]);
+        let (state, rng, done, ticks) = e.parts();
+        assert_eq!(ticks, 2);
+        let mut restored = env();
+        restored.set_parts(state, rng, done, ticks);
+        assert_eq!(restored.ticks(), 2);
+        assert_eq!(*restored.state(), 1);
     }
 
     #[test]
