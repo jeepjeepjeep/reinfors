@@ -3,7 +3,7 @@
 Hand-maintained for now; once the API surface grows we can generate these from the Rust bindings.
 """
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import Any
 
 import numpy as np
@@ -250,6 +250,18 @@ class PolicyHandle:
     ) -> PolicyHandle: ...
     @staticmethod
     def EpsilonGreedyQ(n_heads: int = 1, epsilon: float = 0.1) -> PolicyHandle: ...
+    # One batched decision per env: pooled search, one shared infer callback. `seeds` are
+    # per-env EPISODE seeds and `plies` per-env decision counts; a result depends only on
+    # its env's (state, seed, ply), never on batch composition. Pure (envs not mutated).
+    # Envs need a Reward; `gamma` is the discount the model was trained with.
+    def choose(
+        self,
+        envs: Sequence[Env],
+        infer: Any,
+        seeds: Sequence[int],
+        plies: Sequence[int] | None = ...,
+        gamma: float = ...,
+    ) -> list[int]: ...
     # MCTS (UCT) for compatible sequential, single-agent, and simultaneous (decoupled/DUCT
     # per-agent statistics) compositions. See the algorithm catalogue for its learner pairing.
     # act_by: "value" | "visits".

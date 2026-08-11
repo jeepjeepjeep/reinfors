@@ -11,10 +11,10 @@ use serde_json::{json, Value};
 
 use reinfors_core::{
     ActBy, AlphaZero, AlphaZeroConfig, AlphaZeroLearner, AlphaZeroRecord, AlwaysInitialState,
-    ChanceMode, Dqn, DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Game, InferCache,
-    InferMode, Learner, Mcts, MctsConfig, NoiseScope, Opponent, Policy, ReachedStateBuffer, Reward,
-    SearchConfig, SelectiveExpectimax, Space, StartDistribution, StateCodec, StateEncoder,
-    TreeStrap, TreeStrapRecord,
+    ChanceMode, Dqn, DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Evaluator, Game,
+    InferCache, InferMode, Learner, Mcts, MctsConfig, NoiseScope, Opponent, Policy,
+    ReachedStateBuffer, Reward, SearchConfig, SelectiveExpectimax, Space, SplitMix64,
+    StartDistribution, StateCodec, StateEncoder, TreeStrap, TreeStrapRecord,
 };
 use reinfors_games::snake::{Cell, DeathCause};
 use reinfors_games::{
@@ -2255,6 +2255,148 @@ fn game_is_sequential<G: Game>(game: &G) -> bool {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn expectimax_from_spec(
+    beta: f64,
+    expansion_budget: usize,
+    top_k: usize,
+    max_depth: i32,
+    chance: ChanceMode,
+    opponent: Opponent,
+    n_heads: usize,
+    epsilon: f64,
+    gamma: f64,
+) -> PyResult<SelectiveExpectimax> {
+    validate_search_params(expansion_budget, top_k, max_depth, beta)?;
+    if n_heads < 1 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "n_heads must be >= 1",
+        ));
+    }
+    check_unit("epsilon", epsilon)?;
+    let cfg = SearchConfig {
+        gamma,
+        beta,
+        expansion_budget,
+        top_k,
+        max_depth,
+        chance,
+        opponent,
+    };
+    Ok(SelectiveExpectimax::new(cfg, n_heads, epsilon))
+}
+
+fn qgreedy_from_spec(n_heads: usize, epsilon: f64) -> PyResult<EpsilonGreedyQ> {
+    if n_heads < 1 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "n_heads must be >= 1",
+        ));
+    }
+    check_unit("epsilon", epsilon)?;
+    Ok(EpsilonGreedyQ::new(n_heads, epsilon))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mcts_from_spec(
+    num_simulations: usize,
+    uct_c: f64,
+    max_depth: i32,
+    act_by: ActBy,
+    temperature: f64,
+    temperature_drop: u32,
+    chance: ChanceMode,
+    gamma: f64,
+) -> PyResult<Mcts> {
+    if num_simulations < 1 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "num_simulations must be >= 1",
+        ));
+    }
+    if max_depth < 1 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "max_depth must be >= 1",
+        ));
+    }
+    if uct_c < 0.0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "uct_c must be >= 0",
+        ));
+    }
+    if !(temperature >= 0.0 && temperature.is_finite()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "temperature must be finite and >= 0",
+        ));
+    }
+    Ok(Mcts::new(
+        MctsConfig {
+            num_simulations,
+            uct_c,
+            gamma,
+            max_depth,
+            temperature,
+            temperature_drop,
+            chance,
+        },
+        act_by,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn alphazero_from_spec(
+    num_simulations: usize,
+    c_puct: f64,
+    max_depth: i32,
+    noise_epsilon: f64,
+    noise_alpha: f64,
+    temperature: f64,
+    temperature_drop: u32,
+    chance: ChanceMode,
+    noise_scope: NoiseScope,
+    sequential_backup: reinfors_core::SequentialBackup,
+    gamma: f64,
+) -> PyResult<AlphaZero> {
+    // Simulation one evaluates the root; a visit-policy target needs another.
+    if num_simulations < 2 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "num_simulations must be >= 2",
+        ));
+    }
+    if max_depth < 1 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "max_depth must be >= 1",
+        ));
+    }
+    if c_puct < 0.0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "c_puct must be >= 0",
+        ));
+    }
+    check_unit("noise_epsilon", noise_epsilon)?;
+    if !(noise_alpha > 0.0 && noise_alpha.is_finite()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "noise_alpha must be finite and > 0",
+        ));
+    }
+    if !(temperature >= 0.0 && temperature.is_finite()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "temperature must be finite and >= 0",
+        ));
+    }
+    Ok(AlphaZero::new(AlphaZeroConfig {
+        num_simulations,
+        c_puct,
+        gamma,
+        max_depth,
+        noise_epsilon,
+        noise_alpha,
+        temperature,
+        temperature_drop,
+        chance,
+        noise_scope,
+        sequential_backup,
+    }))
+}
+
 fn check_max_agents<P: Policy, G: Game>(policy: &P, label: &str, game: &G) -> PyResult<()> {
     let num_agents = game.num_agents();
     // Reject before probing initial_state: a malformed zero-agent game may panic while realizing it.
@@ -2367,25 +2509,19 @@ where
                 interior_targets,
             },
         ) => {
-            validate_search_params(expansion_budget, top_k, max_depth, beta)?;
-            if n_heads < 1 {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "n_heads must be >= 1",
-                ));
-            }
-            check_unit("epsilon", epsilon)?;
             check_unit("outcome_weight", outcome_weight)?;
             check_unit("bootstrap_p", bootstrap_p)?;
-            let cfg = SearchConfig {
-                gamma,
+            let policy = expectimax_from_spec(
                 beta,
                 expansion_budget,
                 top_k,
                 max_depth,
                 chance,
                 opponent,
-            };
-            let policy = SelectiveExpectimax::new(cfg, n_heads, epsilon);
+                n_heads,
+                epsilon,
+                gamma,
+            )?;
             check_information("SelectiveExpectimax", &game)?;
             check_max_agents(&policy, "SelectiveExpectimax", &game)?;
             check_joint_space(
@@ -2434,40 +2570,18 @@ where
                 interior_targets: _, // MCTS produces root records only.
             },
         ) => {
-            if num_simulations < 1 {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "num_simulations must be >= 1",
-                ));
-            }
-            if max_depth < 1 {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "max_depth must be >= 1",
-                ));
-            }
-            if uct_c < 0.0 {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "uct_c must be >= 0",
-                ));
-            }
-            if !(temperature >= 0.0 && temperature.is_finite()) {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "temperature must be finite and >= 0",
-                ));
-            }
             check_unit("outcome_weight", outcome_weight)?;
             check_unit("bootstrap_p", bootstrap_p)?;
-            let policy = Mcts::new(
-                MctsConfig {
-                    num_simulations,
-                    uct_c,
-                    gamma,
-                    max_depth,
-                    temperature,
-                    temperature_drop,
-                    chance,
-                },
+            let policy = mcts_from_spec(
+                num_simulations,
+                uct_c,
+                max_depth,
                 act_by,
-            );
+                temperature,
+                temperature_drop,
+                chance,
+                gamma,
+            )?;
             check_information("Mcts", &game)?;
             check_max_agents(&policy, "Mcts", &game)?;
             check_joint_space("Mcts", &game, game.num_agents())?;
@@ -2510,37 +2624,9 @@ where
             },
             LearnerSpec::AlphaZero { gamma },
         ) => {
-            // Simulation one evaluates the root; a visit-policy target needs another.
-            if num_simulations < 2 {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "num_simulations must be >= 2",
-                ));
-            }
-            if max_depth < 1 {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "max_depth must be >= 1",
-                ));
-            }
-            if c_puct < 0.0 {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "c_puct must be >= 0",
-                ));
-            }
-            check_unit("noise_epsilon", noise_epsilon)?;
-            if !(noise_alpha > 0.0 && noise_alpha.is_finite()) {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "noise_alpha must be finite and > 0",
-                ));
-            }
-            if !(temperature >= 0.0 && temperature.is_finite()) {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "temperature must be finite and >= 0",
-                ));
-            }
-            let policy = AlphaZero::new(AlphaZeroConfig {
+            let policy = alphazero_from_spec(
                 num_simulations,
                 c_puct,
-                gamma,
                 max_depth,
                 noise_epsilon,
                 noise_alpha,
@@ -2549,7 +2635,8 @@ where
                 chance,
                 noise_scope,
                 sequential_backup,
-            });
+                gamma,
+            )?;
             check_information("AlphaZero", &game)?;
             check_max_agents(&policy, "AlphaZero", &game)?;
             check_joint_space("AlphaZero", &game, game.num_agents())?;
@@ -2578,14 +2665,8 @@ where
             }))
         }
         (PolicySpec::EpsilonGreedyQ { n_heads, epsilon }, LearnerSpec::Dqn { bootstrap_p }) => {
-            if n_heads < 1 {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "n_heads must be >= 1",
-                ));
-            }
-            check_unit("epsilon", epsilon)?;
             check_unit("bootstrap_p", bootstrap_p)?;
-            let policy = EpsilonGreedyQ::new(n_heads, epsilon);
+            let policy = qgreedy_from_spec(n_heads, epsilon)?;
             check_max_agents(&policy, "EpsilonGreedyQ", &game)?;
             let learner = Dqn::new(n_heads, bootstrap_p);
             Ok(Box::new(EngineImpl {
@@ -3331,6 +3412,64 @@ trait ErasedEnv: Send + Sync {
         actions: Vec<usize>,
     ) -> PyResult<Vec<Bound<'py, PyAny>>>;
     fn last_rewards(&self) -> Option<Vec<f64>>;
+    fn as_any(&self) -> &dyn std::any::Any;
+    fn obs_dim(&self) -> usize;
+    #[allow(clippy::too_many_arguments)]
+    fn choose_batch(
+        &self,
+        peers: &[&dyn ErasedEnv],
+        spec: &PolicySpec,
+        gamma: f64,
+        seeds: &[u64],
+        plies: &[u64],
+        infer: &mut dyn FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+    ) -> PyResult<Vec<usize>>;
+}
+
+// Per-decision streams derive from (episode seed, ply) so results depend only on stable
+// request identity, never on batch composition or scheduler order.
+const CHOOSE_PLY_MIX: u64 = 0x9E37_79B9_7F4A_7C15;
+const CHOOSE_SELECT_SALT: u64 = 0xC3A5_C85C_97CB_3127;
+const CHOOSE_HEAD_SALT: u64 = 0xB492_B66F_BE98_F273;
+
+#[allow(clippy::too_many_arguments)]
+fn run_choose<G, P>(
+    policy: &P,
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
+    requests: Vec<(G::State, usize)>,
+    search_seeds: &[u64],
+    mut states: Vec<P::PolicyState>,
+    seeds: &[u64],
+    plies: &[u64],
+    infer: &mut dyn FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+) -> PyResult<Vec<usize>>
+where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+{
+    let mut infer_fn = |p: usize, o: Vec<f32>, n: usize| infer(p, o, n);
+    let mut evaluator = Evaluator::new(&mut infer_fn, InferMode::Shared, None);
+    let evals = policy
+        .evaluate_seeded(
+            game,
+            enc,
+            reward,
+            requests,
+            search_seeds,
+            false,
+            &mut evaluator,
+        )
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    let mut out = Vec::with_capacity(evals.len());
+    for (i, eval) in evals.iter().enumerate() {
+        let mut rng =
+            SplitMix64::new(seeds[i] ^ plies[i].wrapping_mul(CHOOSE_PLY_MIX) ^ CHOOSE_SELECT_SALT);
+        out.push(policy.select(eval, &mut states[i], &mut rng));
+    }
+    Ok(out)
 }
 
 struct EnvImpl<G: Game> {
@@ -3438,6 +3577,215 @@ where
     }
     fn last_rewards(&self) -> Option<Vec<f64>> {
         self.last_rewards.clone()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn obs_dim(&self) -> usize {
+        let (c, h, w) = self.obs_shape;
+        c * h * w
+    }
+
+    fn choose_batch(
+        &self,
+        peers: &[&dyn ErasedEnv],
+        spec: &PolicySpec,
+        gamma: f64,
+        seeds: &[u64],
+        plies: &[u64],
+        infer: &mut dyn FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+    ) -> PyResult<Vec<usize>> {
+        let mut impls: Vec<&EnvImpl<G>> = Vec::with_capacity(peers.len());
+        for peer in peers {
+            impls.push(peer.as_any().downcast_ref::<EnvImpl<G>>().ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(
+                    "envs must share one composition (game, encoder, reward)",
+                )
+            })?);
+        }
+        let game = impls[0].inner.game();
+        let enc = impls[0].inner.encoder();
+        let reward = impls[0].reward.as_deref().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(
+                "choose needs terminal values: construct these Envs with a reward",
+            )
+        })?;
+        let mut requests: Vec<(G::State, usize)> = Vec::with_capacity(impls.len());
+        for e in &impls {
+            let agents = e.inner.active_agents();
+            if agents.len() != 1 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "choose supports sequential games: exactly one active agent per env",
+                ));
+            }
+            requests.push((e.inner.state().clone(), agents[0]));
+        }
+        let search_seeds: Vec<u64> = seeds
+            .iter()
+            .zip(plies)
+            .map(|(&sd, &p)| SplitMix64::new(sd ^ p.wrapping_mul(CHOOSE_PLY_MIX)).next_u64())
+            .collect();
+        match spec.clone() {
+            PolicySpec::SelectiveExpectimax {
+                beta,
+                expansion_budget,
+                top_k,
+                max_depth,
+                chance,
+                opponent,
+                n_heads,
+                epsilon,
+            } => {
+                let policy = expectimax_from_spec(
+                    beta,
+                    expansion_budget,
+                    top_k,
+                    max_depth,
+                    chance,
+                    opponent,
+                    n_heads,
+                    epsilon,
+                    gamma,
+                )?;
+                check_information("SelectiveExpectimax", game)?;
+                check_max_agents(&policy, "SelectiveExpectimax", game)?;
+                check_joint_space(
+                    "SelectiveExpectimax",
+                    game,
+                    game.num_agents().saturating_sub(1),
+                )?;
+                let states: Vec<usize> = seeds
+                    .iter()
+                    .map(|&sd| policy.begin_episode(&mut SplitMix64::new(sd ^ CHOOSE_HEAD_SALT)))
+                    .collect();
+                run_choose(
+                    &policy,
+                    game,
+                    enc,
+                    reward,
+                    requests,
+                    &search_seeds,
+                    states,
+                    seeds,
+                    plies,
+                    infer,
+                )
+            }
+            PolicySpec::EpsilonGreedyQ { n_heads, epsilon } => {
+                let policy = qgreedy_from_spec(n_heads, epsilon)?;
+                check_max_agents(&policy, "EpsilonGreedyQ", game)?;
+                let states: Vec<usize> = seeds
+                    .iter()
+                    .map(|&sd| policy.begin_episode(&mut SplitMix64::new(sd ^ CHOOSE_HEAD_SALT)))
+                    .collect();
+                run_choose(
+                    &policy,
+                    game,
+                    enc,
+                    reward,
+                    requests,
+                    &search_seeds,
+                    states,
+                    seeds,
+                    plies,
+                    infer,
+                )
+            }
+            PolicySpec::Mcts {
+                num_simulations,
+                uct_c,
+                max_depth,
+                act_by,
+                temperature,
+                temperature_drop,
+                chance,
+            } => {
+                let policy = mcts_from_spec(
+                    num_simulations,
+                    uct_c,
+                    max_depth,
+                    act_by,
+                    temperature,
+                    temperature_drop,
+                    chance,
+                    gamma,
+                )?;
+                check_information("Mcts", game)?;
+                check_max_agents(&policy, "Mcts", game)?;
+                check_joint_space("Mcts", game, game.num_agents())?;
+                let states = plies
+                    .iter()
+                    .map(|&p| {
+                        policy
+                            .policy_state_from_u64(p)
+                            .map_err(pyo3::exceptions::PyValueError::new_err)
+                    })
+                    .collect::<PyResult<Vec<u32>>>()?;
+                run_choose(
+                    &policy,
+                    game,
+                    enc,
+                    reward,
+                    requests,
+                    &search_seeds,
+                    states,
+                    seeds,
+                    plies,
+                    infer,
+                )
+            }
+            PolicySpec::AlphaZero {
+                num_simulations,
+                c_puct,
+                max_depth,
+                noise_epsilon,
+                noise_alpha,
+                temperature,
+                temperature_drop,
+                chance,
+                noise_scope,
+                sequential_backup,
+            } => {
+                let policy = alphazero_from_spec(
+                    num_simulations,
+                    c_puct,
+                    max_depth,
+                    noise_epsilon,
+                    noise_alpha,
+                    temperature,
+                    temperature_drop,
+                    chance,
+                    noise_scope,
+                    sequential_backup,
+                    gamma,
+                )?;
+                check_information("AlphaZero", game)?;
+                check_max_agents(&policy, "AlphaZero", game)?;
+                check_joint_space("AlphaZero", game, game.num_agents())?;
+                let states = plies
+                    .iter()
+                    .map(|&p| {
+                        policy
+                            .policy_state_from_u64(p)
+                            .map_err(pyo3::exceptions::PyValueError::new_err)
+                    })
+                    .collect::<PyResult<Vec<u32>>>()?;
+                run_choose(
+                    &policy,
+                    game,
+                    enc,
+                    reward,
+                    requests,
+                    &search_seeds,
+                    states,
+                    seeds,
+                    plies,
+                    infer,
+                )
+            }
+        }
     }
 }
 
@@ -4663,6 +5011,110 @@ impl PolicyHandle {
                 sequential_backup,
             },
         })
+    }
+
+    /// One batched decision per env: one pooled search across the envs, leaves batched
+    /// into a single shared `infer` callback. `seeds` are per-env episode seeds and
+    /// `plies` per-env decision counts; a result depends only on its env's
+    /// (state, seed, ply), never on batch composition or order. Pure: envs are not
+    /// mutated. `gamma` is the discount the model was trained with.
+    #[pyo3(signature = (envs, infer, seeds, plies=None, gamma=1.0))]
+    fn choose(
+        &self,
+        py: Python<'_>,
+        envs: Vec<Py<PyEnv>>,
+        infer: Bound<'_, PyAny>,
+        seeds: Vec<u64>,
+        plies: Option<Vec<u64>>,
+        gamma: f64,
+    ) -> PyResult<Vec<usize>> {
+        if envs.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "choose needs at least one env",
+            ));
+        }
+        if seeds.len() != envs.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{} seeds for {} envs",
+                seeds.len(),
+                envs.len()
+            )));
+        }
+        let plies = plies.unwrap_or_else(|| vec![0; envs.len()]);
+        if plies.len() != envs.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{} plies for {} envs",
+                plies.len(),
+                envs.len()
+            )));
+        }
+        if !infer.is_callable() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "choose takes a single shared infer callable",
+            ));
+        }
+        if !(gamma.is_finite() && gamma >= 0.0) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "gamma must be finite and >= 0",
+            ));
+        }
+        let borrowed: Vec<PyRef<'_, PyEnv>> = envs.iter().map(|e| e.borrow(py)).collect();
+        let fingerprint = borrowed[0].fingerprint.clone();
+        for env in &borrowed {
+            if env.fingerprint != fingerprint {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "envs must share one composition (game, encoder, reward)",
+                ));
+            }
+            if env.inner.done() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "choose on a finished env",
+                ));
+            }
+            if env.reward_weights.is_none() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "choose needs terminal values: construct these Envs with a reward",
+                ));
+            }
+        }
+        let (expected_heads, layout) = match &self.spec {
+            PolicySpec::AlphaZero { .. } => (1usize, InferLayout::PolicyValue),
+            PolicySpec::Mcts { .. } => (1, InferLayout::ValueHeads),
+            PolicySpec::SelectiveExpectimax { n_heads, .. } => (*n_heads, InferLayout::ValueHeads),
+            PolicySpec::EpsilonGreedyQ { n_heads, .. } => (*n_heads, InferLayout::ValueHeads),
+        };
+        let dim = borrowed[0].inner.obs_dim();
+        let action_count = borrowed[0].inner.action_count();
+        let callbacks = vec![infer.clone().unbind()];
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback_err = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut infer_fn = infer_closure_gil(
+            &callbacks,
+            dim,
+            action_count,
+            expected_heads,
+            layout,
+            stop,
+            callback_err.clone(),
+        );
+        let env_refs: Vec<&dyn ErasedEnv> = borrowed.iter().map(|b| &*b.inner).collect();
+        let spec = &self.spec;
+        let outcome = py.allow_threads(|| {
+            env_refs[0].choose_batch(&env_refs, spec, gamma, &seeds, &plies, &mut infer_fn)
+        });
+        if let Some(e) = callback_err.lock().unwrap().take() {
+            return Err(e);
+        }
+        let actions = outcome?;
+        for (env, &action) in borrowed.iter().zip(&actions) {
+            let agent = env.inner.active_agents()[0];
+            if !env.inner.legal_actions(agent).contains(&action) {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "internal: policy chose illegal action {action}"
+                )));
+            }
+        }
+        Ok(actions)
     }
 }
 

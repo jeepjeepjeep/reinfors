@@ -4,12 +4,12 @@ use crate::game::Rng;
 
 /// Tiny deterministic PRNG (splitmix64).
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub(crate) struct SplitMix64 {
+pub struct SplitMix64 {
     state: u64,
 }
 
 impl SplitMix64 {
-    pub(crate) fn new(seed: u64) -> Self {
+    pub fn new(seed: u64) -> Self {
         SplitMix64 { state: seed }
     }
 
@@ -21,7 +21,7 @@ impl SplitMix64 {
         SplitMix64 { state }
     }
 
-    pub(crate) fn next_u64(&mut self) -> u64 {
+    pub fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.state;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);

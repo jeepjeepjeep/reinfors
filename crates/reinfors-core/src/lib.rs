@@ -35,6 +35,7 @@ pub use policies::tree::mcts::{
 };
 pub use policy::{ChanceMode, Policy, SearchPolicy, MAX_ENUMERATED_OUTCOMES};
 pub use reward::Reward;
+pub use rng::SplitMix64;
 pub use rollout::engine::{CollectStats, Engine, EngineParams, EpisodeSummary};
 pub use rollout::env::Env;
 pub use rollout::evaluator::{CommittedRows, EvalBatch, Evaluator, InferMode, Resolve};
