@@ -238,6 +238,7 @@ where
         mut self,
         caches: Vec<crate::rollout::infer_cache::ShardedInferCache>,
     ) -> Self {
+        assert_eq!(self.n_groups, 2, "sharded caches require n_groups=2");
         assert_eq!(
             caches.len(),
             self.game.num_agents() + 1,
@@ -249,6 +250,10 @@ where
 
     /// Install one shared cache followed by one cache per player.
     pub fn with_infer_caches(mut self, caches: Vec<InferCache>) -> Self {
+        assert_eq!(
+            self.n_groups, 1,
+            "exclusive caches require n_groups=1; grouped engines use sharded caches"
+        );
         assert_eq!(
             caches.len(),
             self.game.num_agents() + 1,
@@ -381,6 +386,10 @@ where
         use crate::rollout::infer_service::{run_service, InferRequest, ServiceState};
 
         assert_eq!(self.n_groups, 2, "collect_grouped requires n_groups=2");
+        assert!(
+            matches!(mode, InferMode::Shared),
+            "collect_grouped supports a single shared infer callback"
+        );
         if n_records == 0 {
             return (Vec::new(), CollectStats::default());
         }
@@ -1409,6 +1418,28 @@ mod tests {
         let mut eng = engine(1);
         let v2 = downgrade_to_v2(eng.snapshot_bytes(&Codec).unwrap());
         eng.restore_bytes(&Codec, &v2).unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "sharded caches require n_groups=2")]
+    fn sharded_caches_rejected_on_ungrouped_engine() {
+        let generation = Arc::new(AtomicU64::new(0));
+        let caches = vec![
+            ShardedInferCache::new(64, 4, generation.clone()),
+            ShardedInferCache::new(64, 4, generation),
+        ];
+        let _ = engine(1).with_sharded_infer_caches(caches);
+    }
+
+    #[test]
+    #[should_panic(expected = "exclusive caches require n_groups=1")]
+    fn exclusive_caches_rejected_on_grouped_engine() {
+        let generation = Arc::new(AtomicU64::new(0));
+        let caches = vec![
+            InferCache::new(64, generation.clone()),
+            InferCache::new(64, generation),
+        ];
+        let _ = engine(2).with_infer_caches(caches);
     }
 
     #[test]

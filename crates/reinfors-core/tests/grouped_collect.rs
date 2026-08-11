@@ -129,6 +129,12 @@ fn plain_collect_rejects_grouped_engine() {
 }
 
 #[test]
+#[should_panic(expected = "single shared infer callback")]
+fn grouped_collect_rejects_per_player_mode() {
+    let _ = engine(4, 2, 0).collect_grouped(8, InferMode::PerPlayer, infer);
+}
+
+#[test]
 #[should_panic(expected = "requires n_groups=2")]
 fn grouped_collect_rejects_ungrouped_engine() {
     let _ = engine(4, 1, 0).collect_grouped(8, InferMode::Shared, infer);
