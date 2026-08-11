@@ -19,13 +19,24 @@ The CUDA grids behind the [throughput levers](throughput-levers.md) tables (f32 
 cache capacity, the `n_groups` grid) run through the companion benchmark repository's
 trainer, on the same instance and under the same protocol as the cross-framework
 comparison. As on the [comparison reproduction page](../openspiel/reproducing.md), these
-are command templates; published results link a pinned companion-repo commit with the
-exact run manifest:
+are command templates; raw telemetry for the published cells is archived in the companion
+workspace:
 
 ```bash
 # from the companion repository root
-CORES=0-3 WIDTH=256 DEPTH=8 NGAMES="64 128" NGROUPS=1 MINUTES=20 bash scripts/measure_states_rf.sh
-CORES=0-3 WIDTH=256 DEPTH=8 NGAMES="64 128" NGROUPS=2 MINUTES=20 bash scripts/measure_states_rf.sh
+# n_groups grid (the published cells ran MINUTES=12)
+CORES=0-3 WIDTH=256 DEPTH=8 NGAMES="64 128" NGROUPS=1 MINUTES=12 bash scripts/measure_states_rf.sh
+CORES=0-3 WIDTH=256 DEPTH=8 NGAMES="128 64" NGROUPS=2 MINUTES=12 bash scripts/measure_states_rf.sh
+
+# kernel ceiling + f32-vs-f64 callback arms (pure-forward and engine modes)
+python benchmarks/openspiel/phase0_gpu_sweep.py  # modes, widths, batch grids per --help
+
+# cache capacity curve: the trainer at fixed conditions across --infer-cache values
+for CAP in 4096 32768 262144 2097152; do
+    taskset -c 0-3 .venv23/bin/python benchmarks/openspiel/train_reinfors_az.py \
+        --minutes 15 --device cuda --game chess --out "results/cap_$CAP" \
+        --n-games 64 --sims 64 --width 256 --depth 8 --infer-cache "$CAP"
+done
 ```
 
 ## Publication artifacts

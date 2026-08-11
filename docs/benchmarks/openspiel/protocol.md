@@ -45,8 +45,9 @@ them mid-write.
 
 ## Head-to-head scoring
 
-Training runs are single-seed per round with the seed recorded, and the single-seed
-caveat is carried explicitly until multi-seed rounds land (see the
-[open items](matched-round.md#open-items)). Head-to-head matches use paired openings
+Training runs are single runs per (seed, side) with the seed recorded; the headline
+results are replicated across two independent training seeds, and per-cell precision is
+carried explicitly as an [open item](matched-round.md#open-items). Head-to-head matches
+use paired openings
 (each opening played once per color) so opening imbalance cancels within pairs, and are
 reported with standard errors computed over pairs, not games.

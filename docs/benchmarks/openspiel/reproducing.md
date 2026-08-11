@@ -11,9 +11,10 @@ pointer.
 
 The blocks below are **command templates**, not verbatim invocations: they run from the
 companion repository's root (except where noted), and uppercase shell variables come from
-the tuning tables or artifact paths. Every published result links a pinned companion-repo
-commit whose run manifest contains the exact commands, resolved configurations, and seeds
-— audit against the manifest, not this page.
+the tuning tables or artifact paths. The published training rounds predate the
+run-manifest tooling; their raw learner telemetry is archived in the companion workspace,
+and head-to-head runs from the Arena protocol onward append machine-readable manifests
+(checkpoint hashes, seeds, concurrency, versions) automatically.
 
 ## One-time setup (per instance)
 
@@ -46,12 +47,13 @@ CORES=0-3 WIDTH=256 DEPTH=8 NGAMES="64 128" MINUTES=20 bash scripts/measure_stat
 ```bash
 # two sequential 2h legs (OpenSpiel then reinfors), hard-killed at the deadline,
 # post-run listing of each side's checkpoint artifacts
-MINUTES=120 OS_ACTORS="$SELECTED_ACTORS" bash scripts/run_round_chess_gpu.sh
+MINUTES=120 OS_ACTORS=16 RF_NGAMES=128 RF_NGROUPS=2 ROUND_SEED="$SEED" \
+    bash scripts/run_round_chess_gpu.sh
 
 # head-to-head: paired openings, both colors, matched simulations, solver off,
 # PGN export with run metadata for every game
 python benchmarks/openspiel/eval_h2h_chess.py "$RF_CKPT" "$OS_DIR" --os-checkpoint "$OS_CHECKPOINT" \
-    --games 50 --sims 64 --device cuda --az-device /cuda:0
+    --games 100 --sims 64 --seed "$MATCH_SEED" --device cuda --az-device /cuda:0
 
 # telemetry comparison panels from both learners' structured logs
 python scripts/plot_round.py "$RF_ROUND_DIR" "$OS_ROUND_DIR" -o round_panels.png
@@ -59,7 +61,7 @@ python scripts/plot_round.py "$RF_ROUND_DIR" "$OS_ROUND_DIR" -o round_panels.png
 
 ## Publication artifacts
 
-Per published number: reinfors and companion-repo commits, `resolved_config()` /
-`config_fingerprint()` of every engine, full command line, raw interior-window samples,
-learner logs from both stacks, head-to-head PGNs, and the analysis script that reduced
-them.
+Archived per published run: both learners' structured telemetry (the interior-window
+counters every table reduces), head-to-head logs and PGNs, and — for Arena-protocol
+matches — the appended run manifest. Tables state their provenance inline; commands here
+plus the [tuning tables](tuning.md) reconstruct any cell.

@@ -10,7 +10,10 @@ each other.
 Figures below are from single 2-hour runs per (seed, side) on the shared
 [environment](../setup.md) (g5.2xlarge, August 2026), with the headline quantities
 replicated across two independent training seeds. Sustained rates use the interior
-window (minutes 5–115, counter deltas). These runs predate the run-manifest tooling.
+window (minutes 5–115, counter deltas). OpenSpiel pin `112b7770` (source-built, CUDA
+libtorch 2.3.0); the seed-0 reinfors leg ran the v1 grouped scheduler, the seed-1 leg the
+rewritten v2 scheduler at the merge commit — the two agree to 0.4%. These runs predate
+the run-manifest tooling.
 
 ## Training throughput
 

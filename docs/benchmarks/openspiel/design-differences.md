@@ -66,7 +66,7 @@ consequence — proportional to concurrent games and per-game latency. See the s
 
 | dimension | OpenSpiel | reinfors |
 |---|---|---|
-| heterogeneous play | Per-seat `Bot` composition inside its run infrastructure, including evaluation actors and rollout baselines. Batching still requires evaluator integration. | Per-player networks and frozen opponents stay inside `Engine`; arbitrary bot or search mixes use `Env`, outside Engine-provided batching, caching, and telemetry. |
+| heterogeneous play | Per-seat `Bot` composition inside its run infrastructure, including evaluation actors and rollout baselines. Batching still requires evaluator integration. | Per-player networks and frozen opponents stay inside `Engine`; evaluation matches mixing searched and external agents run through `Arena` with pooled batched search; fully caller-driven loops use `Env`, outside engine batching and telemetry. |
 | new search integration | A new bot can use the actor loop directly; batched network service requires its evaluator queue. | The standard policy seam uses normal collection, including under `n_groups=2` (group workers run any policy's search opaquely). |
 | per-game latency | Small actor counts can favor individual-game latency. | Throughput-oriented lockstep batches can increase individual-game latency. |
 | training ownership | The C++ learner is self-contained. | The caller-owned Python learner is flexible but shares the process during concurrent collection. |
