@@ -20,7 +20,21 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import _reinfors, catalog, chance_modes, encoders, games, gym, learners, noise, policies, solvers, spaces
+from . import (
+    _reinfors,
+    arena,
+    catalog,
+    chance_modes,
+    encoders,
+    games,
+    gym,
+    learners,
+    noise,
+    policies,
+    solvers,
+    spaces,
+    starts,
+)
 from ._reinfors import (
     AlphaZeroBatch,
     CollectStream,
@@ -37,6 +51,7 @@ from ._reinfors import (
     core_build_profile,
     core_version,
 )
+from .arena import Arena
 
 
 def make_game(name: str, **kwargs: Any) -> Any:
@@ -135,6 +150,7 @@ def engine_from_config(config: dict[str, Any]) -> Engine:
 
 __all__ = [
     "AlphaZeroBatch",
+    "Arena",
     "CollectStream",
     "DeepCfrBatch",
     "DqnBatch",
@@ -145,6 +161,7 @@ __all__ = [
     "Reward",
     "TreeStrapBatch",
     "_reinfors",
+    "arena",
     "catalog",
     "chance_modes",
     "chess_action_uci",
@@ -166,5 +183,6 @@ __all__ = [
     "registered_policies",
     "solvers",
     "spaces",
+    "starts",
 ]
 __version__ = "0.0.0"
