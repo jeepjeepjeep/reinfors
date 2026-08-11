@@ -106,6 +106,30 @@ Rendering is game-specific: this example formats `env.state()["board"]`, whereas
 from `env.observe()`. `state()` is trusted inspection data and can expose hidden information in games
 such as poker, so never use it as an agent input.
 
+## A fixed-strength baseline opponent
+
+[Minimax](../catalogue/algorithms.md#minimax) with a zero evaluator is the classical calibration
+baseline: deterministic, dependency-free, and perfect within its horizon using terminal rewards
+alone. Strength is dialed by `depth`. Use it as a referee-side opponent through `choose`, or as a
+frozen opponent during training with per-player callbacks and `learn_players`:
+
+```python
+import numpy as np
+import reinfors as rf
+
+baseline = rf.policies.Minimax(depth=4)
+envs = [rf.Env(rf.games.Connect4(), reward=rf.Reward(win=1.0, loss=-1.0), seed=s) for s in range(20)]
+
+def zero_infer(obs: np.ndarray) -> np.ndarray:
+    return np.zeros((len(obs), 1, 7), dtype=np.float32)
+
+actions = baseline.choose(envs, zero_infer, gamma=1.0)
+```
+
+Fixed-depth minimax has no quiescence search: it is strongest in quiet positions and blind to
+tactics deeper than `depth` (the horizon effect), which is exactly what makes it a predictable
+measuring stick rather than a competitive agent.
+
 ## Drive an environment directly
 
 For debugging, scripted opponents, or interactive play, choose legal actions yourself:
