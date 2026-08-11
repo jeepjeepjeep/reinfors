@@ -46,12 +46,41 @@ pub struct CollectStats {
     pub sum_extra_eval_rows: usize,
 }
 
-/// Start-distribution access shared across group workers.
+/// Start-distribution access: exclusive on the classic path, mutex-shared across group
+/// workers.
 pub(crate) struct StartParts<'a, S> {
     pub dist: &'a mut dyn StartDistribution<S>,
     pub rng: &'a mut SplitMix64,
 }
-pub(crate) type StartAccess<'a, S> = std::sync::Mutex<StartParts<'a, S>>;
+
+pub(crate) enum StartAccess<'a, 'b, S> {
+    Exclusive(StartParts<'a, S>),
+    Shared(&'b std::sync::Mutex<StartParts<'a, S>>),
+}
+
+impl<S> StartAccess<'_, '_, S> {
+    fn observe(&mut self, state: &S) {
+        match self {
+            StartAccess::Exclusive(parts) => parts.dist.observe(state, &mut *parts.rng),
+            StartAccess::Shared(shared) => {
+                let mut parts = shared.lock().expect("start access poisoned");
+                let StartParts { dist, rng } = &mut *parts;
+                dist.observe(state, &mut **rng);
+            }
+        }
+    }
+
+    fn choose(&mut self) -> Start<S> {
+        match self {
+            StartAccess::Exclusive(parts) => parts.dist.choose(&mut *parts.rng),
+            StartAccess::Shared(shared) => {
+                let mut parts = shared.lock().expect("start access poisoned");
+                let StartParts { dist, rng } = &mut *parts;
+                dist.choose(&mut **rng)
+            }
+        }
+    }
+}
 
 /// Engine-level rollout parameters.
 pub struct EngineParams {
@@ -249,6 +278,10 @@ where
     where
         F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
+        assert_eq!(
+            self.n_groups, 1,
+            "n_groups=2 engines collect via collect_grouped"
+        );
         let mut out: Vec<L::Record> = Vec::new();
         let mut stats = CollectStats::default();
         let num_agents = self.game.num_agents();
@@ -293,7 +326,7 @@ where
             );
 
             let finished = {
-                let start = std::sync::Mutex::new(StartParts {
+                let mut start = StartAccess::Exclusive(StartParts {
                     dist: &mut *self.start_dist,
                     rng: &mut self.buffer_rng,
                 });
@@ -313,7 +346,7 @@ where
                     &mut self.ticks,
                     &mut self.policy_states,
                     &mut self.episode_returns,
-                    &start,
+                    &mut start,
                     &mut out,
                     &mut stats,
                 )
@@ -391,7 +424,7 @@ where
         let learn_mask: &[bool] = learn_mask;
         let sequential = *sequential;
         let slots = sharded_caches.as_deref();
-        let start: StartAccess<'_, G::State> = std::sync::Mutex::new(StartParts {
+        let start = std::sync::Mutex::new(StartParts {
             dist: &mut **start_dist,
             rng: buffer_rng,
         });
@@ -548,7 +581,7 @@ where
         F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
         let tails = self.tail_values(finished, evaluator);
-        let start = std::sync::Mutex::new(StartParts {
+        let mut start = StartAccess::Exclusive(StartParts {
             dist: &mut *self.start_dist,
             rng: &mut self.buffer_rng,
         });
@@ -565,7 +598,7 @@ where
             &mut self.policy_states,
             &mut self.episode_returns,
             &mut self.seeded,
-            &start,
+            &mut start,
             out,
             stats,
         );
@@ -844,7 +877,7 @@ fn process_tick<G, P, L>(
     ticks: &mut [usize],
     policy_states: &mut [P::PolicyState],
     episode_returns: &mut [Vec<f64>],
-    start: &StartAccess<'_, G::State>,
+    start: &mut StartAccess<'_, '_, G::State>,
     out: &mut Vec<L::Record>,
     stats: &mut CollectStats,
 ) -> Vec<(usize, bool)>
@@ -948,11 +981,7 @@ where
             }
         }
         if !terminal {
-            {
-                let mut start = start.lock().expect("start access poisoned");
-                let StartParts { dist, rng } = &mut *start;
-                dist.observe(&episodes[gi].state, &mut **rng);
-            }
+            start.observe(&episodes[gi].state);
         }
         if terminal || truncated {
             finished.push((gi, terminal));
@@ -977,7 +1006,7 @@ fn flush_finished_parts<G, P, L>(
     policy_states: &mut [P::PolicyState],
     episode_returns: &mut [Vec<f64>],
     seeded: &mut [bool],
-    start: &StartAccess<'_, G::State>,
+    start: &mut StartAccess<'_, '_, G::State>,
     out: &mut Vec<L::Record>,
     stats: &mut CollectStats,
 ) where
@@ -1004,11 +1033,7 @@ fn flush_finished_parts<G, P, L>(
             length: ticks[gi],
             seeded: seeded[gi],
         });
-        let choice = {
-            let mut start = start.lock().expect("start access poisoned");
-            let StartParts { dist, rng } = &mut *start;
-            dist.choose(&mut **rng)
-        };
+        let choice = start.choose();
         match choice {
             Start::Restore(state) => {
                 Episode::assert_decision_state(game, &state);
@@ -1131,7 +1156,7 @@ fn run_group_worker<G, P, L>(
     slots: Option<&[crate::rollout::infer_cache::ShardedInferCache]>,
     req_tx: std::sync::mpsc::SyncSender<crate::rollout::infer_service::InferRequest>,
     svc: &crate::rollout::infer_service::ServiceState,
-    start: &StartAccess<'_, G::State>,
+    start: &std::sync::Mutex<StartParts<'_, G::State>>,
 ) -> (Vec<L::Record>, CollectStats)
 where
     G: Game + Sync,
@@ -1140,6 +1165,7 @@ where
     L: Learner<P::Evaluation>,
 {
     use std::sync::atomic::Ordering;
+    let mut start = StartAccess::Shared(start);
     let cancel = &svc.cancel;
     // run_service answers every accepted request exactly once, so one reply channel
     // serves the worker's lifetime.
@@ -1213,7 +1239,7 @@ where
             ticks,
             policy_states,
             episode_returns,
-            start,
+            &mut start,
             &mut out,
             &mut stats,
         );
@@ -1244,7 +1270,7 @@ where
             policy_states,
             episode_returns,
             seeded,
-            start,
+            &mut start,
             &mut out,
             &mut stats,
         );

@@ -152,9 +152,9 @@ workflow. If the experiment enables inference caching, follow the
 
 By default the engine's collect loop alternates between tree work on the CPU and your `infer`
 callback: while the accelerator runs a batch, the engine waits, and vice versa. With
-`n_groups=2` the games split into two fixed groups whose search rounds alternate — one group's
-tree work runs while the other group's batch is inside the callback (which moves to a
-dedicated submitter thread).
+`n_groups=2` the games split into two fixed groups, each collecting on its own worker
+thread with inference forwarded to a service thread that owns the callback — one group's
+tree work runs while the other group's batch is inside the callback.
 
 With per-group search time `S` and inference time `I`, steady-state throughput improves from
 one group-round per `S + I` to one per `max(S, I)` — a gain of `(S + I) / max(S, I)`, largest
