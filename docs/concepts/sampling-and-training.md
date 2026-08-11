@@ -26,6 +26,11 @@ time.
 
 - `n_games` adds independent episode slots. Increase it when callback batches underfill the
   accelerator and CPU or memory headroom remains.
+- [Minimax](../catalogue/algorithms.md#minimax)'s `depth` grows the tree with the game's
+  *realized* legal branching — roughly `b^depth` leaves for typical branching `b`, evaluated in one
+  pooled callback round per ply. Connect 4 sustains full width at the default depth; wide games
+  such as chess need `top_k` or a shallower depth, and a run that outgrows the node bound stops
+  with `search tree exceeds` rather than allocating without limit.
 - `n_records` for `collect`, or `collect_size` for streaming, is the minimum returned training-row
   count. Raise it for fewer, larger training handoffs; completed work may overshoot the floor.
 - MCTS and AlphaZero each default `num_simulations` to `64`. Larger values spend more search work

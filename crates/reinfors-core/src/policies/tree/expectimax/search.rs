@@ -12,7 +12,15 @@ use crate::rng::SplitMix64;
 #[derive(Clone, Copy)]
 pub enum Opponent {
     Uniform,
-    Distributional { temperature: f64, floor: f64 },
+    Distributional {
+        temperature: f64,
+        floor: f64,
+    },
+    /// Minimax: opponent decisions back up as a minimum over their moves; `move_cap` beams
+    /// non-root nodes by their own leaf evaluation (`usize::MAX` = full width).
+    Adversarial {
+        move_cap: usize,
+    },
 }
 
 /// Game-independent selective-search parameters.
@@ -74,6 +82,14 @@ struct Node<S> {
     path_weight: f64,
     // True only at the searcher's decisions; opponent nodes must not become TreeStrap targets.
     max_node: bool,
+    // Minimum over edges; interior values stay in the searcher's perspective.
+    min_node: bool,
+    // Perspective this node's obs/leaf row belong to. Adversarial leaves use their own mover so
+    // a self-play network only ever serves on-turn inputs (the distribution TreeStrap trains);
+    // the zero-sum negation back to the searcher happens at evaluation.
+    eval_agent: usize,
+    // Adversarial beam only: the mover-perspective leaf row, kept to order a later expansion.
+    q_row: Vec<f64>,
 }
 
 #[derive(Clone, Copy)]
@@ -129,6 +145,9 @@ impl<S> Search<S> {
             sigma: 0.0,
             path_weight: 1.0,
             max_node: false,
+            min_node: false,
+            eval_agent: agent,
+            q_row: Vec::new(),
         };
         Search {
             arena: vec![root],
@@ -278,7 +297,7 @@ where
             }
             for &li in &s.new_leaves {
                 obs_flat.extend_from_slice(&s.arena[li].obs);
-                players.push(s.agent);
+                players.push(s.arena[li].eval_agent);
             }
             n_rows += s.opp_obs.len() + s.new_leaves.len();
             span_by_idx[si] = Some((row_start, s.opp_obs.len()));
@@ -388,7 +407,7 @@ fn evaluate<S, L>(
                 }
                 full
             }
-            Opponent::Uniform => Vec::new(),
+            Opponent::Uniform | Opponent::Adversarial { .. } => Vec::new(),
         })
         .collect();
 
@@ -396,17 +415,40 @@ fn evaluate<S, L>(
         let leaf_q = row(n_opp + j);
         let legal = legal_of(&arena[li].state);
         debug_assert!(!legal.is_empty(), "non-terminal leaf with no legal actions");
+        // The row belongs to the leaf's own mover (on-turn — the distribution the paired
+        // learner trains); an adversarial opponent horizon negates back to the searcher
+        // under the 2p zero-sum contract.
+        let leaf_agent = arena[li].eval_agent;
+        let negate = leaf_agent != searcher;
         let boot: Vec<f64> = (0..k)
             .map(|h| {
                 let head = &leaf_q[h * a..(h + 1) * a];
-                legal
+                let best = legal
                     .iter()
-                    .map(|&aid| head[view.head_index(aid, searcher)])
-                    .fold(f64::NEG_INFINITY, f64::max)
+                    .map(|&aid| head[view.head_index(aid, leaf_agent)])
+                    .fold(f64::NEG_INFINITY, f64::max);
+                if negate {
+                    -best
+                } else {
+                    best
+                }
             })
             .collect();
         arena[li].sigma = std(&boot);
         arena[li].bootstrap = boot;
+        if let Opponent::Adversarial { move_cap } = cfg.opponent {
+            if move_cap != usize::MAX {
+                // Mover-perspective head-mean, retained to order this node's beamed expansion.
+                let mut q_row = vec![f64::NEG_INFINITY; a];
+                for &aid in &legal {
+                    q_row[aid] = (0..k)
+                        .map(|h| leaf_q[h * a + view.head_index(aid, leaf_agent)])
+                        .sum::<f64>()
+                        / k as f64;
+                }
+                arena[li].q_row = q_row;
+            }
+        }
         stats.leaves += 1;
         stats.sigma_sum += arena[li].sigma;
     }
@@ -488,6 +530,10 @@ fn agent_branching<G: Game>(
             opp_legal.push((mover, legal));
             branches
         }
+        Opponent::Adversarial { .. } => unreachable!(
+            "adversarial opponent decisions build per-move edges in expand_node, never weighted \
+             branches"
+        ),
     }
 }
 
@@ -579,10 +625,14 @@ fn push_branches<G: Game>(
         let terminal = chain_terminal
             || (agent_out_terminal && game.legal_actions(&child_state, agent).is_empty());
         let child = if terminal {
-            push_node(arena, child_state, Vec::new(), depth + 1, true)
+            push_node(arena, child_state, Vec::new(), depth + 1, true, agent)
         } else {
-            let obs = enc.encode(&child_state, agent);
-            let idx = push_node(arena, child_state, obs, depth + 1, false);
+            let eval_agent = match (cfg.opponent, game.actor(&child_state)) {
+                (Opponent::Adversarial { .. }, Actor::Agent(mover)) => mover,
+                _ => agent,
+            };
+            let obs = enc.encode(&child_state, eval_agent);
+            let idx = push_node(arena, child_state, obs, depth + 1, false, eval_agent);
             new_leaves.push(idx);
             idx
         };
@@ -616,6 +666,11 @@ fn expand_node<G: Game>(
 
     let (edges, max_node) = match game.actor(&state) {
         Actor::Simultaneous => {
+            assert!(
+                !matches!(cfg.opponent, Opponent::Adversarial { .. }),
+                "adversarial (minimax) backup is undefined for simultaneous decisions; see {}",
+                crate::COMPATIBILITY_DOCS
+            );
             let co_movers: Vec<usize> = (0..num_agents).filter(|&i| i != agent).collect();
             let co_b: Vec<Vec<(usize, BranchWeight)>> = co_movers
                 .iter()
@@ -677,7 +732,12 @@ fn expand_node<G: Game>(
             (edges, true)
         }
         Actor::Agent(a) if a == agent => {
-            let agent_legal = game.legal_actions(&state, agent);
+            let agent_legal = match cfg.opponent {
+                Opponent::Adversarial { move_cap } => {
+                    beamed_legal(arena, game, &state, ni, agent, depth, move_cap)
+                }
+                _ => game.legal_actions(&state, agent),
+            };
             let mut edges = Vec::with_capacity(agent_legal.len());
             for &action in &agent_legal {
                 let mut branches = Vec::new();
@@ -703,35 +763,111 @@ fn expand_node<G: Game>(
             }
             (edges, true)
         }
-        Actor::Agent(mover) => {
-            let mover_b = agent_branching(game, enc, cfg, &state, mover, opp_obs, opp_legal);
-            let mut branches = Vec::with_capacity(mover_b.len());
-            for &(action, bw) in &mover_b {
-                let mut joint = vec![0usize; num_agents];
-                joint[mover] = action;
-                push_branches(
-                    arena,
-                    game,
-                    enc,
-                    reward,
-                    cfg,
-                    &state,
-                    &joint,
-                    MoveWeight::from(bw),
-                    agent,
-                    false,
-                    depth,
-                    new_leaves,
-                    &mut branches,
-                    &mut *rng,
-                );
+        Actor::Agent(mover) => match cfg.opponent {
+            // One edge per opponent move: min of per-move expectations, not a weighted sum.
+            Opponent::Adversarial { move_cap } => {
+                let legal = beamed_legal(arena, game, &state, ni, mover, depth, move_cap);
+                let mut edges = Vec::with_capacity(legal.len().max(1));
+                if legal.is_empty() {
+                    let mut branches = Vec::new();
+                    let joint = vec![0usize; num_agents];
+                    push_branches(
+                        arena,
+                        game,
+                        enc,
+                        reward,
+                        cfg,
+                        &state,
+                        &joint,
+                        MoveWeight::from(BranchWeight::Fixed(1.0)),
+                        agent,
+                        false,
+                        depth,
+                        new_leaves,
+                        &mut branches,
+                        &mut *rng,
+                    );
+                    edges.push(Edge { branches });
+                } else {
+                    for &action in &legal {
+                        let mut branches = Vec::new();
+                        let mut joint = vec![0usize; num_agents];
+                        joint[mover] = action;
+                        push_branches(
+                            arena,
+                            game,
+                            enc,
+                            reward,
+                            cfg,
+                            &state,
+                            &joint,
+                            MoveWeight::from(BranchWeight::Fixed(1.0)),
+                            agent,
+                            false,
+                            depth,
+                            new_leaves,
+                            &mut branches,
+                            &mut *rng,
+                        );
+                        edges.push(Edge { branches });
+                    }
+                }
+                arena[ni].min_node = true;
+                (edges, false)
             }
-            (vec![Edge { branches }], false)
-        }
+            _ => {
+                let mover_b = agent_branching(game, enc, cfg, &state, mover, opp_obs, opp_legal);
+                let mut branches = Vec::with_capacity(mover_b.len());
+                for &(action, bw) in &mover_b {
+                    let mut joint = vec![0usize; num_agents];
+                    joint[mover] = action;
+                    push_branches(
+                        arena,
+                        game,
+                        enc,
+                        reward,
+                        cfg,
+                        &state,
+                        &joint,
+                        MoveWeight::from(bw),
+                        agent,
+                        false,
+                        depth,
+                        new_leaves,
+                        &mut branches,
+                        &mut *rng,
+                    );
+                }
+                (vec![Edge { branches }], false)
+            }
+        },
         Actor::Chance => unimplemented!("explicit Actor::Chance nodes are not yet supported"),
     };
     arena[ni].edges = Some(edges);
     arena[ni].max_node = max_node;
+}
+
+/// Beam-capped legal moves, ordered descending in the node's own mover-perspective leaf row.
+/// The root, and nodes without a retained `q_row`, keep full width.
+fn beamed_legal<G: Game>(
+    arena: &[Node<G::State>],
+    game: &G,
+    state: &G::State,
+    ni: usize,
+    mover: usize,
+    depth: i32,
+    move_cap: usize,
+) -> Vec<usize> {
+    let mut legal = game.legal_actions(state, mover);
+    let q_row = &arena[ni].q_row;
+    if depth == 0 || move_cap >= legal.len() || q_row.is_empty() {
+        return legal;
+    }
+    legal.sort_by(|&x, &y| q_row[y].partial_cmp(&q_row[x]).unwrap());
+    legal.truncate(move_cap);
+    // Restore canonical order so edges stay parallel to a sorted legal gather downstream.
+    legal.sort_unstable();
+    legal
 }
 
 fn push_node<S>(
@@ -740,7 +876,15 @@ fn push_node<S>(
     obs: Vec<f32>,
     depth: i32,
     terminal: bool,
+    eval_agent: usize,
 ) -> usize {
+    // Full-width modes have no expansion budget; every insertion checks the realized bound so a
+    // single wide final ply cannot allocate past it.
+    assert!(
+        arena.len() < MAX_ENUMERATED_OUTCOMES,
+        "search tree exceeds {} nodes; lower depth or set top_k",
+        MAX_ENUMERATED_OUTCOMES
+    );
     arena.push(Node {
         state,
         obs,
@@ -752,6 +896,9 @@ fn push_node<S>(
         sigma: 0.0,
         path_weight: 1.0,
         max_node: false,
+        min_node: false,
+        eval_agent,
+        q_row: Vec::new(),
     });
     arena.len() - 1
 }
@@ -770,11 +917,21 @@ fn resolve<S>(arena: &mut Vec<Node<S>>, idx: usize, gamma: f64, k: usize) {
             resolve(arena, child, gamma, k);
         }
     }
-    let mut value = vec![f64::NEG_INFINITY; k];
+    let min_node = arena[idx].min_node;
+    let init = if min_node {
+        f64::INFINITY
+    } else {
+        f64::NEG_INFINITY
+    };
+    let mut value = vec![init; k];
     for edge in &edges {
         let ev = edge_value(arena, edge, gamma, k);
         for h in 0..k {
-            value[h] = value[h].max(ev[h]);
+            value[h] = if min_node {
+                value[h].min(ev[h])
+            } else {
+                value[h].max(ev[h])
+            };
         }
     }
     arena[idx].value = value;
@@ -860,7 +1017,10 @@ fn collect_interior_targets<S, L>(
         return;
     }
     // Only searcher-choice nodes yield policy targets; opponent expectations are internal.
-    if arena[idx].max_node {
+    // Beamed nodes emit nothing: a dense row would train unsearched actions toward zero.
+    if arena[idx].max_node
+        && arena[idx].edges.as_ref().unwrap().len() == legal_of(&arena[idx].state).len()
+    {
         out.push((
             arena[idx].obs.clone(),
             node_action_values(arena, idx, gamma, k, a, legal_of),

@@ -66,7 +66,7 @@ GAMES: dict[str, GameInfo] = {
         (("win", 1.0), ("gammon", 2.0), ("backgammon", 3.0)),
         "PettingZoo AEC",
         False,
-        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero"),
+        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero", "minimax"),
         "Standard play without the doubling cube; win, gammon and backgammon outcomes.",
     ),
     "chess": GameInfo(
@@ -80,7 +80,7 @@ GAMES: dict[str, GameInfo] = {
         (("win", 1.0), ("loss", -1.0), ("draw", 0.0)),
         "PettingZoo AEC",
         False,
-        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero"),
+        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero", "minimax"),
         "Standard chess with minimal, relative, OpenSpiel and AlphaZero observation views.",
     ),
     "connect4": GameInfo(
@@ -94,7 +94,7 @@ GAMES: dict[str, GameInfo] = {
         (("win", 1.0), ("loss", -1.0), ("draw", 0.0)),
         "PettingZoo AEC",
         False,
-        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero"),
+        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero", "minimax"),
         "Compact deterministic benchmark for value learning, MCTS and AlphaZero.",
     ),
     "gridworld": GameInfo(
@@ -314,6 +314,31 @@ ALGORITHMS: dict[str, AlgorithmInfo] = {
         "UCT for sequential games and decoupled UCT for simultaneous multiplayer games.",
         (("UCT", "https://doi.org/10.1007/11871842_29"),),
     ),
+    "minimax": AlgorithmInfo(
+        "Minimax",
+        "Engine",
+        "rf.policies.Minimax",
+        "rf.learners.TreeStrap",
+        "TreeStrapBatch",
+        "Interactive play and evaluation examples",
+        "solving-and-evaluation",
+        "2",
+        "Sequential",
+        "Committed or ExpandAll",
+        "Perfect only",
+        "Q values (rows, 1, actions)",
+        "Deterministic depth-limited minimax with expectation backup at declared chance nodes "
+        "(expectiminimax) and callback-scored frontier leaves. A zero callback plays "
+        "horizon-perfectly from terminal rewards alone, making this the classical fixed-strength "
+        "baseline; no quiescence search, so fixed-depth play is subject to the horizon effect. "
+        "Paired with TreeStrap this is the original TreeStrap(minimax) setting.",
+        (
+            (
+                "Bootstrapping from Game Tree Search",
+                "https://cgi.cse.unsw.edu.au/~blair/pubs/2009VenessSilverUtherBlairNIPS.pdf",
+            ),
+        ),
+    ),
     "alphazero": AlgorithmInfo(
         "AlphaZero",
         "Engine",
@@ -393,7 +418,7 @@ ALGORITHMS: dict[str, AlgorithmInfo] = {
 
 # Public constructor registries. Keeping this small list here lets documentation generation stay
 # Rust-free; runtime tests compare it with every actual `registered()` result.
-POLICIES = frozenset({"alphazero", "epsilon_greedy_q", "mcts", "selective_expectimax"})
+POLICIES = frozenset({"alphazero", "epsilon_greedy_q", "mcts", "minimax", "selective_expectimax"})
 LEARNERS = frozenset({"alphazero", "dqn", "treestrap"})
 ENCODERS = frozenset(ENCODER_INFO)
 CHANCE_MODES = frozenset({"always_resample", "committed", "expand_all"})

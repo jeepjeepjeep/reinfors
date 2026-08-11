@@ -9,6 +9,9 @@ callback rather than corrupting search. Match a traceback fragment here first:
 | `incompatible policy/learner composition` | The policy and learner cannot form an Engine | [Construction is rejected](#construction-is-rejected) |
 | `incompatible encoder` | The encoder belongs to another game | [Construction is rejected](#construction-is-rejected) |
 | `not compatible with`, `would be clairvoyant`, or `supports at most` | The algorithm does not support that game's semantics | [Construction is rejected](#construction-is-rejected) |
+| `requires a two-player sequential game` | Minimax was composed with a game it cannot serve | [Construction is rejected](#construction-is-rejected) |
+| `requires an antisymmetric reward` | Minimax's zero-sum negation needs `loss = -win`, `draw = 0` | [Construction is rejected](#construction-is-rejected) |
+| `search tree exceeds` | Full-width search outgrew the node bound at collection time | [Construction is rejected](#construction-is-rejected) |
 | `win_food_lead is a two-snake rule` | `win_food_lead` was combined with `num_snakes != 2` | [Construction is rejected](#construction-is-rejected) |
 | `expected … per-player infer callables` | The callback sequence does not match the player count | [Per-player callback count](#per-player-callback-count) |
 | `must be a float64 or float32 ndarray` | Unsupported callback dtype or non-array output | [Callback dtype or shape errors](#callback-dtype-or-shape-errors) |
@@ -30,6 +33,8 @@ supports it in the [compatibility matrix](../catalogue/compatibility.md).
 
 `incompatible encoder` means the handle passed through `encoder=` belongs to a different game.
 Choose one from that game's rows in the [encoder catalogue](../catalogue/games.md#observation-encoders).
+
+`search tree exceeds` arrives at collection time rather than construction: Minimax is full-width, and the action vocabulary cannot statically predict realized legal branching, so the tree bound is checked as the search grows. Lower `depth` or set `top_k`.
 
 Errors containing `not compatible with`, `would be clairvoyant`, or `supports at most` reject a
 game/algorithm pairing because of information, player-count, or dynamics requirements. Choose a

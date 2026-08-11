@@ -9,10 +9,10 @@ disagreement from `EpsilonGreedyQ` as measured agreement.
 | --- | --- | --- | --- |
 | `episodes` | `list[tuple[list[float], int, bool]]` | All engine policies | Completed `(returns, length, seeded)` tuples. Returns contain one scalar per player; length is in ticks. |
 | `decisions` | `int` decisions | All engine policies | Policy decisions completed during collection. |
-| `max_depth` | `int` tree depth | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Maximum search depth observed. |
-| `mean_leaves` | `float` leaves / decision | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Mean leaf count over completed searches. |
-| `mean_rounds` | `float` rounds / decision | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Mean pooled inference/search rounds. |
-| `mean_expansions` | `float` nodes / decision | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Mean expanded-node count. |
+| `max_depth` | `int` tree depth | `SelectiveExpectimax`, `Minimax`, `Mcts`, `AlphaZero` | Maximum search depth observed. |
+| `mean_leaves` | `float` leaves / decision | `SelectiveExpectimax`, `Minimax`, `Mcts`, `AlphaZero` | Mean leaf count over completed searches. |
+| `mean_rounds` | `float` rounds / decision | `SelectiveExpectimax`, `Minimax`, `Mcts`, `AlphaZero` | Mean pooled inference/search rounds. |
+| `mean_expansions` | `float` nodes / decision | `SelectiveExpectimax`, `Minimax`, `Mcts`, `AlphaZero` | Mean expanded-node count. |
 | `mean_sigma` | `float` value units | `SelectiveExpectimax`, `n_heads >= 2` | Mean epistemic uncertainty across searched leaves; reported as `0.0` with one head. |
 | `mean_disagreement` | `float` value units | `SelectiveExpectimax`, `n_heads >= 2` | Mean root action-value disagreement across ensemble heads; reported as `0.0` with one head. |
 | `infer_seconds` | `float` seconds | All engine policies | Wall time observed inside inference callbacks. |

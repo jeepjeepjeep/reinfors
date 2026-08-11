@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use reinfors_core::{
     ActBy, AlphaZero, AlphaZeroConfig, AlphaZeroLearner, AlphaZeroRecord, AlwaysInitialState,
     ChanceMode, Dqn, DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Evaluator, Game,
-    InferCache, InferMode, Learner, Mcts, MctsConfig, NoiseScope, Opponent, Policy,
+    InferCache, InferMode, Learner, Mcts, MctsConfig, Minimax, NoiseScope, Opponent, Policy,
     ReachedStateBuffer, Reward, SearchConfig, SelectiveExpectimax, Space, SplitMix64,
     StartDistribution, StateCodec, StateEncoder, TreeStrap, TreeStrapRecord,
 };
@@ -513,9 +513,23 @@ fn policy_cfg(spec: &PolicySpec) -> Value {
                     m.insert("opp_temperature".into(), json!(temperature));
                     m.insert("opp_floor".into(), json!(floor));
                 }
+                Opponent::Adversarial { .. } => {
+                    unreachable!("SelectiveExpectimax never stores an adversarial opponent")
+                }
             }
             v
         }
+        PolicySpec::Minimax {
+            depth,
+            top_k,
+            chance,
+        } => json!({
+            "name": "minimax",
+            "depth": depth,
+            // None renders null so an omitted beam cannot split fingerprints.
+            "top_k": top_k,
+            "chance": chance_cfg(chance),
+        }),
         PolicySpec::EpsilonGreedyQ { n_heads, epsilon } => {
             json!({"name": "epsilon_greedy_q", "n_heads": n_heads, "epsilon": epsilon})
         }
@@ -2158,6 +2172,11 @@ enum PolicySpec {
         n_heads: usize,
         epsilon: f64,
     },
+    Minimax {
+        depth: i32,
+        top_k: Option<usize>,
+        chance: ChanceMode,
+    },
     Mcts {
         num_simulations: usize,
         uct_c: f64,
@@ -2429,6 +2448,49 @@ fn check_information<G: Game>(label: &str, game: &G) -> PyResult<()> {
     Ok(())
 }
 
+// No static width bound on purpose: the action vocabulary wildly overestimates realized legal
+// branching (chess: 4672 vs ~35), so the search bounds the realized tree instead.
+fn check_minimax_composition<G: Game>(game: &G) -> PyResult<()> {
+    if game.num_agents() != 2 || !game_is_sequential(game) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Minimax requires a two-player sequential game; see {}",
+            reinfors_core::COMPATIBILITY_DOCS
+        )));
+    }
+    Ok(())
+}
+
+// The adversarial negation is sound only for antisymmetric rewards. Backgammon's events carry
+// the sign themselves (Loss(m) = -magnitude), so any weights stay zero-sum; chess and connect4
+// weight win/loss/draw independently and must be constrained.
+fn check_minimax_zero_sum(game: &GameSpec, weights: Option<&HashMap<String, f64>>) -> PyResult<()> {
+    if !matches!(game, GameSpec::Chess { .. } | GameSpec::Connect4) {
+        return Ok(());
+    }
+    let effective = |key: &str| -> f64 {
+        weights
+            .and_then(|m| m.get(key).copied())
+            .unwrap_or_else(|| {
+                reward_schema(game)
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, default)| *default)
+                    .expect("schema names its outcome keys")
+            })
+    };
+    if effective("win") + effective("loss") != 0.0 || effective("draw") != 0.0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "Minimax's zero-sum negation requires an antisymmetric reward: set loss = -win and \
+             draw = 0",
+        ));
+    }
+    Ok(())
+}
+
+fn minimax_from_spec(depth: i32, top_k: Option<usize>, chance: ChanceMode, gamma: f64) -> Minimax {
+    Minimax::new(depth, top_k, chance, gamma)
+}
+
 fn check_joint_space<G: Game>(label: &str, game: &G, movers: usize) -> PyResult<()> {
     // `movers` is family-specific: all agents for dense MCTS/AZ tables, but
     // only co-movers for expectimax's per-MAX-edge product. A wrong exponent
@@ -2549,6 +2611,49 @@ where
                 dim,
                 action_count,
                 n_heads,
+                layout: InferLayout::ValueHeads,
+                num_agents,
+            }))
+        }
+        (
+            PolicySpec::Minimax {
+                depth,
+                top_k,
+                chance,
+            },
+            LearnerSpec::TreeStrap {
+                gamma,
+                outcome_weight,
+                bootstrap_p,
+                interior_targets,
+            },
+        ) => {
+            check_unit("outcome_weight", outcome_weight)?;
+            check_unit("bootstrap_p", bootstrap_p)?;
+            let policy = minimax_from_spec(depth, top_k, chance, gamma);
+            check_information("Minimax", &game)?;
+            check_minimax_composition(&game)?;
+            check_max_agents(&policy, "Minimax", &game)?;
+            let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
+            Ok(Box::new(EngineImpl {
+                codec: codec.take(),
+                n_groups: engine_params.n_groups,
+                inner: {
+                    let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
+                        .with_start_distribution(start_dist);
+                    match infer_caches {
+                        Some(CacheSet::Exclusive(c)) => e = e.with_infer_caches(c),
+                        Some(CacheSet::Sharded(c)) => e = e.with_sharded_infer_caches(c),
+                        None => {}
+                    }
+                    if let Some(lp) = learn_players {
+                        e = e.with_learn_players(&lp);
+                    }
+                    e
+                },
+                dim,
+                action_count,
+                n_heads: 1,
                 layout: InferLayout::ValueHeads,
                 num_agents,
             }))
@@ -2715,6 +2820,9 @@ fn build_engine(
     infer_caches: Option<CacheSet>,
     learn_players: Option<Vec<usize>>,
 ) -> PyResult<Box<dyn ErasedEngine>> {
+    if matches!(policy, PolicySpec::Minimax { .. }) {
+        check_minimax_zero_sum(&game, reward.as_ref().map(|r| &r.weights))?;
+    }
     let reward = build_reward(&game, reward)?;
     if start_buffer.is_some() && !matches!(game, GameSpec::Snake { .. }) {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -3597,6 +3705,18 @@ where
                 let states: Vec<usize> = (0..impls.len())
                     .map(|i| policy.begin_episode(&mut choose_env_rng(seed, i, CHOOSE_HEAD_SALT)))
                     .collect();
+                run_choose(&policy, game, enc, reward, requests, seed, states, infer)
+            }
+            PolicySpec::Minimax {
+                depth,
+                top_k,
+                chance,
+            } => {
+                let policy = minimax_from_spec(depth, top_k, chance, gamma);
+                check_information("Minimax", game)?;
+                check_minimax_composition(game)?;
+                check_max_agents(&policy, "Minimax", game)?;
+                let states = vec![(); impls.len()];
                 run_choose(&policy, game, enc, reward, requests, seed, states, infer)
             }
             PolicySpec::Mcts {
@@ -4898,6 +5018,42 @@ impl PolicyHandle {
     }
 
     #[staticmethod]
+    #[pyo3(signature = (depth=4, top_k=None, chance=None))]
+    #[pyo3(name = "Minimax")]
+    fn minimax(
+        depth: i32,
+        top_k: Option<usize>,
+        chance: Option<ChanceModeHandle>,
+    ) -> PyResult<Self> {
+        if depth < 1 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "minimax needs at least one ply of lookahead (depth >= 1)",
+            ));
+        }
+        if top_k == Some(0) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "top_k must keep at least one move per node",
+            ));
+        }
+        // ExpandAll by default: the documented expectiminimax semantics are an exact
+        // expectation, not a seeded sample; Committed{k} is the opt-in for wide fans.
+        let chance = chance.map_or(ChanceMode::ExpandAll, |c| c.mode);
+        if !Minimax::supports_chance_mode(chance) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Minimax expands each node exactly once and cannot express per-traversal \
+                 chance modes; use Committed or ExpandAll",
+            ));
+        }
+        Ok(PolicyHandle {
+            spec: PolicySpec::Minimax {
+                depth,
+                top_k,
+                chance,
+            },
+        })
+    }
+
+    #[staticmethod]
     #[pyo3(signature = (n_heads=1, epsilon=0.1))]
     #[pyo3(name = "EpsilonGreedyQ")]
     fn epsilon_greedy_q(n_heads: usize, epsilon: f64) -> PyResult<Self> {
@@ -5018,6 +5174,9 @@ impl PolicyHandle {
         }
         check_unit("gamma", gamma)?;
         let borrowed: Vec<PyRef<'_, PyEnv>> = envs.iter().map(|e| e.borrow(py)).collect();
+        if matches!(self.spec, PolicySpec::Minimax { .. }) {
+            check_minimax_zero_sum(&borrowed[0].game_spec, borrowed[0].reward_weights.as_ref())?;
+        }
         let fingerprint = borrowed[0].fingerprint.clone();
         for env in &borrowed {
             if env.fingerprint != fingerprint {
@@ -5054,6 +5213,7 @@ impl PolicyHandle {
             PolicySpec::Mcts { .. } => (1, InferLayout::ValueHeads),
             PolicySpec::SelectiveExpectimax { n_heads, .. } => (*n_heads, InferLayout::ValueHeads),
             PolicySpec::EpsilonGreedyQ { n_heads, .. } => (*n_heads, InferLayout::ValueHeads),
+            PolicySpec::Minimax { .. } => (1, InferLayout::ValueHeads),
         };
         let dim = borrowed[0].inner.obs_dim();
         let action_count = borrowed[0].inner.action_count();
