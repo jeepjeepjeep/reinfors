@@ -3,7 +3,7 @@
 Hand-maintained for now; once the API surface grows we can generate these from the Rust bindings.
 """
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import Any
 
 import numpy as np
@@ -250,6 +250,21 @@ class PolicyHandle:
     ) -> PolicyHandle: ...
     @staticmethod
     def EpsilonGreedyQ(n_heads: int = 1, epsilon: float = 0.1) -> PolicyHandle: ...
+    # One batched decision per env: pooled search, one shared infer callback. STATELESS —
+    # nothing persists between calls (multi-head Thompson draws are per call, not per
+    # episode; the engine is the reference for training semantics). Reproducible for the
+    # same ordered batch, seed and deterministic inference; pure (envs not mutated).
+    # plies defaults to each env's own tick count. gamma is REQUIRED: the discount the
+    # model was trained with (the engine takes it from the learner).
+    def choose(
+        self,
+        envs: Sequence[Env],
+        infer: Any,
+        seed: int = ...,
+        plies: Sequence[int] | None = ...,
+        *,
+        gamma: float,
+    ) -> list[int]: ...
     # MCTS (UCT) for compatible sequential, single-agent, and simultaneous (decoupled/DUCT
     # per-agent statistics) compositions. See the algorithm catalogue for its learner pairing.
     # act_by: "value" | "visits".
@@ -472,6 +487,9 @@ class Env:
     def resolved_config(self) -> dict[str, Any]: ...
     def config_fingerprint(self) -> str: ...
     def snapshot(self) -> EnvSnapshot: ...
+    # Completed steps this episode (the current decision's ply in sequential games).
+    @property
+    def ticks(self) -> int: ...
     # Rejects other compositions (fingerprint), unsupported schemas, malformed state bytes.
     # Lands at a step boundary: rewards is None until the next step.
     def restore(self, snapshot: EnvSnapshot) -> None: ...

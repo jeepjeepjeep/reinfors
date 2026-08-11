@@ -144,8 +144,8 @@ def test_done_mismatch_between_envelope_and_state_is_rejected() -> None:
 
 def _snap_with_state(env: rf.Env, state: bytes) -> rf.EnvSnapshot:
     """Rebuild a snapshot envelope around a forged state payload (fixed-width header: magic 4 +
-    schema 1 + fp-len 4 + fp 64 + rng 8 + done 1)."""
-    head = bytes(env.snapshot().to_bytes()[: 4 + 1 + 4 + 64 + 8 + 1])
+    schema 1 + fp-len 4 + fp 64 + rng 8 + done 1 + ticks 8)."""
+    head = bytes(env.snapshot().to_bytes()[: 4 + 1 + 4 + 64 + 8 + 1 + 8])
     return rf.EnvSnapshot.from_bytes(head + len(state).to_bytes(4, "little") + state)
 
 
@@ -158,7 +158,7 @@ def test_deep_codec_invariants_reject_forged_states() -> None:
     env.reset()
     good = env.snapshot().to_bytes()
     stale = bytearray(good)
-    stale[4 + 1 + 4 + 64 + 8 + 1 + 4] = 1  # state payload's layout-version byte: serde era is 2
+    stale[4 + 1 + 4 + 64 + 8 + 1 + 8 + 4] = 1  # state payload's layout-version byte: serde era is 2
     with pytest.raises(ValueError, match="layout version"):
         env.restore(rf.EnvSnapshot.from_bytes(bytes(stale)))
 
