@@ -10,8 +10,11 @@ parallel Rust backend. Your inference callback is the boundary: it receives pool
 observations and returns model outputs, so the network, framework, optimizer, replay,
 hardware placement, and distributed topology remain yours.
 
-[Benchmarks](docs/benchmarks/index.md) find this boundary negligible beside search and
-training, so an all-Rust training path would sacrifice flexibility for little measured gain.
+[Benchmarks](docs/benchmarks/index.md) measure this boundary directly: end-to-end
+throughput stays competitive with a mature C++ implementation while the seam remains in
+Python — return native f32 outputs (the measured fast path; +10–25% over f64 depending on
+net size), with the residual boundary cost dominated by per-call Python dispatch rather
+than data transfer.
 
 Reinfors is not designed to maximize throughput at any cost or to outperform a bespoke, fully
 fused JAX/XLA pipeline on the fixed workload it specializes for. It targets a practical balance:
@@ -90,8 +93,10 @@ Reinfors is pre-1.0. Public contracts are documented, but breaking changes may s
 - [Add a Rust game or algorithm](docs/extending/index.md)
 - [Read the complete documentation](docs/index.md)
 
-The benchmark area is being rebuilt with controlled, reproducible measurements. Results
-will be published only with their hardware, configuration, and methodology.
+Benchmark results — environment, methodology, the OpenSpiel comparison rounds, and the
+internal lever measurements — are published in [docs/benchmarks](docs/benchmarks/index.md)
+with per-table provenance; raw run artifacts live in the companion
+[reinfors-benchmarks](https://github.com/jeepjeepjeep/reinfors-benchmarks) repository.
 
 ## License
 

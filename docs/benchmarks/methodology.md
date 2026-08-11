@@ -25,10 +25,11 @@ search budget; rows/s is recorded as diagnosis.
 Collection is seeded and bit-reproducible per configuration under fixed weights and
 deterministic inference; every run records its seed and resolved configuration.
 
-Repeats are tiered by cost: tuning and characterization measurements (kernel curves,
-sweep legs) are repeated — at least three legs, reported as median with the spread — while
-the two-hour rounds are explicitly **single-seed per side**, stated as such wherever their
-results appear. Match results report a standard error (computed over opening pairs);
-sweep-derived selections state the margin between the chosen configuration and the
-runner-up. No published number appears without either a repeat-derived spread or a
-single-run label.
+Repeats are tiered by cost: cheap characterization measurements (kernel curves, sweep
+legs) are repeated and reported as median with the spread where they gate a decision,
+while the two-hour rounds are **single runs per (seed, side)**, with the headline
+quantities replicated across independent training seeds and stated as such wherever
+their results appear. Match results report a standard error (computed over opening
+pairs); sweep-derived selections state the margin between the chosen configuration and
+the runner-up. No published number appears without a repeat-derived spread, a
+repeat-median label, or a single-run label.

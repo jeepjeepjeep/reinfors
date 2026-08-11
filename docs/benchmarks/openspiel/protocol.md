@@ -5,7 +5,8 @@ of the shared [measurement discipline](../methodology.md).
 
 ## Caches are architecture, not a matched knob
 
-Each stack runs its own cache design at its own best capacity. Cross-stack comparison with
+Each stack runs its own cache design at its own capacity (their default; ours set equal —
+hit rate is monotone in capacity). Cross-stack comparison with
 caches *disabled* is not a "clean" condition: OpenSpiel's evaluator issues two requests per
 expanded node (policy and value are separate calls) and relies on its LRU cache to merge
 them, so cache-off roughly doubles its forwards per node while leaving reinfors (a single
@@ -26,12 +27,13 @@ than assumed). Loss definitions are aligned: both sides train a masked policy
 cross-entropy over legal actions and value MSE on outcomes in [−1, 1], with weight decay
 applied to the same parameter-name set.
 
-## Each side its own best configuration
+## Each side its best measured configuration
 
 Parallelism topology (actor/game counts, inference batch sizes) is **not** matched: each
-stack runs the configuration that empirically maximizes *its own* states/s under the round
-workload — cache on, learner and checkpoint writes sharing the GPU, windows long enough to
-contain several learn steps and game lengths (see [tuning](tuning.md)). Selecting a rival's
+stack runs the configuration that maximized *its own* states/s among the tested candidates
+under the round workload — cache on, learner and checkpoint writes sharing the GPU,
+windows long enough to contain several learn steps and game lengths (see
+[tuning](tuning.md), which also records the grid's untested edges). Selecting a rival's
 topology for it, or measuring topology under a lighter workload than the round, both bias
 the comparison.
 
@@ -45,8 +47,9 @@ them mid-write.
 
 ## Head-to-head scoring
 
-Training runs are single-seed per round with the seed recorded, and the single-seed
-caveat is carried explicitly until multi-seed rounds land (see the
-[open items](matched-round.md#open-items)). Head-to-head matches use paired openings
+Training runs are single runs per (seed, side) with the seed recorded; the headline
+results are replicated across two independent training seeds, and per-cell precision is
+carried explicitly as an [open item](matched-round.md#open-items). Head-to-head matches
+use paired openings
 (each opening played once per color) so opening imbalance cancels within pairs, and are
 reported with standard errors computed over pairs, not games.
