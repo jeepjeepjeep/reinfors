@@ -5,4 +5,5 @@ pub mod env;
 pub(crate) mod episode;
 pub mod evaluator;
 pub mod infer_cache;
+pub(crate) mod infer_service;
 pub mod start;

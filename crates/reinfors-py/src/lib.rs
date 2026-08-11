@@ -814,10 +814,27 @@ impl PyEngine {
             .map(|_| std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)))
             .collect();
         let caches = (infer_cache > 0).then(|| {
-            weights_generations
-                .iter()
-                .map(|generation| InferCache::new(infer_cache, generation.clone()))
-                .collect::<Vec<_>>()
+            if n_groups == 2 {
+                CacheSet::Sharded(
+                    weights_generations
+                        .iter()
+                        .map(|generation| {
+                            reinfors_core::ShardedInferCache::new(
+                                infer_cache,
+                                16,
+                                generation.clone(),
+                            )
+                        })
+                        .collect(),
+                )
+            } else {
+                CacheSet::Exclusive(
+                    weights_generations
+                        .iter()
+                        .map(|generation| InferCache::new(infer_cache, generation.clone()))
+                        .collect(),
+                )
+            }
         });
         let snapshot_fp = {
             let mut stripped = config.clone();
@@ -1779,7 +1796,26 @@ where
                     "n_groups=2 supports a single shared infer callback",
                 ));
             }
-            self.inner.collect_grouped(n_records, mode, &mut infer_fn)
+            let err_probe = callback_err.clone();
+            let mut grouped_fn = move |p: usize, o: Vec<f32>, n: usize| -> Vec<f64> {
+                let out = infer_fn(p, o, n);
+                if err_probe.lock().unwrap().is_some() {
+                    // Unwinds into the service's catch, cancelling both workers promptly.
+                    std::panic::panic_any("python infer callback raised".to_string());
+                }
+                out
+            };
+            let inner = &mut self.inner;
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                inner.collect_grouped(n_records, mode, &mut grouped_fn)
+            }));
+            if let Some(e) = callback_err.lock().unwrap().take() {
+                return Err(e);
+            }
+            match outcome {
+                Ok(v) => v,
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
         } else {
             self.inner.collect_routed(n_records, mode, &mut infer_fn)
         };
@@ -1817,12 +1853,28 @@ where
                 stop,
                 callback_err.clone(),
             );
+            let err_probe = callback_err.clone();
+            let mut grouped_fn = move |p: usize, o: Vec<f32>, n: usize| -> Vec<f64> {
+                let out = infer_fn(p, o, n);
+                if err_probe.lock().unwrap().is_some() {
+                    // Unwinds into the service's catch, cancelling both workers promptly.
+                    std::panic::panic_any("python infer callback raised".to_string());
+                }
+                out
+            };
             let inner = &mut self.inner;
-            let (records, stats) =
-                py.allow_threads(|| inner.collect_grouped(n_records, mode, &mut infer_fn));
+            let outcome = py.allow_threads(|| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    inner.collect_grouped(n_records, mode, &mut grouped_fn)
+                }))
+            });
             if let Some(e) = callback_err.lock().unwrap().take() {
                 return Err(e);
             }
+            let (records, stats) = match outcome {
+                Ok(v) => v,
+                Err(payload) => std::panic::resume_unwind(payload),
+            };
             let telemetry = build_telemetry(py, &stats)?;
             return L::Record::into_py_batch(records, py, self.dim, self.n_heads, telemetry);
         }
@@ -1847,6 +1899,11 @@ where
     fn n_groups(&self) -> usize {
         self.n_groups
     }
+}
+
+enum CacheSet {
+    Exclusive(Vec<InferCache>),
+    Sharded(Vec<reinfors_core::ShardedInferCache>),
 }
 
 #[derive(Clone)]
@@ -2266,7 +2323,7 @@ fn build_for_game<G: Game + Send + Sync + 'static>(
     policy: PolicySpec,
     learner: LearnerSpec,
     engine_params: EngineParams,
-    infer_caches: Option<Vec<InferCache>>,
+    infer_caches: Option<CacheSet>,
     learn_players: Option<Vec<usize>>,
 ) -> PyResult<Box<dyn ErasedEngine>>
 where
@@ -2289,27 +2346,6 @@ where
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "learn player {bad} out of range (this game has {num_agents} players)"
             )));
-        }
-    }
-    if engine_params.n_groups == 2 {
-        if !matches!(
-            policy,
-            PolicySpec::Mcts { .. } | PolicySpec::AlphaZero { .. }
-        ) {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "n_groups=2 requires a pooled-search policy (policies.Mcts or policies.AlphaZero)",
-            ));
-        }
-        let uses_tail = match &learner {
-            LearnerSpec::AlphaZero { .. } => true,
-            LearnerSpec::TreeStrap { outcome_weight, .. } => *outcome_weight > 0.0,
-            _ => false,
-        };
-        if uses_tail && game.truncation_horizon().is_some() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "n_groups=2 does not support truncation-tail bootstrapping: this learner \
-                 seeds returns from the net at the horizon; drop max_ticks or use n_groups=1",
-            ));
         }
     }
     match (policy, learner) {
@@ -2364,8 +2400,10 @@ where
                 inner: {
                     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
                         .with_start_distribution(start_dist);
-                    if let Some(c) = infer_caches {
-                        e = e.with_infer_caches(c);
+                    match infer_caches {
+                        Some(CacheSet::Exclusive(c)) => e = e.with_infer_caches(c),
+                        Some(CacheSet::Sharded(c)) => e = e.with_sharded_infer_caches(c),
+                        None => {}
                     }
                     if let Some(lp) = learn_players {
                         e = e.with_learn_players(&lp);
@@ -2440,8 +2478,10 @@ where
                 inner: {
                     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
                         .with_start_distribution(start_dist);
-                    if let Some(c) = infer_caches {
-                        e = e.with_infer_caches(c);
+                    match infer_caches {
+                        Some(CacheSet::Exclusive(c)) => e = e.with_infer_caches(c),
+                        Some(CacheSet::Sharded(c)) => e = e.with_sharded_infer_caches(c),
+                        None => {}
                     }
                     if let Some(lp) = learn_players {
                         e = e.with_learn_players(&lp);
@@ -2520,8 +2560,10 @@ where
                 inner: {
                     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
                         .with_start_distribution(start_dist);
-                    if let Some(c) = infer_caches {
-                        e = e.with_infer_caches(c);
+                    match infer_caches {
+                        Some(CacheSet::Exclusive(c)) => e = e.with_infer_caches(c),
+                        Some(CacheSet::Sharded(c)) => e = e.with_sharded_infer_caches(c),
+                        None => {}
                     }
                     if let Some(lp) = learn_players {
                         e = e.with_learn_players(&lp);
@@ -2552,8 +2594,10 @@ where
                 inner: {
                     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
                         .with_start_distribution(start_dist);
-                    if let Some(c) = infer_caches {
-                        e = e.with_infer_caches(c);
+                    match infer_caches {
+                        Some(CacheSet::Exclusive(c)) => e = e.with_infer_caches(c),
+                        Some(CacheSet::Sharded(c)) => e = e.with_sharded_infer_caches(c),
+                        None => {}
                     }
                     if let Some(lp) = learn_players {
                         e = e.with_learn_players(&lp);
@@ -2587,7 +2631,7 @@ fn build_engine(
     learner: LearnerSpec,
     engine_params: EngineParams,
     start_buffer: Option<StartBufferConfig>,
-    infer_caches: Option<Vec<InferCache>>,
+    infer_caches: Option<CacheSet>,
     learn_players: Option<Vec<usize>>,
 ) -> PyResult<Box<dyn ErasedEngine>> {
     let reward = build_reward(&game, reward)?;

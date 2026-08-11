@@ -169,9 +169,12 @@ def test_forged_payload_semantics_are_rejected() -> None:
     blob = bytearray(snap.to_bytes())
     # Envelope header: magic 4 + schema 1 + fp(4+64) + gen 8 + pv(1+4+0) + payload len 4.
     payload_off = 4 + 1 + 4 + 64 + 8 + 1 + 4 + 4
-    # Payload: version 1 + n_games 4 + agents 4 + rngs 16 => ticks live inside the per-game
-    # section; forge the FIRST game's tick to u64::MAX (version+counts+rngs, then state blob).
-    state_len_off = payload_off + 1 + 4 + 4 + 16
+    # Payload (schema v3): version 1 + n_games 4 + agents 4 + rngs 16 + group-stream count 4
+    # + 8 per stream => ticks live inside the per-game section; forge the FIRST game's tick
+    # to u64::MAX (version+counts+rngs+groups, then state blob).
+    group_cnt_off = payload_off + 1 + 4 + 4 + 16
+    group_count = int.from_bytes(blob[group_cnt_off : group_cnt_off + 4], "little")
+    state_len_off = group_cnt_off + 4 + 8 * group_count
     state_len = int.from_bytes(blob[state_len_off : state_len_off + 4], "little")
     rng_off = state_len_off + 4 + state_len
     tick_off = rng_off + 8

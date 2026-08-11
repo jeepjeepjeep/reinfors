@@ -81,12 +81,12 @@ with the two-dimensional output described above.
 ## Concurrency
 
 During `collect` with `n_groups=1`, the callback runs in the calling thread. With
-`n_groups=2` it runs on a dedicated submitter thread instead — thread-local state
+`n_groups=2` it runs on a dedicated service thread instead — thread-local state
 (`torch.autocast` contexts, per-thread default devices or streams) set on the calling thread
 does not apply there; configure such state inside the callback. During `collect_stream`, the
-background collector (or its submitter, under `n_groups=2`) invokes it while Python may train
+background collector (or its service thread, under `n_groups=2`) invokes it while Python may train
 concurrently. Protect mutable model state and use a stable collector copy. A callback can
-perform RPC, but it must return before the pooled search round advances.
+perform RPC, but the requesting group's search blocks until it returns.
 
 ## Cache lifetime
 

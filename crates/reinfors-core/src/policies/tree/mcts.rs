@@ -1738,38 +1738,6 @@ impl Policy for Mcts {
         mcts_many(game, enc, reward, &self.cfg, requests, seed, eval)
     }
 
-    fn begin_pooled<'c, G>(
-        &self,
-        game: &'c G,
-        enc: &'c dyn StateEncoder<State = G::State>,
-        reward: &'c dyn Reward<Event = G::Event>,
-        requests: Vec<(G::State, usize)>,
-        seed: u64,
-        _collect_interior: bool,
-    ) -> Option<PooledSearch<'c, G>>
-    where
-        G: Game + Sync,
-        G::State: Send,
-    {
-        Some(PooledSearch::new(
-            game,
-            enc,
-            reward,
-            self.cfg.num_simulations,
-            self.cfg.gamma,
-            self.cfg.max_depth,
-            Guidance::Uct { c: self.cfg.uct_c },
-            self.cfg.chance,
-            seed,
-            requests,
-            false,
-        ))
-    }
-
-    fn pooled_into_evals(&self, evals: Vec<SearchEvaluation>) -> Vec<SearchEvaluation> {
-        evals
-    }
-
     fn select(&self, eval: &SearchEvaluation, state: &mut u32, rng: &mut dyn Rng) -> usize {
         let move_idx = *state;
         *state += 1;
