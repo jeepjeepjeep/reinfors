@@ -256,7 +256,7 @@ where
     pub fn resolve_or_stage(&mut self, player: usize, obs: &[f32]) -> Resolve {
         if !matches!(self.eval.cache, CacheAccess::None) {
             let key = self.eval.row_key(player, obs);
-            let mut staging_generation = 0;
+            let mut staging_generation = None;
             let hit = match &mut self.eval.cache {
                 CacheAccess::Exclusive(_) => self
                     .eval
@@ -273,7 +273,7 @@ where
                     if hit.is_some() {
                         self.eval.shared_hits += 1;
                     }
-                    staging_generation = slots[idx].generation();
+                    staging_generation = Some(slots[idx].generation());
                     hit
                 }
                 CacheAccess::None => unreachable!(),
@@ -286,7 +286,9 @@ where
             }
             self.staged.insert(key, self.n);
             self.keys.push(key);
-            self.row_generations.push(staging_generation);
+            if let Some(generation) = staging_generation {
+                self.row_generations.push(generation);
+            }
         }
         self.dim = obs.len();
         self.players.push(player);

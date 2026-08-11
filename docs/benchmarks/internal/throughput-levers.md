@@ -62,7 +62,7 @@ derived from isolated component probes understate the overlappable engine-side w
 record emission, batch packing, and runtime interplay with a concurrent learner all sit on
 the engine side of the cycle — and therefore understate the gain. The batch term at this
 operating point is favorable: two 64-row groups sit at the A10G sweet spot, while a single
-128-row batch pays a measured kernel regression. Boundary costs
-(worker and service thread spawns per collect, one channel round-trip per inference call)
-are amortized at round-scale collection and measured separately at small collection sizes
-before any general recommendation.
+128-row batch pays a measured kernel regression. Boundary costs differ in scale: worker and service thread spawns amortize over the length
+of a collect, while the channel round-trip on every inference call amortizes only over
+that call's rows. Both are measured at small collection sizes before any general
+recommendation.
