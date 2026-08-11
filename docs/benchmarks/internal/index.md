@@ -16,8 +16,8 @@ approaches:
 | pure forward, batch 64 | 15.2k | 65.8 |
 
 The batch-size curve that drives sizing decisions (engine batch, grouped-collection
-group size) was measured end-to-end through the engine, internally timed — same shape,
-lower absolute:
+group size) was measured end-to-end through the engine (120-second internally timed
+legs, cache off — a within-stack comparison) — same shape, lower absolute:
 
 | batch (`n_games`) | rows/s (engine, A10G, w256 d8) |
 |---|---|
