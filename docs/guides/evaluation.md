@@ -6,7 +6,7 @@ Use the evaluation path that matches the trained object:
 | --- | --- | --- |
 | Policy or network | Referee games through `Env` | [AlphaZero head-to-head example](../examples/index.md#alphazero-head-to-head) |
 | Tabular CFR strategy | Solver value and best-response metrics | [CFR solving example](../examples/index.md#solve-leduc) |
-| Scripted or human agent | Direct action selection through `Env` | Snippet below |
+| Scripted or human agent | Direct action selection through `Env` | [Terminal Connect4 example](../examples/index.md#play-connect4) |
 
 ## Compare trained policies
 
@@ -81,6 +81,22 @@ can persist the tables with `--save`. Exact metrics are subject to the canonical
 [enumeration limits](../reference/limits.md#enumeration-limits). For N-player games, NashConv
 remains a distance-from-equilibrium diagnostic, but the two-player exploitability interpretation
 does not carry over unchanged.
+
+## Play Connect4 in a terminal
+
+The maintained interactive example renders Connect4's inspection state, accepts columns `1`–`7`
+from standard input, validates them against `env.legal_actions()`, and plays a seeded random
+opponent. Pass `--opponent human` for two-player input or enter `q` to stop:
+
+```bash
+python examples/play_connect4.py
+```
+
+![A terminal Connect4 game advancing after numbered keyboard input](../assets/interactive-connect4.svg)
+
+Rendering is game-specific: this example formats `env.state()["board"]`, whereas agents should act
+from `env.observe()`. `state()` is trusted inspection data and can expose hidden information in games
+such as poker, so never use it as an agent input.
 
 ## Drive an environment directly
 
