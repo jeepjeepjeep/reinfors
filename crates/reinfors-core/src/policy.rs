@@ -4,7 +4,6 @@ use crate::codec::bytes::Reader;
 use crate::encoder::StateEncoder;
 use crate::game::{Game, Rng};
 use crate::policies::tree::expectimax::SearchEvaluation;
-use crate::policies::tree::mcts::PooledSearch;
 use crate::reward::Reward;
 use crate::rollout::engine::CollectStats;
 use crate::rollout::evaluator::Evaluator;
@@ -61,33 +60,6 @@ pub trait Policy {
         G: Game + Sync,
         G::State: Send,
         F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>;
-
-    /// Begin a caller-driven pooled search for grouped collects, or `None` for policies
-    /// without one (the binding gates `n_groups` on this capability).
-    #[allow(clippy::too_many_arguments)]
-    fn begin_pooled<'c, G>(
-        &self,
-        game: &'c G,
-        enc: &'c dyn StateEncoder<State = G::State>,
-        reward: &'c dyn Reward<Event = G::Event>,
-        requests: Vec<(G::State, usize)>,
-        seed: u64,
-        collect_interior: bool,
-    ) -> Option<PooledSearch<'c, G>>
-    where
-        G: Game + Sync,
-        G::State: Send,
-    {
-        let _ = (game, enc, reward, requests, seed, collect_interior);
-        None
-    }
-
-    /// Convert pooled-search results into this policy's evaluation type. Only reachable for
-    /// policies whose `begin_pooled` returns `Some`.
-    fn pooled_into_evals(&self, evals: Vec<SearchEvaluation>) -> Vec<Self::Evaluation> {
-        let _ = evals;
-        unreachable!("policy does not support pooled collect")
-    }
 
     /// Choose an action from an evaluation.
     fn select(

@@ -172,22 +172,24 @@ deduplication, and terminal simulations all remove rows. Check the realized mean
 `n_games=128, n_groups=2` starting point for a sequential game at a batch-64 sweet spot is a
 workload-specific example, not a rule.
 
-Collects are bit-reproducible for a fixed seed *given deterministic inference and fixed
-weights* (accelerator kernels are not always deterministic, and under streaming the timing
-of weight refreshes decides which version serves a round): group membership is static,
-rounds alternate strictly, and rows keep game-index order. Digests differ from `n_groups=1`
-— it is a different composition, and `resolved_config()`/`config_fingerprint()` record it.
+Grouped collects are run-to-run nondeterministic while shared state is live — the shared
+inference cache, the start buffer, and weight refreshes — which is the same status real
+accelerator training already has. With deterministic inference and none of those in play
+(e.g. cacheless test configurations) they are exact: per-group record floors and
+persistent per-group rng streams (carried in snapshots) make results independent of
+scheduling and of collection chunking. Reproduce anomalies with `n_groups=1`, which stays
+exactly deterministic. Digests differ from `n_groups=1` — it is a different composition,
+and `resolved_config()`/`config_fingerprint()` record it.
 On a weight refresh (`weights_updated()`), rows already in flight finish their round. Once
 a round observes the new generation (each round syncs at its boundary, before any lookup),
 older entries are cleared and no longer served; a refresh landing *mid-round* takes effect
 at the next boundary, so that round's remaining lookups may still see pre-refresh entries —
 the same one-round staleness window the ungrouped collect has.
 
-v1 supports `policies.Mcts` and `policies.AlphaZero`, and excludes truncation-tail
-bootstrapping (an `AlphaZero` learner — or `TreeStrap` with an outcome weight — combined
-with a truncating game); the constructor raises `ValueError` for those. The remaining
-restriction — a single shared callback, not per-player routing — is checked when a collect
-or stream begins, since the callback shape is only known then.
+Grouping is policy- and learner-agnostic: any composition collects grouped, including
+truncation-tail bootstrapping (tail forwards are ordinary inference requests). The one
+remaining restriction — a single shared callback, not per-player routing — is checked when
+a collect or stream begins, since the callback shape is only known then.
 
 ## Per-player models
 
