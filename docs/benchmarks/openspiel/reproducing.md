@@ -16,8 +16,9 @@ The blocks below are **command templates**, not verbatim invocations: they run f
 companion repository's root (except where noted), and uppercase shell variables come from
 the tuning tables or artifact paths. The published training rounds predate the
 run-manifest tooling; their raw learner telemetry is archived in the companion workspace,
-and head-to-head runs from the Arena protocol onward append machine-readable manifests
-(checkpoint hashes, seeds, concurrency, versions) automatically.
+and every run surface from protocol v1 onward appends machine-readable manifests
+(source identity for both repositories, checkpoint hashes, seeds, concurrency, versions)
+automatically.
 
 ## One-time setup (per instance)
 
@@ -53,12 +54,10 @@ CORES=0-3 WIDTH=256 DEPTH=8 NGAMES="64 128" MINUTES=20 bash scripts/measure_stat
 MINUTES=120 OS_ACTORS=16 RF_NGAMES=128 RF_NGROUPS=2 ROUND_SEED="$SEED" \
     bash scripts/run_round_chess_gpu.sh
 
-# head-to-head: paired openings, both colors, matched simulations, solver off,
-# PGN export with run metadata for every game.
-# The PUBLISHED matches ran the pre-Arena bridge — companion commit 7ed1120 — whose
-# results are not poolable with the current Arena-protocol script; to reproduce them,
-# run the script at that commit. Matches from the Arena protocol onward use the current
-# script (batched search, appended run manifests).
+# head-to-head (protocol v1): paired openings, both colors, matched simulations,
+# solver off, PGN export and a run manifest for every match.
+# The currently published matches predate protocol v1 (they ran the earlier bridge,
+# companion commit 7ed1120 — see published/ provenance); reproduce those at that commit.
 python benchmarks/openspiel/eval_h2h_chess.py "$RF_CKPT" "$OS_DIR" --os-checkpoint "$OS_CHECKPOINT" \
     --games 100 --sims 64 --seed "$MATCH_SEED" --device cuda --az-device /cuda:0
 
