@@ -588,6 +588,98 @@ mod tests {
     }
 
     #[test]
+    fn an_opponent_horizon_collapses_with_min_not_max() {
+        // Depth 1 ends on the opponent's turn. The leaf after root action 0 scores [-10, +10]
+        // and after action 1 scores [-2, +1]; a max collapse would prefer action 0 at +10, the
+        // adversarial value is action 1 at -2.
+        let infer = |_players: &[usize], obs: Vec<f32>, n: usize| -> Vec<f64> {
+            (0..n)
+                .flat_map(|i| {
+                    if obs[i * 2 + 1] == 0.0 {
+                        vec![-10.0, 10.0]
+                    } else {
+                        vec![-2.0, 1.0]
+                    }
+                })
+                .collect()
+        };
+        let results = search_many(
+            &Duel,
+            &DuelEnc,
+            &Pass,
+            &adversarial_cfg(1, usize::MAX, ChanceMode::Committed { samples: 1 }),
+            vec![(Duel.initial_state(), 0)],
+            false,
+            0,
+            infer,
+        );
+        let v = &results[0].0[0];
+        assert!((v[0] - -10.0).abs() < 1e-12, "min collapse: {v:?}");
+        assert!((v[1] - -2.0).abs() < 1e-12, "min collapse: {v:?}");
+    }
+
+    #[test]
+    #[should_panic(expected = "search tree exceeds")]
+    fn one_wide_final_ply_cannot_allocate_past_the_bound() {
+        // 1100 root moves x 1100 terminal replies crosses the node bound mid-round; the
+        // insertion-point check must fire even though no further round would run.
+        #[derive(Clone)]
+        struct W(u8);
+        struct WideFinal;
+        impl Game for WideFinal {
+            type State = W;
+            type Event = f64;
+            fn num_agents(&self) -> usize {
+                2
+            }
+            fn action_count(&self) -> usize {
+                1100
+            }
+            fn actor(&self, s: &W) -> Actor {
+                Actor::Agent(usize::from(s.0))
+            }
+            fn legal_actions(&self, s: &W, agent: usize) -> Vec<usize> {
+                if s.0 < 2 && agent == usize::from(s.0) {
+                    (0..1100).collect()
+                } else {
+                    Vec::new()
+                }
+            }
+            fn step(&self, s: &W, _a: &[usize]) -> Transition<W, f64> {
+                Transition {
+                    next_state: W(s.0 + 1),
+                    events: vec![Some(0.0), Some(0.0)],
+                    terminal: s.0 == 1,
+                }
+            }
+            fn initial_state(&self) -> W {
+                W(0)
+            }
+        }
+        struct WEnc;
+        impl ActionView for WEnc {}
+        impl StateEncoder for WEnc {
+            type State = W;
+            fn encode(&self, s: &W, _: usize) -> Vec<f32> {
+                vec![f32::from(s.0)]
+            }
+            fn obs_shape(&self) -> (usize, usize, usize) {
+                (1, 1, 1)
+            }
+        }
+        let _ = search_many(
+            &WideFinal,
+            &WEnc,
+            &Pass,
+            &adversarial_cfg(2, usize::MAX, ChanceMode::Committed { samples: 1 }),
+            vec![(W(0), 0)],
+            false,
+            0,
+            |_p: &[usize], _o: Vec<f32>, n: usize| vec![0.0; n * 1100],
+        );
+    }
+
+    #[test]
     #[should_panic(expected = "per-traversal chance modes")]
     fn minimax_rejects_always_resample() {
         let _ = Minimax::new(4, None, ChanceMode::AlwaysResample, 1.0);

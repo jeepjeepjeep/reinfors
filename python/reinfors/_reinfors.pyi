@@ -276,7 +276,8 @@ class PolicyHandle:
     # `(rows, 1, actions)`. A zero callback plays horizon-perfectly from terminal rewards alone
     # (the fixed-strength baseline); `top_k` beams each non-root node to its best moves by that
     # node's own leaf evaluation. Pairs with `rf.learners.TreeStrap` (TreeStrap(minimax));
-    # `chance=` accepts Committed(samples=...) or ExpandAll() — AlwaysResample is rejected
+    # `chance=` defaults to ExpandAll() (exact expectation backup — true expectiminimax);
+    # Committed(samples=...) is the opt-in for wide chance fans. AlwaysResample is rejected
     # (expand-once search has no traversal event to redraw on). No quiescence search: fixed-depth
     # play is subject to the horizon effect in tactically sharp positions.
     @staticmethod

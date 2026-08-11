@@ -67,6 +67,11 @@ def test_an_omitted_beam_renders_null_and_keeps_fingerprints_stable() -> None:
     assert explicit.config_fingerprint() == implicit.config_fingerprint()
 
 
+def test_chance_defaults_to_the_exact_expectation() -> None:
+    config = connect4_engine(depth=2).resolved_config()
+    assert config["policy"]["chance"] == {"name": "expand_all"}
+
+
 @pytest.mark.parametrize(
     "game",
     [

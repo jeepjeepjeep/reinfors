@@ -185,12 +185,6 @@ fn expand_round<G: Game>(
     s.opp_legal.clear();
     s.new_leaves.clear();
     let agent = s.agent;
-    // Full-width modes have no expansion budget; the realized tree is the bound.
-    assert!(
-        s.arena.len() <= MAX_ENUMERATED_OUTCOMES,
-        "search tree exceeds {} nodes; lower depth or set top_k",
-        MAX_ENUMERATED_OUTCOMES
-    );
     for ni in s.batch.clone() {
         expand_node(
             &mut s.arena,
@@ -319,6 +313,10 @@ where
                         Actor::Simultaneous => game.legal_actions(state, agent),
                         Actor::Chance => unreachable!("chance actors are not searched"),
                     };
+                    let adversarial = matches!(cfg.opponent, Opponent::Adversarial { .. });
+                    let min_leaf = |state: &G::State| {
+                        adversarial && matches!(game.actor(state), Actor::Agent(m) if m != agent)
+                    };
                     evaluate(
                         &mut s.arena,
                         &s.batch,
@@ -327,6 +325,7 @@ where
                         enc,
                         s.agent,
                         &legal_of,
+                        &min_leaf,
                         slice,
                         n_opp,
                         n_heads,
@@ -371,7 +370,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn evaluate<S, L>(
+fn evaluate<S, L, M>(
     arena: &mut [Node<S>],
     batch: &[usize],
     new_leaves: &[usize],
@@ -380,6 +379,7 @@ fn evaluate<S, L>(
     view: &dyn ActionView,
     searcher: usize,
     legal_of: &L,
+    min_leaf: &M,
     q: &[f64],
     n_opp: usize,
     k: usize,
@@ -388,6 +388,7 @@ fn evaluate<S, L>(
     stats: &mut SearchStats,
 ) where
     L: Fn(&S) -> Vec<usize>,
+    M: Fn(&S) -> bool,
 {
     let row = |r: usize| -> &[f64] { &q[r * k * a..(r + 1) * k * a] };
 
@@ -416,13 +417,20 @@ fn evaluate<S, L>(
         let leaf_q = row(n_opp + j);
         let legal = legal_of(&arena[li].state);
         debug_assert!(!legal.is_empty(), "non-terminal leaf with no legal actions");
+        // Adversarial opponent-to-move horizons collapse with min: max would value the
+        // opponent's best reply as ours.
+        let fold_min = min_leaf(&arena[li].state);
         let boot: Vec<f64> = (0..k)
             .map(|h| {
                 let head = &leaf_q[h * a..(h + 1) * a];
-                legal
+                let it = legal
                     .iter()
-                    .map(|&aid| head[view.head_index(aid, searcher)])
-                    .fold(f64::NEG_INFINITY, f64::max)
+                    .map(|&aid| head[view.head_index(aid, searcher)]);
+                if fold_min {
+                    it.fold(f64::INFINITY, f64::min)
+                } else {
+                    it.fold(f64::NEG_INFINITY, f64::max)
+                }
             })
             .collect();
         arena[li].sigma = std(&boot);
@@ -873,6 +881,13 @@ fn push_node<S>(
     depth: i32,
     terminal: bool,
 ) -> usize {
+    // Full-width modes have no expansion budget; every insertion checks the realized bound so a
+    // single wide final ply cannot allocate past it.
+    assert!(
+        arena.len() < MAX_ENUMERATED_OUTCOMES,
+        "search tree exceeds {} nodes; lower depth or set top_k",
+        MAX_ENUMERATED_OUTCOMES
+    );
     arena.push(Node {
         state,
         obs,

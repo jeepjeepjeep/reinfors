@@ -5005,7 +5005,9 @@ impl PolicyHandle {
                 "top_k must keep at least one move per node",
             ));
         }
-        let chance = chance.map_or(ChanceMode::Committed { samples: 1 }, |c| c.mode);
+        // ExpandAll by default: the documented expectiminimax semantics are an exact
+        // expectation, not a seeded sample; Committed{k} is the opt-in for wide fans.
+        let chance = chance.map_or(ChanceMode::ExpandAll, |c| c.mode);
         if !Minimax::supports_chance_mode(chance) {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "Minimax expands each node exactly once and cannot express per-traversal \
