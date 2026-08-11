@@ -218,6 +218,28 @@ pub fn search_many<G: Game + Sync, F>(
     requests: Vec<(G::State, usize)>,
     collect_interior: bool,
     seed: u64,
+    infer: F,
+) -> Vec<SearchResult>
+where
+    F: FnMut(&[usize], Vec<f32>, usize) -> Vec<f64>,
+    G::State: Send,
+{
+    let requests = requests
+        .into_iter()
+        .enumerate()
+        .map(|(i, (s, agent))| (s, agent, seed.wrapping_add(i as u64)))
+        .collect();
+    search_many_seeded(game, enc, reward, cfg, requests, collect_interior, infer)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn search_many_seeded<G: Game + Sync, F>(
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
+    cfg: &SearchConfig,
+    requests: Vec<(G::State, usize, u64)>,
+    collect_interior: bool,
     mut infer: F,
 ) -> Vec<SearchResult>
 where
@@ -238,8 +260,7 @@ where
     // Per-request RNG streams make results independent of the parallel schedule.
     let mut searches: Vec<Search<G::State>> = requests
         .into_iter()
-        .enumerate()
-        .map(|(i, (s, agent))| Search::new(s, agent, seed.wrapping_add(i as u64)))
+        .map(|(s, agent, sd)| Search::new(s, agent, sd))
         .collect();
     let budget = cfg.expansion_budget;
     let mut first = true;

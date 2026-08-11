@@ -41,6 +41,10 @@ impl<G: Game> Env<G> {
         &self.episode.state
     }
 
+    pub fn encoder(&self) -> &dyn StateEncoder<State = G::State> {
+        &*self.encoder
+    }
+
     pub fn game(&self) -> &G {
         &self.game
     }

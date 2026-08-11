@@ -150,6 +150,24 @@ impl Policy for EpsilonGreedyQ {
             .collect()
     }
 
+    fn evaluate_seeded<G, F>(
+        &self,
+        game: &G,
+        enc: &dyn StateEncoder<State = G::State>,
+        reward: &dyn Reward<Event = G::Event>,
+        requests: Vec<(G::State, usize)>,
+        _seeds: &[u64],
+        collect_interior: bool,
+        eval: &mut Evaluator<'_, F>,
+    ) -> Result<Vec<QEvaluation>, String>
+    where
+        G: Game + Sync,
+        G::State: Send,
+        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+    {
+        Ok(self.evaluate(game, enc, reward, requests, 0, collect_interior, eval))
+    }
+
     fn select(&self, eval: &QEvaluation, head: &mut usize, rng: &mut dyn Rng) -> usize {
         let k = eval.values.len();
         let row = &eval.values[(*head).min(k - 1)];

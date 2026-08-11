@@ -21,7 +21,7 @@ pub(crate) enum Guidance {
     },
     Puct {
         c: f64,
-        noise: Option<(f64, f64, u64)>,
+        noise: Option<(f64, f64)>,
         noise_all: bool,
     },
 }
@@ -226,6 +226,7 @@ struct Tree<S> {
     n_agents: usize,
     max_depth_seen: i32,
     rng: SplitMix64,
+    noise_seed: u64,
     pending: Option<(PendingWork, usize)>,
     terminal_sims: usize,
     depthcap_sims: usize,
@@ -400,7 +401,7 @@ impl<S: Clone> Tree<S> {
         enc: &dyn StateEncoder<State = S>,
         state: S,
         requester: usize,
-        chance_seed: u64,
+        seed: u64,
         force_maxn: bool,
     ) -> Tree<S>
     where
@@ -434,7 +435,8 @@ impl<S: Clone> Tree<S> {
             mode,
             n_agents: n,
             max_depth_seen: 0,
-            rng: SplitMix64::new(chance_seed),
+            rng: SplitMix64::new(seed ^ 0x53A3_C5A9_1D87_2F6B),
+            noise_seed: seed,
             pending: None,
             terminal_sims: 0,
             depthcap_sims: 0,
@@ -1259,6 +1261,51 @@ where
     G::State: Send,
     F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
 {
+    let requests = requests
+        .into_iter()
+        .enumerate()
+        .map(|(ti, (s, agent))| {
+            (
+                s,
+                agent,
+                seed ^ (ti as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+            )
+        })
+        .collect();
+    search_many_seeded(
+        game,
+        enc,
+        reward,
+        num_simulations,
+        gamma,
+        max_depth,
+        guidance,
+        chance,
+        requests,
+        eval,
+        force_maxn,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn search_many_seeded<G, F>(
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
+    num_simulations: usize,
+    gamma: f64,
+    max_depth: i32,
+    guidance: &Guidance,
+    chance: ChanceMode,
+    requests: Vec<(G::State, usize, u64)>,
+    eval: &mut Evaluator<'_, F>,
+    force_maxn: bool,
+) -> Vec<SearchEvaluation>
+where
+    G: Game + Sync,
+    G::State: Send,
+    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+{
     let mut pool = PooledSearch::new(
         game,
         enc,
@@ -1268,7 +1315,6 @@ where
         max_depth,
         guidance.clone(),
         chance,
-        seed,
         requests,
         force_maxn,
     );
@@ -1310,8 +1356,7 @@ impl<'c, G: Game> PooledSearch<'c, G> {
         max_depth: i32,
         guidance: Guidance,
         chance: ChanceMode,
-        seed: u64,
-        requests: Vec<(G::State, usize)>,
+        requests: Vec<(G::State, usize, u64)>,
         force_maxn: bool,
     ) -> Self {
         assert!(
@@ -1327,12 +1372,7 @@ impl<'c, G: Game> PooledSearch<'c, G> {
         let a = game.action_count();
         let trees: Vec<Tree<G::State>> = requests
             .into_iter()
-            .enumerate()
-            .map(|(ti, (state, agent))| {
-                let chance_seed =
-                    seed ^ 0x53A3_C5A9_1D87_2F6B ^ (ti as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                Tree::new(game, enc, state, agent, chance_seed, force_maxn)
-            })
+            .map(|(state, agent, seed)| Tree::new(game, enc, state, agent, seed, force_maxn))
             .collect();
         assert!(
             // Q-derived UCT leaf values exist only at the evaluated agent's own turns. Sequential MaxN
@@ -1418,9 +1458,7 @@ impl<'c, G: Game> PooledSearch<'c, G> {
                                 match batch.resolve_or_stage(ag, &obs) {
                                     Resolve::Resolved(row) => {
                                         tree.hit_rows += 1;
-                                        consume_row(
-                                            tree, leaf, ag, &row, guidance, gamma, a, ti, enc,
-                                        );
+                                        consume_row(tree, leaf, ag, &row, guidance, gamma, a, enc);
                                     }
                                     Resolve::Staged(ticket) => {
                                         stage(tree, ti, leaf, ag, ticket, &mut self.consumers);
@@ -1436,7 +1474,7 @@ impl<'c, G: Game> PooledSearch<'c, G> {
                             {
                                 Resolve::Resolved(row) => {
                                     tree.hit_rows += 1;
-                                    consume_row(tree, leaf, 0, &row, guidance, gamma, a, ti, enc);
+                                    consume_row(tree, leaf, 0, &row, guidance, gamma, a, enc);
                                 }
                                 Resolve::Staged(ticket) => {
                                     stage(tree, ti, leaf, 0, ticket, &mut self.consumers);
@@ -1485,9 +1523,7 @@ impl<'c, G: Game> PooledSearch<'c, G> {
                                 match batch.resolve_or_stage(row_player, &obs) {
                                     Resolve::Resolved(row) => {
                                         tree.hit_rows += 1;
-                                        consume_row(
-                                            tree, child, ag, &row, guidance, gamma, a, ti, enc,
-                                        );
+                                        consume_row(tree, child, ag, &row, guidance, gamma, a, enc);
                                     }
                                     Resolve::Staged(ticket) => {
                                         stage(tree, ti, child, ag, ticket, &mut self.consumers);
@@ -1520,7 +1556,6 @@ impl<'c, G: Game> PooledSearch<'c, G> {
                     &self.guidance,
                     self.gamma,
                     self.a,
-                    ti,
                     self.enc,
                 );
             }
@@ -1563,7 +1598,6 @@ fn consume_row<S: Clone>(
     guidance: &Guidance,
     gamma: f64,
     a: usize,
-    ti: usize,
     view: &dyn ActionView,
 ) {
     // Fresh forwards, cache hits, and within-batch deduplication all terminate here; keeping one
@@ -1603,11 +1637,10 @@ fn consume_row<S: Clone>(
             if noised {
                 // Noise is applied after lookup: the cache must contain raw logits so root hits
                 // reproduce the same per-tree noise as fresh rows.
-                if let Some((eps, alpha, seed)) = noise {
+                if let Some((eps, alpha)) = noise {
                     if *eps > 0.0 {
                         let mut rng = SplitMix64::new(
-                            seed ^ (ti as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                                ^ (slot as u64).wrapping_mul(0xD1B5_4A32_D192_ED03),
+                            tree.noise_seed ^ (slot as u64).wrapping_mul(0xD1B5_4A32_D192_ED03),
                         );
                         let noise_draw = dirichlet(&mut rng, *alpha, prior.len());
                         for (p, d) in prior.iter_mut().zip(noise_draw) {
@@ -1736,6 +1769,42 @@ impl Policy for Mcts {
         F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
         mcts_many(game, enc, reward, &self.cfg, requests, seed, eval)
+    }
+
+    fn evaluate_seeded<G, F>(
+        &self,
+        game: &G,
+        enc: &dyn StateEncoder<State = G::State>,
+        reward: &dyn Reward<Event = G::Event>,
+        requests: Vec<(G::State, usize)>,
+        seeds: &[u64],
+        _collect_interior: bool,
+        eval: &mut Evaluator<'_, F>,
+    ) -> Result<Vec<SearchEvaluation>, String>
+    where
+        G: Game + Sync,
+        G::State: Send,
+        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+    {
+        let guidance = Guidance::Uct { c: self.cfg.uct_c };
+        let requests = requests
+            .into_iter()
+            .zip(seeds)
+            .map(|((s, agent), &sd)| (s, agent, sd))
+            .collect();
+        Ok(search_many_seeded(
+            game,
+            enc,
+            reward,
+            self.cfg.num_simulations,
+            self.cfg.gamma,
+            self.cfg.max_depth,
+            &guidance,
+            self.cfg.chance,
+            requests,
+            eval,
+            false,
+        ))
     }
 
     fn select(&self, eval: &SearchEvaluation, state: &mut u32, rng: &mut dyn Rng) -> usize {
@@ -3274,8 +3343,7 @@ mod pooled_lifecycle_tests {
             64,
             Guidance::Uct { c: 1.0 },
             ChanceMode::AlwaysResample,
-            7,
-            vec![(St { tick: 0 }, 0)],
+            vec![(St { tick: 0 }, 0, 7)],
             false,
         )
     }

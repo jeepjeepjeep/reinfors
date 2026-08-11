@@ -61,6 +61,29 @@ pub trait Policy {
         G::State: Send,
         F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>;
 
+    /// Batch evaluation with caller-named per-request random streams: a request's result
+    /// depends only on its (state, agent, seed), never on batch composition or order.
+    /// Families that cannot honor this contract keep the default and callers fail loudly.
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_seeded<G, F>(
+        &self,
+        game: &G,
+        enc: &dyn StateEncoder<State = G::State>,
+        reward: &dyn Reward<Event = G::Event>,
+        requests: Vec<(G::State, usize)>,
+        seeds: &[u64],
+        collect_interior: bool,
+        eval: &mut Evaluator<'_, F>,
+    ) -> Result<Vec<Self::Evaluation>, String>
+    where
+        G: Game + Sync,
+        G::State: Send,
+        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+    {
+        let _ = (game, enc, reward, requests, seeds, collect_interior, eval);
+        Err("this policy does not support per-request seeded evaluation".into())
+    }
+
     /// Choose an action from an evaluation.
     fn select(
         &self,

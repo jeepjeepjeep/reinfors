@@ -9,7 +9,7 @@ use crate::policy::{ChanceMode, Policy, SearchPolicy};
 use crate::reward::Reward;
 use crate::rollout::engine::CollectStats;
 use crate::rollout::evaluator::Evaluator;
-use search::{search_many, InteriorTarget, SearchConfig, SearchStats};
+use search::{search_many, search_many_seeded, InteriorTarget, SearchConfig, SearchStats};
 
 /// Per-decision values, visits, auxiliary targets, legality, and telemetry.
 pub struct SearchEvaluation {
@@ -130,6 +130,58 @@ impl Policy for SelectiveExpectimax {
             }
         })
         .collect()
+    }
+
+    fn evaluate_seeded<G, F>(
+        &self,
+        game: &G,
+        enc: &dyn StateEncoder<State = G::State>,
+        reward: &dyn Reward<Event = G::Event>,
+        requests: Vec<(G::State, usize)>,
+        seeds: &[u64],
+        collect_interior: bool,
+        eval: &mut Evaluator<'_, F>,
+    ) -> Result<Vec<SearchEvaluation>, String>
+    where
+        G: Game + Sync,
+        G::State: Send,
+        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+    {
+        let legal: Vec<Vec<usize>> = requests
+            .iter()
+            .map(|(state, agent)| game.legal_actions(state, *agent))
+            .collect();
+        let requests = requests
+            .into_iter()
+            .zip(seeds)
+            .map(|((s, agent), &sd)| (s, agent, sd))
+            .collect();
+        Ok(search_many_seeded(
+            game,
+            enc,
+            reward,
+            &self.cfg,
+            requests,
+            collect_interior,
+            &mut |players: &[usize], obs, n| eval.forward(players, obs, n),
+        )
+        .into_iter()
+        .zip(legal)
+        .map(|((values, interior, stats), legal)| {
+            let values = if values.len() < self.n_heads {
+                vec![values[0].clone(); self.n_heads]
+            } else {
+                values
+            };
+            SearchEvaluation {
+                values,
+                visits: Vec::new(),
+                interior,
+                legal,
+                stats,
+            }
+        })
+        .collect())
     }
 
     fn select(&self, eval: &SearchEvaluation, head: &mut usize, rng: &mut dyn Rng) -> usize {

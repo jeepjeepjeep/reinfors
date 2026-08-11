@@ -5,7 +5,7 @@ use crate::encoder::StateEncoder;
 use crate::game::{Game, Rng};
 use crate::policies::tree::expectimax::{decode_search_eval, encode_search_eval, SearchEvaluation};
 use crate::policies::tree::mcts::{
-    sample_visits, search_many, Guidance, NoiseScope, SequentialBackup,
+    sample_visits, search_many, search_many_seeded, Guidance, NoiseScope, SequentialBackup,
 };
 use crate::policy::{argmax, ChanceMode, Policy, SearchPolicy};
 use crate::reward::Reward;
@@ -55,7 +55,7 @@ where
 {
     let guidance = Guidance::Puct {
         c: cfg.c_puct,
-        noise: Some((cfg.noise_epsilon, cfg.noise_alpha, seed)),
+        noise: Some((cfg.noise_epsilon, cfg.noise_alpha)),
         noise_all: matches!(cfg.noise_scope, NoiseScope::All),
     };
     search_many(
@@ -129,6 +129,46 @@ impl Policy for AlphaZero {
         F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
         alphazero_many(game, enc, reward, &self.cfg, requests, seed, eval)
+    }
+
+    fn evaluate_seeded<G, F>(
+        &self,
+        game: &G,
+        enc: &dyn StateEncoder<State = G::State>,
+        reward: &dyn Reward<Event = G::Event>,
+        requests: Vec<(G::State, usize)>,
+        seeds: &[u64],
+        _collect_interior: bool,
+        eval: &mut Evaluator<'_, F>,
+    ) -> Result<Vec<SearchEvaluation>, String>
+    where
+        G: Game + Sync,
+        G::State: Send,
+        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+    {
+        let guidance = Guidance::Puct {
+            c: self.cfg.c_puct,
+            noise: Some((self.cfg.noise_epsilon, self.cfg.noise_alpha)),
+            noise_all: matches!(self.cfg.noise_scope, NoiseScope::All),
+        };
+        let requests = requests
+            .into_iter()
+            .zip(seeds)
+            .map(|((s, agent), &sd)| (s, agent, sd))
+            .collect();
+        Ok(search_many_seeded(
+            game,
+            enc,
+            reward,
+            self.cfg.num_simulations,
+            self.cfg.gamma,
+            self.cfg.max_depth,
+            &guidance,
+            self.cfg.chance,
+            requests,
+            eval,
+            matches!(self.cfg.sequential_backup, SequentialBackup::MaxN),
+        ))
     }
 
     fn select(&self, eval: &SearchEvaluation, state: &mut u32, rng: &mut dyn Rng) -> usize {
