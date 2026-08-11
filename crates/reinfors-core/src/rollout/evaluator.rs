@@ -2,7 +2,7 @@
 //! pass through this service; the earlier peer-parameter design let call sites bypass caching and
 //! telemetry accidentally.
 
-use crate::rollout::infer_cache::InferCache;
+use crate::rollout::infer_cache::{InferCache, ShardedInferCache};
 
 /// Whether rows route to one shared network or one network per player.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -11,10 +11,21 @@ pub enum InferMode {
     PerPlayer,
 }
 
+/// How an evaluator reaches its cache: exclusively owned, shared sharded slots, or none.
+pub enum CacheAccess<'a> {
+    None,
+    Exclusive(&'a mut [InferCache]),
+    Shared(&'a [ShardedInferCache]),
+}
+
 pub struct Evaluator<'a, F> {
     infer: &'a mut F,
     mode: InferMode,
-    caches: Option<&'a mut [InferCache]>,
+    cache: CacheAccess<'a>,
+    // The sharded cache's own counters are global across accessors; per-evaluator
+    // telemetry must be local or folding double-counts.
+    shared_lookups: usize,
+    shared_hits: usize,
     pub rows: usize,
     pub calls: usize,
     pub seconds: f64,
@@ -33,7 +44,8 @@ pub struct EvalBatch<'e, 'a, F> {
     staged: std::collections::HashMap<u128, usize>,
     n: usize,
     dim: usize,
-    generation: u64,
+    // per-player slots advance generations independently, so staging generations are per row
+    row_generations: Vec<u64>,
 }
 
 /// A batch detached from its evaluator: rows to forward elsewhere (e.g. on a submitter
@@ -44,7 +56,7 @@ pub struct StagedBatch {
     pub n: usize,
     pub dim: usize,
     keys: Vec<u128>,
-    generation: u64,
+    row_generations: Vec<u64>,
 }
 
 pub struct CommittedRows {
@@ -66,19 +78,49 @@ where
         Evaluator {
             infer,
             mode,
-            caches,
+            cache: match caches {
+                Some(c) => CacheAccess::Exclusive(c),
+                None => CacheAccess::None,
+            },
+            shared_lookups: 0,
+            shared_hits: 0,
             rows: 0,
             calls: 0,
             seconds: 0.0,
         }
     }
 
-    fn cache_slot(&mut self, player: usize) -> Option<&mut InferCache> {
-        let idx = match self.mode {
+    /// Grouped-collection constructor: shared sharded cache slots (one per routing slot).
+    pub fn with_shared_cache(
+        infer: &'a mut F,
+        mode: InferMode,
+        slots: &'a [ShardedInferCache],
+    ) -> Self {
+        Evaluator {
+            infer,
+            mode,
+            cache: CacheAccess::Shared(slots),
+            shared_lookups: 0,
+            shared_hits: 0,
+            rows: 0,
+            calls: 0,
+            seconds: 0.0,
+        }
+    }
+
+    fn slot_index(&self, player: usize) -> usize {
+        match self.mode {
             InferMode::Shared => 0,
             InferMode::PerPlayer => player,
-        };
-        self.caches.as_deref_mut().map(|c| &mut c[idx])
+        }
+    }
+
+    fn cache_slot(&mut self, player: usize) -> Option<&mut InferCache> {
+        let idx = self.slot_index(player);
+        match &mut self.cache {
+            CacheAccess::Exclusive(c) => Some(&mut c[idx]),
+            _ => None,
+        }
     }
 
     fn row_key(&self, player: usize, obs: &[f32]) -> u128 {
@@ -89,15 +131,12 @@ where
     }
 
     pub fn batch<'e>(&'e mut self) -> EvalBatch<'e, 'a, F> {
-        if let Some(caches) = self.caches.as_deref_mut() {
+        // Shared shards sync lazily per access; locking all per round would serialize.
+        if let CacheAccess::Exclusive(caches) = &mut self.cache {
             for cache in caches.iter_mut() {
                 cache.sync_generation();
             }
         }
-        let generation = match self.caches.as_deref() {
-            Some(caches) => caches.first().map_or(0, InferCache::seen_generation),
-            None => 0,
-        };
         EvalBatch {
             eval: self,
             obs_flat: Vec::new(),
@@ -106,7 +145,7 @@ where
             staged: std::collections::HashMap::new(),
             n: 0,
             dim: 0,
-            generation,
+            row_generations: Vec::new(),
         }
     }
 
@@ -138,10 +177,9 @@ where
     }
 
     /// Account and cache rows forwarded elsewhere for a batch detached via `into_staged`.
-    /// The freshness check compares the batch's staging generation to the cache's last-synced
-    /// one, so an update landing after that sync can still admit a stale insert — but every
-    /// batch synchronizes generations before its first lookup, clearing such entries first.
-    /// The observable guarantee: the cache never SERVES rows from superseded weights.
+    /// Each row is inserted only while its slot's generation matches the one captured at
+    /// staging; the observable guarantee is that the cache never SERVES rows from
+    /// superseded weights.
     pub fn ingest(
         &mut self,
         staged: StagedBatch,
@@ -159,34 +197,50 @@ where
         self.calls += calls;
         self.rows += staged.n;
         let stride = out.len() / staged.n;
-        let fresh = match self.caches.as_deref() {
-            Some(caches) => caches
-                .first()
-                .is_some_and(|c| c.seen_generation() == staged.generation),
-            None => false,
-        };
-        if fresh {
-            for i in 0..staged.keys.len() {
-                let (key, player) = (staged.keys[i], staged.players[i]);
-                let row = out[i * stride..(i + 1) * stride].to_vec();
-                self.cache_slot(player)
-                    .expect("caches present")
-                    .insert(key, &row);
+        match &mut self.cache {
+            CacheAccess::Exclusive(_) => {
+                for i in 0..staged.keys.len() {
+                    let (key, player) = (staged.keys[i], staged.players[i]);
+                    let row = out[i * stride..(i + 1) * stride].to_vec();
+                    let slot = self.cache_slot(player).expect("caches present");
+                    if slot.seen_generation() == staged.row_generations[i] {
+                        slot.insert(key, &row);
+                    }
+                }
             }
+            CacheAccess::Shared(slots) => {
+                for i in 0..staged.keys.len() {
+                    let (key, player) = (staged.keys[i], staged.players[i]);
+                    let idx = match self.mode {
+                        InferMode::Shared => 0,
+                        InferMode::PerPlayer => player,
+                    };
+                    slots[idx].insert(
+                        key,
+                        &out[i * stride..(i + 1) * stride],
+                        staged.row_generations[i],
+                    );
+                }
+            }
+            CacheAccess::None => {}
         }
         CommittedRows { out, stride }
     }
 
     pub fn cache_lookups(&self) -> usize {
-        self.caches
-            .as_deref()
-            .map_or(0, |c| c.iter().map(|x| x.lookups).sum())
+        match &self.cache {
+            CacheAccess::Exclusive(c) => c.iter().map(|x| x.lookups).sum(),
+            CacheAccess::Shared(_) => self.shared_lookups,
+            CacheAccess::None => 0,
+        }
     }
 
     pub fn cache_hits(&self) -> usize {
-        self.caches
-            .as_deref()
-            .map_or(0, |c| c.iter().map(|x| x.hits).sum())
+        match &self.cache {
+            CacheAccess::Exclusive(c) => c.iter().map(|x| x.hits).sum(),
+            CacheAccess::Shared(_) => self.shared_hits,
+            CacheAccess::None => 0,
+        }
     }
 }
 
@@ -262,14 +316,31 @@ where
     F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
 {
     pub fn resolve_or_stage(&mut self, player: usize, obs: &[f32]) -> Resolve {
-        if self.eval.caches.is_some() {
+        if !matches!(self.eval.cache, CacheAccess::None) {
             let key = self.eval.row_key(player, obs);
-            if let Some(row) = self
-                .eval
-                .cache_slot(player)
-                .expect("caches present")
-                .lookup(key)
-            {
+            let staging_generation;
+            let hit = match &mut self.eval.cache {
+                CacheAccess::Exclusive(_) => {
+                    let slot = self.eval.cache_slot(player).expect("caches present");
+                    staging_generation = slot.seen_generation();
+                    slot.lookup(key)
+                }
+                CacheAccess::Shared(slots) => {
+                    let idx = match self.eval.mode {
+                        InferMode::Shared => 0,
+                        InferMode::PerPlayer => player,
+                    };
+                    self.eval.shared_lookups += 1;
+                    let hit = slots[idx].lookup(key);
+                    if hit.is_some() {
+                        self.eval.shared_hits += 1;
+                    }
+                    staging_generation = slots[idx].generation();
+                    hit
+                }
+                CacheAccess::None => unreachable!(),
+            };
+            if let Some(row) = hit {
                 return Resolve::Resolved(row);
             }
             if let Some(&ticket) = self.staged.get(&key) {
@@ -277,6 +348,7 @@ where
             }
             self.staged.insert(key, self.n);
             self.keys.push(key);
+            self.row_generations.push(staging_generation);
         }
         self.dim = obs.len();
         self.players.push(player);
@@ -311,15 +383,32 @@ where
         self.eval.calls += calls;
         self.eval.rows += self.n;
         let stride = out.len() / self.n;
-        if self.eval.caches.is_some() {
-            for i in 0..self.keys.len() {
-                let (key, player) = (self.keys[i], self.players[i]);
-                let row = out[i * stride..(i + 1) * stride].to_vec();
-                self.eval
-                    .cache_slot(player)
-                    .expect("caches present")
-                    .insert(key, &row);
+        match &mut self.eval.cache {
+            CacheAccess::Exclusive(_) => {
+                for i in 0..self.keys.len() {
+                    let (key, player) = (self.keys[i], self.players[i]);
+                    let row = out[i * stride..(i + 1) * stride].to_vec();
+                    self.eval
+                        .cache_slot(player)
+                        .expect("caches present")
+                        .insert(key, &row);
+                }
             }
+            CacheAccess::Shared(slots) => {
+                for i in 0..self.keys.len() {
+                    let (key, player) = (self.keys[i], self.players[i]);
+                    let idx = match self.eval.mode {
+                        InferMode::Shared => 0,
+                        InferMode::PerPlayer => player,
+                    };
+                    slots[idx].insert(
+                        key,
+                        &out[i * stride..(i + 1) * stride],
+                        self.row_generations[i],
+                    );
+                }
+            }
+            CacheAccess::None => {}
         }
         CommittedRows { out, stride }
     }
@@ -332,7 +421,7 @@ where
             n: self.n,
             dim: self.dim,
             keys: self.keys,
-            generation: self.generation,
+            row_generations: self.row_generations,
         }
     }
 }
@@ -454,6 +543,168 @@ mod tests {
         let Resolve::Staged(_) = batch.resolve_or_stage(0, &[1.0, 2.0]) else {
             panic!("superseded-generation rows must not be served from the cache");
         };
+    }
+
+    #[test]
+    fn detached_exclusive_staging_preserves_per_slot_generations() {
+        let gen0 = Arc::new(AtomicU64::new(0));
+        let gen1 = Arc::new(AtomicU64::new(0));
+        let mut caches = [InferCache::new(64, gen0), InferCache::new(64, gen1.clone())];
+        let mut infer = double_infer;
+        let mut eval = Evaluator::new(&mut infer, InferMode::PerPlayer, Some(&mut caches[..]));
+
+        let mut batch = eval.batch();
+        let _ = batch.resolve_or_stage(0, &[1.0, 2.0]);
+        let _ = batch.resolve_or_stage(1, &[3.0, 4.0]);
+        let staged = batch.into_staged();
+        // player 1's slot advances and syncs at a batch boundary while rows are in flight
+        gen1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        drop(eval.batch());
+        let _ = eval.ingest(staged, vec![2.0, 4.0, 6.0, 8.0], 0.0, 1);
+
+        let mut batch = eval.batch();
+        assert!(
+            matches!(batch.resolve_or_stage(0, &[1.0, 2.0]), Resolve::Resolved(_)),
+            "player 0's row staged under its own (unchanged) generation must be cached"
+        );
+        drop(batch);
+        let mut batch = eval.batch();
+        assert!(
+            matches!(batch.resolve_or_stage(1, &[3.0, 4.0]), Resolve::Staged(_)),
+            "player 1's row staged under a superseded generation must be rejected"
+        );
+    }
+
+    #[test]
+    fn detached_staging_preserves_per_slot_generations() {
+        use crate::rollout::infer_cache::ShardedInferCache;
+        let gen0 = Arc::new(AtomicU64::new(0));
+        let gen1 = Arc::new(AtomicU64::new(0));
+        let slots = [
+            ShardedInferCache::new(1024, 16, gen0),
+            ShardedInferCache::new(1024, 16, gen1.clone()),
+        ];
+        let mut infer = double_infer;
+        let mut eval = Evaluator::with_shared_cache(&mut infer, InferMode::PerPlayer, &slots);
+
+        let mut batch = eval.batch();
+        let _ = batch.resolve_or_stage(0, &[1.0, 2.0]);
+        let _ = batch.resolve_or_stage(1, &[3.0, 4.0]);
+        let staged = batch.into_staged();
+        // player 1's slot advances while the rows are in flight; player 0's does not
+        gen1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = eval.ingest(staged, vec![2.0, 4.0, 6.0, 8.0], 0.0, 1);
+
+        let mut batch = eval.batch();
+        assert!(
+            matches!(batch.resolve_or_stage(0, &[1.0, 2.0]), Resolve::Resolved(_)),
+            "player 0's row staged under its own (unchanged) generation must be cached"
+        );
+        drop(batch);
+        let mut batch = eval.batch();
+        assert!(
+            matches!(batch.resolve_or_stage(1, &[3.0, 4.0]), Resolve::Staged(_)),
+            "player 1's row staged under a superseded generation must be rejected"
+        );
+    }
+
+    #[test]
+    fn shared_cache_evaluator_stages_dedupes_and_serves() {
+        use crate::rollout::infer_cache::ShardedInferCache;
+        let mut infer = double_infer;
+        let generation = Arc::new(AtomicU64::new(0));
+        let slots = [ShardedInferCache::new(1024, 16, generation)];
+        let mut eval = Evaluator::with_shared_cache(&mut infer, InferMode::Shared, &slots);
+
+        let mut batch = eval.batch();
+        let a = batch.resolve_or_stage(0, &[1.0, 2.0]);
+        let b = batch.resolve_or_stage(0, &[1.0, 2.0]);
+        let (Resolve::Staged(ta), Resolve::Staged(tb)) = (a, b) else {
+            panic!("cold shared cache must stage");
+        };
+        assert_eq!(
+            ta, tb,
+            "within-batch dedup applies over the shared cache too"
+        );
+        let rows = batch.commit();
+        assert_eq!(rows.row(ta), &[2.0, 4.0]);
+
+        let mut batch = eval.batch();
+        let Resolve::Resolved(row) = batch.resolve_or_stage(0, &[1.0, 2.0]) else {
+            panic!("warm shared cache must resolve");
+        };
+        assert_eq!(row, vec![2.0, 4.0]);
+        assert_eq!(eval.cache_hits(), 1);
+    }
+
+    #[test]
+    fn two_evaluators_report_their_own_shared_traffic() {
+        use crate::rollout::infer_cache::ShardedInferCache;
+        let generation = Arc::new(AtomicU64::new(0));
+        let slots = [ShardedInferCache::new(1024, 16, generation)];
+
+        let mut infer_a = double_infer;
+        let mut a = Evaluator::with_shared_cache(&mut infer_a, InferMode::Shared, &slots);
+        let mut batch = a.batch();
+        let _ = batch.resolve_or_stage(0, &[1.0, 2.0]);
+        batch.commit();
+        let mut batch = a.batch();
+        let _ = batch.resolve_or_stage(0, &[1.0, 2.0]); // hit
+        batch.commit();
+
+        let mut infer_b = double_infer;
+        let mut b = Evaluator::with_shared_cache(&mut infer_b, InferMode::Shared, &slots);
+        let mut batch = b.batch();
+        let _ = batch.resolve_or_stage(0, &[1.0, 2.0]); // hit, b's only lookup
+        batch.commit();
+
+        assert_eq!(
+            (a.cache_lookups(), a.cache_hits()),
+            (2, 1),
+            "a's own traffic only"
+        );
+        assert_eq!(
+            (b.cache_lookups(), b.cache_hits()),
+            (1, 1),
+            "b's own traffic only"
+        );
+        assert_eq!(
+            slots[0].lookups(),
+            3,
+            "the cache itself carries the global totals"
+        );
+    }
+
+    #[test]
+    fn per_player_slots_stage_under_their_own_generations() {
+        use crate::rollout::infer_cache::ShardedInferCache;
+        let gen0 = Arc::new(AtomicU64::new(0));
+        let gen1 = Arc::new(AtomicU64::new(0));
+        let slots = [
+            ShardedInferCache::new(1024, 16, gen0),
+            ShardedInferCache::new(1024, 16, gen1.clone()),
+        ];
+        let mut infer = double_infer;
+        let mut eval = Evaluator::with_shared_cache(&mut infer, InferMode::PerPlayer, &slots);
+
+        let mut batch = eval.batch();
+        let _ = batch.resolve_or_stage(0, &[1.0, 2.0]);
+        let _ = batch.resolve_or_stage(1, &[3.0, 4.0]);
+        // player 1's slot advances while the batch is in flight; player 0's does not
+        gen1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        batch.commit();
+
+        let mut batch = eval.batch();
+        assert!(
+            matches!(batch.resolve_or_stage(0, &[1.0, 2.0]), Resolve::Resolved(_)),
+            "player 0's row staged under its own (unchanged) generation must be cached"
+        );
+        drop(batch);
+        let mut batch = eval.batch();
+        assert!(
+            matches!(batch.resolve_or_stage(1, &[3.0, 4.0]), Resolve::Staged(_)),
+            "player 1's row staged under a superseded generation must be rejected"
+        );
     }
 
     #[test]

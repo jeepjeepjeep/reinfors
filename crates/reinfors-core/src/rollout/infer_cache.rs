@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 fn avalanche(mut z: u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -130,6 +130,107 @@ impl InferCache {
     }
 }
 
+/// Concurrent cache for grouped collection: key-hash-partitioned shards, each its own
+/// lock, generations synchronized lazily per access. Every operation takes exactly one
+/// shard lock and never spans inference or channel work.
+pub struct ShardedInferCache {
+    shards: Vec<Mutex<InferCache>>,
+    generation: Arc<AtomicU64>,
+    mask: u64,
+}
+
+impl ShardedInferCache {
+    /// `capacity` is the total entry budget, divided across up to `shards`.
+    pub fn new(capacity: usize, shards: usize, generation: Arc<AtomicU64>) -> Self {
+        assert!(
+            shards.is_power_of_two(),
+            "shard count must be a power of two"
+        );
+        // Small budgets shrink the shard count so the floor stays 2, never 2 * shards.
+        let cap_bound = (capacity / 2).max(1);
+        let cap_shards = if cap_bound.is_power_of_two() {
+            cap_bound
+        } else {
+            cap_bound.next_power_of_two() / 2
+        };
+        let shards = shards.min(cap_shards).max(1);
+        let per_shard = (capacity / shards).max(2);
+        ShardedInferCache {
+            shards: (0..shards)
+                .map(|_| Mutex::new(InferCache::new(per_shard, generation.clone())))
+                .collect(),
+            mask: shards as u64 - 1,
+            generation,
+        }
+    }
+
+    fn shard(&self, key: u128) -> &Mutex<InferCache> {
+        &self.shards[(key as u64 & self.mask) as usize]
+    }
+
+    /// The current weights generation (batch staging captures this).
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    pub fn lookup(&self, key: u128) -> Option<Vec<f64>> {
+        let mut shard = self.shard(key).lock().expect("cache shard poisoned");
+        shard.sync_generation();
+        shard.lookup(key)
+    }
+
+    /// Insert a row computed under weights generation `staged`; rejected once the shard
+    /// has advanced past it.
+    pub fn insert(&self, key: u128, row: &[f64], staged: u64) {
+        let mut shard = self.shard(key).lock().expect("cache shard poisoned");
+        shard.sync_generation();
+        debug_assert!(
+            shard.seen_generation() >= staged,
+            "generations only advance"
+        );
+        if shard.seen_generation() == staged {
+            shard.insert(key, row);
+        }
+    }
+
+    pub fn begin_collect(&self) {
+        for shard in &self.shards {
+            shard.lock().expect("cache shard poisoned").begin_collect();
+        }
+    }
+
+    pub fn force_clear(&self) {
+        for shard in &self.shards {
+            shard.lock().expect("cache shard poisoned").force_clear();
+        }
+    }
+
+    pub fn lookups(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|s| s.lock().expect("cache shard poisoned").lookups)
+            .sum()
+    }
+
+    pub fn hits(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|s| s.lock().expect("cache shard poisoned").hits)
+            .sum()
+    }
+
+    pub fn len(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|s| s.lock().expect("cache shard poisoned").len())
+            .sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +311,125 @@ mod tests {
         for (g, r) in got.iter().zip(row) {
             assert!((g - r).abs() < 1e-6);
         }
+    }
+}
+
+#[cfg(test)]
+mod sharded_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn cache(capacity: usize) -> (ShardedInferCache, Arc<AtomicU64>) {
+        let generation = Arc::new(AtomicU64::new(0));
+        (
+            ShardedInferCache::new(capacity, 16, generation.clone()),
+            generation,
+        )
+    }
+
+    #[test]
+    fn lookup_after_insert_round_trips() {
+        let (c, _g) = cache(1024);
+        let key = InferCache::key(&[1.0, 2.0]);
+        assert!(c.lookup(key).is_none());
+        c.insert(key, &[0.5, 0.25], 0);
+        assert_eq!(c.lookup(key).unwrap(), vec![0.5, 0.25]);
+        assert_eq!((c.lookups(), c.hits()), (2, 1));
+    }
+
+    #[test]
+    fn superseded_generation_rows_never_enter() {
+        let (c, g) = cache(1024);
+        let key = InferCache::key(&[3.0, 4.0]);
+        let staged = c.generation();
+        g.fetch_add(1, Ordering::Relaxed);
+        c.insert(key, &[9.0, 9.0], staged);
+        assert!(c.lookup(key).is_none(), "stale insert must be rejected");
+        c.insert(key, &[7.0, 7.0], c.generation());
+        assert_eq!(c.lookup(key).unwrap(), vec![7.0, 7.0]);
+    }
+
+    #[test]
+    fn generation_bump_clears_lazily_per_shard() {
+        let (c, g) = cache(1024);
+        let keys: Vec<u128> = (0..64).map(|i| InferCache::key(&[i as f32, 1.0])).collect();
+        for &k in &keys {
+            c.insert(k, &[1.0], c.generation());
+        }
+        g.fetch_add(1, Ordering::Relaxed);
+        for &k in &keys {
+            assert!(
+                c.lookup(k).is_none(),
+                "pre-bump entries must never be served"
+            );
+        }
+    }
+
+    #[test]
+    fn total_capacity_is_divided_not_multiplied() {
+        for capacity in [1usize, 8, 31, 256] {
+            let (c, _g) = cache(capacity);
+            for i in 0..4096u32 {
+                let k = InferCache::key(&[i as f32, 0.5]);
+                c.insert(k, &[1.0], 0);
+            }
+            let budget = capacity.max(2);
+            assert!(
+                c.len() <= budget,
+                "capacity {capacity}: stored {} > budget {budget}",
+                c.len()
+            );
+        }
+    }
+
+    #[test]
+    fn force_clear_empties_every_shard() {
+        let (c, _g) = cache(256);
+        for i in 0..64u32 {
+            c.insert(InferCache::key(&[i as f32, 0.5]), &[1.0], 0);
+        }
+        assert!(!c.is_empty());
+        c.force_clear();
+        assert_eq!(c.len(), 0);
+    }
+
+    #[test]
+    fn begin_collect_resets_counters() {
+        let (c, _g) = cache(1024);
+        let key = InferCache::key(&[1.0, 1.0]);
+        c.insert(key, &[1.0], 0);
+        let _ = c.lookup(key);
+        c.begin_collect();
+        assert_eq!((c.lookups(), c.hits()), (0, 0));
+    }
+
+    #[test]
+    fn concurrent_hammer_with_generation_churn() {
+        let (c, g) = cache(4096);
+        std::thread::scope(|scope| {
+            for t in 0..4u32 {
+                let c = &c;
+                scope.spawn(move || {
+                    for i in 0..2000u32 {
+                        let k = InferCache::key(&[(i % 257) as f32, t as f32]);
+                        let staged = c.generation();
+                        if i % 3 == 0 {
+                            c.insert(k, &[f64::from(i)], staged);
+                        } else {
+                            let _ = c.lookup(k);
+                        }
+                    }
+                });
+            }
+            let g = &g;
+            scope.spawn(move || {
+                for _ in 0..20 {
+                    g.fetch_add(1, Ordering::Relaxed);
+                    std::thread::yield_now();
+                }
+            });
+        });
+        assert!(c.lookups() > 0);
+        let _ = c.len();
     }
 }
