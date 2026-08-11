@@ -145,11 +145,19 @@ impl StateEncoder for PanicEnc {
         self.calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let me = std::thread::current().id();
-        let mut owner = self.owner.lock().unwrap();
-        match *owner {
-            None => *owner = Some(me),
-            Some(t) if t != me => panic!("peer group panicked"),
-            _ => {}
+        let is_peer = {
+            let mut owner = self.owner.lock().unwrap();
+            match *owner {
+                None => {
+                    *owner = Some(me);
+                    false
+                }
+                Some(t) => t != me,
+            }
+        };
+        // panic outside the lock so the owning thread is not poisoned into a second panic
+        if is_peer {
+            panic!("peer group panicked");
         }
         vec![s.tick as f32, 1.0]
     }

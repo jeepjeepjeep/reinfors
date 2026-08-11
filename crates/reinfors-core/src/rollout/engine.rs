@@ -410,11 +410,13 @@ where
         let tx_b = req_tx;
         let mut infer = infer;
 
-        let mut group_results: [Option<(Vec<L::Record>, CollectStats)>; 2] = [None, None];
-        let mut worker_panic: Option<Box<dyn std::any::Any + Send>> = None;
+        let group_results: [Option<(Vec<L::Record>, CollectStats)>; 2];
+        let first_panic: std::sync::Mutex<Option<Box<dyn std::any::Any + Send>>> =
+            std::sync::Mutex::new(None);
         {
             let svc = &service_state;
             let start = &start;
+            let panic_slot = &first_panic;
             let (res_a, res_b) = std::thread::scope(|scope| {
                 scope.spawn(move || run_service(&mut infer, &req_rx, svc));
                 let handle_a = scope.spawn(move || {
@@ -443,10 +445,19 @@ where
                             start,
                         )
                     }));
-                    if res.is_err() {
-                        svc.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    match res {
+                        Ok(v) => Some(v),
+                        Err(payload) => {
+                            // record before cancelling: collateral panics (empty rows
+                            // after cancellation) must not mask the root cause
+                            panic_slot
+                                .lock()
+                                .expect("panic slot poisoned")
+                                .get_or_insert(payload);
+                            svc.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                            None
+                        }
                     }
-                    res
                 });
                 let handle_b = scope.spawn(move || {
                     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -474,24 +485,26 @@ where
                             start,
                         )
                     }));
-                    if res.is_err() {
-                        svc.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    match res {
+                        Ok(v) => Some(v),
+                        Err(payload) => {
+                            // record before cancelling: collateral panics (empty rows
+                            // after cancellation) must not mask the root cause
+                            panic_slot
+                                .lock()
+                                .expect("panic slot poisoned")
+                                .get_or_insert(payload);
+                            svc.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                            None
+                        }
                     }
-                    res
                 });
                 (
-                    handle_a.join().and_then(|r| r),
-                    handle_b.join().and_then(|r| r),
+                    handle_a.join().unwrap_or(None),
+                    handle_b.join().unwrap_or(None),
                 )
             });
-            for (slot, res) in group_results.iter_mut().zip([res_a, res_b]) {
-                match res {
-                    Ok(r) => *slot = Some(r),
-                    Err(payload) => {
-                        worker_panic.get_or_insert(payload);
-                    }
-                }
-            }
+            group_results = [res_a, res_b];
         }
 
         if let Some(err) = service_state
@@ -502,7 +515,7 @@ where
         {
             panic!("grouped collect infer callback failed: {err}");
         }
-        if let Some(payload) = worker_panic {
+        if let Some(payload) = first_panic.into_inner().expect("panic slot poisoned") {
             std::panic::resume_unwind(payload);
         }
 
