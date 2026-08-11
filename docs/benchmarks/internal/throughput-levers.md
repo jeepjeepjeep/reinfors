@@ -10,10 +10,19 @@ exactly in Rust (bit-identical to the caller converting to `float64`, without th
 conversion and double-width transfer), including padded policy widths so torch heads sized
 past the action space return whole tensors without a device-side slice.
 
+A10G, 3-cycle medians, within-stack comparison (the callback drops its `.double()` and
+returns native f32; everything else identical):
+
 | config (chess, CUDA) | f64 path rows/s | f32 path rows/s | gain |
 |---|---|---|---|
-| w256 d8, batch 64 | _TBD_ | _TBD_ | _TBD_ |
-| w128 d8, batch 64 | _TBD_ | _TBD_ | _TBD_ |
+| w256 d8, batch 64 | 11,380 | 12,493 | +9.8% |
+| w128 d8, batch 64 | 15,591 | 19,483 | +25.0% |
+
+The gain grows as the net shrinks because the boundary cost is a larger share of a
+smaller forward. Measured null worth knowing: layering pinned host transfers, packed
+single-copy returns, and no-slice padded heads on top of the f32 path moved nothing on
+CUDA — the remaining per-call overhead is Python/torch op dispatch in the callback, not
+transfer, so further boundary tuning is not the lever there.
 
 ## Inference cache
 
