@@ -306,15 +306,15 @@ where
     }
 }
 
-fn infer_closure_gil(
-    callbacks: Vec<Py<PyAny>>,
+fn infer_closure_gil<C: AsRef<[Py<PyAny>]> + Send>(
+    callbacks: C,
     dim: usize,
     action_count: usize,
     expected_heads: usize,
     layout: InferLayout,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     callback_err: std::sync::Arc<std::sync::Mutex<Option<PyErr>>>,
-) -> impl FnMut(usize, Vec<f32>, usize) -> Vec<f64> + Send + 'static {
+) -> impl FnMut(usize, Vec<f32>, usize) -> Vec<f64> + Send {
     move |player: usize, obs_flat: Vec<f32>, n: usize| -> Vec<f64> {
         let fallback_len = match layout {
             InferLayout::ValueHeads => n * expected_heads * action_count,
@@ -332,7 +332,7 @@ fn infer_closure_gil(
                     InferLayout::ValueHeads => {
                         let mut f = infer_closure(
                             py,
-                            &callbacks,
+                            callbacks.as_ref(),
                             dim,
                             action_count,
                             Some(expected_heads),
@@ -341,7 +341,8 @@ fn infer_closure_gil(
                         f(player, obs_flat, n)
                     }
                     InferLayout::PolicyValue => {
-                        let mut f = az_infer_closure(py, &callbacks, dim, action_count, &mut err);
+                        let mut f =
+                            az_infer_closure(py, callbacks.as_ref(), dim, action_count, &mut err);
                         f(player, obs_flat, n)
                     }
                 }
@@ -1017,9 +1018,6 @@ impl PyEngine {
             let (stop, queued) = (stop.clone(), queued.clone());
             let pause = pause.clone();
             std::thread::spawn(move || {
-                // n_groups=2: a resident service thread owns the callback for the
-                // stream's lifetime, so thread-affine callbacks (e.g. torch.compile's
-                // cudagraphs) see one fixed thread across collects.
                 let hosted = (engine.n_groups() == 2)
                     .then(|| engine.make_service_host(&infer, stop.clone()));
                 loop {
@@ -1330,8 +1328,6 @@ trait ErasedEngine: Send + Sync {
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> PyResult<BatchThunk>;
 
-    /// Resident service thread owning the callback for a stream's lifetime
-    /// (thread-affine callbacks see one fixed thread across collects).
     fn make_service_host(
         &self,
         infer: &[Py<PyAny>],
@@ -1822,10 +1818,8 @@ where
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> PyResult<BatchThunk> {
         let callback_err = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let owned =
-            Python::with_gil(|py| infer.iter().map(|c| c.clone_ref(py)).collect::<Vec<_>>());
         let mut infer_fn = infer_closure_gil(
-            owned,
+            infer,
             self.dim,
             self.action_count,
             self.n_heads,
@@ -1941,7 +1935,7 @@ where
             let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let callback_err = std::sync::Arc::new(std::sync::Mutex::new(None));
             let mut infer_fn = infer_closure_gil(
-                callbacks,
+                &callbacks,
                 self.dim,
                 self.action_count,
                 self.n_heads,
@@ -5303,7 +5297,7 @@ impl PolicyHandle {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let callback_err = std::sync::Arc::new(std::sync::Mutex::new(None));
         let mut infer_fn = infer_closure_gil(
-            callbacks,
+            &callbacks,
             dim,
             action_count,
             expected_heads,

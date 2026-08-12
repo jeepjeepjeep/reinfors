@@ -162,7 +162,7 @@ fn hosted_collect_callback_panic_reports_and_host_survives() {
         engine(4, 2, 5).collect_grouped_hosted(8, InferMode::Shared, &host)
     }));
     assert!(panicked.is_err());
-    drop(host); // resident thread must still be joinable after the failed collect
+    drop(host); // still joinable after the failed collect
 }
 
 #[test]

@@ -2,11 +2,8 @@
 //! on one-shot `Result` replies. Callback panics cancel the run and answer every pending
 //! request with `Err` so no worker deadlocks.
 //!
-//! The service runs on either a per-collect scoped thread (the plain `collect_grouped`
-//! path, where the callback is a per-call loan) or a [`ServiceHost`] — a resident
-//! thread owning the callback for a session's lifetime, so callbacks that are
-//! thread-affine (e.g. `torch.compile` cudagraphs, whose capture state is
-//! thread-local) see one fixed thread across collects.
+//! The service runs on a per-collect scoped thread, or on a [`ServiceHost`] — a
+//! resident thread giving thread-affine callbacks one fixed thread across collects.
 
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -89,14 +86,9 @@ struct Begin {
     state: Arc<ServiceState>,
 }
 
-/// A resident inference-service thread owning the callback for a session's lifetime.
-///
-/// Every callback invocation across every collect happens on this one thread — the
-/// affinity contract thread-affine callbacks need. Per collect, [`Self::begin`] hands
-/// the thread that collect's request channel and state; the service loop exits when
-/// the workers drop their senders, and [`Self::wait_done`] is the quiesce barrier.
-/// Callback panics are handled inside the loop (cancel + `Err` replies), so the
-/// resident thread survives them; dropping the host stops and joins the thread.
+/// Resident service thread owning the callback for a session's lifetime: every
+/// callback invocation across every collect happens on its one thread. The service
+/// loop exits when the workers drop their senders; [`Self::wait_done`] awaits that.
 pub struct ServiceHost {
     tx: Option<Sender<Begin>>,
     done_rx: Receiver<()>,

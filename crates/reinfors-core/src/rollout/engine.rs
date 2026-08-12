@@ -15,8 +15,7 @@ use crate::rollout::infer_cache::InferCache;
 use crate::rollout::infer_service::ServiceHost;
 use crate::rollout::start::{AlwaysInitialState, Start, StartDistribution};
 
-/// Who runs the grouped-collect inference service: a thread scoped to this collect
-/// (callback is a per-call loan) or a resident [`ServiceHost`] (session owns it).
+/// Service placement for a grouped collect: scoped to the call, or resident.
 enum ServiceDriver<'a, F> {
     Scoped(F),
     Hosted(&'a ServiceHost),
@@ -394,11 +393,8 @@ where
         self.collect_grouped_impl(n_records, mode, ServiceDriver::Scoped(infer))
     }
 
-    /// Grouped collect with inference served by a resident [`ServiceHost`] thread that
-    /// owns the callback for a session's lifetime. Identical scheduling to
-    /// [`Self::collect_grouped`]; the difference is the affinity contract — every
-    /// callback invocation across every collect happens on the host's one thread,
-    /// which thread-affine callbacks (compiled/captured forwards) require.
+    /// Grouped collect served by a resident [`ServiceHost`]: identical scheduling to
+    /// [`Self::collect_grouped`], but the callback thread is fixed across collects.
     pub fn collect_grouped_hosted(
         &mut self,
         n_records: usize,
@@ -608,8 +604,7 @@ where
             });
             group_results = [res_a, res_b];
         }
-        // Hosted: the workers' senders are dropped, so the service loop is exiting;
-        // block until it has, so its stats/error writes are visible below.
+        // quiesce before reading the service's stats/error writes below
         if let ServiceDriver::Hosted(host) = &driver {
             host.wait_done();
         }

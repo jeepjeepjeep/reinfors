@@ -276,8 +276,7 @@ def test_uneven_groups_and_tiny_floor() -> None:
 
 
 def test_grouped_stream_callback_thread_is_fixed_across_batches() -> None:
-    # the resident-service contract thread-affine (compiled) callbacks rely on:
-    # every invocation across every stream batch happens on ONE persistent thread
+    # every invocation across every stream batch happens on one persistent thread
     import threading
 
     seen = set()
@@ -294,7 +293,6 @@ def test_grouped_stream_callback_thread_is_fixed_across_batches() -> None:
 
 
 def test_grouped_stream_first_batch_matches_direct_collect() -> None:
-    # hosted (stream) vs scoped (direct) service: identical scheduling, identical batch
     with _engine(2).collect_stream(40, _uniform_infer) as stream:
         a = stream.next()
     b = _engine(2).collect(40, _uniform_infer)

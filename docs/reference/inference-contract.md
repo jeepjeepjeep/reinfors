@@ -89,7 +89,11 @@ background collector (or its service thread, under `n_groups=2`) invokes it whil
 concurrently, and the invoking thread is **fixed for the stream's lifetime**: every call across
 every batch arrives on one persistent thread, so thread-affine callbacks (a
 `torch.compile(mode="reduce-overhead")` forward, whose cudagraph state is thread-local) work
-under a stream. One-shot `collect` calls give no cross-call thread guarantee.
+under a stream. The guarantee covers only invocations made *through* the stream — state a
+callback captured on another thread beforehand is not repaired. Warm a compiled callable via
+the stream itself (e.g. discard the first batch) or construct it lazily inside the callback;
+never invoke it on the caller thread first. One-shot `collect` calls give no cross-call
+thread guarantee.
 Protect mutable model state and use a stable collector copy. A callback can
 perform RPC, but the requesting group's search blocks until it returns.
 
