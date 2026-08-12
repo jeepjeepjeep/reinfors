@@ -273,3 +273,40 @@ def test_uneven_groups_and_tiny_floor() -> None:
     )
     batch = eng.collect(1, _uniform_infer)
     assert batch.obs.shape[0] >= 1
+
+
+def test_grouped_stream_callback_thread_is_fixed_across_batches() -> None:
+    # the resident-service contract thread-affine (compiled) callbacks rely on:
+    # every invocation across every stream batch happens on ONE persistent thread
+    import threading
+
+    seen = set()
+
+    def recording(obs, n=None):
+        seen.add(threading.get_ident())
+        return _uniform_infer(obs)
+
+    with _engine(2).collect_stream(40, recording) as stream:
+        for _ in range(3):
+            stream.next()
+    assert len(seen) == 1
+    assert threading.get_ident() not in seen
+
+
+def test_grouped_stream_first_batch_matches_direct_collect() -> None:
+    # hosted (stream) vs scoped (direct) service: identical scheduling, identical batch
+    with _engine(2).collect_stream(40, _uniform_infer) as stream:
+        a = stream.next()
+    b = _engine(2).collect(40, _uniform_infer)
+    assert np.array_equal(a.obs, b.obs)
+    assert np.array_equal(a.policy_targets, b.policy_targets)
+    assert np.array_equal(a.value_targets, b.value_targets)
+
+
+def test_grouped_stream_callback_error_still_propagates() -> None:
+    def bad(obs, n=None):
+        raise RuntimeError("boom from stream infer")
+
+    with _engine(2).collect_stream(40, bad) as stream:
+        with pytest.raises(RuntimeError, match="boom from stream infer"):
+            stream.next()

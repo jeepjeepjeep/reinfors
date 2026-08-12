@@ -12,7 +12,15 @@ use crate::rng::SplitMix64;
 use crate::rollout::episode::Episode;
 use crate::rollout::evaluator::{Evaluator, InferMode};
 use crate::rollout::infer_cache::InferCache;
+use crate::rollout::infer_service::ServiceHost;
 use crate::rollout::start::{AlwaysInitialState, Start, StartDistribution};
+
+/// Who runs the grouped-collect inference service: a thread scoped to this collect
+/// (callback is a per-call loan) or a resident [`ServiceHost`] (session owns it).
+enum ServiceDriver<'a, F> {
+    Scoped(F),
+    Hosted(&'a ServiceHost),
+}
 
 /// Summary of one finished episode.
 #[derive(Clone)]
@@ -383,6 +391,48 @@ where
         P::Evaluation: Send,
         L::Record: Send,
     {
+        self.collect_grouped_impl(n_records, mode, ServiceDriver::Scoped(infer))
+    }
+
+    /// Grouped collect with inference served by a resident [`ServiceHost`] thread that
+    /// owns the callback for a session's lifetime. Identical scheduling to
+    /// [`Self::collect_grouped`]; the difference is the affinity contract — every
+    /// callback invocation across every collect happens on the host's one thread,
+    /// which thread-affine callbacks (compiled/captured forwards) require.
+    pub fn collect_grouped_hosted(
+        &mut self,
+        n_records: usize,
+        mode: InferMode,
+        host: &ServiceHost,
+    ) -> (Vec<L::Record>, CollectStats)
+    where
+        P: Sync,
+        L: Sync,
+        P::PolicyState: Send,
+        P::Evaluation: Send,
+        L::Record: Send,
+    {
+        self.collect_grouped_impl::<fn(usize, Vec<f32>, usize) -> Vec<f64>>(
+            n_records,
+            mode,
+            ServiceDriver::Hosted(host),
+        )
+    }
+
+    fn collect_grouped_impl<F>(
+        &mut self,
+        n_records: usize,
+        mode: InferMode,
+        driver: ServiceDriver<'_, F>,
+    ) -> (Vec<L::Record>, CollectStats)
+    where
+        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64> + Send,
+        P: Sync,
+        L: Sync,
+        P::PolicyState: Send,
+        P::Evaluation: Send,
+        L::Record: Send,
+    {
         use crate::rollout::infer_service::{run_service, InferRequest, ServiceState};
 
         assert_eq!(self.n_groups, 2, "collect_grouped requires n_groups=2");
@@ -446,21 +496,31 @@ where
         let (sd_a, sd_b) = seeded.split_at_mut(half);
         let (rng_a, rng_b) = group_rngs.split_at_mut(1);
 
-        let service_state = ServiceState::new();
+        let service_state = std::sync::Arc::new(ServiceState::new());
         let (req_tx, req_rx) = std::sync::mpsc::sync_channel::<InferRequest>(2);
         let tx_a = req_tx.clone();
         let tx_b = req_tx;
-        let mut infer = infer;
+        let mut driver = driver;
+        let mut req_rx = Some(req_rx);
+        if let ServiceDriver::Hosted(host) = &driver {
+            host.begin(
+                req_rx.take().expect("request receiver taken"),
+                service_state.clone(),
+            );
+        }
 
         let group_results: [Option<(Vec<L::Record>, CollectStats)>; 2];
         let first_panic: std::sync::Mutex<Option<Box<dyn std::any::Any + Send>>> =
             std::sync::Mutex::new(None);
         {
-            let svc = &service_state;
+            let svc: &ServiceState = &service_state;
             let start = &start;
             let panic_slot = &first_panic;
             let (res_a, res_b) = std::thread::scope(|scope| {
-                scope.spawn(move || run_service(&mut infer, &req_rx, svc));
+                if let ServiceDriver::Scoped(infer) = &mut driver {
+                    let rx = req_rx.take().expect("request receiver taken");
+                    scope.spawn(move || run_service(infer, &rx, svc));
+                }
                 let handle_a = scope.spawn(move || {
                     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         run_group_worker(
@@ -547,6 +607,11 @@ where
                 )
             });
             group_results = [res_a, res_b];
+        }
+        // Hosted: the workers' senders are dropped, so the service loop is exiting;
+        // block until it has, so its stats/error writes are visible below.
+        if let ServiceDriver::Hosted(host) = &driver {
+            host.wait_done();
         }
 
         if let Some(err) = service_state

@@ -86,7 +86,11 @@ During `collect` with `n_groups=1`, the callback runs in the calling thread. Wit
 (`torch.autocast` contexts, per-thread default devices or streams) set on the calling thread
 does not apply there; configure such state inside the callback. During `collect_stream`, the
 background collector (or its service thread, under `n_groups=2`) invokes it while Python may train
-concurrently. Protect mutable model state and use a stable collector copy. A callback can
+concurrently, and the invoking thread is **fixed for the stream's lifetime**: every call across
+every batch arrives on one persistent thread, so thread-affine callbacks (a
+`torch.compile(mode="reduce-overhead")` forward, whose cudagraph state is thread-local) work
+under a stream. One-shot `collect` calls give no cross-call thread guarantee.
+Protect mutable model state and use a stable collector copy. A callback can
 perform RPC, but the requesting group's search blocks until it returns.
 
 ## Cache lifetime

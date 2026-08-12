@@ -6,4 +6,5 @@ pub(crate) mod episode;
 pub mod evaluator;
 pub mod infer_cache;
 pub(crate) mod infer_service;
+pub use infer_service::ServiceHost;
 pub mod start;

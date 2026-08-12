@@ -114,6 +114,58 @@ fn grouped_collect_is_deterministic_per_seed() {
 }
 
 #[test]
+fn hosted_collect_matches_scoped() {
+    let (a, sa) = engine(4, 2, 11).collect_grouped(24, InferMode::Shared, infer);
+    let host = reinfors_core::ServiceHost::spawn(infer);
+    let (b, sb) = engine(4, 2, 11).collect_grouped_hosted(24, InferMode::Shared, &host);
+    assert!(!a.is_empty());
+    assert_eq!(a.len(), b.len());
+    for (ra, rb) in a.iter().zip(&b) {
+        assert_eq!(ra.0, rb.0, "obs");
+        assert_eq!(ra.1, rb.1, "pi");
+        assert_eq!(ra.2, rb.2, "z");
+        assert_eq!(ra.5, rb.5, "legal");
+    }
+    assert_eq!(sa.infer_rows, sb.infer_rows);
+    assert_eq!(sa.decisions, sb.decisions);
+}
+
+#[test]
+fn hosted_collects_share_one_service_thread() {
+    use std::sync::{Arc, Mutex};
+    let threads: Arc<Mutex<std::collections::HashSet<std::thread::ThreadId>>> =
+        Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let seen = threads.clone();
+    let host = reinfors_core::ServiceHost::spawn(move |p, obs, n| {
+        seen.lock().unwrap().insert(std::thread::current().id());
+        infer(p, obs, n)
+    });
+    let mut eng = engine(4, 2, 7);
+    let (r1, _) = eng.collect_grouped_hosted(16, InferMode::Shared, &host);
+    let (r2, _) = eng.collect_grouped_hosted(16, InferMode::Shared, &host);
+    assert!(!r1.is_empty() && !r2.is_empty());
+    let seen = threads.lock().unwrap();
+    assert_eq!(seen.len(), 1, "one thread across collects: {seen:?}");
+    assert!(!seen.contains(&std::thread::current().id()));
+}
+
+#[test]
+fn hosted_collect_callback_panic_reports_and_host_survives() {
+    let host = reinfors_core::ServiceHost::spawn(|p, obs, n| {
+        if p == usize::MAX {
+            unreachable!()
+        }
+        let _ = (&obs, n);
+        panic!("boom");
+    });
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        engine(4, 2, 5).collect_grouped_hosted(8, InferMode::Shared, &host)
+    }));
+    assert!(panicked.is_err());
+    drop(host); // resident thread must still be joinable after the failed collect
+}
+
+#[test]
 fn grouped_collect_produces_sane_telemetry() {
     let (records, stats) = engine(4, 2, 3).collect_grouped(16, InferMode::Shared, infer);
     assert!(records.len() >= 16);
