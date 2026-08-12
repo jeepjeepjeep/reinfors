@@ -20,9 +20,10 @@ Shared foundations, applying to both families:
 - [Methodology](methodology.md) — the measurement protocol, including the rules that exist
   because an earlier version of the benchmark broke them.
 
-Each family carries its own reproduction guide:
-[internal](internal/reproducing.md) (this repository) and
-[comparison](openspiel/reproducing.md) (the companion benchmark repository).
+Each family carries its own reproduction guide —
+[internal](internal/reproducing.md) and [comparison](openspiel/reproducing.md); both
+families' harnesses live in the companion benchmark repository, so one checkout carries
+every measurement.
 
 Every table states its own provenance inline — hardware, measurement window, and run
 type (a repeat-derived spread, a repeat-median label, or an explicit single-run label). The commands that produce each
