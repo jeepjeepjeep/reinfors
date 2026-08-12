@@ -105,14 +105,3 @@ disallow_untyped_calls = false
 [[tool.mypy.overrides]]
 module = ["reinfors.gym"]
 disallow_subclassing_any = false
-
-# The peer-benchmark harness imports optional, stubless frameworks (jax/pgx/mctx/pyspiel) and wraps
-# their untyped surfaces; strict typing is not meaningful there. Same relaxed posture as reinfors.gym,
-# so an IDE / full-tree mypy run stays signal, not noise.
-[[tool.mypy.overrides]]
-module = ["benchmark_vs"]
-disallow_subclassing_any = false
-disallow_untyped_decorators = false
-disallow_untyped_calls = false
-warn_return_any = false
-disallow_any_generics = false

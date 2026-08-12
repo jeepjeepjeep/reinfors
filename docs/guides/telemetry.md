@@ -80,4 +80,4 @@ See the [telemetry field reference](../reference/telemetry-fields.md) for defini
   [concurrent collection](streaming.md).
 - Persist the resolved configuration beside logs using
   [configuration and checkpoints](configuration-and-checkpoints.md).
-- Follow the [benchmark methodology](../benchmarks/methodology.md) before publishing throughput.
+- Follow the [benchmark methodology](https://github.com/jeepjeepjeep/reinfors-benchmarks/blob/main/docs/methodology.md) before publishing throughput.
