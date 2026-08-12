@@ -92,4 +92,4 @@ uvx --with mkdocs-material==9.7.7 mkdocs==1.6.1 build --strict
 
 - Choose an extension path from the [contributor overview](../extending/index.md).
 - Use the [documentation workflow](documentation.md) for catalogue and site changes.
-- Run performance work through the benchmark reproduction guides ([internal](../benchmarks/internal/reproducing.md), [comparison](../benchmarks/openspiel/reproducing.md)).
+- Run performance work through the companion [reinfors-benchmarks](https://github.com/jeepjeepjeep/reinfors-benchmarks) repository (specs + runner; see its README).
