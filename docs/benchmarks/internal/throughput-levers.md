@@ -30,8 +30,8 @@ transfer, so further boundary tuning is not the lever there.
 Position-keyed reuse of network rows across the search, cleared on weight refresh. Effect
 depends on the game's transposition structure (measured at the chess benchmark operating
 point: mid-teens early, 26–27% by two hours of training, *rising* as the net strengthens;
-small-board connect-style games far higher) and on capacity only up to a saturation
-point — see the [capacity curve](index.md).
+games with denser transposition structure should sit higher) and on capacity only up to a
+saturation point — see the [capacity curve](index.md).
 
 ## Grouped collection (`n_groups=2`)
 
@@ -50,12 +50,6 @@ kernel batch curve for its per-call row count. Two comparisons matter:
 - **matched rows per call** (should I double my games into two groups?): the deployment
   question; with inference share `p`, gains approach the `1 / max(p, 1 - p)` ceiling when
   the scheduler is saturated.
-
-Mechanism validation (local Apple-silicon grid; illustrative of the model, not of absolute
-throughput): at a near-balanced operating point the matched-rows comparison realized ×1.70
-of a theoretical ×1.72 ceiling, and at an inference-dominated point with a steep batch
-curve, splitting below the sweet spot made grouping net-negative — both signs predicted by
-the model.
 
 A10G grid at the benchmark operating point (v2 scheduler at the merged tip, 12-minute
 legs on the round-true workload reduced over the interior window, minutes 5 to 11.5 —

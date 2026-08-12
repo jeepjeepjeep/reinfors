@@ -30,10 +30,7 @@ which reproduced the v1 numbers.
 | final cache hit rate¹ | 46.8% / 46.8% | 26.4% / 27.3% |
 
 A **+39% / +35%** sustained-throughput edge at matched wall-clock, cadence, and net
-architecture. Seed 0 also ran the pre-grouping operating point (`n_games=64`,
-ungrouped): 172.4 states/s, a +17% edge — grouped collection accounts for the
-difference between the two rows, as measured in the
-[lever grid](../internal/throughput-levers.md).
+architecture.
 
 ¹ Not comparable across the columns: OpenSpiel's figure is run-cumulative and its
 evaluator issues Prior and Evaluate as two cache queries per node (pairs merge in the
