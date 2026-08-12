@@ -7,7 +7,6 @@ Documentation is organized by user intent, with detail disclosed progressively:
 - generated catalogues answer coverage questions;
 - extension pages explain ownership and contribution contracts;
 - reference pages hold exact shapes, fields, and boundaries;
-- benchmark pages state reproducibility requirements separately from marketing.
 
 Do not add a page per game or algorithm by default. Add one only when a component needs
 substantial unique setup, theory, or interpretation that cannot fit a catalogue row and an
@@ -32,7 +31,9 @@ tests keep metadata names aligned with exported constructors.
 - Use named batch fields and resolved configs in examples.
 - Explain algorithm-specific limitations next to the relevant contract and summarize them in
   [current boundaries](../reference/limits.md).
-- Do not publish benchmark claims without the artifacts required by the benchmark methodology.
+- Benchmark claims do not live in this repository: link the companion
+  [reinfors-benchmarks](https://github.com/jeepjeepjeep/reinfors-benchmarks), which carries the
+  methodology and artifacts behind every published number.
 
 ## Preview
 

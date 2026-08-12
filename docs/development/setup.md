@@ -83,7 +83,7 @@ uvx --with mkdocs-material==9.7.7 mkdocs==1.6.1 build --strict
 | `crates/reinfors-games` | Built-in games, encoders, rewards, and codecs |
 | `crates/reinfors-py` | PyO3 conversion and binding surface |
 | `python/reinfors` | Python modules, registries, stubs, adapters, and catalogue metadata |
-| `scripts` | Benchmark harnesses and repository maintenance tools |
+| `scripts` | Repository maintenance tools (docs generation and checks, git hooks) |
 | `examples` | Runnable training and integration examples |
 | `tests` | Python API and adapter tests |
 | `docs` | Progressive user and contributor documentation |
