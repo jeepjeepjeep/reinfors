@@ -2,8 +2,8 @@
 //! on one-shot `Result` replies. Callback panics cancel the run and answer every pending
 //! request with `Err` so no worker deadlocks.
 //!
-//! The service runs on a per-collect scoped thread, or on a [`ServiceHost`] — a
-//! resident thread giving thread-affine callbacks one fixed thread across collects.
+//! The service runs on a [`ServiceHost`] — a resident thread giving thread-affine
+//! callbacks one fixed thread across every collect that uses the same host.
 
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
