@@ -738,7 +738,7 @@ struct PyEngine {
 #[pymethods]
 impl PyEngine {
     #[new]
-    #[pyo3(signature = (game, reward, policy, learner, n_games, seed=0, start_buffer=false, start_buffer_capacity=1000, p_fresh=0.05, infer_cache=0, learn_players=None, n_groups=1))]
+    #[pyo3(signature = (game, reward, policy, learner, n_games, seed=0, start_buffer=false, start_buffer_capacity=1000, p_fresh=0.05, infer_cache=0, learn_players=None, n_groups=1, pad_rows_to=0))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         game: GameHandle,
@@ -753,6 +753,7 @@ impl PyEngine {
         infer_cache: usize,
         learn_players: Option<Vec<usize>>,
         n_groups: usize,
+        pad_rows_to: usize,
     ) -> PyResult<Self> {
         if n_games < 1 {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -815,6 +816,7 @@ impl PyEngine {
                 })),
                 "infer_cache": infer_cache,
                 "learn_players": learn_players,
+                "pad_rows_to": pad_rows_to,
             },
         });
         let engine_params = EngineParams {
@@ -867,6 +869,7 @@ impl PyEngine {
                 policy.spec,
                 learner.spec,
                 engine_params,
+                (pad_rows_to > 0).then_some(pad_rows_to),
                 start_buffer,
                 caches,
                 learn_players,
@@ -1002,6 +1005,7 @@ impl PyEngine {
                     "n_groups=2 supports a single shared infer callback",
                 ));
             }
+            reject_padded_per_player(engine.pad_rows_to(), pair.1)?;
             pair
         };
         let mut engine = slf
@@ -1344,6 +1348,8 @@ trait ErasedEngine: Send + Sync {
     fn routing(&self) -> usize;
 
     fn n_groups(&self) -> usize;
+
+    fn pad_rows_to(&self) -> Option<usize>;
 }
 
 trait RecordBatch: Sized {
@@ -1736,6 +1742,15 @@ where
     Ok((records, telemetry))
 }
 
+fn reject_padded_per_player(pad_rows_to: Option<usize>, mode: InferMode) -> PyResult<()> {
+    if pad_rows_to.is_some() && matches!(mode, InferMode::PerPlayer) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "pad_rows_to supports a single shared infer callback",
+        ));
+    }
+    Ok(())
+}
+
 fn build_telemetry<'py>(
     py: Python<'py>,
     stats: &reinfors_core::CollectStats,
@@ -1758,6 +1773,7 @@ fn build_telemetry<'py>(
     telemetry.set_item("infer_seconds", stats.infer_seconds)?;
     telemetry.set_item("infer_calls", stats.infer_calls)?;
     telemetry.set_item("infer_rows", stats.infer_rows)?;
+    telemetry.set_item("padded_rows", stats.padded_rows)?;
     telemetry.set_item("cache_lookups", stats.cache_lookups)?;
     telemetry.set_item("cache_hits", stats.cache_hits)?;
     // Exact Mcts/AlphaZero tree sim-fate identity: decisions*sims = fresh + hit + shared + terminal
@@ -1780,6 +1796,7 @@ struct EngineImpl<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     layout: InferLayout,
     num_agents: usize,
     n_groups: usize,
+    pad_rows_to: Option<usize>,
 }
 
 impl<G, P, L> ErasedEngine for EngineImpl<G, P, L>
@@ -1817,6 +1834,7 @@ where
         mode: InferMode,
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> PyResult<BatchThunk> {
+        reject_padded_per_player(self.pad_rows_to, mode)?;
         let callback_err = std::sync::Arc::new(std::sync::Mutex::new(None));
         let mut infer_fn = infer_closure_gil(
             infer,
@@ -1925,6 +1943,10 @@ where
         n_records: usize,
         infer: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if self.pad_rows_to.is_some() {
+            let (_callbacks, mode) = engine_callbacks(infer, self.num_agents)?;
+            reject_padded_per_player(self.pad_rows_to, mode)?;
+        }
         if self.n_groups == 2 {
             let (callbacks, mode) = engine_callbacks(infer, self.num_agents)?;
             if matches!(mode, InferMode::PerPlayer) {
@@ -1988,6 +2010,10 @@ where
 
     fn n_groups(&self) -> usize {
         self.n_groups
+    }
+
+    fn pad_rows_to(&self) -> Option<usize> {
+        self.pad_rows_to
     }
 }
 
@@ -2603,6 +2629,7 @@ fn build_for_game<G: Game + Send + Sync + 'static>(
     policy: PolicySpec,
     learner: LearnerSpec,
     engine_params: EngineParams,
+    pad_rows_to: Option<usize>,
     infer_caches: Option<CacheSet>,
     learn_players: Option<Vec<usize>>,
 ) -> PyResult<Box<dyn ErasedEngine>>
@@ -2671,9 +2698,11 @@ where
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
                 n_groups: engine_params.n_groups,
+                pad_rows_to,
                 inner: {
                     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
-                        .with_start_distribution(start_dist);
+                        .with_start_distribution(start_dist)
+                        .with_pad_rows_to(pad_rows_to);
                     match infer_caches {
                         Some(CacheSet::Exclusive(c)) => e = e.with_infer_caches(c),
                         Some(CacheSet::Sharded(c)) => e = e.with_sharded_infer_caches(c),
@@ -2714,9 +2743,11 @@ where
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
                 n_groups: engine_params.n_groups,
+                pad_rows_to,
                 inner: {
                     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
-                        .with_start_distribution(start_dist);
+                        .with_start_distribution(start_dist)
+                        .with_pad_rows_to(pad_rows_to);
                     match infer_caches {
                         Some(CacheSet::Exclusive(c)) => e = e.with_infer_caches(c),
                         Some(CacheSet::Sharded(c)) => e = e.with_sharded_infer_caches(c),
@@ -2770,9 +2801,11 @@ where
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
                 n_groups: engine_params.n_groups,
+                pad_rows_to,
                 inner: {
                     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
-                        .with_start_distribution(start_dist);
+                        .with_start_distribution(start_dist)
+                        .with_pad_rows_to(pad_rows_to);
                     match infer_caches {
                         Some(CacheSet::Exclusive(c)) => e = e.with_infer_caches(c),
                         Some(CacheSet::Sharded(c)) => e = e.with_sharded_infer_caches(c),
@@ -2825,9 +2858,11 @@ where
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
                 n_groups: engine_params.n_groups,
+                pad_rows_to,
                 inner: {
                     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
-                        .with_start_distribution(start_dist);
+                        .with_start_distribution(start_dist)
+                        .with_pad_rows_to(pad_rows_to);
                     match infer_caches {
                         Some(CacheSet::Exclusive(c)) => e = e.with_infer_caches(c),
                         Some(CacheSet::Sharded(c)) => e = e.with_sharded_infer_caches(c),
@@ -2853,9 +2888,11 @@ where
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
                 n_groups: engine_params.n_groups,
+                pad_rows_to,
                 inner: {
                     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
-                        .with_start_distribution(start_dist);
+                        .with_start_distribution(start_dist)
+                        .with_pad_rows_to(pad_rows_to);
                     match infer_caches {
                         Some(CacheSet::Exclusive(c)) => e = e.with_infer_caches(c),
                         Some(CacheSet::Sharded(c)) => e = e.with_sharded_infer_caches(c),
@@ -2892,6 +2929,7 @@ fn build_engine(
     policy: PolicySpec,
     learner: LearnerSpec,
     engine_params: EngineParams,
+    pad_rows_to: Option<usize>,
     start_buffer: Option<StartBufferConfig>,
     infer_caches: Option<CacheSet>,
     learn_players: Option<Vec<usize>>,
@@ -2952,6 +2990,7 @@ fn build_engine(
                 policy,
                 learner,
                 engine_params,
+                pad_rows_to,
                 infer_caches,
                 learn_players,
             )
@@ -2965,6 +3004,7 @@ fn build_engine(
             policy,
             learner,
             engine_params,
+            pad_rows_to,
             infer_caches,
             learn_players,
         ),
@@ -2979,6 +3019,7 @@ fn build_engine(
                 policy,
                 learner,
                 engine_params,
+                pad_rows_to,
                 infer_caches,
                 learn_players,
             )
@@ -2992,6 +3033,7 @@ fn build_engine(
             policy,
             learner,
             engine_params,
+            pad_rows_to,
             infer_caches,
             learn_players,
         ),
@@ -3022,6 +3064,7 @@ fn build_engine(
             policy,
             learner,
             engine_params,
+            pad_rows_to,
             infer_caches,
             learn_players,
         ),
@@ -3034,6 +3077,7 @@ fn build_engine(
             policy,
             learner,
             engine_params,
+            pad_rows_to,
             infer_caches,
             learn_players,
         ),
@@ -3046,6 +3090,7 @@ fn build_engine(
             policy,
             learner,
             engine_params,
+            pad_rows_to,
             infer_caches,
             learn_players,
         ),
@@ -3073,6 +3118,7 @@ fn build_engine(
             policy,
             learner,
             engine_params,
+            pad_rows_to,
             infer_caches,
             learn_players,
         ),

@@ -444,6 +444,11 @@ class Engine:
         # refreshes) is live; exact otherwise. Reproduce with n_groups=1. Fingerprinted.
         # Guidance: docs/guides/training.md#overlapping-search-and-inference-n_groups.
         n_groups: int = ...,
+        # Fix shared-callback call shapes at exactly N rows (0 = off): short calls are
+        # zero-padded (outputs for pad rows discarded), oversized calls split into N-row
+        # chunks. For compiled/graph-captured callbacks. Fingerprinted.
+        # Reference: docs/reference/inference-contract.md#input.
+        pad_rows_to: int = ...,
     ) -> None: ...
     # Tell the engine the net's weights changed (call after every weight sync — e.g. right after
     # load_state_dict onto the collector net). Clears the infer cache at the next round boundary;

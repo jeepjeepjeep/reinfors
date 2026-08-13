@@ -43,6 +43,7 @@ pub struct CollectStats {
     pub infer_seconds: f64,
     pub infer_calls: usize,
     pub infer_rows: usize,
+    pub padded_rows: usize,
     pub cache_lookups: usize,
     pub cache_hits: usize,
     pub sum_terminal_sims: usize,
@@ -114,6 +115,7 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     episode_returns: Vec<Vec<f64>>,
     sequential: bool,
     n_groups: usize,
+    pad_rows_to: Option<usize>,
     group_rngs: Vec<SplitMix64>,
     sharded_caches: Option<Vec<crate::rollout::infer_cache::ShardedInferCache>>,
     buffer_rng: SplitMix64,
@@ -207,6 +209,7 @@ where
             episode_returns: vec![vec![0.0; num_agents]; params.n_games],
             sequential,
             n_groups: params.n_groups,
+            pad_rows_to: None,
             group_rngs,
             sharded_caches: None,
             buffer_rng,
@@ -223,6 +226,16 @@ where
         start_dist: Box<dyn StartDistribution<G::State>>,
     ) -> Self {
         self.start_dist = start_dist;
+        self
+    }
+
+    /// Pad shared-callback calls with zero rows to a fixed row count
+    /// (pad outputs are discarded); telemetry reports them as `padded_rows`.
+    pub fn with_pad_rows_to(mut self, pad_rows_to: Option<usize>) -> Self {
+        if let Some(pad) = pad_rows_to {
+            assert!(pad >= 1, "pad_rows_to must be >= 1");
+        }
+        self.pad_rows_to = pad_rows_to;
         self
     }
 
@@ -309,7 +322,12 @@ where
             InferMode::Shared => &mut c[..1],
             InferMode::PerPlayer => &mut c[1..],
         });
-        let mut evaluator = Evaluator::new(&mut infer, mode, cache_slice);
+        assert!(
+            self.pad_rows_to.is_none() || matches!(mode, InferMode::Shared),
+            "pad_rows_to supports a single shared infer callback"
+        );
+        let mut evaluator =
+            Evaluator::new(&mut infer, mode, cache_slice).with_pad_rows_to(self.pad_rows_to);
 
         while out.len() < n_records {
             let mut requests: Vec<(G::State, usize)> = Vec::new();
@@ -367,6 +385,7 @@ where
         }
         (stats.infer_seconds, stats.infer_calls, stats.infer_rows) =
             (evaluator.seconds, evaluator.calls, evaluator.rows);
+        stats.padded_rows = evaluator.padded_rows;
         (stats.cache_lookups, stats.cache_hits) =
             (evaluator.cache_lookups(), evaluator.cache_hits());
         self.infer_caches = caches;
@@ -451,6 +470,7 @@ where
             }
         }
         let collect_interior = self.learner.needs_interior();
+        let pad_rows_to = self.pad_rows_to;
         let Engine {
             game,
             encoder,
@@ -538,6 +558,7 @@ where
                             sd_a,
                             &mut rng_a[0],
                             slots,
+                            pad_rows_to,
                             tx_a,
                             svc,
                             start,
@@ -578,6 +599,7 @@ where
                             sd_b,
                             &mut rng_b[0],
                             slots,
+                            pad_rows_to,
                             tx_b,
                             svc,
                             start,
@@ -628,10 +650,11 @@ where
         out.extend(out_b);
         let mut stats = fold_stats(stats_a, stats_b);
         {
+            // rows fold from the worker evaluators (real rows only, excluding padding);
+            // wall-clock seconds and call counts are the service's to report
             let svc_stats = service_state.stats.lock().expect("service stats poisoned");
             stats.infer_seconds = svc_stats.seconds;
             stats.infer_calls = svc_stats.calls;
-            stats.infer_rows = svc_stats.rows;
         }
         if let Some(caches) = self.sharded_caches.as_ref() {
             stats.cache_lookups = caches.iter().map(|c| c.lookups()).sum();
@@ -1197,6 +1220,8 @@ fn fold_stats(mut a: CollectStats, b: CollectStats) -> CollectStats {
     a.sum_fresh_rows += b.sum_fresh_rows;
     a.sum_hit_rows += b.sum_hit_rows;
     a.sum_extra_eval_rows += b.sum_extra_eval_rows;
+    a.infer_rows += b.infer_rows;
+    a.padded_rows += b.padded_rows;
     a.episodes.extend(b.episodes);
     a
 }
@@ -1223,6 +1248,7 @@ fn run_group_worker<G, P, L>(
     seeded: &mut [bool],
     rng: &mut SplitMix64,
     slots: Option<&[crate::rollout::infer_cache::ShardedInferCache]>,
+    pad_rows_to: Option<usize>,
     req_tx: std::sync::mpsc::SyncSender<crate::rollout::infer_service::InferRequest>,
     svc: &crate::rollout::infer_service::ServiceState,
     start: &std::sync::Mutex<StartParts<'_, G::State>>,
@@ -1260,7 +1286,8 @@ where
     let mut evaluator = match slots {
         Some(slots) => Evaluator::with_shared_cache(&mut service_infer, mode, slots),
         None => Evaluator::new(&mut service_infer, mode, None),
-    };
+    }
+    .with_pad_rows_to(pad_rows_to);
 
     let mut out: Vec<L::Record> = Vec::new();
     let mut stats = CollectStats::default();
@@ -1344,6 +1371,8 @@ where
             &mut stats,
         );
     }
+    stats.infer_rows = evaluator.rows;
+    stats.padded_rows = evaluator.padded_rows;
     (out, stats)
 }
 
