@@ -37,6 +37,7 @@ impl Reward for GridWorldReward {
     }
 }
 
+#[derive(Clone)]
 pub struct GridWorld {
     pub size: i32,
     pub goal: Pos,

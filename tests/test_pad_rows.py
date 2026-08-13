@@ -3,26 +3,16 @@
 import numpy as np
 import pytest
 import reinfors as rf
+from conftest import az_zeros_infer, connect4_az_engine
 
 _A = rf.games.Connect4().action_space().n
 
 
-def _uniform(obs, n=None):
-    m = obs.shape[0]
-    return np.zeros((m, _A), dtype=np.float32), np.zeros(m, dtype=np.float32)
+_uniform = az_zeros_infer(_A)
 
 
 def _engine(n_groups: int = 1, pad_rows_to: int = 0, seed: int = 5) -> rf.Engine:
-    return rf.Engine(
-        rf.games.Connect4(),
-        rf.Reward(win=1.0, loss=-1.0),
-        rf.policies.AlphaZero(num_simulations=12),
-        rf.learners.AlphaZero(gamma=1.0),
-        n_games=4,
-        seed=seed,
-        n_groups=n_groups,
-        pad_rows_to=pad_rows_to,
-    )
+    return connect4_az_engine(seed=seed, n_groups=n_groups, pad_rows_to=pad_rows_to)
 
 
 @pytest.mark.parametrize("n_groups", [1, 2])

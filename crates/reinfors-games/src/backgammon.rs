@@ -70,6 +70,7 @@ pub struct BackgammonState {
     pub opening: bool,
 }
 
+#[derive(Clone)]
 pub struct Backgammon {
     pub max_ticks: Option<usize>,
 }

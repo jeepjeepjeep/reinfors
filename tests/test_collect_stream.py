@@ -8,23 +8,16 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 import reinfors as rf
+from conftest import az_zeros_infer, connect4_az_engine
 
 _A = 7
 
 
-def _az_infer(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    return np.zeros((arr.shape[0], _A)), np.zeros(arr.shape[0])
+_az_infer = az_zeros_infer(_A)
 
 
 def _az_engine(seed: int = 0) -> rf.Engine:
-    return rf.Engine(
-        rf.games.Connect4(),
-        rf.Reward(win=1.0, loss=-1.0),
-        rf.policies.AlphaZero(num_simulations=12),
-        rf.learners.AlphaZero(),
-        n_games=2,
-        seed=seed,
-    )
+    return connect4_az_engine(n_games=2, seed=seed)
 
 
 def _snake_infer(arr: np.ndarray) -> np.ndarray:

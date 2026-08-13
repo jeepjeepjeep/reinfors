@@ -2,6 +2,7 @@
 
 import numpy as np
 import reinfors as rf
+from conftest import connect4_az_engine
 
 _A = 7
 
@@ -15,15 +16,7 @@ def _infer(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _engine(infer_cache: int = 0, seed: int = 0) -> rf.Engine:
-    return rf.Engine(
-        rf.games.Connect4(),
-        rf.Reward(win=1.0, loss=-1.0),
-        rf.policies.AlphaZero(num_simulations=16),
-        rf.learners.AlphaZero(),
-        n_games=2,
-        seed=seed,
-        infer_cache=infer_cache,
-    )
+    return connect4_az_engine(num_simulations=16, n_games=2, seed=seed, infer_cache=infer_cache)
 
 
 def test_cache_is_behavior_identical() -> None:

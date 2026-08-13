@@ -7,7 +7,7 @@ use crate::policies::tree::expectimax::{decode_search_eval, encode_search_eval, 
 use crate::policies::tree::mcts::{
     sample_visits, search_many, Guidance, NoiseScope, SequentialBackup,
 };
-use crate::policy::{argmax, fold_search_stats, ChanceMode, Policy};
+use crate::policy::{argmax, fold_search_stats, ply_from_u64, ChanceMode, Policy};
 use crate::reward::Reward;
 use crate::rollout::engine::CollectStats;
 use crate::rollout::evaluator::Evaluator;
@@ -106,11 +106,7 @@ impl Policy for AlphaZero {
     }
 
     fn policy_state_from_u64(&self, v: u64) -> Result<u32, String> {
-        // select() advances the counter, so the maximum value must stay unreachable.
-        match u32::try_from(v) {
-            Ok(x) if x < u32::MAX => Ok(x),
-            _ => Err(format!("acting-ply counter {v} out of range")),
-        }
+        ply_from_u64(v)
     }
 
     fn begin_episode(&self, _rng: &mut dyn Rng) -> u32 {

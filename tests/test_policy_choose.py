@@ -7,6 +7,7 @@ schedulers that reorder batches get statistically seeded, non-replayable results
 import numpy as np
 import pytest
 import reinfors as rf
+from conftest import az_zeros_infer
 
 _A = rf.games.Connect4().action_space().n
 _R = rf.Reward(win=1.0, loss=-1.0)
@@ -22,9 +23,7 @@ def _az(temperature=0.0, noise=0.0, sims=8, temperature_drop=8):
     )
 
 
-def _az_infer(obs, n=None):
-    m = obs.shape[0]
-    return np.zeros((m, _A), dtype=np.float32), np.zeros(m, dtype=np.float32)
+_az_infer = az_zeros_infer(_A)
 
 
 def _envs(n):

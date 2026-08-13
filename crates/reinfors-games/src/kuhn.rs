@@ -43,6 +43,7 @@ impl KuhnState {
     }
 }
 
+#[derive(Clone)]
 pub struct KuhnPoker {
     pub players: usize,
 }
