@@ -172,8 +172,9 @@ deduplication, and terminal simulations all remove rows. Check the realized mean
 `n_games=128, n_groups=2` starting point for a sequential game at a batch-64 sweet spot is a
 workload-specific example, not a rule. If the callback needs a *constant* row count
 (compiled/graph-captured forwards), `pad_rows_to` in the
-[inference contract](../reference/inference-contract.md#input) fixes the call shape at the
-cost of discarded pad-row compute.
+[inference contract](../reference/inference-contract.md#input) fixes every call at exactly
+that row count — zero-padding short calls, chunking oversized ones — at the cost of
+discarded pad-row compute.
 
 Grouped collects are run-to-run nondeterministic while shared state is live — the shared
 inference cache, the start buffer, and weight refreshes — which is the same status real

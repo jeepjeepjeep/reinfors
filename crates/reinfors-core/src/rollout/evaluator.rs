@@ -122,8 +122,14 @@ where
         }
     }
 
-    /// Pad shared-mode calls with zero rows up to `pad`; pad outputs are discarded.
+    /// Fix shared-mode call shapes at exactly `pad` rows: short batches are padded
+    /// with zero rows (outputs discarded), oversized batches split into `pad`-row
+    /// chunks. Assumes row-independent callback outputs (evaluation-mode networks).
     pub fn with_pad_rows_to(mut self, pad: Option<usize>) -> Self {
+        assert!(
+            pad.is_none() || self.mode == InferMode::Shared,
+            "pad_rows_to supports shared-mode inference only"
+        );
         self.pad_rows_to = pad;
         self
     }
@@ -280,6 +286,46 @@ where
     }
 }
 
+/// Forward `n` staged rows through shared-mode `infer` in calls of EXACTLY `pad` rows:
+/// the final short chunk is zero-padded (pad outputs discarded), earlier chunks are
+/// full. Returns rows in ticket order, the call count, and the pad rows forwarded.
+fn run_infer_fixed_shape<F>(
+    infer: &mut F,
+    obs_flat: Vec<f32>,
+    n: usize,
+    dim: usize,
+    pad: usize,
+) -> (Vec<f64>, usize, usize)
+where
+    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+{
+    let chunks = n.div_ceil(pad);
+    if chunks == 1 {
+        let mut obs = obs_flat;
+        obs.resize(pad * dim, 0.0);
+        let mut rows = infer(0, obs, pad);
+        let stride = rows.len() / pad;
+        rows.truncate(n * stride);
+        return (rows, 1, pad - n);
+    }
+    let mut out = Vec::new();
+    let mut stride: Option<usize> = None;
+    for c in 0..chunks {
+        let lo = c * pad;
+        let hi = ((c + 1) * pad).min(n);
+        let mut obs = obs_flat[lo * dim..hi * dim].to_vec();
+        obs.resize(pad * dim, 0.0);
+        let rows = infer(0, obs, pad);
+        let s = rows.len() / pad;
+        if let Some(expected) = stride {
+            assert_eq!(s, expected, "padded chunk row width changed between chunks");
+        }
+        stride = Some(s);
+        out.extend_from_slice(&rows[..(hi - lo) * s]);
+    }
+    (out, chunks, chunks * pad - n)
+}
+
 impl<'e, 'a, F> EvalBatch<'e, 'a, F>
 where
     F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
@@ -323,6 +369,11 @@ where
             }
         }
         self.dim = obs.len();
+        if self.n == 0 {
+            if let Some(pad) = self.eval.pad_rows_to {
+                self.obs_flat.reserve(pad * obs.len());
+            }
+        }
         self.players.push(player);
         self.obs_flat.extend_from_slice(obs);
         let ticket = self.n;
@@ -344,28 +395,27 @@ where
         }
         let t = std::time::Instant::now();
         let n_real = self.n;
-        let mut obs_flat = self.obs_flat;
-        let mut n_call = n_real;
-        if let Some(pad) = self.eval.pad_rows_to {
-            if self.eval.mode == InferMode::Shared && n_call < pad {
-                obs_flat.resize(pad * self.dim, 0.0);
-                n_call = pad;
+        let (out, calls, padded) = match self.eval.pad_rows_to {
+            Some(pad) => {
+                run_infer_fixed_shape(self.eval.infer, self.obs_flat, n_real, self.dim, pad)
             }
-        }
-        let (mut out, calls) = run_infer(
-            self.eval.infer,
-            self.eval.mode,
-            &self.players,
-            obs_flat,
-            n_call,
-            self.dim,
-        );
+            None => {
+                let (out, calls) = run_infer(
+                    self.eval.infer,
+                    self.eval.mode,
+                    &self.players,
+                    self.obs_flat,
+                    n_real,
+                    self.dim,
+                );
+                (out, calls, 0)
+            }
+        };
         self.eval.seconds += t.elapsed().as_secs_f64();
         self.eval.calls += calls;
         self.eval.rows += n_real;
-        self.eval.padded_rows += n_call - n_real;
-        let stride = out.len() / n_call;
-        out.truncate(n_real * stride);
+        self.eval.padded_rows += padded;
+        let stride = out.len() / n_real;
         match &mut self.eval.cache {
             CacheAccess::Exclusive(_) => {
                 for i in 0..self.keys.len() {
@@ -433,22 +483,36 @@ mod tests {
     }
 
     #[test]
-    fn oversize_batches_pass_through_unpadded() {
-        let seen_n = Arc::new(AtomicU64::new(0));
-        let seen = seen_n.clone();
-        let mut infer = move |_p: usize, _obs: Vec<f32>, n: usize| -> Vec<f64> {
-            seen.store(n as u64, std::sync::atomic::Ordering::Relaxed);
-            vec![0.5; n * 2]
+    fn oversize_batches_chunk_to_the_exact_shape() {
+        let sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = sizes.clone();
+        let mut infer = move |_p: usize, obs: Vec<f32>, n: usize| -> Vec<f64> {
+            seen.lock().unwrap().push(n);
+            (0..n).flat_map(|i| [f64::from(obs[i * 2]), 0.5]).collect()
         };
         let mut eval =
             Evaluator::new(&mut infer, InferMode::Shared, None).with_pad_rows_to(Some(2));
         let mut batch = eval.batch();
-        for i in 0..4 {
-            batch.resolve_or_stage(0, &[i as f32, 1.0]);
+        for i in 0..5 {
+            batch.resolve_or_stage(0, &[i as f32 + 1.0, 1.0]);
         }
-        batch.commit();
-        assert_eq!(seen_n.load(std::sync::atomic::Ordering::Relaxed), 4);
-        assert_eq!(eval.padded_rows, 0);
+        let rows = batch.commit();
+        // 5 rows at pad 2: three calls of exactly 2 rows, one zero pad row in the last
+        assert_eq!(*sizes.lock().unwrap(), vec![2, 2, 2]);
+        assert_eq!(eval.calls, 3);
+        assert_eq!(eval.rows, 5);
+        assert_eq!(eval.padded_rows, 1);
+        // ticket order preserved across chunk boundaries
+        for i in 0..5 {
+            assert_eq!(rows.row(i), &[f64::from(i as u32) + 1.0, 0.5]);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "shared-mode inference only")]
+    fn padding_rejects_per_player_mode_at_configuration() {
+        let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| -> Vec<f64> { vec![0.5; n * 2] };
+        let _ = Evaluator::new(&mut infer, InferMode::PerPlayer, None).with_pad_rows_to(Some(4));
     }
 
     #[test]

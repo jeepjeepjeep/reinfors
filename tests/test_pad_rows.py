@@ -44,11 +44,13 @@ def test_calls_arrive_at_the_fixed_shape() -> None:
         seen.add(obs.shape[0])
         return _uniform(obs)
 
-    _engine(pad_rows_to=8).collect(60, recording)
+    batch = _engine(pad_rows_to=8).collect(60, recording)
     assert seen == {8}
+    t = batch.telemetry
+    assert t["infer_calls"] * 8 == t["infer_rows"] + t["padded_rows"]
 
 
-def test_oversize_calls_pass_through() -> None:
+def test_oversize_calls_are_chunked_to_the_exact_shape() -> None:
     seen = set()
 
     def recording(obs, n=None):
@@ -56,7 +58,7 @@ def test_oversize_calls_pass_through() -> None:
         return _uniform(obs)
 
     _engine(pad_rows_to=2).collect(60, recording)
-    assert max(seen) > 2
+    assert seen == {2}
 
 
 def test_padded_stream_matches_padded_collect() -> None:

@@ -17,11 +17,15 @@ particular contiguity on input; make it contiguous if your framework requires it
 
 Row counts vary call to call: cache hits, in-batch deduplication and terminal
 simulations all remove rows. Fixed-shape consumers (compiled or graph-captured
-forwards, XLA) can set `rf.Engine(..., pad_rows_to=N)`: shared-callback calls smaller
-than `N` are padded with zero rows and the pad outputs are discarded — a semantic
-no-op reported in telemetry as `padded_rows` (`infer_rows` keeps counting real rows).
-Calls larger than `N` pass through unpadded, so choose `N` = games per group
-(`n_games / n_groups`). Padding requires a single shared callback.
+forwards, XLA) can set `rf.Engine(..., pad_rows_to=N)`: every call then carries
+exactly `N` rows — short batches are padded with zero rows (pad outputs are
+discarded), oversized batches are split into `N`-row chunks. Telemetry reports pad
+rows as `padded_rows`; `infer_rows` keeps counting real rows. `N` = games per group
+(`n_games / n_groups`) fits sequential games exactly; searches that stage several
+rows per node (simultaneous/Max^N perspectives, exhaustive chance fans) exceed it
+and chunk. Padding requires a single shared callback, and the no-op guarantee
+assumes the callback's outputs are row-independent — evaluation-mode networks, no
+batch-coupled statistics — as the contract already requires for caching.
 
 ## Engine outputs by policy family
 
