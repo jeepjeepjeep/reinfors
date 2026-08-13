@@ -16,8 +16,9 @@ uncertainty-guided selective expansion over classical expectimax search.
 ## Encodings and layouts
 
 - **OpenSpiel chess observation** (`rf.encoders.OpenSpielChess()`) — layout
-  pinned to [OpenSpiel](https://github.com/google-deepmind/open_spiel)'s
-  `chess.cc` observation tensor for cross-stack comparability; Lanctot et al.,
+  pinned to OpenSpiel's
+  [`chess.cc::ObservationTensor` at commit `d15d49f8`](https://github.com/google-deepmind/open_spiel/blob/d15d49f8/open_spiel/games/chess/chess.cc)
+  for cross-stack comparability; Lanctot et al.,
   ["OpenSpiel: A Framework for Reinforcement Learning in Games"](https://arxiv.org/abs/1908.09453),
   2019.
 - **AZ-119 chess planes** (`rf.encoders.AlphaZeroChess()`) — the 119-plane
@@ -32,11 +33,11 @@ uncertainty-guided selective expansion over classical expectimax search.
 
 ## Validation and comparison
 
-- **Mandatory internal suites** gate every game and encoding: rules, legality,
-  codec round-trips, and the no-panic boundary sweep run in CI unconditionally.
+- **Mandatory internal suites** (rules, legality, codec round-trips) run in CI
+  unconditionally, alongside targeted no-panic boundary sweeps.
 - **Optional OpenSpiel oracles**: the poker suites compare against `pyspiel`
   when it is installed (`pytest.importorskip` — a development-time oracle, not
-  a CI gate). The chess observation layout is pinned to OpenSpiel's
-  implementation and exercised against it in the companion
+  a CI gate). The pinned chess observation layout is used by the companion
   [reinfors-benchmarks](https://github.com/jeepjeepjeep/reinfors-benchmarks)
-  repository, which also holds the benchmark protocol and results.
+  repository for its matched cross-stack experiments; the benchmark protocol
+  and results live there.
