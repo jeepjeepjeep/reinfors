@@ -275,7 +275,16 @@ ALGORITHMS: dict[str, AlgorithmInfo] = {
         "Perfect or imperfect",
         "Q values: (rows, heads, actions)",
         "Observation-only off-policy value learning with sparse legal-action records.",
-        (("Human-level control through deep reinforcement learning", "https://doi.org/10.1038/nature14236"),),
+        (
+            (
+                "Human-level control through deep reinforcement learning",
+                "https://doi.org/10.1038/nature14236",
+            ),
+            (
+                "Deep Exploration via Bootstrapped DQN",
+                "https://papers.nips.cc/paper_files/paper/2016/hash/8d8818c8e140c64c743113f563cf750f-Abstract.html",
+            ),
+        ),
     ),
     "treestrap_expectimax": AlgorithmInfo(
         "TreeStrap + selective expectimax",
@@ -312,7 +321,13 @@ ALGORITHMS: dict[str, AlgorithmInfo] = {
         "Perfect only",
         "One ensemble head of action values",
         "UCT for sequential games and decoupled UCT for simultaneous multiplayer games.",
-        (("UCT", "https://doi.org/10.1007/11871842_29"),),
+        (
+            ("UCT", "https://doi.org/10.1007/11871842_29"),
+            (
+                "MCTS variants for simultaneous move games (DUCT)",
+                "https://doi.org/10.1109/CIG.2014.6932885",
+            ),
+        ),
     ),
     "minimax": AlgorithmInfo(
         "Minimax",

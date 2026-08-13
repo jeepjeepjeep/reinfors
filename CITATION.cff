@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use reinfors in your research, please cite it as below."
+title: "reinfors"
+type: software
+authors:
+  - family-names: "Roberts"
+    given-names: "Adam"
+repository-code: "https://github.com/jeepjeepjeep/reinfors"
+license:
+  - MIT
+  - Apache-2.0
+abstract: "General-purpose gym-style simulation and batching engine for reinforcement learning: Rust core, Python API."

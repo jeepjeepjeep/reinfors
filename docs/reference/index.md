@@ -12,3 +12,4 @@ and boundaries.
 - [Python API](python-api.md): module map and source of signature truth.
 - [Troubleshooting](troubleshooting.md): common callback, stream, build, and learning failures.
 - [Current boundaries](limits.md): deliberately unsupported or bounded semantics.
+- [References](references.md): sources for the algorithms, encodings, and validation targets.
