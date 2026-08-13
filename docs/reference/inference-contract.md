@@ -15,6 +15,14 @@ obs: float32 NumPy array, shape (rows, flattened_observation_size)
 Reshape trailing dimensions using `game.observation_space().shape`. Do not assume a
 particular contiguity on input; make it contiguous if your framework requires it.
 
+Row counts vary call to call: cache hits, in-batch deduplication and terminal
+simulations all remove rows. Fixed-shape consumers (compiled or graph-captured
+forwards, XLA) can set `rf.Engine(..., pad_rows_to=N)`: shared-callback calls smaller
+than `N` are padded with zero rows and the pad outputs are discarded — a semantic
+no-op reported in telemetry as `padded_rows` (`infer_rows` keeps counting real rows).
+Calls larger than `N` pass through unpadded, so choose `N` = games per group
+(`n_games / n_groups`). Padding requires a single shared callback.
+
 ## Engine outputs by policy family
 
 | Policy | Required output |

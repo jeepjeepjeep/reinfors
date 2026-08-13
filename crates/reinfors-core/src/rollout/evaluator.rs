@@ -29,7 +29,9 @@ pub struct Evaluator<'a, F> {
     // telemetry must be local or folding double-counts.
     shared_lookups: usize,
     shared_hits: usize,
+    pad_rows_to: Option<usize>,
     pub rows: usize,
+    pub padded_rows: usize,
     pub calls: usize,
     pub seconds: f64,
 }
@@ -76,7 +78,9 @@ where
             },
             shared_lookups: 0,
             shared_hits: 0,
+            pad_rows_to: None,
             rows: 0,
+            padded_rows: 0,
             calls: 0,
             seconds: 0.0,
         }
@@ -91,7 +95,9 @@ where
             cache: CacheAccess::BatchDedup,
             shared_lookups: 0,
             shared_hits: 0,
+            pad_rows_to: None,
             rows: 0,
+            padded_rows: 0,
             calls: 0,
             seconds: 0.0,
         }
@@ -108,10 +114,18 @@ where
             cache: CacheAccess::Shared(slots),
             shared_lookups: 0,
             shared_hits: 0,
+            pad_rows_to: None,
             rows: 0,
+            padded_rows: 0,
             calls: 0,
             seconds: 0.0,
         }
+    }
+
+    /// Pad shared-mode calls with zero rows up to `pad`; pad outputs are discarded.
+    pub fn with_pad_rows_to(mut self, pad: Option<usize>) -> Self {
+        self.pad_rows_to = pad;
+        self
     }
 
     fn slot_index(&self, player: usize) -> usize {
@@ -329,18 +343,29 @@ where
             };
         }
         let t = std::time::Instant::now();
-        let (out, calls) = run_infer(
+        let n_real = self.n;
+        let mut obs_flat = self.obs_flat;
+        let mut n_call = n_real;
+        if let Some(pad) = self.eval.pad_rows_to {
+            if self.eval.mode == InferMode::Shared && n_call < pad {
+                obs_flat.resize(pad * self.dim, 0.0);
+                n_call = pad;
+            }
+        }
+        let (mut out, calls) = run_infer(
             self.eval.infer,
             self.eval.mode,
             &self.players,
-            self.obs_flat,
-            self.n,
+            obs_flat,
+            n_call,
             self.dim,
         );
         self.eval.seconds += t.elapsed().as_secs_f64();
         self.eval.calls += calls;
-        self.eval.rows += self.n;
-        let stride = out.len() / self.n;
+        self.eval.rows += n_real;
+        self.eval.padded_rows += n_call - n_real;
+        let stride = out.len() / n_call;
+        out.truncate(n_real * stride);
         match &mut self.eval.cache {
             CacheAccess::Exclusive(_) => {
                 for i in 0..self.keys.len() {
@@ -381,6 +406,71 @@ mod tests {
     fn double_infer(_player: usize, obs: Vec<f32>, n: usize) -> Vec<f64> {
         assert_eq!(obs.len(), n * 2);
         obs.iter().map(|&v| f64::from(v) * 2.0).collect()
+    }
+
+    #[test]
+    fn padding_fixes_call_shape_and_discards_pad_outputs() {
+        let seen_n = Arc::new(AtomicU64::new(0));
+        let seen = seen_n.clone();
+        let mut infer = move |_p: usize, obs: Vec<f32>, n: usize| -> Vec<f64> {
+            seen.store(n as u64, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(obs.len(), n * 2);
+            (0..n).flat_map(|i| [f64::from(obs[i * 2]), 0.5]).collect()
+        };
+        let mut eval =
+            Evaluator::new(&mut infer, InferMode::Shared, None).with_pad_rows_to(Some(8));
+        let mut batch = eval.batch();
+        for i in 0..3 {
+            batch.resolve_or_stage(0, &[i as f32 + 1.0, 1.0]);
+        }
+        let rows = batch.commit();
+        assert_eq!(seen_n.load(std::sync::atomic::Ordering::Relaxed), 8);
+        for i in 0..3 {
+            assert_eq!(rows.row(i), &[f64::from(i as u32) + 1.0, 0.5]);
+        }
+        assert_eq!(eval.rows, 3);
+        assert_eq!(eval.padded_rows, 5);
+    }
+
+    #[test]
+    fn oversize_batches_pass_through_unpadded() {
+        let seen_n = Arc::new(AtomicU64::new(0));
+        let seen = seen_n.clone();
+        let mut infer = move |_p: usize, _obs: Vec<f32>, n: usize| -> Vec<f64> {
+            seen.store(n as u64, std::sync::atomic::Ordering::Relaxed);
+            vec![0.5; n * 2]
+        };
+        let mut eval =
+            Evaluator::new(&mut infer, InferMode::Shared, None).with_pad_rows_to(Some(2));
+        let mut batch = eval.batch();
+        for i in 0..4 {
+            batch.resolve_or_stage(0, &[i as f32, 1.0]);
+        }
+        batch.commit();
+        assert_eq!(seen_n.load(std::sync::atomic::Ordering::Relaxed), 4);
+        assert_eq!(eval.padded_rows, 0);
+    }
+
+    #[test]
+    fn pad_rows_never_reach_the_cache() {
+        // a real observation that HAPPENS to equal the zero padding must still miss
+        let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| -> Vec<f64> { vec![0.5; n * 2] };
+        let generation = Arc::new(AtomicU64::new(0));
+        let mut caches = vec![InferCache::new(64, generation)];
+        let mut eval = Evaluator::new(&mut infer, InferMode::Shared, Some(&mut caches))
+            .with_pad_rows_to(Some(4));
+        let mut batch = eval.batch();
+        batch.resolve_or_stage(0, &[7.0, 7.0]);
+        batch.commit(); // padded with three [0.0, 0.0] rows
+        let mut batch = eval.batch();
+        assert!(matches!(
+            batch.resolve_or_stage(0, &[7.0, 7.0]),
+            Resolve::Resolved(_)
+        ));
+        assert!(matches!(
+            batch.resolve_or_stage(0, &[0.0, 0.0]),
+            Resolve::Staged(_)
+        ));
     }
 
     #[test]

@@ -166,6 +166,28 @@ fn hosted_collect_callback_panic_reports_and_host_survives() {
 }
 
 #[test]
+fn padded_grouped_collect_matches_unpadded() {
+    let (a, sa) = engine(4, 2, 11).collect_grouped(24, InferMode::Shared, infer);
+    let (b, sb) =
+        engine(4, 2, 11)
+            .with_pad_rows_to(Some(8))
+            .collect_grouped(24, InferMode::Shared, infer);
+    assert!(!a.is_empty());
+    assert_eq!(a.len(), b.len());
+    for (ra, rb) in a.iter().zip(&b) {
+        assert_eq!(ra.0, rb.0, "obs");
+        assert_eq!(ra.1, rb.1, "pi");
+        assert_eq!(ra.2, rb.2, "z");
+    }
+    assert_eq!(
+        sa.infer_rows, sb.infer_rows,
+        "telemetry counts real rows only"
+    );
+    assert_eq!(sa.padded_rows, 0);
+    assert!(sb.padded_rows > 0);
+}
+
+#[test]
 fn grouped_collect_produces_sane_telemetry() {
     let (records, stats) = engine(4, 2, 3).collect_grouped(16, InferMode::Shared, infer);
     assert!(records.len() >= 16);
