@@ -5,7 +5,7 @@ resolver = "2"
 [workspace.package]
 version = "0.0.0"
 edition = "2021"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 # Thin cross-crate LTO for release builds: the hot path (search + rollout) now calls the per-branch
 # `Game` methods across the crate boundary, so this restores the cross-crate inlining the single-crate
