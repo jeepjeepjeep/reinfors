@@ -76,6 +76,7 @@ nav:
       - Python API: reference/python-api.md
       - Troubleshooting: reference/troubleshooting.md
       - Current boundaries: reference/limits.md
+      - References: reference/references.md
   - Development:
       - Setup: development/setup.md
       - Documentation: development/documentation.md

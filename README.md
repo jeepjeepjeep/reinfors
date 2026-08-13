@@ -93,6 +93,13 @@ Reinfors is pre-1.0. Public contracts are documented, but breaking changes may s
 - [Add a Rust game or algorithm](docs/extending/index.md)
 - [Read the complete documentation](docs/index.md)
 
+## Citation
+
+If you use reinfors in your research, cite it via the repository's
+[CITATION.cff](CITATION.cff) (GitHub's "Cite this repository" button renders it
+as BibTeX/APA). What reinfors itself builds on is catalogued in
+[References](docs/reference/references.md).
+
 ## License
 
 Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your
