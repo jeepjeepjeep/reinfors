@@ -15,12 +15,6 @@ use crate::rollout::infer_cache::InferCache;
 use crate::rollout::infer_service::ServiceHost;
 use crate::rollout::start::{AlwaysInitialState, Start, StartDistribution};
 
-/// Service placement for a grouped collect: scoped to the call, or resident.
-enum ServiceDriver<'a, F> {
-    Scoped(F),
-    Hosted(&'a ServiceHost),
-}
-
 /// Summary of one finished episode.
 #[derive(Clone)]
 pub struct EpisodeSummary {
@@ -305,7 +299,7 @@ where
     {
         assert_eq!(
             self.n_groups, 1,
-            "n_groups=2 engines collect via collect_grouped"
+            "n_groups=2 engines collect via collect_grouped_hosted"
         );
         let mut out: Vec<L::Record> = Vec::new();
         let mut stats = CollectStats::default();
@@ -392,28 +386,11 @@ where
         (out, stats)
     }
 
-    /// Grouped collect: each group runs the classic collect loop on its own worker thread,
-    /// with inference forwarded to a service thread owning the callback. Run-to-run
-    /// nondeterministic when shared state is live; reproduce anomalies with `n_groups=1`.
-    pub fn collect_grouped<F>(
-        &mut self,
-        n_records: usize,
-        mode: InferMode,
-        infer: F,
-    ) -> (Vec<L::Record>, CollectStats)
-    where
-        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64> + Send,
-        P: Sync,
-        L: Sync,
-        P::PolicyState: Send,
-        P::Evaluation: Send,
-        L::Record: Send,
-    {
-        self.collect_grouped_impl(n_records, mode, ServiceDriver::Scoped(infer))
-    }
-
-    /// Grouped collect served by a resident [`ServiceHost`]: identical scheduling to
-    /// [`Self::collect_grouped`], but the callback thread is fixed across collects.
+    /// Grouped collect: each group runs the classic collect loop on its own worker
+    /// thread, with inference forwarded to the [`ServiceHost`]'s resident thread —
+    /// every callback invocation across every collect using the same host arrives on
+    /// that one thread. Run-to-run nondeterministic when shared state is live;
+    /// reproduce anomalies with `n_groups=1`.
     pub fn collect_grouped_hosted(
         &mut self,
         n_records: usize,
@@ -427,33 +404,15 @@ where
         P::Evaluation: Send,
         L::Record: Send,
     {
-        self.collect_grouped_impl::<fn(usize, Vec<f32>, usize) -> Vec<f64>>(
-            n_records,
-            mode,
-            ServiceDriver::Hosted(host),
-        )
-    }
+        use crate::rollout::infer_service::{InferRequest, ServiceState};
 
-    fn collect_grouped_impl<F>(
-        &mut self,
-        n_records: usize,
-        mode: InferMode,
-        driver: ServiceDriver<'_, F>,
-    ) -> (Vec<L::Record>, CollectStats)
-    where
-        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64> + Send,
-        P: Sync,
-        L: Sync,
-        P::PolicyState: Send,
-        P::Evaluation: Send,
-        L::Record: Send,
-    {
-        use crate::rollout::infer_service::{run_service, InferRequest, ServiceState};
-
-        assert_eq!(self.n_groups, 2, "collect_grouped requires n_groups=2");
+        assert_eq!(
+            self.n_groups, 2,
+            "collect_grouped_hosted requires n_groups=2"
+        );
         assert!(
             matches!(mode, InferMode::Shared),
-            "collect_grouped supports a single shared infer callback"
+            "collect_grouped_hosted supports a single shared infer callback"
         );
         if n_records == 0 {
             return (Vec::new(), CollectStats::default());
@@ -516,14 +475,7 @@ where
         let (req_tx, req_rx) = std::sync::mpsc::sync_channel::<InferRequest>(2);
         let tx_a = req_tx.clone();
         let tx_b = req_tx;
-        let mut driver = driver;
-        let mut req_rx = Some(req_rx);
-        if let ServiceDriver::Hosted(host) = &driver {
-            host.begin(
-                req_rx.take().expect("request receiver taken"),
-                service_state.clone(),
-            );
-        }
+        host.begin(req_rx, service_state.clone());
 
         let group_results: [Option<(Vec<L::Record>, CollectStats)>; 2];
         let first_panic: std::sync::Mutex<Option<Box<dyn std::any::Any + Send>>> =
@@ -533,10 +485,6 @@ where
             let start = &start;
             let panic_slot = &first_panic;
             let (res_a, res_b) = std::thread::scope(|scope| {
-                if let ServiceDriver::Scoped(infer) = &mut driver {
-                    let rx = req_rx.take().expect("request receiver taken");
-                    scope.spawn(move || run_service(infer, &rx, svc));
-                }
                 let handle_a = scope.spawn(move || {
                     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         run_group_worker(
@@ -627,9 +575,7 @@ where
             group_results = [res_a, res_b];
         }
         // quiesce before reading the service's stats/error writes below
-        if let ServiceDriver::Hosted(host) = &driver {
-            host.wait_done();
-        }
+        host.wait_done();
 
         if let Some(err) = service_state
             .error
