@@ -8,7 +8,7 @@ description = "General-purpose gym-style simulation + batching engine (Rust core
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT OR Apache-2.0"
-license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
+license-files = ["LICENSE-MIT", "LICENSE-APACHE", "THIRD-PARTY-NOTICES"]
 authors = [{ name = "Adam Roberts" }]
 keywords = ["reinforcement-learning", "rust", "mcts", "self-play", "simulation", "search"]
 classifiers = [
