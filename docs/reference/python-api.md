@@ -25,7 +25,6 @@ Reinfors keeps the public composition surface small and typed.
 | `TreeStrapBatch`, `DqnBatch`, `AlphaZeroBatch` | Engine learner-specific training batches |
 | `DeepCfrBatch` | Training samples returned by `solvers.DeepCfr.collect` |
 | `engine_from_config` | Reconstruct an engine from resolved configuration |
-| `core_build_profile` | Report whether the native extension is a debug or release build |
 
 The authoritative signatures, defaults, array types, and method-level contract comments are
 in `python/reinfors/_reinfors.pyi`, shipped with the package and understood by editors. The

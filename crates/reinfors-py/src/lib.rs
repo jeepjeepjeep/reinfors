@@ -5650,7 +5650,6 @@ fn core_version() -> &'static str {
     reinfors_core::version()
 }
 
-#[pyfunction]
 fn core_build_profile() -> &'static str {
     if cfg!(debug_assertions) {
         "debug"
@@ -5672,6 +5671,7 @@ fn build_info(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     let tag = env!("REINFORS_GIT_TAG");
     d.set_item("git_tag", if tag.is_empty() { None } else { Some(tag) })?;
     d.set_item("profile", core_build_profile())?;
+    d.set_item("version", reinfors_core::version())?;
     Ok(d)
 }
 
@@ -5682,7 +5682,6 @@ fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyEngineSnapshot>()?;
     m.add_function(wrap_pyfunction!(chess_uci_action, m)?)?;
     m.add_function(wrap_pyfunction!(chess_action_uci, m)?)?;
-    m.add_function(wrap_pyfunction!(core_build_profile, m)?)?;
     m.add_function(wrap_pyfunction!(build_info, m)?)?;
     m.add_class::<PyEngine>()?;
     m.add_class::<PyEnv>()?;

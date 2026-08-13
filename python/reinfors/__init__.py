@@ -49,7 +49,6 @@ from ._reinfors import (
     build_info,
     chess_action_uci,
     chess_uci_action,
-    core_build_profile,
     core_version,
 )
 from .arena import Arena
@@ -168,7 +167,6 @@ __all__ = [
     "chance_modes",
     "chess_action_uci",
     "chess_uci_action",
-    "core_build_profile",
     "core_version",
     "encoders",
     "engine_from_config",

@@ -38,7 +38,7 @@ active virtual environment. A cold workspace build can take several minutes; lat
 builds are normally much faster. Cargo's compile output indicates that the build is progressing.
 
 Use the default debug build for development. Performance measurements require
-`maturin develop --release`; confirm the active build at runtime with `rf.core_build_profile()`
+`maturin develop --release`; confirm the active build at runtime with `rf.build_info()["profile"]`
 before recording results.
 
 Optional adapter and training tests need their extras:
