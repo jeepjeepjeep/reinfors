@@ -41,6 +41,7 @@ pub use rollout::engine::{CollectStats, Engine, EngineParams, EpisodeSummary};
 pub use rollout::env::Env;
 pub use rollout::evaluator::{CommittedRows, EvalBatch, Evaluator, InferMode, Resolve};
 pub use rollout::infer_cache::{InferCache, ShardedInferCache};
+pub use rollout::infer_service::ServiceHost;
 pub use rollout::start::{AlwaysInitialState, ReachedStateBuffer, Start, StartDistribution};
 pub use solvers::best_response::{
     best_response_value, enumerate_infosets, exploitability, EnumerationCapExceeded,

@@ -306,15 +306,15 @@ where
     }
 }
 
-fn infer_closure_gil<'a>(
-    callbacks: &'a [Py<PyAny>],
+fn infer_closure_gil<C: AsRef<[Py<PyAny>]> + Send>(
+    callbacks: C,
     dim: usize,
     action_count: usize,
     expected_heads: usize,
     layout: InferLayout,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     callback_err: std::sync::Arc<std::sync::Mutex<Option<PyErr>>>,
-) -> impl FnMut(usize, Vec<f32>, usize) -> Vec<f64> + 'a {
+) -> impl FnMut(usize, Vec<f32>, usize) -> Vec<f64> + Send {
     move |player: usize, obs_flat: Vec<f32>, n: usize| -> Vec<f64> {
         let fallback_len = match layout {
             InferLayout::ValueHeads => n * expected_heads * action_count,
@@ -332,7 +332,7 @@ fn infer_closure_gil<'a>(
                     InferLayout::ValueHeads => {
                         let mut f = infer_closure(
                             py,
-                            callbacks,
+                            callbacks.as_ref(),
                             dim,
                             action_count,
                             Some(expected_heads),
@@ -341,7 +341,8 @@ fn infer_closure_gil<'a>(
                         f(player, obs_flat, n)
                     }
                     InferLayout::PolicyValue => {
-                        let mut f = az_infer_closure(py, callbacks, dim, action_count, &mut err);
+                        let mut f =
+                            az_infer_closure(py, callbacks.as_ref(), dim, action_count, &mut err);
                         f(player, obs_flat, n)
                     }
                 }
@@ -1017,6 +1018,8 @@ impl PyEngine {
             let (stop, queued) = (stop.clone(), queued.clone());
             let pause = pause.clone();
             std::thread::spawn(move || {
+                let hosted = (engine.n_groups() == 2)
+                    .then(|| engine.make_service_host(&infer, stop.clone()));
                 loop {
                     // Pausing at batch boundaries keeps state aligned with delivered batches.
                     if stop.load(std::sync::atomic::Ordering::Relaxed)
@@ -1024,7 +1027,12 @@ impl PyEngine {
                     {
                         break;
                     }
-                    let result = engine.collect_thunk(collect_size, &infer, mode, stop.clone());
+                    let result = match &hosted {
+                        Some((host, callback_err)) => {
+                            engine.collect_thunk_hosted(collect_size, host, callback_err)
+                        }
+                        None => engine.collect_thunk(collect_size, &infer, mode, stop.clone()),
+                    };
                     let fatal = result.is_err();
                     if tx.send(result).is_err() {
                         break;
@@ -1300,6 +1308,8 @@ impl Drop for CollectStream {
     }
 }
 
+type CallbackErr = std::sync::Arc<std::sync::Mutex<Option<PyErr>>>;
+
 trait ErasedEngine: Send + Sync {
     fn snapshot_payload(&self) -> PyResult<Vec<u8>>;
     fn restore_payload(&mut self, bytes: &[u8]) -> PyResult<()>;
@@ -1316,6 +1326,19 @@ trait ErasedEngine: Send + Sync {
         infer: &[Py<PyAny>],
         mode: InferMode,
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> PyResult<BatchThunk>;
+
+    fn make_service_host(
+        &self,
+        infer: &[Py<PyAny>],
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> (reinfors_core::ServiceHost, CallbackErr);
+
+    fn collect_thunk_hosted(
+        &mut self,
+        n_records: usize,
+        host: &reinfors_core::ServiceHost,
+        callback_err: &CallbackErr,
     ) -> PyResult<BatchThunk>;
 
     fn routing(&self) -> usize;
@@ -1836,6 +1859,59 @@ where
         if let Some(e) = callback_err.lock().unwrap().take() {
             return Err(e);
         }
+        let (dim, n_heads) = (self.dim, self.n_heads);
+        Ok(Box::new(move |py: Python<'_>| {
+            let telemetry = build_telemetry(py, &stats)?;
+            Ok(L::Record::into_py_batch(records, py, dim, n_heads, telemetry)?.unbind())
+        }))
+    }
+
+    fn make_service_host(
+        &self,
+        infer: &[Py<PyAny>],
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> (reinfors_core::ServiceHost, CallbackErr) {
+        let callbacks =
+            Python::with_gil(|py| infer.iter().map(|c| c.clone_ref(py)).collect::<Vec<_>>());
+        let callback_err: CallbackErr = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut infer_fn = infer_closure_gil(
+            callbacks,
+            self.dim,
+            self.action_count,
+            self.n_heads,
+            self.layout,
+            stop,
+            callback_err.clone(),
+        );
+        let err_probe = callback_err.clone();
+        let grouped_fn = move |p: usize, o: Vec<f32>, n: usize| -> Vec<f64> {
+            let out = infer_fn(p, o, n);
+            if err_probe.lock().unwrap().is_some() {
+                // Unwinds into the service's catch, cancelling both workers promptly.
+                std::panic::panic_any("python infer callback raised".to_string());
+            }
+            out
+        };
+        (reinfors_core::ServiceHost::spawn(grouped_fn), callback_err)
+    }
+
+    fn collect_thunk_hosted(
+        &mut self,
+        n_records: usize,
+        host: &reinfors_core::ServiceHost,
+        callback_err: &CallbackErr,
+    ) -> PyResult<BatchThunk> {
+        let inner = &mut self.inner;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            inner.collect_grouped_hosted(n_records, InferMode::Shared, host)
+        }));
+        if let Some(e) = callback_err.lock().unwrap().take() {
+            return Err(e);
+        }
+        let (records, stats) = match outcome {
+            Ok(v) => v,
+            Err(payload) => std::panic::resume_unwind(payload),
+        };
         let (dim, n_heads) = (self.dim, self.n_heads);
         Ok(Box::new(move |py: Python<'_>| {
             let telemetry = build_telemetry(py, &stats)?;
