@@ -1935,7 +1935,7 @@ where
             let inner = &mut self.inner;
             let outcome = py.allow_threads(|| {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    inner.collect_grouped_hosted(n_records, mode, &host)
+                    inner.collect_grouped_hosted(n_records, InferMode::Shared, &host)
                 }))
             });
             if let Some(e) = callback_err.lock().unwrap().take() {

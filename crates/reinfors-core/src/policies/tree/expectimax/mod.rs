@@ -5,7 +5,7 @@ pub mod search;
 use crate::codec::bytes::Reader;
 use crate::encoder::StateEncoder;
 use crate::game::{Game, Rng};
-use crate::policy::{ChanceMode, Policy, SearchPolicy};
+use crate::policy::{fold_search_stats, ChanceMode, Policy};
 use crate::reward::Reward;
 use crate::rollout::engine::CollectStats;
 use crate::rollout::evaluator::Evaluator;
@@ -149,18 +149,12 @@ impl Policy for SelectiveExpectimax {
     }
 
     fn fold_telemetry(&self, eval: &SearchEvaluation, stats: &mut CollectStats) {
-        Self::fold_search_stats(eval, stats);
+        fold_search_stats(eval, stats);
         let s = &eval.stats;
         if s.leaves > 0 {
             stats.sum_sigma += s.sigma_sum / s.leaves as f64;
         }
         stats.sum_disagreement += root_disagreement(&eval.values, &eval.legal);
-    }
-}
-
-impl SearchPolicy for SelectiveExpectimax {
-    fn supports_chance(&self, mode: ChanceMode) -> bool {
-        Self::supports_chance_mode(mode)
     }
 }
 

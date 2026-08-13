@@ -86,7 +86,6 @@ where
         }
     }
 
-    /// Grouped-collection constructor: shared sharded cache slots (one per routing slot).
     /// Batch-deduplicating cacheless evaluator (the `choose` composition).
     pub fn with_batch_dedup(infer: &'a mut F, mode: InferMode) -> Self {
         Evaluator {
@@ -103,6 +102,7 @@ where
         }
     }
 
+    /// Grouped-collection constructor: shared sharded cache slots (one per routing slot).
     pub fn with_shared_cache(
         infer: &'a mut F,
         mode: InferMode,
@@ -224,7 +224,7 @@ where
 
 /// Forward `n` staged rows through `infer`, honoring the routing mode; returns rows in
 /// ticket order plus the number of callback invocations made.
-pub fn run_infer<F>(
+fn run_infer<F>(
     infer: &mut F,
     mode: InferMode,
     players: &[usize],

@@ -121,11 +121,13 @@ impl InferCache {
         self.current.insert(key, row);
     }
 
-    pub fn len(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
         self.current.len() + self.prev.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
         self.current.is_empty() && self.prev.is_empty()
     }
 }
@@ -219,14 +221,16 @@ impl ShardedInferCache {
             .sum()
     }
 
-    pub fn len(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
         self.shards
             .iter()
             .map(|s| s.lock().expect("cache shard poisoned").len())
             .sum()
     }
 
-    pub fn is_empty(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
         self.len() == 0
     }
 }

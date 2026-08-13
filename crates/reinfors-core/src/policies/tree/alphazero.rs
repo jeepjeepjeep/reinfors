@@ -7,7 +7,7 @@ use crate::policies::tree::expectimax::{decode_search_eval, encode_search_eval, 
 use crate::policies::tree::mcts::{
     sample_visits, search_many, Guidance, NoiseScope, SequentialBackup,
 };
-use crate::policy::{argmax, ChanceMode, Policy, SearchPolicy};
+use crate::policy::{argmax, fold_search_stats, ChanceMode, Policy};
 use crate::reward::Reward;
 use crate::rollout::engine::CollectStats;
 use crate::rollout::evaluator::Evaluator;
@@ -145,12 +145,6 @@ impl Policy for AlphaZero {
     }
 
     fn fold_telemetry(&self, eval: &SearchEvaluation, stats: &mut CollectStats) {
-        Self::fold_search_stats(eval, stats);
-    }
-}
-
-impl SearchPolicy for AlphaZero {
-    fn supports_chance(&self, _mode: ChanceMode) -> bool {
-        true
+        fold_search_stats(eval, stats);
     }
 }
