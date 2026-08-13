@@ -95,7 +95,6 @@ impl ChanceMode {
     }
 }
 
-/// Fold one search evaluation's stats into collection telemetry.
 /// Acting-ply counter codec shared by the u32-ply search policies. `select()`
 /// advances the counter, so the maximum value must stay unreachable.
 pub(crate) fn ply_from_u64(v: u64) -> Result<u32, String> {
@@ -115,6 +114,7 @@ pub(crate) fn thompson_head_from_u64(v: u64, n_heads: usize) -> Result<usize, St
     Ok(v as usize)
 }
 
+/// Fold one search evaluation's stats into collection telemetry.
 pub(crate) fn fold_search_stats(eval: &SearchEvaluation, stats: &mut CollectStats) {
     let s = &eval.stats;
     stats.max_depth = stats.max_depth.max(s.max_depth);

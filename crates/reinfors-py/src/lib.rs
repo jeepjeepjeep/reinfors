@@ -2983,19 +2983,22 @@ fn build_engine(
                 learn_players,
             )
         }
-        (GameSpec::Backgammon { max_ticks }, RewardBox::Backgammon(reward)) => build_for_game(
-            Backgammon { max_ticks },
-            Box::new(BackgammonTesauro),
-            Box::new(reward),
-            Box::new(AlwaysInitialState),
-            Some(Box::new(Backgammon { max_ticks })),
-            policy,
-            learner,
-            engine_params,
-            pad_rows_to,
-            infer_caches,
-            learn_players,
-        ),
+        (GameSpec::Backgammon { max_ticks }, RewardBox::Backgammon(reward)) => {
+            let game = Backgammon { max_ticks };
+            build_for_game(
+                game.clone(),
+                Box::new(BackgammonTesauro),
+                Box::new(reward),
+                Box::new(AlwaysInitialState),
+                Some(Box::new(game)),
+                policy,
+                learner,
+                engine_params,
+                pad_rows_to,
+                infer_caches,
+                learn_players,
+            )
+        }
         (
             GameSpec::TexasHoldem {
                 num_players,
@@ -3025,19 +3028,22 @@ fn build_engine(
                 learn_players,
             )
         }
-        (GameSpec::KuhnPoker { players }, RewardBox::Holdem(reward)) => build_for_game(
-            KuhnPoker { players },
-            Box::new(KuhnEncoder { players }),
-            Box::new(reward),
-            Box::new(AlwaysInitialState),
-            Some(Box::new(KuhnPoker { players })),
-            policy,
-            learner,
-            engine_params,
-            pad_rows_to,
-            infer_caches,
-            learn_players,
-        ),
+        (GameSpec::KuhnPoker { players }, RewardBox::Holdem(reward)) => {
+            let game = KuhnPoker { players };
+            build_for_game(
+                game.clone(),
+                Box::new(KuhnEncoder { players }),
+                Box::new(reward),
+                Box::new(AlwaysInitialState),
+                Some(Box::new(game)),
+                policy,
+                learner,
+                engine_params,
+                pad_rows_to,
+                infer_caches,
+                learn_players,
+            )
+        }
         (GameSpec::LeducPoker, RewardBox::Holdem(reward)) => build_for_game(
             LeducPoker,
             Box::new(LeducEncoder),
