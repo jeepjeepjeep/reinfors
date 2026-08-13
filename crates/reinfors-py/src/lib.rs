@@ -5650,14 +5650,6 @@ fn core_version() -> &'static str {
     reinfors_core::version()
 }
 
-fn core_build_profile() -> &'static str {
-    if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    }
-}
-
 /// Source identity baked at compile time; "unknown" for builds without a git checkout.
 #[pyfunction]
 fn build_info(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
@@ -5670,7 +5662,14 @@ fn build_info(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     }
     let tag = env!("REINFORS_GIT_TAG");
     d.set_item("git_tag", if tag.is_empty() { None } else { Some(tag) })?;
-    d.set_item("profile", core_build_profile())?;
+    d.set_item(
+        "profile",
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
+    )?;
     d.set_item("version", reinfors_core::version())?;
     Ok(d)
 }
