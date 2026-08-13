@@ -91,7 +91,8 @@ struct Begin {
 /// loop exits when the workers drop their senders; [`Self::wait_done`] awaits that.
 pub struct ServiceHost {
     tx: Option<Sender<Begin>>,
-    done_rx: Receiver<()>,
+    // Mutex for Sync: hosts are shared across `allow_threads`-style scopes
+    done_rx: Mutex<Receiver<()>>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -120,7 +121,7 @@ impl ServiceHost {
         });
         ServiceHost {
             tx: Some(tx),
-            done_rx,
+            done_rx: Mutex::new(done_rx),
             handle: Some(handle),
         }
     }
@@ -134,7 +135,11 @@ impl ServiceHost {
     }
 
     pub(crate) fn wait_done(&self) {
-        self.done_rx.recv().expect("inference service thread died");
+        self.done_rx
+            .lock()
+            .expect("done channel poisoned")
+            .recv()
+            .expect("inference service thread died");
     }
 }
 
