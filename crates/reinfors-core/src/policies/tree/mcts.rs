@@ -1767,11 +1767,7 @@ impl Policy for Mcts {
     }
 }
 
-impl SearchPolicy for Mcts {
-    fn supports_chance(&self, _mode: ChanceMode) -> bool {
-        true
-    }
-}
+impl SearchPolicy for Mcts {}
 
 #[cfg(test)]
 mod tests {

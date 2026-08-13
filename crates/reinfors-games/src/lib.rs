@@ -22,13 +22,12 @@ pub use holdem::{
     HoldemEgocentric, HoldemReward, HoldemState, Street, TexasHoldem, HOLDEM_ACTIONS,
 };
 pub use kuhn::{KuhnEncoder, KuhnPoker, KuhnState};
-pub use leduc::{LeducEncoder, LeducPoker, LeducState, LEDUC_DECK};
+pub use leduc::{LeducEncoder, LeducPoker, LeducState};
 pub(crate) mod codec_util;
 
 pub use cozy_chess::Board as ChessBoard;
 pub use gridworld::{GridEvent, GridState, GridWorld, GridWorldPlanes, GridWorldReward};
 pub use snake::{
-    egocentric_parts, relative_to_absolute, snake_length_cell, Action, Cell, DeathCause,
-    EgocentricSnake, RelativeAction, Snake, SnakeBody, SnakeReward, SnakeState, StepEvent,
-    N_CHANNELS, RELATIVE_ACTIONS,
+    snake_length_cell, Action, Cell, DeathCause, EgocentricSnake, Snake, SnakeReward, SnakeState,
+    StepEvent,
 };

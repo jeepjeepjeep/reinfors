@@ -97,9 +97,6 @@ impl ChanceMode {
 
 /// A policy that produces search evaluations.
 pub trait SearchPolicy: Policy<Evaluation = SearchEvaluation> {
-    /// Whether this search paradigm supports the chance mode.
-    fn supports_chance(&self, mode: ChanceMode) -> bool;
-
     fn fold_search_stats(eval: &SearchEvaluation, stats: &mut CollectStats) {
         let s = &eval.stats;
         stats.max_depth = stats.max_depth.max(s.max_depth);

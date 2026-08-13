@@ -149,8 +149,4 @@ impl Policy for AlphaZero {
     }
 }
 
-impl SearchPolicy for AlphaZero {
-    fn supports_chance(&self, _mode: ChanceMode) -> bool {
-        true
-    }
-}
+impl SearchPolicy for AlphaZero {}

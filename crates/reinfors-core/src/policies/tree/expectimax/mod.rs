@@ -158,11 +158,7 @@ impl Policy for SelectiveExpectimax {
     }
 }
 
-impl SearchPolicy for SelectiveExpectimax {
-    fn supports_chance(&self, mode: ChanceMode) -> bool {
-        Self::supports_chance_mode(mode)
-    }
-}
+impl SearchPolicy for SelectiveExpectimax {}
 
 fn root_disagreement(values: &[Vec<f64>], legal: &[usize]) -> f64 {
     // Illegal densified zeros would otherwise dilute disagreement on sparse-action games.

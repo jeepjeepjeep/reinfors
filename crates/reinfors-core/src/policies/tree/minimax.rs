@@ -149,11 +149,7 @@ impl Policy for Minimax {
     }
 }
 
-impl SearchPolicy for Minimax {
-    fn supports_chance(&self, mode: ChanceMode) -> bool {
-        Self::supports_chance_mode(mode)
-    }
-}
+impl SearchPolicy for Minimax {}
 
 #[cfg(test)]
 mod tests {
