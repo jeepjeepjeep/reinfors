@@ -7,7 +7,7 @@ use crate::encoder::{ActionView, StateEncoder};
 use crate::game::{Actor, ChanceDist, Game, Rng, Transition};
 use crate::policies::tree::expectimax::search::SearchStats;
 use crate::policies::tree::expectimax::{decode_search_eval, encode_search_eval, SearchEvaluation};
-use crate::policy::{argmax, Policy, SearchPolicy, MAX_ENUMERATED_OUTCOMES};
+use crate::policy::{argmax, fold_search_stats, Policy, MAX_ENUMERATED_OUTCOMES};
 use crate::reward::Reward;
 use crate::rng::{dirichlet, SplitMix64};
 use crate::rollout::engine::CollectStats;
@@ -1763,11 +1763,9 @@ impl Policy for Mcts {
     }
 
     fn fold_telemetry(&self, eval: &SearchEvaluation, stats: &mut CollectStats) {
-        Self::fold_search_stats(eval, stats);
+        fold_search_stats(eval, stats);
     }
 }
-
-impl SearchPolicy for Mcts {}
 
 #[cfg(test)]
 mod tests {

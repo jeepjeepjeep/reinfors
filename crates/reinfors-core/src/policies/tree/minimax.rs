@@ -3,7 +3,7 @@
 use crate::codec::bytes::Reader;
 use crate::encoder::StateEncoder;
 use crate::game::{Game, Rng};
-use crate::policy::{ChanceMode, Policy, SearchPolicy};
+use crate::policy::{fold_search_stats, ChanceMode, Policy};
 use crate::reward::Reward;
 use crate::rollout::engine::CollectStats;
 use crate::rollout::evaluator::Evaluator;
@@ -145,11 +145,9 @@ impl Policy for Minimax {
     }
 
     fn fold_telemetry(&self, eval: &SearchEvaluation, stats: &mut CollectStats) {
-        Self::fold_search_stats(eval, stats);
+        fold_search_stats(eval, stats);
     }
 }
-
-impl SearchPolicy for Minimax {}
 
 #[cfg(test)]
 mod tests {
