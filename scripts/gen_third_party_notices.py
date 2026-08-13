@@ -1,48 +1,118 @@
-"""Regenerate THIRD-PARTY-NOTICES from the cargo dependency tree.
+"""Regenerate THIRD-PARTY-NOTICES from the wheel's runtime dependency closure.
 
-Release gate: rerun after any dependency change; the file ships in the wheel via
-pyproject `license-files`.
+Closure = union of `cargo tree --edges normal` for every wheel target, so
+proc-macro/build dependencies and non-shipped-target packages are excluded.
+Crates whose packaged archive omits its license text must have a reviewed
+override in scripts/license-overrides/, or generation fails.
+
+    python scripts/gen_third_party_notices.py          # rewrite the file
+    python scripts/gen_third_party_notices.py --check  # fail on drift (CI/test)
 """
 
 import hashlib
 import json
 import subprocess
+import sys
 from pathlib import Path
 
-meta = json.loads(subprocess.check_output(["cargo", "metadata", "--format-version", "1"]))
-members = set(meta["workspace_members"])
-packages = [p for p in meta["packages"] if p["id"] not in members]
-packages.sort(key=lambda p: (p["name"], p["version"]))
-
-out = [
-    "Third-party notices for reinfors\n",
-    "This distribution statically contains the following Rust components.\n",
-    "License texts follow; identical texts are printed once and referenced.\n",
+REPO = Path(__file__).resolve().parents[1]
+OUT = REPO / "THIRD-PARTY-NOTICES"
+WHEEL_TARGETS = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
 ]
-seen: dict[str, str] = {}
-for p in packages:
-    crate_dir = Path(p["manifest_path"]).parent
-    files = sorted(
-        f for pat in ("LICENSE*", "LICENCE*", "COPYING*", "NOTICE*") for f in crate_dir.glob(pat) if f.is_file()
-    )
-    header = f"{p['name']} {p['version']} — {p.get('license') or 'see repository'}"
-    if p.get("repository"):
-        header += f" — {p['repository']}"
-    out.append("=" * 78)
-    out.append(header)
-    if not files:
-        out.append("(no license file shipped in the crate; see repository above)")
-        continue
-    for f in files:
-        text = f.read_text(errors="replace").strip()
-        digest = hashlib.sha256(text.encode()).hexdigest()
-        if digest in seen:
-            out.append(f"[{f.name}: text identical to {seen[digest]}]")
-        else:
-            seen[digest] = f"{p['name']} {p['version']}/{f.name}"
-            out.append(f"--- {f.name} ---")
-            out.append(text)
-    out.append("")
+OVERRIDES = {
+    # crates.io archives omit the workspace-level LICENSE for these
+    "cozy-chess": REPO / "scripts" / "license-overrides" / "cozy-chess.LICENSE",
+    "cozy-chess-types": REPO / "scripts" / "license-overrides" / "cozy-chess.LICENSE",
+}
 
-Path("THIRD-PARTY-NOTICES").write_text("\n".join(out) + "\n")
-print(f"{len(packages)} components; {len(seen)} unique license texts")
+
+def runtime_closure() -> set[str]:
+    names: set[str] = set()
+    for target in WHEEL_TARGETS:
+        out = subprocess.check_output(
+            [
+                "cargo",
+                "tree",
+                "-p",
+                "reinfors-py",
+                "--edges",
+                "normal,no-proc-macro",
+                "--target",
+                target,
+                "--prefix",
+                "none",
+                "--format",
+                "{p}",
+            ],
+            cwd=REPO,
+            text=True,
+        )
+        for line in out.splitlines():
+            if line.strip():
+                names.add(line.split()[0])
+    return names
+
+
+def build() -> str:
+    meta = json.loads(subprocess.check_output(["cargo", "metadata", "--format-version", "1"], cwd=REPO))
+    members = set(meta["workspace_members"])
+    wanted = runtime_closure()
+    packages = sorted(
+        (p for p in meta["packages"] if p["id"] not in members and p["name"] in wanted),
+        key=lambda p: (p["name"], p["version"]),
+    )
+    out = [
+        "Third-party notices for reinfors",
+        "",
+        "The compiled extension statically contains the following Rust components.",
+        "License texts follow; identical texts are printed once and referenced.",
+        "",
+    ]
+    seen: dict[str, str] = {}
+    missing: list[str] = []
+    for p in packages:
+        crate_dir = Path(p["manifest_path"]).parent
+        files = sorted(
+            f for pat in ("LICENSE*", "LICENCE*", "COPYING*", "NOTICE*") for f in crate_dir.glob(pat) if f.is_file()
+        )
+        if not files:
+            override = OVERRIDES.get(p["name"])
+            if override is None:
+                missing.append(f"{p['name']} {p['version']}")
+                continue
+            files = [override]
+        header = f"{p['name']} {p['version']} — {p.get('license') or 'see files'}"
+        if p.get("repository"):
+            header += f" — {p['repository']}"
+        out.append("=" * 78)
+        out.append(header)
+        for f in files:
+            text = f.read_text(errors="replace").strip()
+            digest = hashlib.sha256(text.encode()).hexdigest()
+            if digest in seen:
+                out.append(f"[{f.name}: text identical to {seen[digest]}]")
+            else:
+                seen[digest] = f"{p['name']} {p['version']}/{f.name}"
+                out.append(f"--- {f.name} ---")
+                out.append(text)
+        out.append("")
+    if missing:
+        sys.exit("no license text found and no reviewed override for: " + ", ".join(missing))
+    while out and out[-1] == "":
+        out.pop()
+    return "\n".join(out) + "\n"
+
+
+if __name__ == "__main__":
+    content = build()
+    if "--check" in sys.argv[1:]:
+        if not OUT.exists() or OUT.read_text() != content:
+            sys.exit("THIRD-PARTY-NOTICES is stale — rerun the generator")
+        print("THIRD-PARTY-NOTICES up to date")
+    else:
+        OUT.write_text(content)
+        print(f"wrote {OUT.name}")
