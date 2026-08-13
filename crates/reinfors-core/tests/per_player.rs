@@ -75,6 +75,7 @@ fn engine() -> Engine<Alt, EpsilonGreedyQ, Dqn> {
             n_games: 2,
             seed: 3,
             n_groups: 1,
+            ..Default::default()
         },
     )
 }
@@ -203,6 +204,7 @@ fn per_player_row_widths_must_agree_across_players() {
             n_games: 1,
             seed: 3,
             n_groups: 1,
+            ..Default::default()
         },
     );
     let _ = e.collect_routed(4, InferMode::PerPlayer, |p, _obs, n| vec![0.0; n * (2 + p)]);

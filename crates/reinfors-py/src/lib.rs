@@ -823,6 +823,7 @@ impl PyEngine {
             n_games,
             seed,
             n_groups,
+            pad_rows_to: (pad_rows_to > 0).then_some(pad_rows_to),
         };
         let num_agents = game.spec.num_agents();
         // Slot 0 serves a shared callback; slots 1..=N serve per-player callbacks.
@@ -869,7 +870,6 @@ impl PyEngine {
                 policy.spec,
                 learner.spec,
                 engine_params,
-                (pad_rows_to > 0).then_some(pad_rows_to),
                 start_buffer,
                 caches,
                 learn_players,
@@ -2574,7 +2574,6 @@ fn build_inner<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>>(
     learner: L,
     engine_params: EngineParams,
     start_dist: Box<dyn reinfors_core::StartDistribution<G::State>>,
-    pad_rows_to: Option<usize>,
     infer_caches: Option<CacheSet>,
     learn_players: Option<Vec<usize>>,
 ) -> Engine<G, P, L>
@@ -2582,8 +2581,7 @@ where
     G::State: Send,
 {
     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
-        .with_start_distribution(start_dist)
-        .with_pad_rows_to(pad_rows_to);
+        .with_start_distribution(start_dist);
     match infer_caches {
         Some(CacheSet::Exclusive(c)) => e = e.with_infer_caches(c),
         Some(CacheSet::Sharded(c)) => e = e.with_sharded_infer_caches(c),
@@ -2605,7 +2603,6 @@ fn build_for_game<G: Game + Send + Sync + 'static>(
     policy: PolicySpec,
     learner: LearnerSpec,
     engine_params: EngineParams,
-    pad_rows_to: Option<usize>,
     infer_caches: Option<CacheSet>,
     learn_players: Option<Vec<usize>>,
 ) -> PyResult<Box<dyn ErasedEngine>>
@@ -2674,7 +2671,7 @@ where
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
                 n_groups: engine_params.n_groups,
-                pad_rows_to,
+                pad_rows_to: engine_params.pad_rows_to,
                 inner: build_inner(
                     game,
                     enc,
@@ -2683,7 +2680,6 @@ where
                     learner,
                     engine_params,
                     start_dist,
-                    pad_rows_to,
                     infer_caches,
                     learn_players,
                 ),
@@ -2717,7 +2713,7 @@ where
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
                 n_groups: engine_params.n_groups,
-                pad_rows_to,
+                pad_rows_to: engine_params.pad_rows_to,
                 inner: build_inner(
                     game,
                     enc,
@@ -2726,7 +2722,6 @@ where
                     learner,
                     engine_params,
                     start_dist,
-                    pad_rows_to,
                     infer_caches,
                     learn_players,
                 ),
@@ -2773,7 +2768,7 @@ where
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
                 n_groups: engine_params.n_groups,
-                pad_rows_to,
+                pad_rows_to: engine_params.pad_rows_to,
                 inner: build_inner(
                     game,
                     enc,
@@ -2782,7 +2777,6 @@ where
                     learner,
                     engine_params,
                     start_dist,
-                    pad_rows_to,
                     infer_caches,
                     learn_players,
                 ),
@@ -2828,7 +2822,7 @@ where
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
                 n_groups: engine_params.n_groups,
-                pad_rows_to,
+                pad_rows_to: engine_params.pad_rows_to,
                 inner: build_inner(
                     game,
                     enc,
@@ -2837,7 +2831,6 @@ where
                     learner,
                     engine_params,
                     start_dist,
-                    pad_rows_to,
                     infer_caches,
                     learn_players,
                 ),
@@ -2856,7 +2849,7 @@ where
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
                 n_groups: engine_params.n_groups,
-                pad_rows_to,
+                pad_rows_to: engine_params.pad_rows_to,
                 inner: build_inner(
                     game,
                     enc,
@@ -2865,7 +2858,6 @@ where
                     learner,
                     engine_params,
                     start_dist,
-                    pad_rows_to,
                     infer_caches,
                     learn_players,
                 ),
@@ -2895,7 +2887,6 @@ fn build_engine(
     policy: PolicySpec,
     learner: LearnerSpec,
     engine_params: EngineParams,
-    pad_rows_to: Option<usize>,
     start_buffer: Option<StartBufferConfig>,
     infer_caches: Option<CacheSet>,
     learn_players: Option<Vec<usize>>,
@@ -2949,7 +2940,6 @@ fn build_engine(
                 policy,
                 learner,
                 engine_params,
-                pad_rows_to,
                 infer_caches,
                 learn_players,
             )
@@ -2963,7 +2953,6 @@ fn build_engine(
             policy,
             learner,
             engine_params,
-            pad_rows_to,
             infer_caches,
             learn_players,
         ),
@@ -2978,7 +2967,6 @@ fn build_engine(
                 policy,
                 learner,
                 engine_params,
-                pad_rows_to,
                 infer_caches,
                 learn_players,
             )
@@ -2994,7 +2982,6 @@ fn build_engine(
                 policy,
                 learner,
                 engine_params,
-                pad_rows_to,
                 infer_caches,
                 learn_players,
             )
@@ -3023,7 +3010,6 @@ fn build_engine(
                 policy,
                 learner,
                 engine_params,
-                pad_rows_to,
                 infer_caches,
                 learn_players,
             )
@@ -3039,7 +3025,6 @@ fn build_engine(
                 policy,
                 learner,
                 engine_params,
-                pad_rows_to,
                 infer_caches,
                 learn_players,
             )
@@ -3053,7 +3038,6 @@ fn build_engine(
             policy,
             learner,
             engine_params,
-            pad_rows_to,
             infer_caches,
             learn_players,
         ),
@@ -3079,7 +3063,6 @@ fn build_engine(
                 policy,
                 learner,
                 engine_params,
-                pad_rows_to,
                 infer_caches,
                 learn_players,
             )

@@ -489,6 +489,7 @@ mod tests {
             n_games: 3,
             seed: 0,
             n_groups: 1,
+            ..Default::default()
         };
         let mut engine = Engine::new(
             Connect4,

@@ -91,6 +91,19 @@ pub struct EngineParams {
     /// 1 = the classic lockstep collect; 2 = grouped collect (two game groups on worker
     /// threads so search overlaps inference).
     pub n_groups: usize,
+    /// Fixed call shape in rows (None = off); see the inference contract.
+    pub pad_rows_to: Option<usize>,
+}
+
+impl Default for EngineParams {
+    fn default() -> Self {
+        EngineParams {
+            n_games: 1,
+            seed: 0,
+            n_groups: 1,
+            pad_rows_to: None,
+        }
+    }
 }
 
 pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
@@ -133,6 +146,9 @@ where
     ) -> Self {
         let n = game.num_agents();
         assert!(n >= 1, "a game must have at least one agent");
+        if let Some(pad) = params.pad_rows_to {
+            assert!(pad >= 1, "pad_rows_to must be >= 1");
+        }
         assert!(
             matches!(params.n_groups, 1 | 2),
             "n_groups must be 1 or 2 (got {})",
@@ -203,7 +219,7 @@ where
             episode_returns: vec![vec![0.0; num_agents]; params.n_games],
             sequential,
             n_groups: params.n_groups,
-            pad_rows_to: None,
+            pad_rows_to: params.pad_rows_to,
             group_rngs,
             sharded_caches: None,
             buffer_rng,
@@ -220,16 +236,6 @@ where
         start_dist: Box<dyn StartDistribution<G::State>>,
     ) -> Self {
         self.start_dist = start_dist;
-        self
-    }
-
-    /// Pad shared-callback calls with zero rows to a fixed row count
-    /// (pad outputs are discarded); telemetry reports them as `padded_rows`.
-    pub fn with_pad_rows_to(mut self, pad_rows_to: Option<usize>) -> Self {
-        if let Some(pad) = pad_rows_to {
-            assert!(pad >= 1, "pad_rows_to must be >= 1");
-        }
-        self.pad_rows_to = pad_rows_to;
         self
     }
 
@@ -1428,6 +1434,7 @@ mod tests {
                 n_games: 4,
                 seed: 5,
                 n_groups,
+                ..Default::default()
             },
         )
     }
