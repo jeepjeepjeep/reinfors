@@ -17,8 +17,10 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 OUT = REPO / "THIRD-PARTY-NOTICES"
+# must cover every wheel in .github/workflows/release.yml (tied by test)
 WHEEL_TARGETS = [
     "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
     "x86_64-apple-darwin",
     "x86_64-unknown-linux-gnu",
     "x86_64-pc-windows-msvc",
