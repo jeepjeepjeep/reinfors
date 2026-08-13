@@ -1,16 +1,10 @@
-"""Shared test helpers: the zeros AlphaZero callback and the standard connect4 engine.
-
-The zeros callback returns native f32 (the recommended contract path); dtype
-acceptance itself is covered explicitly by test_infer_dtype.
-"""
+"""Shared test helpers."""
 
 import numpy as np
 import reinfors as rf
 
 
 def az_zeros_infer(n_actions: int):
-    """AlphaZero infer stub: zero logits (uniform policy), zero values."""
-
     def infer(obs, n=None):
         m = obs.shape[0]
         return np.zeros((m, n_actions), dtype=np.float32), np.zeros(m, dtype=np.float32)

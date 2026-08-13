@@ -446,10 +446,8 @@ impl StateEncoder for ChessPlanesMinimal {
     }
 }
 
-/// Piece-occupancy planes in the native layout (`(ci*6 + pi)`, `Piece::ALL`
-/// order); `base` is a raw obs offset, `at` maps squares into the perspective.
-/// ChessPlanesOpenSpiel deliberately does NOT use this — its layout is pinned
-/// to their `chess.cc` (piece-major interleave, reordered types).
+// ChessPlanesOpenSpiel must NOT use these helpers: its layout is pinned to their
+// chess.cc (piece-major interleave, long-before-short castling).
 fn fill_piece_planes(
     obs: &mut [f32],
     base: usize,
@@ -468,8 +466,6 @@ fn fill_piece_planes(
     }
 }
 
-/// Castling-rights planes in the native order (short then long per color),
-/// starting at `base_plane`. OpenSpiel's encoder keeps its own pinned order.
 fn fill_castling_planes(obs: &mut [f32], base_plane: usize, board: &Board, colors: [Color; 2]) {
     const PLANE: usize = 64;
     for (i, color) in colors.into_iter().enumerate() {
