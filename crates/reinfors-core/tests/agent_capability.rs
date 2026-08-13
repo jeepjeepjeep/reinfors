@@ -230,6 +230,7 @@ fn engine_rejects_a_capped_policy_on_a_three_agent_game() {
             n_games: 1,
             seed: 0,
             n_groups: 1,
+            ..Default::default()
         },
     );
 }
@@ -248,6 +249,7 @@ fn expectimax_engine_collects_on_a_three_agent_simultaneous_game() {
             n_games: 2,
             seed: 4,
             n_groups: 1,
+            ..Default::default()
         },
     );
     let (records, stats) = engine.collect(9, |_obs: Vec<f32>, n: usize| vec![0.0; n * 2]);
@@ -335,6 +337,7 @@ fn mcts_engine_collects_on_a_three_agent_simultaneous_game() {
             n_games: 2,
             seed: 3,
             n_groups: 1,
+            ..Default::default()
         },
     );
     let (records, stats) = engine.collect(9, |_obs: Vec<f32>, n: usize| vec![0.0; n * 2]);
@@ -373,6 +376,7 @@ fn alphazero_engine_collects_on_a_three_agent_sequential_game() {
             n_games: 2,
             seed: 5,
             n_groups: 1,
+            ..Default::default()
         },
     );
     let (records, stats) = engine.collect(9, |_obs: Vec<f32>, n: usize| vec![0.0; n * 3]);
@@ -406,6 +410,7 @@ fn learn_players_filters_value_only_perspectives() {
             n_games: 2,
             seed: 5,
             n_groups: 1,
+            ..Default::default()
         },
     )
     .with_learn_players(&[0]);
@@ -477,6 +482,7 @@ fn alphazero_routes_each_perspective_to_its_own_network() {
             n_games: 2,
             seed: 5,
             n_groups: 1,
+            ..Default::default()
         },
     );
     let mut seen = std::collections::HashSet::new();
@@ -506,6 +512,7 @@ fn uct_routes_sequential_leaf_rows_to_the_leaf_mover() {
             n_games: 2,
             seed: 3,
             n_groups: 1,
+            ..Default::default()
         },
     );
     let mut seen = std::collections::HashSet::new();
@@ -535,6 +542,7 @@ fn duct_routes_every_perspective_to_its_own_network() {
             n_games: 2,
             seed: 3,
             n_groups: 1,
+            ..Default::default()
         },
     );
     let mut seen = std::collections::HashSet::new();
@@ -571,6 +579,7 @@ fn expectimax_routes_opponent_model_rows_to_that_mover() {
             n_games: 2,
             seed: 4,
             n_groups: 1,
+            ..Default::default()
         },
     );
     let mut seen = std::collections::HashSet::new();
@@ -661,6 +670,7 @@ fn value_only_rows_carry_each_agents_own_return() {
             n_games: 1,
             seed: 2,
             n_groups: 1,
+            ..Default::default()
         },
     );
     let (records, _) = engine.collect(9, |_obs: Vec<f32>, n: usize| vec![0.0; n * 3]);
@@ -688,6 +698,7 @@ fn a_capability_free_policy_collects_on_a_three_agent_game() {
             n_games: 2,
             seed: 7,
             n_groups: 1,
+            ..Default::default()
         },
     );
     let (records, stats) = engine.collect(12, |_obs: Vec<f32>, n: usize| vec![0.0; n * 2]);
@@ -757,6 +768,7 @@ fn truncation_bootstraps_every_perspectives_own_tail() {
             n_games: 1,
             seed: 6,
             n_groups: 1,
+            ..Default::default()
         },
     );
     let infer = |obs: Vec<f32>, n: usize| {
@@ -1084,6 +1096,7 @@ fn episode_birth_realizes_root_chance_chains() {
             n_games: 2,
             seed: 0,
             n_groups: 1,
+            ..Default::default()
         },
     );
     let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2 * 2];
@@ -1146,6 +1159,7 @@ fn start_distribution_restores_must_be_decision_states() {
             n_games: 1,
             seed: 0,
             n_groups: 1,
+            ..Default::default()
         },
     )
     .with_start_distribution(Box::new(ChanceRestore));
@@ -1219,6 +1233,7 @@ fn forced_maxn_supervises_both_perspectives_at_two_agents() {
                 n_games: 1,
                 seed: 9,
                 n_groups: 1,
+                ..Default::default()
             },
         );
         engine
@@ -1302,6 +1317,7 @@ fn forced_maxn_truncation_bootstraps_both_perspectives() {
             n_games: 1,
             seed: 8,
             n_groups: 1,
+            ..Default::default()
         },
     );
     // Rewards are zero and gamma is one, so z must be each encoded agent's distinct tail value.

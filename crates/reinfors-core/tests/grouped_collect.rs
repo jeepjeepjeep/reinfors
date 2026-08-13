@@ -58,6 +58,22 @@ impl reinfors_core::Reward for Zero {
     }
 }
 
+fn az_config() -> AlphaZero {
+    AlphaZero::new(AlphaZeroConfig {
+        num_simulations: 6,
+        c_puct: 1.5,
+        gamma: 1.0,
+        max_depth: 64,
+        noise_epsilon: 0.25,
+        noise_alpha: 0.5,
+        temperature: 1.0,
+        temperature_drop: 4,
+        chance: reinfors_core::ChanceMode::AlwaysResample,
+        noise_scope: reinfors_core::policies::tree::mcts::NoiseScope::Requester,
+        sequential_backup: reinfors_core::policies::tree::mcts::SequentialBackup::Auto,
+    })
+}
+
 fn engine(
     n_games: usize,
     n_groups: usize,
@@ -67,24 +83,33 @@ fn engine(
         Count,
         Box::new(Enc),
         Box::new(Zero),
-        AlphaZero::new(AlphaZeroConfig {
-            num_simulations: 6,
-            c_puct: 1.5,
-            gamma: 1.0,
-            max_depth: 64,
-            noise_epsilon: 0.25,
-            noise_alpha: 0.5,
-            temperature: 1.0,
-            temperature_drop: 4,
-            chance: reinfors_core::ChanceMode::AlwaysResample,
-            noise_scope: reinfors_core::policies::tree::mcts::NoiseScope::Requester,
-            sequential_backup: reinfors_core::policies::tree::mcts::SequentialBackup::Auto,
-        }),
+        az_config(),
         AlphaZeroLearner::new(1.0),
         EngineParams {
             n_games,
             seed,
             n_groups,
+            ..Default::default()
+        },
+    )
+}
+
+fn engine_padded(
+    n_games: usize,
+    seed: u64,
+    pad: usize,
+) -> Engine<Count, AlphaZero, AlphaZeroLearner> {
+    Engine::new(
+        Count,
+        Box::new(Enc),
+        Box::new(Zero),
+        az_config(),
+        AlphaZeroLearner::new(1.0),
+        EngineParams {
+            n_games,
+            seed,
+            n_groups: 2,
+            pad_rows_to: Some(pad),
         },
     )
 }
@@ -174,9 +199,7 @@ fn padded_grouped_collect_matches_unpadded() {
     let h1 = reinfors_core::ServiceHost::spawn(infer);
     let (a, sa) = engine(4, 2, 11).collect_grouped_hosted(24, InferMode::Shared, &h1);
     let h2 = reinfors_core::ServiceHost::spawn(infer);
-    let (b, sb) = engine(4, 2, 11)
-        .with_pad_rows_to(Some(8))
-        .collect_grouped_hosted(24, InferMode::Shared, &h2);
+    let (b, sb) = engine_padded(4, 11, 8).collect_grouped_hosted(24, InferMode::Shared, &h2);
     assert!(!a.is_empty());
     assert_eq!(a.len(), b.len());
     for (ra, rb) in a.iter().zip(&b) {
@@ -292,6 +315,7 @@ fn worker_panic_cancels_the_peer_group_promptly() {
             n_games: 4,
             seed: 7,
             n_groups: 2,
+            ..Default::default()
         },
     );
     let host = reinfors_core::ServiceHost::spawn(infer);

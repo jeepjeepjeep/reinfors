@@ -493,6 +493,7 @@ fn engine_collects_with_search_policies_through_chance() {
             n_games: 2,
             seed: 3,
             n_groups: 1,
+            ..Default::default()
         },
     );
     let (records, stats) = engine.collect(4, |_obs: Vec<f32>, n: usize| vec![0.0; n]);
