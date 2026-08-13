@@ -130,6 +130,9 @@ where
             pad.is_none() || self.mode == InferMode::Shared,
             "pad_rows_to supports shared-mode inference only"
         );
+        if let Some(pad) = pad {
+            assert!(pad >= 1, "pad_rows_to must be >= 1");
+        }
         self.pad_rows_to = pad;
         self
     }
@@ -506,6 +509,13 @@ mod tests {
         for i in 0..5 {
             assert_eq!(rows.row(i), &[f64::from(i as u32) + 1.0, 0.5]);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "must be >= 1")]
+    fn padding_rejects_a_zero_pad_size() {
+        let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| -> Vec<f64> { vec![0.5; n * 2] };
+        let _ = Evaluator::new(&mut infer, InferMode::Shared, None).with_pad_rows_to(Some(0));
     }
 
     #[test]

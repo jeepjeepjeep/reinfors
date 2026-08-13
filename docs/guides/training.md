@@ -168,7 +168,8 @@ usually means doubling `n_games` rather than splitting it. Note that games-per-g
 approximates rows-per-callback — simultaneous and MaxN searches evaluate multiple
 perspectives per node, exhaustive chance fans stage every outcome, and cache hits, in-batch
 deduplication, and terminal simulations all remove rows. Check the realized mean with
-`telemetry["infer_rows"] / telemetry["infer_calls"]` rather than assuming it; a
+`telemetry["infer_rows"] / telemetry["infer_calls"]` rather than assuming it (with
+`pad_rows_to`, add `padded_rows` to the numerator for the physical size); a
 `n_games=128, n_groups=2` starting point for a sequential game at a batch-64 sweet spot is a
 workload-specific example, not a rule. If the callback needs a *constant* row count
 (compiled/graph-captured forwards), `pad_rows_to` in the

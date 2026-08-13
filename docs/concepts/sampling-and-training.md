@@ -41,8 +41,9 @@ time.
   search controls; telemetry `max_depth` is the deepest branch actually observed.
 
 For DQN, only `n_games` and the record floor apply; it performs no tree search. Measure mean
-callback batch size as `infer_rows / infer_calls`: if it is small relative to the device's efficient
-batch size, increase `n_games` first. Then sweep the search budget against both throughput and task
+callback batch size as `infer_rows / infer_calls` (add `padded_rows` to the numerator when
+`pad_rows_to` is set): if it is small relative to the device's efficient batch size, increase
+`n_games` first. Then sweep the search budget against both throughput and task
 performance; more simulations are not automatically useful once model quality, latency, or memory
 is limiting.
 
