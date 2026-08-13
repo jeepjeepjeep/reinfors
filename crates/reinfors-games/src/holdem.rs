@@ -126,6 +126,7 @@ impl Reward for HoldemReward {
     }
 }
 
+#[derive(Clone)]
 pub struct TexasHoldem {
     pub num_players: usize,
     pub stack: u32,

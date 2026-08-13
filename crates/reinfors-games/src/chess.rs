@@ -233,6 +233,7 @@ impl Reward for ChessReward {
     }
 }
 
+#[derive(Clone)]
 pub struct Chess {
     pub max_ticks: Option<usize>,
     pub history_len: usize,
@@ -424,26 +425,11 @@ impl StateEncoder for ChessPlanesMinimal {
         const PLANE: usize = 64;
         let mut obs = vec![0.0f32; 19 * PLANE];
         let board = &state.board;
-        for (ci, color) in [Color::White, Color::Black].into_iter().enumerate() {
-            for (pi, piece) in Piece::ALL.into_iter().enumerate() {
-                let bb = board.pieces(piece) & board.colors(color);
-                for sq in bb {
-                    obs[(ci * 6 + pi) * PLANE + sq_index(sq)] = 1.0;
-                }
-            }
-        }
+        fill_piece_planes(&mut obs, 0, board, [Color::White, Color::Black], sq_index);
         if board.side_to_move() == Color::White {
             obs[12 * PLANE..13 * PLANE].fill(1.0);
         }
-        for (i, color) in [Color::White, Color::Black].into_iter().enumerate() {
-            let rights = board.castle_rights(color);
-            if rights.short.is_some() {
-                obs[(13 + i * 2) * PLANE..(14 + i * 2) * PLANE].fill(1.0);
-            }
-            if rights.long.is_some() {
-                obs[(14 + i * 2) * PLANE..(15 + i * 2) * PLANE].fill(1.0);
-            }
-        }
+        fill_castling_planes(&mut obs, 13, board, [Color::White, Color::Black]);
         if let Some(file) = board.en_passant() {
             let f = file as usize;
             for rank in 0..8 {
@@ -457,6 +443,39 @@ impl StateEncoder for ChessPlanesMinimal {
 
     fn obs_shape(&self) -> (usize, usize, usize) {
         (19, 8, 8)
+    }
+}
+
+// ChessPlanesOpenSpiel must NOT use these helpers: its layout is pinned to their
+// chess.cc (piece-major interleave, long-before-short castling).
+fn fill_piece_planes(
+    obs: &mut [f32],
+    base: usize,
+    board: &Board,
+    colors: [Color; 2],
+    at: impl Fn(Square) -> usize,
+) {
+    const PLANE: usize = 64;
+    for (ci, color) in colors.into_iter().enumerate() {
+        for (pi, piece) in Piece::ALL.into_iter().enumerate() {
+            let bb = board.pieces(piece) & board.colors(color);
+            for sq in bb {
+                obs[base + (ci * 6 + pi) * PLANE + at(sq)] = 1.0;
+            }
+        }
+    }
+}
+
+fn fill_castling_planes(obs: &mut [f32], base_plane: usize, board: &Board, colors: [Color; 2]) {
+    const PLANE: usize = 64;
+    for (i, color) in colors.into_iter().enumerate() {
+        let rights = board.castle_rights(color);
+        if rights.short.is_some() {
+            obs[(base_plane + i * 2) * PLANE..(base_plane + 1 + i * 2) * PLANE].fill(1.0);
+        }
+        if rights.long.is_some() {
+            obs[(base_plane + 1 + i * 2) * PLANE..(base_plane + 2 + i * 2) * PLANE].fill(1.0);
+        }
     }
 }
 
@@ -520,26 +539,11 @@ impl StateEncoder for ChessPlanesRelative {
                 i
             }
         };
-        for (ci, color) in [persp, !persp].into_iter().enumerate() {
-            for (pi, piece) in Piece::ALL.into_iter().enumerate() {
-                let bb = board.pieces(piece) & board.colors(color);
-                for sq in bb {
-                    obs[(ci * 6 + pi) * PLANE + at(sq)] = 1.0;
-                }
-            }
-        }
+        fill_piece_planes(&mut obs, 0, board, [persp, !persp], at);
         if board.side_to_move() == persp {
             obs[12 * PLANE..13 * PLANE].fill(1.0);
         }
-        for (i, color) in [persp, !persp].into_iter().enumerate() {
-            let rights = board.castle_rights(color);
-            if rights.short.is_some() {
-                obs[(13 + i * 2) * PLANE..(14 + i * 2) * PLANE].fill(1.0);
-            }
-            if rights.long.is_some() {
-                obs[(14 + i * 2) * PLANE..(15 + i * 2) * PLANE].fill(1.0);
-            }
-        }
+        fill_castling_planes(&mut obs, 13, board, [persp, !persp]);
         if let Some(file) = board.en_passant() {
             // Sigma reflects ranks only, so the en-passant file is unchanged.
             let f = file as usize;
@@ -637,14 +641,7 @@ impl Default for ChessPlanesAz119 {
 impl ChessPlanesAz119 {
     fn step_planes(obs: &mut [f32], base: usize, board: &Board, count: usize) {
         const PLANE: usize = 64;
-        for (ci, color) in [Color::White, Color::Black].into_iter().enumerate() {
-            for (pi, piece) in Piece::ALL.into_iter().enumerate() {
-                let bb = board.pieces(piece) & board.colors(color);
-                for sq in bb {
-                    obs[base + (ci * 6 + pi) * PLANE + sq_index(sq)] = 1.0;
-                }
-            }
-        }
+        fill_piece_planes(obs, base, board, [Color::White, Color::Black], sq_index);
         if count >= 2 {
             obs[base + 12 * PLANE..base + 13 * PLANE].fill(1.0);
         }
@@ -676,15 +673,7 @@ impl StateEncoder for ChessPlanesAz119 {
         }
         let fullmove = f32::from(board.fullmove_number()) / 100.0;
         obs[(aux + 1) * PLANE..(aux + 2) * PLANE].fill(fullmove);
-        for (i, color) in [Color::White, Color::Black].into_iter().enumerate() {
-            let rights = board.castle_rights(color);
-            if rights.short.is_some() {
-                obs[(aux + 2 + i * 2) * PLANE..(aux + 3 + i * 2) * PLANE].fill(1.0);
-            }
-            if rights.long.is_some() {
-                obs[(aux + 3 + i * 2) * PLANE..(aux + 4 + i * 2) * PLANE].fill(1.0);
-            }
-        }
+        fill_castling_planes(&mut obs, aux + 2, board, [Color::White, Color::Black]);
         let hm = f32::from(board.halfmove_clock()) / 100.0;
         obs[(aux + 6) * PLANE..(aux + 7) * PLANE].fill(hm);
         obs

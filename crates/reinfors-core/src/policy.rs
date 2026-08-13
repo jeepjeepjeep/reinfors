@@ -95,7 +95,23 @@ impl ChanceMode {
     }
 }
 
-/// Fold one search evaluation's stats into collection telemetry.
+// select() advances the counter, so u32::MAX must stay unreachable
+pub(crate) fn ply_from_u64(v: u64) -> Result<u32, String> {
+    match u32::try_from(v) {
+        Ok(x) if x < u32::MAX => Ok(x),
+        _ => Err(format!("acting-ply counter {v} out of range")),
+    }
+}
+
+pub(crate) fn thompson_head_from_u64(v: u64, n_heads: usize) -> Result<usize, String> {
+    if v as usize >= n_heads {
+        return Err(format!(
+            "Thompson head {v} out of range for {n_heads} heads"
+        ));
+    }
+    Ok(v as usize)
+}
+
 pub(crate) fn fold_search_stats(eval: &SearchEvaluation, stats: &mut CollectStats) {
     let s = &eval.stats;
     stats.max_depth = stats.max_depth.max(s.max_depth);

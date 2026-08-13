@@ -6,12 +6,12 @@ from typing import Any
 import numpy as np
 import pytest
 import reinfors as rf
+from conftest import az_zeros_infer
 
 _A = 4672
 
 
-def _az_infer(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    return np.zeros((arr.shape[0], _A)), np.zeros(arr.shape[0])
+_az_infer = az_zeros_infer(_A)
 
 
 def _engine(seed: int = 0, **kwargs: Any) -> rf.Engine:

@@ -1932,21 +1932,9 @@ where
             }
             let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let (host, callback_err) = self.make_service_host(&callbacks, stop);
-            let inner = &mut self.inner;
-            let outcome = py.allow_threads(|| {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    inner.collect_grouped_hosted(n_records, InferMode::Shared, &host)
-                }))
-            });
-            if let Some(e) = callback_err.lock().unwrap().take() {
-                return Err(e);
-            }
-            let (records, stats) = match outcome {
-                Ok(v) => v,
-                Err(payload) => std::panic::resume_unwind(payload),
-            };
-            let telemetry = build_telemetry(py, &stats)?;
-            return L::Record::into_py_batch(records, py, self.dim, self.n_heads, telemetry);
+            let thunk =
+                py.allow_threads(|| self.collect_thunk_hosted(n_records, &host, &callback_err))?;
+            return Ok(thunk(py)?.into_bound(py));
         }
         let (records, telemetry) = run_collect(
             &mut self.inner,
@@ -2578,6 +2566,36 @@ fn check_max_ticks(max_ticks: Option<usize>) -> PyResult<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn build_inner<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>>(
+    game: G,
+    enc: Box<dyn StateEncoder<State = G::State>>,
+    reward: Box<dyn Reward<Event = G::Event>>,
+    policy: P,
+    learner: L,
+    engine_params: EngineParams,
+    start_dist: Box<dyn reinfors_core::StartDistribution<G::State>>,
+    pad_rows_to: Option<usize>,
+    infer_caches: Option<CacheSet>,
+    learn_players: Option<Vec<usize>>,
+) -> Engine<G, P, L>
+where
+    G::State: Send,
+{
+    let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
+        .with_start_distribution(start_dist)
+        .with_pad_rows_to(pad_rows_to);
+    match infer_caches {
+        Some(CacheSet::Exclusive(c)) => e = e.with_infer_caches(c),
+        Some(CacheSet::Sharded(c)) => e = e.with_sharded_infer_caches(c),
+        None => {}
+    }
+    if let Some(lp) = learn_players {
+        e = e.with_learn_players(&lp);
+    }
+    e
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_for_game<G: Game + Send + Sync + 'static>(
     game: G,
     enc: Box<dyn StateEncoder<State = G::State>>,
@@ -2657,20 +2675,18 @@ where
                 codec: codec.take(),
                 n_groups: engine_params.n_groups,
                 pad_rows_to,
-                inner: {
-                    let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
-                        .with_start_distribution(start_dist)
-                        .with_pad_rows_to(pad_rows_to);
-                    match infer_caches {
-                        Some(CacheSet::Exclusive(c)) => e = e.with_infer_caches(c),
-                        Some(CacheSet::Sharded(c)) => e = e.with_sharded_infer_caches(c),
-                        None => {}
-                    }
-                    if let Some(lp) = learn_players {
-                        e = e.with_learn_players(&lp);
-                    }
-                    e
-                },
+                inner: build_inner(
+                    game,
+                    enc,
+                    reward,
+                    policy,
+                    learner,
+                    engine_params,
+                    start_dist,
+                    pad_rows_to,
+                    infer_caches,
+                    learn_players,
+                ),
                 dim,
                 action_count,
                 n_heads,
@@ -2702,20 +2718,18 @@ where
                 codec: codec.take(),
                 n_groups: engine_params.n_groups,
                 pad_rows_to,
-                inner: {
-                    let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
-                        .with_start_distribution(start_dist)
-                        .with_pad_rows_to(pad_rows_to);
-                    match infer_caches {
-                        Some(CacheSet::Exclusive(c)) => e = e.with_infer_caches(c),
-                        Some(CacheSet::Sharded(c)) => e = e.with_sharded_infer_caches(c),
-                        None => {}
-                    }
-                    if let Some(lp) = learn_players {
-                        e = e.with_learn_players(&lp);
-                    }
-                    e
-                },
+                inner: build_inner(
+                    game,
+                    enc,
+                    reward,
+                    policy,
+                    learner,
+                    engine_params,
+                    start_dist,
+                    pad_rows_to,
+                    infer_caches,
+                    learn_players,
+                ),
                 dim,
                 action_count,
                 n_heads: 1,
@@ -2760,20 +2774,18 @@ where
                 codec: codec.take(),
                 n_groups: engine_params.n_groups,
                 pad_rows_to,
-                inner: {
-                    let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
-                        .with_start_distribution(start_dist)
-                        .with_pad_rows_to(pad_rows_to);
-                    match infer_caches {
-                        Some(CacheSet::Exclusive(c)) => e = e.with_infer_caches(c),
-                        Some(CacheSet::Sharded(c)) => e = e.with_sharded_infer_caches(c),
-                        None => {}
-                    }
-                    if let Some(lp) = learn_players {
-                        e = e.with_learn_players(&lp);
-                    }
-                    e
-                },
+                inner: build_inner(
+                    game,
+                    enc,
+                    reward,
+                    policy,
+                    learner,
+                    engine_params,
+                    start_dist,
+                    pad_rows_to,
+                    infer_caches,
+                    learn_players,
+                ),
                 dim,
                 action_count,
                 n_heads: 1,
@@ -2817,20 +2829,18 @@ where
                 codec: codec.take(),
                 n_groups: engine_params.n_groups,
                 pad_rows_to,
-                inner: {
-                    let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
-                        .with_start_distribution(start_dist)
-                        .with_pad_rows_to(pad_rows_to);
-                    match infer_caches {
-                        Some(CacheSet::Exclusive(c)) => e = e.with_infer_caches(c),
-                        Some(CacheSet::Sharded(c)) => e = e.with_sharded_infer_caches(c),
-                        None => {}
-                    }
-                    if let Some(lp) = learn_players {
-                        e = e.with_learn_players(&lp);
-                    }
-                    e
-                },
+                inner: build_inner(
+                    game,
+                    enc,
+                    reward,
+                    policy,
+                    learner,
+                    engine_params,
+                    start_dist,
+                    pad_rows_to,
+                    infer_caches,
+                    learn_players,
+                ),
                 dim,
                 action_count,
                 n_heads: 1,
@@ -2847,20 +2857,18 @@ where
                 codec: codec.take(),
                 n_groups: engine_params.n_groups,
                 pad_rows_to,
-                inner: {
-                    let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
-                        .with_start_distribution(start_dist)
-                        .with_pad_rows_to(pad_rows_to);
-                    match infer_caches {
-                        Some(CacheSet::Exclusive(c)) => e = e.with_infer_caches(c),
-                        Some(CacheSet::Sharded(c)) => e = e.with_sharded_infer_caches(c),
-                        None => {}
-                    }
-                    if let Some(lp) = learn_players {
-                        e = e.with_learn_players(&lp);
-                    }
-                    e
-                },
+                inner: build_inner(
+                    game,
+                    enc,
+                    reward,
+                    policy,
+                    learner,
+                    engine_params,
+                    start_dist,
+                    pad_rows_to,
+                    infer_caches,
+                    learn_players,
+                ),
                 dim,
                 action_count,
                 n_heads,
@@ -2923,28 +2931,21 @@ fn build_engine(
                 )),
                 None => Box::new(AlwaysInitialState),
             };
+            let game = Snake {
+                num_snakes,
+                grid_size,
+                initial_length,
+                play_to_last,
+                win_food_lead,
+                initial_food_count,
+                max_ticks,
+            };
             build_for_game(
-                Snake {
-                    num_snakes,
-                    grid_size,
-                    initial_length,
-                    play_to_last,
-                    win_food_lead,
-                    initial_food_count,
-                    max_ticks,
-                },
+                game.clone(),
                 Box::new(EgocentricSnake { grid_size }),
                 Box::new(reward),
                 start_dist,
-                Some(Box::new(Snake {
-                    num_snakes,
-                    grid_size,
-                    initial_length,
-                    play_to_last,
-                    win_food_lead,
-                    initial_food_count,
-                    max_ticks,
-                })),
+                Some(Box::new(game)),
                 policy,
                 learner,
                 engine_params,
@@ -2969,11 +2970,11 @@ fn build_engine(
         (GameSpec::Chess { max_ticks, encoder }, RewardBox::Chess(reward)) => {
             let (game, enc) = chess_parts(max_ticks, encoder);
             build_for_game(
-                game,
+                game.clone(),
                 enc,
                 Box::new(reward),
                 Box::new(AlwaysInitialState),
-                Some(Box::new(chess_parts(max_ticks, encoder).0)),
+                Some(Box::new(game)),
                 policy,
                 learner,
                 engine_params,
@@ -2982,19 +2983,22 @@ fn build_engine(
                 learn_players,
             )
         }
-        (GameSpec::Backgammon { max_ticks }, RewardBox::Backgammon(reward)) => build_for_game(
-            Backgammon { max_ticks },
-            Box::new(BackgammonTesauro),
-            Box::new(reward),
-            Box::new(AlwaysInitialState),
-            Some(Box::new(Backgammon { max_ticks })),
-            policy,
-            learner,
-            engine_params,
-            pad_rows_to,
-            infer_caches,
-            learn_players,
-        ),
+        (GameSpec::Backgammon { max_ticks }, RewardBox::Backgammon(reward)) => {
+            let game = Backgammon { max_ticks };
+            build_for_game(
+                game.clone(),
+                Box::new(BackgammonTesauro),
+                Box::new(reward),
+                Box::new(AlwaysInitialState),
+                Some(Box::new(game)),
+                policy,
+                learner,
+                engine_params,
+                pad_rows_to,
+                infer_caches,
+                learn_players,
+            )
+        }
         (
             GameSpec::TexasHoldem {
                 num_players,
@@ -3003,42 +3007,43 @@ fn build_engine(
                 big_blind,
             },
             RewardBox::Holdem(reward),
-        ) => build_for_game(
-            TexasHoldem {
+        ) => {
+            let game = TexasHoldem {
                 num_players,
                 stack,
                 small_blind,
                 big_blind,
-            },
-            Box::new(HoldemEgocentric { num_players, stack }),
-            Box::new(reward),
-            Box::new(AlwaysInitialState),
-            Some(Box::new(TexasHoldem {
-                num_players,
-                stack,
-                small_blind,
-                big_blind,
-            })),
-            policy,
-            learner,
-            engine_params,
-            pad_rows_to,
-            infer_caches,
-            learn_players,
-        ),
-        (GameSpec::KuhnPoker { players }, RewardBox::Holdem(reward)) => build_for_game(
-            KuhnPoker { players },
-            Box::new(KuhnEncoder { players }),
-            Box::new(reward),
-            Box::new(AlwaysInitialState),
-            Some(Box::new(KuhnPoker { players })),
-            policy,
-            learner,
-            engine_params,
-            pad_rows_to,
-            infer_caches,
-            learn_players,
-        ),
+            };
+            build_for_game(
+                game.clone(),
+                Box::new(HoldemEgocentric { num_players, stack }),
+                Box::new(reward),
+                Box::new(AlwaysInitialState),
+                Some(Box::new(game)),
+                policy,
+                learner,
+                engine_params,
+                pad_rows_to,
+                infer_caches,
+                learn_players,
+            )
+        }
+        (GameSpec::KuhnPoker { players }, RewardBox::Holdem(reward)) => {
+            let game = KuhnPoker { players };
+            build_for_game(
+                game.clone(),
+                Box::new(KuhnEncoder { players }),
+                Box::new(reward),
+                Box::new(AlwaysInitialState),
+                Some(Box::new(game)),
+                policy,
+                learner,
+                engine_params,
+                pad_rows_to,
+                infer_caches,
+                learn_players,
+            )
+        }
         (GameSpec::LeducPoker, RewardBox::Holdem(reward)) => build_for_game(
             LeducPoker,
             Box::new(LeducEncoder),
@@ -3059,27 +3064,26 @@ fn build_engine(
                 max_ticks,
             },
             RewardBox::GridWorld(reward),
-        ) => build_for_game(
-            GridWorld {
+        ) => {
+            let game = GridWorld {
                 size,
                 goal,
                 max_ticks,
-            },
-            Box::new(GridWorldPlanes { size, goal }),
-            Box::new(reward),
-            Box::new(AlwaysInitialState),
-            Some(Box::new(GridWorld {
-                size,
-                goal,
-                max_ticks,
-            })),
-            policy,
-            learner,
-            engine_params,
-            pad_rows_to,
-            infer_caches,
-            learn_players,
-        ),
+            };
+            build_for_game(
+                game.clone(),
+                Box::new(GridWorldPlanes { size, goal }),
+                Box::new(reward),
+                Box::new(AlwaysInitialState),
+                Some(Box::new(game)),
+                policy,
+                learner,
+                engine_params,
+                pad_rows_to,
+                infer_caches,
+                learn_players,
+            )
+        }
         _ => unreachable!("build_reward returns the reward variant matching the game"),
     }
 }
@@ -4027,9 +4031,9 @@ fn build_env(game: GameSpec, reward: Option<PyReward>, seed: u64) -> PyResult<Bo
             let (game, enc) = chess_parts(max_ticks, encoder);
             let obs_shape = enc.obs_shape();
             Box::new(EnvImpl {
+                codec: Some(Box::new(game.clone())),
                 inner: Env::new(game, enc, seed),
                 obs_shape,
-                codec: Some(Box::new(chess_parts(max_ticks, encoder).0)),
                 reward: reward.map(|rb| match rb {
                     RewardBox::Chess(r) => Box::new(r) as Box<dyn Reward<Event = ChessEvent>>,
                     _ => unreachable!("build_reward returns the reward variant matching the game"),

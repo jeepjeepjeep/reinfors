@@ -302,6 +302,7 @@ impl StateEncoder for EgocentricSnake {
     }
 }
 
+#[derive(Clone)]
 pub struct Snake {
     pub num_snakes: usize,
     pub grid_size: i32,

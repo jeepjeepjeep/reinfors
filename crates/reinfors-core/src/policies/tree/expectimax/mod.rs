@@ -5,7 +5,7 @@ pub mod search;
 use crate::codec::bytes::Reader;
 use crate::encoder::StateEncoder;
 use crate::game::{Game, Rng};
-use crate::policy::{fold_search_stats, ChanceMode, Policy};
+use crate::policy::{fold_search_stats, thompson_head_from_u64, ChanceMode, Policy};
 use crate::reward::Reward;
 use crate::rollout::engine::CollectStats;
 use crate::rollout::evaluator::Evaluator;
@@ -70,13 +70,7 @@ impl Policy for SelectiveExpectimax {
     }
 
     fn policy_state_from_u64(&self, v: u64) -> Result<usize, String> {
-        if v as usize >= self.n_heads {
-            return Err(format!(
-                "Thompson head {v} out of range for {} heads",
-                self.n_heads
-            ));
-        }
-        Ok(v as usize)
+        thompson_head_from_u64(v, self.n_heads)
     }
 
     fn begin_episode(&self, rng: &mut dyn Rng) -> usize {

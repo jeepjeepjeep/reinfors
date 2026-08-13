@@ -8,13 +8,13 @@ from typing import Any
 import numpy as np
 import pytest
 import reinfors as rf
+from conftest import az_zeros_infer
 
 _A = 7  # connect4 columns
 
 
-def _uniform_infer(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    # The AlphaZero contract: (policy_logits (N, A), values (N,)) — no dummy heads, one forward.
-    return np.zeros((arr.shape[0], _A)), np.zeros(arr.shape[0])
+# The AlphaZero contract: (policy_logits (N, A), values (N,)) — no dummy heads, one forward.
+_uniform_infer = az_zeros_infer(_A)
 
 
 def _engine(

@@ -7,7 +7,7 @@ use crate::encoder::{ActionView, StateEncoder};
 use crate::game::{Actor, ChanceDist, Game, Rng, Transition};
 use crate::policies::tree::expectimax::search::SearchStats;
 use crate::policies::tree::expectimax::{decode_search_eval, encode_search_eval, SearchEvaluation};
-use crate::policy::{argmax, fold_search_stats, Policy, MAX_ENUMERATED_OUTCOMES};
+use crate::policy::{argmax, fold_search_stats, ply_from_u64, Policy, MAX_ENUMERATED_OUTCOMES};
 use crate::reward::Reward;
 use crate::rng::{dirichlet, SplitMix64};
 use crate::rollout::engine::CollectStats;
@@ -1713,11 +1713,7 @@ impl Policy for Mcts {
     }
 
     fn policy_state_from_u64(&self, v: u64) -> Result<u32, String> {
-        // select() advances the counter, so the maximum value must stay unreachable.
-        match u32::try_from(v) {
-            Ok(x) if x < u32::MAX => Ok(x),
-            _ => Err(format!("acting-ply counter {v} out of range")),
-        }
+        ply_from_u64(v)
     }
 
     fn begin_episode(&self, _rng: &mut dyn Rng) -> u32 {
