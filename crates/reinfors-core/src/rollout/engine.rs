@@ -85,18 +85,13 @@ impl<S> StartAccess<'_, '_, S> {
 }
 
 /// Engine-level rollout parameters.
-/// Plain-data engine configuration. Construct with functional update so added
-/// fields never break call sites: `EngineParams { n_games: 64, ..Default::default() }`.
-/// Resources and references (start distributions, caches, learn players) configure
-/// through the `with_*` builders instead.
 pub struct EngineParams {
     pub n_games: usize,
     pub seed: u64,
     /// 1 = the classic lockstep collect; 2 = grouped collect (two game groups on worker
     /// threads so search overlaps inference).
     pub n_groups: usize,
-    /// Fix shared-callback call shapes at exactly N rows (None = off); see the
-    /// inference contract's input section.
+    /// Fixed call shape in rows (None = off); see the inference contract.
     pub pad_rows_to: Option<usize>,
 }
 
