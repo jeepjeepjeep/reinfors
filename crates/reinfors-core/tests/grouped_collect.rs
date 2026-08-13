@@ -97,7 +97,10 @@ fn infer(_p: usize, obs: Vec<f32>, n: usize) -> Vec<f64> {
 #[test]
 fn grouped_collect_is_deterministic_per_seed() {
     let runs: Vec<_> = (0..2)
-        .map(|_| engine(4, 2, 11).collect_grouped(24, InferMode::Shared, infer))
+        .map(|_| {
+            let host = reinfors_core::ServiceHost::spawn(infer);
+            engine(4, 2, 11).collect_grouped_hosted(24, InferMode::Shared, &host)
+        })
         .collect();
     let (a, sa) = &runs[0];
     let (b, sb) = &runs[1];
@@ -114,8 +117,9 @@ fn grouped_collect_is_deterministic_per_seed() {
 }
 
 #[test]
-fn hosted_collect_matches_scoped() {
-    let (a, sa) = engine(4, 2, 11).collect_grouped(24, InferMode::Shared, infer);
+fn hosted_results_are_host_independent() {
+    let one = reinfors_core::ServiceHost::spawn(infer);
+    let (a, sa) = engine(4, 2, 11).collect_grouped_hosted(24, InferMode::Shared, &one);
     let host = reinfors_core::ServiceHost::spawn(infer);
     let (b, sb) = engine(4, 2, 11).collect_grouped_hosted(24, InferMode::Shared, &host);
     assert!(!a.is_empty());
@@ -167,11 +171,12 @@ fn hosted_collect_callback_panic_reports_and_host_survives() {
 
 #[test]
 fn padded_grouped_collect_matches_unpadded() {
-    let (a, sa) = engine(4, 2, 11).collect_grouped(24, InferMode::Shared, infer);
-    let (b, sb) =
-        engine(4, 2, 11)
-            .with_pad_rows_to(Some(8))
-            .collect_grouped(24, InferMode::Shared, infer);
+    let h1 = reinfors_core::ServiceHost::spawn(infer);
+    let (a, sa) = engine(4, 2, 11).collect_grouped_hosted(24, InferMode::Shared, &h1);
+    let h2 = reinfors_core::ServiceHost::spawn(infer);
+    let (b, sb) = engine(4, 2, 11)
+        .with_pad_rows_to(Some(8))
+        .collect_grouped_hosted(24, InferMode::Shared, &h2);
     assert!(!a.is_empty());
     assert_eq!(a.len(), b.len());
     for (ra, rb) in a.iter().zip(&b) {
@@ -189,7 +194,8 @@ fn padded_grouped_collect_matches_unpadded() {
 
 #[test]
 fn grouped_collect_produces_sane_telemetry() {
-    let (records, stats) = engine(4, 2, 3).collect_grouped(16, InferMode::Shared, infer);
+    let host = reinfors_core::ServiceHost::spawn(infer);
+    let (records, stats) = engine(4, 2, 3).collect_grouped_hosted(16, InferMode::Shared, &host);
     assert!(records.len() >= 16);
     assert!(stats.infer_rows > 0);
     assert!(stats.infer_calls > 0);
@@ -197,7 +203,7 @@ fn grouped_collect_produces_sane_telemetry() {
 }
 
 #[test]
-#[should_panic(expected = "collect via collect_grouped")]
+#[should_panic(expected = "collect via collect_grouped_hosted")]
 fn plain_collect_rejects_grouped_engine() {
     let _ = engine(4, 2, 0).collect(8, |obs, n| infer(0, obs, n));
 }
@@ -205,13 +211,15 @@ fn plain_collect_rejects_grouped_engine() {
 #[test]
 #[should_panic(expected = "single shared infer callback")]
 fn grouped_collect_rejects_per_player_mode() {
-    let _ = engine(4, 2, 0).collect_grouped(8, InferMode::PerPlayer, infer);
+    let host = reinfors_core::ServiceHost::spawn(infer);
+    let _ = engine(4, 2, 0).collect_grouped_hosted(8, InferMode::PerPlayer, &host);
 }
 
 #[test]
 #[should_panic(expected = "requires n_groups=2")]
 fn grouped_collect_rejects_ungrouped_engine() {
-    let _ = engine(4, 1, 0).collect_grouped(8, InferMode::Shared, infer);
+    let host = reinfors_core::ServiceHost::spawn(infer);
+    let _ = engine(4, 1, 0).collect_grouped_hosted(8, InferMode::Shared, &host);
 }
 
 #[test]
@@ -286,8 +294,9 @@ fn worker_panic_cancels_the_peer_group_promptly() {
             n_groups: 2,
         },
     );
+    let host = reinfors_core::ServiceHost::spawn(infer);
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        eng.collect_grouped(50_000, InferMode::Shared, infer)
+        eng.collect_grouped_hosted(50_000, InferMode::Shared, &host)
     }));
     let payload = match res {
         Err(payload) => payload,
@@ -305,9 +314,9 @@ fn worker_panic_cancels_the_peer_group_promptly() {
 #[test]
 #[should_panic(expected = "grouped collect infer callback failed")]
 fn callback_panic_surfaces_without_hanging() {
-    let _ = engine(4, 2, 1).collect_grouped(
-        16,
-        InferMode::Shared,
-        |_p: usize, _o: Vec<f32>, _n: usize| -> Vec<f64> { panic!("boom") },
-    );
+    let host =
+        reinfors_core::ServiceHost::spawn(|_p: usize, _o: Vec<f32>, _n: usize| -> Vec<f64> {
+            panic!("boom")
+        });
+    let _ = engine(4, 2, 1).collect_grouped_hosted(16, InferMode::Shared, &host);
 }

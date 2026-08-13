@@ -299,7 +299,7 @@ where
     {
         assert_eq!(
             self.n_groups, 1,
-            "n_groups=2 engines collect via collect_grouped"
+            "n_groups=2 engines collect via collect_grouped_hosted"
         );
         let mut out: Vec<L::Record> = Vec::new();
         let mut stats = CollectStats::default();
@@ -386,31 +386,11 @@ where
         (out, stats)
     }
 
-    /// Grouped collect: each group runs the classic collect loop on its own worker thread,
-    /// with inference forwarded to a service thread owning the callback for the duration
-    /// of the call (a fresh [`ServiceHost`] per call; use [`Self::collect_grouped_hosted`]
-    /// to keep one callback thread across calls). Run-to-run nondeterministic when shared
-    /// state is live; reproduce anomalies with `n_groups=1`.
-    pub fn collect_grouped<F>(
-        &mut self,
-        n_records: usize,
-        mode: InferMode,
-        infer: F,
-    ) -> (Vec<L::Record>, CollectStats)
-    where
-        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64> + Send + 'static,
-        P: Sync,
-        L: Sync,
-        P::PolicyState: Send,
-        P::Evaluation: Send,
-        L::Record: Send,
-    {
-        let host = ServiceHost::spawn(infer);
-        self.collect_grouped_hosted(n_records, mode, &host)
-    }
-
-    /// Grouped collect served by a resident [`ServiceHost`]: identical scheduling to
-    /// [`Self::collect_grouped`], but the callback thread is fixed across collects.
+    /// Grouped collect: each group runs the classic collect loop on its own worker
+    /// thread, with inference forwarded to the [`ServiceHost`]'s resident thread —
+    /// every callback invocation across every collect using the same host arrives on
+    /// that one thread. Run-to-run nondeterministic when shared state is live;
+    /// reproduce anomalies with `n_groups=1`.
     pub fn collect_grouped_hosted(
         &mut self,
         n_records: usize,
@@ -426,10 +406,13 @@ where
     {
         use crate::rollout::infer_service::{InferRequest, ServiceState};
 
-        assert_eq!(self.n_groups, 2, "collect_grouped requires n_groups=2");
+        assert_eq!(
+            self.n_groups, 2,
+            "collect_grouped_hosted requires n_groups=2"
+        );
         assert!(
             matches!(mode, InferMode::Shared),
-            "collect_grouped supports a single shared infer callback"
+            "collect_grouped_hosted supports a single shared infer callback"
         );
         if n_records == 0 {
             return (Vec::new(), CollectStats::default());
