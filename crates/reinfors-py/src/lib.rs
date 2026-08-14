@@ -2680,6 +2680,34 @@ fn check_search_budgets(policy: &PolicySpec) -> PyResult<()> {
     Ok(())
 }
 
+/// Per-call buffers are eagerly allocated (and zero-filled on the fallback path), so every
+/// composition point must bound them by BYTES before any collect/choose can run: observations
+/// stage rows x dim f32, callback outputs rows x heads x (actions+1) f64 (stride upper bound
+/// across both infer layouts).
+fn check_call_buffers(
+    knob: &str,
+    rows: usize,
+    dim: usize,
+    n_heads: usize,
+    action_count: usize,
+) -> PyResult<()> {
+    const MAX_BUFFER_BYTES: usize = 1 << 29;
+    let in_bytes = rows.checked_mul(dim).and_then(|t| t.checked_mul(4));
+    let out_bytes = rows
+        .checked_mul(n_heads.max(1))
+        .and_then(|t| t.checked_mul(action_count + 1))
+        .and_then(|t| t.checked_mul(8));
+    match (in_bytes, out_bytes) {
+        (Some(i), Some(o)) if i <= MAX_BUFFER_BYTES && o <= MAX_BUFFER_BYTES => Ok(()),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{knob} ({rows}) is too large for this composition: observation input \
+             (rows x {dim} f32) and callback output (rows x {n_heads} heads x \
+             {action_count} actions f64) must each stay under {} bytes",
+            MAX_BUFFER_BYTES
+        ))),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_for_game<G: Game + Send + Sync + 'static>(
     game: G,
@@ -2708,26 +2736,10 @@ where
         | PolicySpec::EpsilonGreedyQ { n_heads, .. } => *n_heads,
         _ => 1,
     };
-    // per-call buffers scale with rows × these factors; bound them with checked products
-    // so no accepted composition can later allocate past 2^31 elements or overflow
-    let buffer_cell = |knob: &str, rows: usize| -> PyResult<()> {
-        let obs = rows.checked_mul(dim);
-        let out = rows
-            .checked_mul(n_heads)
-            .and_then(|t| t.checked_mul(action_count));
-        match (obs, out) {
-            (Some(o), Some(t)) if o <= 1 << 31 && t <= 1 << 31 => Ok(()),
-            _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "{knob} ({rows}) is too large for this composition: rows x observation \
-                 size ({dim}) and rows x n_heads ({n_heads}) x actions ({action_count}) \
-                 must each stay within 2^31 elements"
-            ))),
-        }
-    };
     check_search_budgets(&policy)?;
-    buffer_cell("n_games", engine_params.n_games)?;
+    check_call_buffers("n_games", engine_params.n_games, dim, n_heads, action_count)?;
     if let Some(pad) = engine_params.pad_rows_to {
-        buffer_cell("pad_rows_to", pad)?;
+        check_call_buffers("pad_rows_to", pad, dim, n_heads, action_count)?;
     }
     if let Some(lp) = &learn_players {
         if lp.is_empty() {
@@ -5397,6 +5409,8 @@ impl PolicyHandle {
         };
         let dim = borrowed[0].inner.obs_dim();
         let action_count = borrowed[0].inner.action_count();
+        check_search_budgets(&self.spec)?;
+        check_call_buffers("envs", envs.len(), dim, expected_heads, action_count)?;
         let callbacks = vec![infer.clone().unbind()];
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let callback_err = std::sync::Arc::new(std::sync::Mutex::new(None));

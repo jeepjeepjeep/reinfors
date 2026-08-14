@@ -80,8 +80,10 @@ def _zeros_az(a: int) -> Any:
     return infer
 
 
-def _collect(game: Any, policy: Any, learner: Any, infer: Any) -> None:
-    rf.Engine(game, rf.Reward(), policy, learner, n_games=2, seed=0).collect(1, infer)
+def _collect(game: Any, policy: Any, learner: Any, infer: Any, execute: bool = True) -> None:
+    engine = rf.Engine(game, rf.Reward(), policy, learner, n_games=2, seed=0)
+    if execute:
+        engine.collect(1, infer)
 
 
 def _env_use(env: Any) -> None:
@@ -91,52 +93,67 @@ def _env_use(env: Any) -> None:
 
 
 # composition hooks: handles defer some validation to attachment/use, so a successful
-# construction must also survive an engine build + one collect
+# construction must also survive an engine build; `execute` additionally runs one collect
 USE: dict[tuple[str, str], Any] = {
-    ("policies", "mcts"): lambda p: _collect(rf.games.Connect4(), p, rf.learners.TreeStrap(), _zeros_q(7)),
-    ("policies", "alphazero"): lambda p: _collect(rf.games.Connect4(), p, rf.learners.AlphaZero(), _zeros_az(7)),
-    ("policies", "minimax"): lambda p: _collect(rf.games.Connect4(), p, rf.learners.TreeStrap(), _zeros_q(7)),
-    ("policies", "selective_expectimax"): lambda p: _collect(rf.games.Snake(), p, rf.learners.TreeStrap(), _zeros_q(3)),
-    ("policies", "epsilon_greedy_q"): lambda p: _collect(rf.games.GridWorld(), p, rf.learners.Dqn(), _zeros_q(4)),
-    ("learners", "treestrap"): lambda le: _collect(
-        rf.games.Connect4(), rf.policies.Mcts(num_simulations=2), le, _zeros_q(7)
+    ("policies", "mcts"): lambda p, ex: _collect(rf.games.Connect4(), p, rf.learners.TreeStrap(), _zeros_q(7), ex),
+    ("policies", "alphazero"): lambda p, ex: _collect(
+        rf.games.Connect4(), p, rf.learners.AlphaZero(), _zeros_az(7), ex
     ),
-    ("learners", "dqn"): lambda le: _collect(rf.games.GridWorld(), rf.policies.EpsilonGreedyQ(), le, _zeros_q(4)),
-    ("learners", "alphazero"): lambda le: _collect(
-        rf.games.Connect4(), rf.policies.AlphaZero(num_simulations=2), le, _zeros_az(7)
+    ("policies", "minimax"): lambda p, ex: _collect(rf.games.Connect4(), p, rf.learners.TreeStrap(), _zeros_q(7), ex),
+    ("policies", "selective_expectimax"): lambda p, ex: _collect(
+        rf.games.Snake(), p, rf.learners.TreeStrap(), _zeros_q(3), ex
     ),
-    ("chance_modes", "always_resample"): lambda m: _collect(
+    ("policies", "epsilon_greedy_q"): lambda p, ex: _collect(
+        rf.games.GridWorld(), p, rf.learners.Dqn(), _zeros_q(4), ex
+    ),
+    ("learners", "treestrap"): lambda le, ex: _collect(
+        rf.games.Connect4(), rf.policies.Mcts(num_simulations=2), le, _zeros_q(7), ex
+    ),
+    ("learners", "dqn"): lambda le, ex: _collect(
+        rf.games.GridWorld(), rf.policies.EpsilonGreedyQ(), le, _zeros_q(4), ex
+    ),
+    ("learners", "alphazero"): lambda le, ex: _collect(
+        rf.games.Connect4(), rf.policies.AlphaZero(num_simulations=2), le, _zeros_az(7), ex
+    ),
+    ("chance_modes", "always_resample"): lambda m, ex: _collect(
         rf.games.Backgammon(),
         rf.policies.AlphaZero(num_simulations=2, chance=m),
         rf.learners.AlphaZero(),
         _zeros_az(1352),
+        ex,
     ),
-    ("chance_modes", "committed"): lambda m: _collect(
+    ("chance_modes", "committed"): lambda m, ex: _collect(
         rf.games.Backgammon(),
         rf.policies.AlphaZero(num_simulations=2, chance=m),
         rf.learners.AlphaZero(),
         _zeros_az(1352),
+        ex,
     ),
-    ("chance_modes", "expand_all"): lambda m: _collect(
+    ("chance_modes", "expand_all"): lambda m, ex: _collect(
         rf.games.Backgammon(),
         rf.policies.AlphaZero(num_simulations=2, chance=m),
         rf.learners.AlphaZero(),
         _zeros_az(1352),
+        ex,
     ),
-    ("noise", "dirichlet"): lambda n: _collect(
-        rf.games.Connect4(), rf.policies.AlphaZero(num_simulations=2, noise=n), rf.learners.AlphaZero(), _zeros_az(7)
+    ("noise", "dirichlet"): lambda n, ex: _collect(
+        rf.games.Connect4(),
+        rf.policies.AlphaZero(num_simulations=2, noise=n),
+        rf.learners.AlphaZero(),
+        _zeros_az(7),
+        ex,
     ),
 }
 USE_REQUIRED = {"policies", "learners", "chance_modes", "noise"}
 
-# accepted-but-huge budgets make the composed collect take minutes, not expose new
-# panic surface; composition itself is still probed at the values below the threshold
+# accepted-but-huge budgets make the composed collect take minutes, not expose new panic
+# surface, so those cases compose the engine but skip the collect
 SLOW_AT_SCALE = {"num_simulations", "expansion_budget", "depth", "max_depth", "samples", "top_k"}
 
 
 def _use_for(mod: Any, name: str, is_game: bool) -> Any:
     if is_game:
-        return _play
+        return lambda g, ex: _play(g)
     tag = mod.__name__.rsplit(".", 1)[-1]
     if tag in USE_REQUIRED:
         assert (tag, name) in USE, f"{tag}.{name} has no composition hook: enroll it in USE"
@@ -151,9 +168,9 @@ def _ctors() -> list[tuple[Any, Any, bool]]:
         for name in mod.registered()
     ]
     out += [
-        (rf.solvers.Cfr, lambda s: s.iterate(1), False),
+        (rf.solvers.Cfr, lambda s, ex: s.iterate(1), False),
         (rf.solvers.DeepCfr, None, False),
-        (rf.Env, _env_use, False),
+        (rf.Env, lambda e, ex: _env_use(e), False),
         (rf.Engine, None, False),
         (rf.starts.RandomStartingMoves, None, False),
     ]
@@ -217,11 +234,12 @@ def test_no_public_input_reaches_a_rust_panic(ctor: Any, use: Any, param: str, v
     except BaseException as exc:  # PanicException derives from BaseException by design
         assert type(exc).__name__ != "PanicException", f"Rust panic escaped {ctor}({param}={value!r}): {exc}"
         return
-    if use is None or (param in SLOW_AT_SCALE and isinstance(value, int) and value > 4096):
+    if use is None:
         return
+    execute = not (param in SLOW_AT_SCALE and isinstance(value, int) and value > 4096)
     try:
         # construction passing is not enough: latent panics fire at compose/encode/step time
-        use(made)
+        use(made, execute)
     except BaseException as exc:
         assert type(exc).__name__ != "PanicException", f"Rust panic escaped using {ctor}({param}={value!r}): {exc}"
 
@@ -285,13 +303,40 @@ def test_buffer_ceiling_is_dimension_aware() -> None:
     env = rf.Env(rf.games.Chess(encoder=rf.encoders.AlphaZeroChess(history_length=256)), rf.Reward(), seed=0)
     env.reset()
     dim = env.observe(0).size
-    limit = 2**31 // dim
+    # the byte budget: rows x dim f32 in, rows x heads x (actions+1) f64 out, 2^29 bytes each
+    limit = min((2**29 // 4) // dim, (2**29 // 8) // (4672 + 1))
     assert limit < 2**16  # the dimension ceiling must bind below the flat cap here
     chess_engine(n_games=2, pad_rows_to=limit)
     with pytest.raises(ValueError, match="too large for this composition"):
         chess_engine(n_games=2, pad_rows_to=limit + 1)
     with pytest.raises(ValueError, match="too large for this composition"):
         chess_engine(n_games=limit + 1)
+
+
+def test_search_budget_caps_boundary() -> None:
+    def compose(policy: Any) -> None:
+        rf.Engine(rf.games.Connect4(), rf.Reward(), policy, rf.learners.TreeStrap(), n_games=1)
+
+    compose(rf.policies.Mcts(num_simulations=2**20))
+    with pytest.raises(ValueError, match="num_simulations must be <="):
+        compose(rf.policies.Mcts(num_simulations=2**20 + 1))
+    with pytest.raises(ValueError, match="chance samples must be <="):
+        compose(rf.policies.Mcts(chance=rf.chance_modes.Committed(samples=2**20 + 1)))
+    rf.Engine(rf.games.GridWorld(), rf.Reward(), rf.policies.EpsilonGreedyQ(n_heads=4096), rf.learners.Dqn(), n_games=1)
+    with pytest.raises(ValueError, match="n_heads must be <="):
+        rf.Engine(
+            rf.games.GridWorld(), rf.Reward(), rf.policies.EpsilonGreedyQ(n_heads=4097), rf.learners.Dqn(), n_games=1
+        )
+
+
+def test_choose_validates_like_engine_composition() -> None:
+    # PolicyHandle.choose is its own composition point; unchecked handle params must be
+    # rejected there too, not panic in the callback layer
+    policy = rf.policies.EpsilonGreedyQ(n_heads=2**63)
+    env = rf.Env(rf.games.GridWorld(), rf.Reward(), seed=0)
+    env.reset()
+    with pytest.raises(ValueError, match="n_heads must be <="):
+        policy.choose([env], lambda obs: np.zeros((obs.shape[0], 1, 4)), gamma=0.99)
 
 
 def test_unknown_reward_weight_rejected_at_attach() -> None:
