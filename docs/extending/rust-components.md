@@ -76,9 +76,9 @@ How the engine and the policies consume chance, so a game knows what it is signi
 - **The rollout samples real chance.** Root chance chains are realized before any policy sees a
   state (`realize_initial_state`), and after every played action the episode samples the complete
   chance chain to the next decision or terminal state (`step_env`); both are cycle-guarded. The
-  actual trajectory always draws from the game's declared distributions — policies never influence
-  it, and non-search policies (e.g. DQN's) meet chance only this way. No policy ever sees a chance
-  state as its decision root; MCTS asserts exactly that.
+  policy chooses actions, but chance outcomes are always sampled from the game's declared
+  distributions, and non-search policies (e.g. DQN's) meet chance only this way. No policy ever
+  sees a chance state as its decision root; MCTS asserts exactly that.
 - **Search policies additionally choose how to model hypothetical chance during planning**, via
   their [chance mode](../catalogue/algorithms.md): MCTS / AlphaZero expand explicit chance nodes
   inside the tree; SelectiveExpectimax applies its chance mode while flattening chance chains along
