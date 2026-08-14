@@ -168,11 +168,11 @@ def test_arena_validates_its_knobs() -> None:
         External(lambda: None, timeout=-1.0)
 
 
-def test_gym_rejects_nonpositive_episode_limits() -> None:
+def test_gym_rejects_nonpositive_or_noninteger_episode_limits() -> None:
     pytest.importorskip("gymnasium")
     import reinfors.gym as rfg
 
-    for bad in (0, -1):
+    for bad in (0, -1, 1.5, float("nan"), float("inf"), True):
         with pytest.raises(ValueError, match="max_episode_steps"):
             rfg.make(rf.games.GridWorld(), max_episode_steps=bad)
 

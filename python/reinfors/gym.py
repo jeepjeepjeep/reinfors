@@ -88,6 +88,8 @@ def _episode_limit(max_episode_steps: int | None, game: Any) -> int | None:
     if max_episode_steps is None:
         horizon: int | None = game.truncation_horizon()
         return horizon
+    if not isinstance(max_episode_steps, int) or isinstance(max_episode_steps, bool):
+        raise ValueError(f"max_episode_steps must be an int, got {max_episode_steps!r}")
     if max_episode_steps < 1:
         raise ValueError("max_episode_steps must be >= 1")
     return max_episode_steps
