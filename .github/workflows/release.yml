@@ -1,9 +1,12 @@
 # Build release wheels for every platform and publish to PyPI.
 #
-# One-time setup (PyPI side): create the `reinfors` project's Trusted Publisher at
-# https://pypi.org/manage/account/publishing/ — GitHub owner `jeepjeepjeep`, repo `reinfors`,
-# workflow `release.yml`, and leave the "environment" field BLANK (this workflow uses none). No API
-# token/secret is needed; publishing is via OIDC.
+# One-time setup: create the `reinfors` project's Trusted Publisher at
+# https://pypi.org/manage/account/publishing/ (and its TestPyPI counterpart) — GitHub owner
+# `jeepjeepjeep`, repo `reinfors`, workflow `release.yml`, environment `pypi` (`testpypi` on TestPyPI).
+# No API token/secret is needed; publishing is via OIDC. In the repo, create GitHub environments
+# `pypi` and `testpypi` (Settings > Environments; needs the repo public on the free plan) and give
+# `pypi` a deployment tag policy of `v*` plus a required reviewer — publish jobs then pause for
+# approval and can only mint the OIDC token from release tags.
 #
 # To cut a release: bump `[workspace.package] version` in Cargo.toml (the single version source; maturin
 # reads it), merge, then publish a GitHub Release tagged `vX.Y.Z`. That fires this workflow, which builds
@@ -96,6 +99,7 @@ jobs:
     if: github.event_name == 'release' || inputs.publish == 'testpypi'
     needs: [wheels, sdist]
     runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'release' && 'pypi' || 'testpypi' }}
     permissions:
       id-token: write # OIDC for PyPI Trusted Publishing (no stored token)
     steps:
