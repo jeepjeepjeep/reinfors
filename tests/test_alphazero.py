@@ -313,6 +313,18 @@ def test_non_tuple_infer_names_the_contract() -> None:
     assert "got ndarray" in message
 
 
+def test_wrong_arity_tuple_reports_the_observed_length() -> None:
+    def three(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return np.zeros((arr.shape[0], _A)), np.zeros(arr.shape[0]), np.zeros(arr.shape[0])
+
+    with pytest.raises(TypeError) as error:
+        _engine().collect(10, three)
+    assert "got a 3-element tuple" in str(error.value)
+    with pytest.raises(TypeError) as error:
+        _engine().collect(10, lambda arr: (np.zeros((arr.shape[0], _A)),))
+    assert "got a 1-element tuple" in str(error.value)
+
+
 def test_rejects_unsupported_alphazero_dtype_with_observed_array() -> None:
     def bad_infer(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         return np.zeros((arr.shape[0], _A), dtype=np.int32), np.zeros(arr.shape[0])
