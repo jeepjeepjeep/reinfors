@@ -89,9 +89,6 @@ impl ChanceDist {
 }
 
 /// Finite-action game dynamics.
-///
-/// Chance contract: roots are realized past chance before any search runs, and each search
-/// family consumes `Actor::Chance` differently — see docs/extending/rust-components.md.
 pub trait Game {
     type State: Clone;
 
