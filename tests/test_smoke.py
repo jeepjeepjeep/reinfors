@@ -2,4 +2,6 @@ import reinfors
 
 
 def test_import_reaches_rust_core() -> None:
-    assert reinfors._reinfors.core_version() == "0.0.0"
+    v = reinfors._reinfors.core_version()
+    assert v and v.count(".") == 2
+    assert reinfors.__version__ == v
