@@ -5,6 +5,7 @@ episode), because latent config bugs panic at encode/step time, far from the con
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 import numpy as np
@@ -13,48 +14,88 @@ import reinfors as rf
 
 INT_EDGES = [-(2**63), -1, 0, 1, 2**31 - 1, 2**31, 2**63]  # 2**31-1 reaches Rust; 2**31 dies at pyo3 i32 conversion
 FLOAT_EDGES = [float("nan"), float("inf"), float("-inf"), -1e308, -1.0, 0.0]
+STR_EDGES = ["", "\x00", "not-a-registered-option", "a" * 4096]
+WRONG_TYPES: list[Any] = ["wrong-type", 3.5]
 
-# (constructor, is_game, {param: edge values}) — each param is perturbed alone, others at defaults.
-SWEEP: list[tuple[Any, bool, dict[str, list[Any]]]] = [
-    (
-        rf.games.Snake,
-        True,
-        {
-            "grid_size": INT_EDGES,
-            "initial_length": INT_EDGES,
-            "food": INT_EDGES,
-            "win_food_lead": INT_EDGES,
-            "max_ticks": INT_EDGES,
-            "num_snakes": INT_EDGES,
-        },
-    ),
-    (
-        rf.games.GridWorld,
-        True,
-        {"size": INT_EDGES, "goal_row": INT_EDGES, "goal_col": INT_EDGES, "max_ticks": INT_EDGES},
-    ),
-    (
-        rf.games.TexasHoldem,
-        True,
-        {
-            "num_players": INT_EDGES,
-            "stack": INT_EDGES,
-            "small_blind": INT_EDGES,
-            "big_blind": INT_EDGES,
-        },
-    ),
-    (rf.games.Chess, True, {"max_ticks": INT_EDGES}),
-    (rf.games.Backgammon, True, {"max_ticks": INT_EDGES}),
-    (rf.Reward, False, {"win": FLOAT_EDGES}),
-    (rf.chance_modes.Committed, False, {"samples": INT_EDGES}),
-    (rf.noise.Dirichlet, False, {"epsilon": FLOAT_EDGES, "alpha": FLOAT_EDGES}),
-    (rf.encoders.AlphaZeroChess, False, {"history_length": INT_EDGES}),
-    (rf.policies.Mcts, False, {"uct_c": FLOAT_EDGES, "temperature": FLOAT_EDGES}),
-    (rf.policies.AlphaZero, False, {"c_puct": FLOAT_EDGES, "temperature": FLOAT_EDGES}),
-    (rf.policies.SelectiveExpectimax, False, {"beta": FLOAT_EDGES, "opp_temperature": FLOAT_EDGES}),
-    (rf.learners.TreeStrap, False, {"gamma": FLOAT_EDGES, "outcome_weight": FLOAT_EDGES}),
-    (rf.learners.Dqn, False, {"bootstrap_p": FLOAT_EDGES}),
+# banks for params whose default (None/Ellipsis) hides the real type
+NONE_BANKS: dict[str, list[Any]] = {
+    "win_food_lead": INT_EDGES,
+    "goal_row": INT_EDGES,
+    "goal_col": INT_EDGES,
+    "temperature_drop": INT_EDGES,
+    "top_k": INT_EDGES,
+    "learn_players": [[-1], [0, 2**31], "wrong-type"],
+    "encoder": WRONG_TYPES,
+    "chance": WRONG_TYPES,
+    "noise": WRONG_TYPES,
+    "reward": WRONG_TYPES,
+}
+
+REQUIRED: dict[str, dict[str, Any]] = {
+    "Cfr": {"game": rf.games.KuhnPoker},
+    "DeepCfr": {"game": rf.games.KuhnPoker},
+    "Env": {"game": rf.games.Connect4},
+    "Engine": {
+        "game": rf.games.Connect4,
+        "reward": rf.Reward,
+        "policy": lambda: rf.policies.Mcts(num_simulations=2),
+        "learner": rf.learners.TreeStrap,
+        "n_games": lambda: 1,
+    },
+    "RandomStartingMoves": {"n_moves": lambda: 1},
+}
+
+MODULES: list[tuple[Any, bool]] = [
+    (rf.games, True),
+    (rf.encoders, False),
+    (rf.policies, False),
+    (rf.learners, False),
+    (rf.chance_modes, False),
+    (rf.noise, False),
 ]
+
+
+def _ctors() -> list[tuple[Any, bool]]:
+    out = [(mod._REGISTRY[name], is_game) for mod, is_game in MODULES for name in mod.registered()]
+    out += [
+        (rf.solvers.Cfr, False),
+        (rf.solvers.DeepCfr, False),
+        (rf.Env, False),
+        (rf.Engine, False),
+        (rf.starts.RandomStartingMoves, False),
+    ]
+    return out
+
+
+def _bank(ctor_name: str, p: inspect.Parameter) -> list[Any]:
+    if p.name in NONE_BANKS:
+        return NONE_BANKS[p.name]
+    default = p.default
+    if default is inspect.Parameter.empty:
+        default = REQUIRED[ctor_name][p.name]()
+    if isinstance(default, bool):
+        return [not default]
+    if isinstance(default, int):
+        return INT_EDGES
+    if isinstance(default, float):
+        return FLOAT_EDGES
+    if isinstance(default, str):
+        return STR_EDGES
+    if p.name in REQUIRED.get(ctor_name, {}):
+        return WRONG_TYPES
+    raise AssertionError(f"{ctor_name}.{p.name}: unrecognized default — enroll it in NONE_BANKS or REQUIRED")
+
+
+def _cases() -> list[tuple[Any, bool, str, Any]]:
+    out = [
+        (ctor, is_game, p.name, value)
+        for ctor, is_game in _ctors()
+        for p in inspect.signature(ctor).parameters.values()
+        if p.kind is not inspect.Parameter.VAR_KEYWORD
+        for value in _bank(getattr(ctor, "__name__", str(ctor)), p)
+    ]
+    out += [(rf.Reward, False, "win", v) for v in FLOAT_EDGES]  # Reward is **weights; no signature to derive
+    return out
 
 
 def _play(game: Any) -> None:
@@ -72,22 +113,44 @@ def _play(game: Any) -> None:
 
 @pytest.mark.parametrize(
     ("ctor", "is_game", "param", "value"),
-    [
-        (ctor, is_game, param, value)
-        for ctor, is_game, params in SWEEP
-        for param, values in params.items()
-        for value in values
-    ],
-    ids=lambda v: getattr(v, "__name__", str(v)),
+    _cases(),
+    ids=lambda v: getattr(v, "__name__", repr(v)[:40]),
 )
 def test_no_public_input_reaches_a_rust_panic(ctor: Any, is_game: bool, param: str, value: Any) -> None:
+    kwargs = {k: make() for k, make in REQUIRED.get(getattr(ctor, "__name__", ""), {}).items()}
+    kwargs[param] = value
     try:
-        made = ctor(**{param: value})
+        made = ctor(**kwargs)
     except BaseException as exc:  # PanicException derives from BaseException by design
-        assert type(exc).__name__ != "PanicException", f"Rust panic escaped {ctor}({param}={value}): {exc}"
+        assert type(exc).__name__ != "PanicException", f"Rust panic escaped {ctor}({param}={value!r}): {exc}"
         return
     if is_game:
         _play(made)  # construction passing is not enough: latent panics fire at encode/step time
+
+
+def test_every_registered_handle_constructs_with_defaults() -> None:
+    for mod, is_game in MODULES:
+        for name in mod.registered():
+            made = mod.make(name)
+            if is_game:
+                _play(made)
+
+
+@pytest.mark.parametrize("game_name", rf.games.registered())
+@pytest.mark.parametrize("encoder_name", rf.encoders.registered())
+def test_every_encoder_attaches_or_refuses_cleanly(game_name: str, encoder_name: str) -> None:
+    try:
+        game = rf.games.make(game_name, encoder=rf.encoders.make(encoder_name))
+    except BaseException as exc:
+        assert type(exc).__name__ != "PanicException", f"Rust panic escaped {game_name}+{encoder_name}: {exc}"
+        return
+    _play(game)
+
+
+def test_unknown_reward_weight_rejected_at_attach() -> None:
+    # Reward is game-agnostic: keys validate against the game's schema when attached
+    with pytest.raises(ValueError, match="unknown reward key"):
+        rf.Env(rf.games.Connect4(), rf.Reward(zzz=1.0), seed=0)
 
 
 def test_gridworld_goal_derives_from_size() -> None:

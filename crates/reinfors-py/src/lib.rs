@@ -760,6 +760,19 @@ impl PyEngine {
                 "n_games must be >= 1",
             ));
         }
+        // eager per-game allocation: an absurd count must fail here, not OOM-kill the process
+        if n_games > 1 << 20 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "n_games must be <= {} (got {n_games})",
+                1 << 20
+            )));
+        }
+        if pad_rows_to > 1 << 20 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "pad_rows_to must be <= {} (got {pad_rows_to})",
+                1 << 20
+            )));
+        }
         if !matches!(n_groups, 1 | 2) {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "n_groups must be 1 or 2",
