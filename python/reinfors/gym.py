@@ -84,6 +84,17 @@ _PARALLEL_CLS: Any = None
 _AEC_CLS: Any = None
 
 
+def _episode_limit(max_episode_steps: int | None, game: Any) -> int | None:
+    if max_episode_steps is None:
+        horizon: int | None = game.truncation_horizon()
+        return horizon
+    if not isinstance(max_episode_steps, int) or isinstance(max_episode_steps, bool):
+        raise ValueError(f"max_episode_steps must be an int, got {max_episode_steps!r}")
+    if max_episode_steps < 1:
+        raise ValueError("max_episode_steps must be >= 1")
+    return max_episode_steps
+
+
 def _missing(pkg: str) -> ImportError:
     return ImportError(f"reinfors.gym needs `{pkg}`; install the adapter backends with `pip install reinfors[gym]`")
 
@@ -118,7 +129,7 @@ def _gym_cls() -> Any:
                 raise ValueError("gymnasium_env is single-agent only; use parallel_env for multi-agent")
             self.observation_space = _to_gym_box(game.observation_space())
             self.action_space = _to_gym_discrete(game.action_space())
-            self._max_episode_steps = max_episode_steps if max_episode_steps is not None else game.truncation_horizon()
+            self._max_episode_steps = _episode_limit(max_episode_steps, game)
             self._elapsed = 0
             self.render_mode = render_mode
 
@@ -181,7 +192,7 @@ def _parallel_cls() -> Any:
             self._index = {name: i for i, name in enumerate(self.possible_agents)}
             self._obs_space = _to_gym_box(game.observation_space())
             self._act_space = _to_gym_discrete(game.action_space())
-            self._max_episode_steps = max_episode_steps if max_episode_steps is not None else game.truncation_horizon()
+            self._max_episode_steps = _episode_limit(max_episode_steps, game)
             self._elapsed = 0
             self.render_mode = render_mode
 
@@ -285,7 +296,7 @@ def _aec_cls() -> Any:
                     "action_mask": gymnasium.spaces.Box(low=0, high=1, shape=(self._act_space.n,), dtype=np.int8),
                 }
             )
-            self._max_episode_steps = max_episode_steps if max_episode_steps is not None else game.truncation_horizon()
+            self._max_episode_steps = _episode_limit(max_episode_steps, game)
             self._elapsed = 0
             self.render_mode = render_mode
 
