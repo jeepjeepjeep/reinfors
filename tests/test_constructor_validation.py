@@ -12,7 +12,17 @@ import numpy as np
 import pytest
 import reinfors as rf
 
-INT_EDGES = [-(2**63), -1, 0, 1, 2**31 - 1, 2**31, 2**63]  # 2**31-1 reaches Rust; 2**31 dies at pyo3 i32 conversion
+INT_EDGES = [
+    -(2**63),
+    -1,
+    0,
+    1,
+    2**16,
+    2**16 + 1,
+    2**31 - 1,
+    2**31,
+    2**63,
+]  # 2**31-1 reaches Rust; 2**31 dies at pyo3 i32 conversion; 2**16 straddles the engine flat caps
 FLOAT_EDGES = [float("nan"), float("inf"), float("-inf"), -1e308, -1.0, 0.0]
 STR_EDGES = ["", "\x00", "not-a-registered-option", "a" * 4096]
 WRONG_TYPES: list[Any] = ["wrong-type", 3.5]
@@ -55,14 +65,97 @@ MODULES: list[tuple[Any, bool]] = [
 ]
 
 
-def _ctors() -> list[tuple[Any, bool]]:
-    out = [(mod._REGISTRY[name], is_game) for mod, is_game in MODULES for name in mod.registered()]
+def _zeros_q(a: int) -> Any:
+    def infer(obs: np.ndarray) -> np.ndarray:
+        return np.zeros((obs.shape[0], 1, a))
+
+    return infer
+
+
+def _zeros_az(a: int) -> Any:
+    def infer(obs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        m = obs.shape[0]
+        return np.zeros((m, a), dtype=np.float32), np.zeros(m, dtype=np.float32)
+
+    return infer
+
+
+def _collect(game: Any, policy: Any, learner: Any, infer: Any) -> None:
+    rf.Engine(game, rf.Reward(), policy, learner, n_games=2, seed=0).collect(1, infer)
+
+
+def _env_use(env: Any) -> None:
+    env.reset()
+    for a in env.active_agents():
+        env.observe(a)
+
+
+# composition hooks: handles defer some validation to attachment/use, so a successful
+# construction must also survive an engine build + one collect
+USE: dict[tuple[str, str], Any] = {
+    ("policies", "mcts"): lambda p: _collect(rf.games.Connect4(), p, rf.learners.TreeStrap(), _zeros_q(7)),
+    ("policies", "alphazero"): lambda p: _collect(rf.games.Connect4(), p, rf.learners.AlphaZero(), _zeros_az(7)),
+    ("policies", "minimax"): lambda p: _collect(rf.games.Connect4(), p, rf.learners.TreeStrap(), _zeros_q(7)),
+    ("policies", "selective_expectimax"): lambda p: _collect(rf.games.Snake(), p, rf.learners.TreeStrap(), _zeros_q(3)),
+    ("policies", "epsilon_greedy_q"): lambda p: _collect(rf.games.GridWorld(), p, rf.learners.Dqn(), _zeros_q(4)),
+    ("learners", "treestrap"): lambda le: _collect(
+        rf.games.Connect4(), rf.policies.Mcts(num_simulations=2), le, _zeros_q(7)
+    ),
+    ("learners", "dqn"): lambda le: _collect(rf.games.GridWorld(), rf.policies.EpsilonGreedyQ(), le, _zeros_q(4)),
+    ("learners", "alphazero"): lambda le: _collect(
+        rf.games.Connect4(), rf.policies.AlphaZero(num_simulations=2), le, _zeros_az(7)
+    ),
+    ("chance_modes", "always_resample"): lambda m: _collect(
+        rf.games.Backgammon(),
+        rf.policies.AlphaZero(num_simulations=2, chance=m),
+        rf.learners.AlphaZero(),
+        _zeros_az(1352),
+    ),
+    ("chance_modes", "committed"): lambda m: _collect(
+        rf.games.Backgammon(),
+        rf.policies.AlphaZero(num_simulations=2, chance=m),
+        rf.learners.AlphaZero(),
+        _zeros_az(1352),
+    ),
+    ("chance_modes", "expand_all"): lambda m: _collect(
+        rf.games.Backgammon(),
+        rf.policies.AlphaZero(num_simulations=2, chance=m),
+        rf.learners.AlphaZero(),
+        _zeros_az(1352),
+    ),
+    ("noise", "dirichlet"): lambda n: _collect(
+        rf.games.Connect4(), rf.policies.AlphaZero(num_simulations=2, noise=n), rf.learners.AlphaZero(), _zeros_az(7)
+    ),
+}
+USE_REQUIRED = {"policies", "learners", "chance_modes", "noise"}
+
+# accepted-but-huge budgets make the composed collect take minutes, not expose new
+# panic surface; composition itself is still probed at the values below the threshold
+SLOW_AT_SCALE = {"num_simulations", "expansion_budget", "depth", "max_depth", "samples", "top_k"}
+
+
+def _use_for(mod: Any, name: str, is_game: bool) -> Any:
+    if is_game:
+        return _play
+    tag = mod.__name__.rsplit(".", 1)[-1]
+    if tag in USE_REQUIRED:
+        assert (tag, name) in USE, f"{tag}.{name} has no composition hook: enroll it in USE"
+        return USE[(tag, name)]
+    return None
+
+
+def _ctors() -> list[tuple[Any, Any, bool]]:
+    out = [
+        (mod._REGISTRY[name], _use_for(mod, name, is_game), is_game)
+        for mod, is_game in MODULES
+        for name in mod.registered()
+    ]
     out += [
-        (rf.solvers.Cfr, False),
-        (rf.solvers.DeepCfr, False),
-        (rf.Env, False),
-        (rf.Engine, False),
-        (rf.starts.RandomStartingMoves, False),
+        (rf.solvers.Cfr, lambda s: s.iterate(1), False),
+        (rf.solvers.DeepCfr, None, False),
+        (rf.Env, _env_use, False),
+        (rf.Engine, None, False),
+        (rf.starts.RandomStartingMoves, None, False),
     ]
     return out
 
@@ -86,15 +179,15 @@ def _bank(ctor_name: str, p: inspect.Parameter) -> list[Any]:
     raise AssertionError(f"{ctor_name}.{p.name}: unrecognized default — enroll it in NONE_BANKS or REQUIRED")
 
 
-def _cases() -> list[tuple[Any, bool, str, Any]]:
+def _cases() -> list[tuple[Any, Any, str, Any]]:
     out = [
-        (ctor, is_game, p.name, value)
-        for ctor, is_game in _ctors()
+        (ctor, use, p.name, value)
+        for ctor, use, _is_game in _ctors()
         for p in inspect.signature(ctor).parameters.values()
         if p.kind is not inspect.Parameter.VAR_KEYWORD
         for value in _bank(getattr(ctor, "__name__", str(ctor)), p)
     ]
-    out += [(rf.Reward, False, "win", v) for v in FLOAT_EDGES]  # Reward is **weights; no signature to derive
+    out += [(rf.Reward, None, "win", v) for v in FLOAT_EDGES]  # Reward is **weights; no signature to derive
     return out
 
 
@@ -112,11 +205,11 @@ def _play(game: Any) -> None:
 
 
 @pytest.mark.parametrize(
-    ("ctor", "is_game", "param", "value"),
+    ("ctor", "use", "param", "value"),
     _cases(),
     ids=lambda v: getattr(v, "__name__", repr(v)[:40]),
 )
-def test_no_public_input_reaches_a_rust_panic(ctor: Any, is_game: bool, param: str, value: Any) -> None:
+def test_no_public_input_reaches_a_rust_panic(ctor: Any, use: Any, param: str, value: Any) -> None:
     kwargs = {k: make() for k, make in REQUIRED.get(getattr(ctor, "__name__", ""), {}).items()}
     kwargs[param] = value
     try:
@@ -124,8 +217,13 @@ def test_no_public_input_reaches_a_rust_panic(ctor: Any, is_game: bool, param: s
     except BaseException as exc:  # PanicException derives from BaseException by design
         assert type(exc).__name__ != "PanicException", f"Rust panic escaped {ctor}({param}={value!r}): {exc}"
         return
-    if is_game:
-        _play(made)  # construction passing is not enough: latent panics fire at encode/step time
+    if use is None or (param in SLOW_AT_SCALE and isinstance(value, int) and value > 4096):
+        return
+    try:
+        # construction passing is not enough: latent panics fire at compose/encode/step time
+        use(made)
+    except BaseException as exc:
+        assert type(exc).__name__ != "PanicException", f"Rust panic escaped using {ctor}({param}={value!r}): {exc}"
 
 
 def test_every_registered_handle_constructs_with_defaults() -> None:
@@ -145,6 +243,55 @@ def test_every_encoder_attaches_or_refuses_cleanly(game_name: str, encoder_name:
         assert type(exc).__name__ != "PanicException", f"Rust panic escaped {game_name}+{encoder_name}: {exc}"
         return
     _play(game)
+
+
+def test_deferred_n_heads_rejects_at_composition_not_collect() -> None:
+    # handles store n_heads unchecked; the engine build must reject it before the
+    # callback layer multiplies rows x heads x actions
+    policy = rf.policies.EpsilonGreedyQ(n_heads=2**63)
+    with pytest.raises(ValueError, match="n_heads must be <="):
+        rf.Engine(rf.games.GridWorld(), rf.Reward(), policy, rf.learners.Dqn(), n_games=1)
+
+
+def _gridworld_engine(**kwargs: Any) -> rf.Engine:
+    return rf.Engine(
+        rf.games.GridWorld(),
+        rf.Reward(),
+        rf.policies.EpsilonGreedyQ(),
+        rf.learners.Dqn(),
+        **kwargs,
+    )
+
+
+def test_flat_caps_accept_boundary_and_reject_boundary_plus_one() -> None:
+    _gridworld_engine(n_games=2**16)
+    with pytest.raises(ValueError, match="n_games must be <="):
+        _gridworld_engine(n_games=2**16 + 1)
+    _gridworld_engine(n_games=1, pad_rows_to=2**16)
+    with pytest.raises(ValueError, match="pad_rows_to must be <="):
+        _gridworld_engine(n_games=1, pad_rows_to=2**16 + 1)
+
+
+def test_buffer_ceiling_is_dimension_aware() -> None:
+    def chess_engine(**kwargs: Any) -> rf.Engine:
+        return rf.Engine(
+            rf.games.Chess(encoder=rf.encoders.AlphaZeroChess(history_length=256)),
+            rf.Reward(),
+            rf.policies.AlphaZero(num_simulations=2),
+            rf.learners.AlphaZero(),
+            **kwargs,
+        )
+
+    env = rf.Env(rf.games.Chess(encoder=rf.encoders.AlphaZeroChess(history_length=256)), rf.Reward(), seed=0)
+    env.reset()
+    dim = env.observe(0).size
+    limit = 2**31 // dim
+    assert limit < 2**16  # the dimension ceiling must bind below the flat cap here
+    chess_engine(n_games=2, pad_rows_to=limit)
+    with pytest.raises(ValueError, match="too large for this composition"):
+        chess_engine(n_games=2, pad_rows_to=limit + 1)
+    with pytest.raises(ValueError, match="too large for this composition"):
+        chess_engine(n_games=limit + 1)
 
 
 def test_unknown_reward_weight_rejected_at_attach() -> None:

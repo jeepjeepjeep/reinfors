@@ -761,16 +761,16 @@ impl PyEngine {
             ));
         }
         // eager per-game allocation: an absurd count must fail here, not OOM-kill the process
-        if n_games > 1 << 20 {
+        if n_games > 1 << 16 {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "n_games must be <= {} (got {n_games})",
-                1 << 20
+                1 << 16
             )));
         }
-        if pad_rows_to > 1 << 20 {
+        if pad_rows_to > 1 << 16 {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "pad_rows_to must be <= {} (got {pad_rows_to})",
-                1 << 20
+                1 << 16
             )));
         }
         if !matches!(n_groups, 1 | 2) {
@@ -2606,6 +2606,80 @@ where
     e
 }
 
+fn check_search_budgets(policy: &PolicySpec) -> PyResult<()> {
+    const MAX: u64 = 1 << 20;
+    // n_heads multiplies per-node search memory (heads x actions per node), so its
+    // sane ceiling is far below the budget caps
+    const MAX_HEADS: u64 = 4096;
+    let mut items: Vec<(&'static str, u64)> = Vec::new();
+    match policy {
+        PolicySpec::SelectiveExpectimax { n_heads, .. }
+        | PolicySpec::EpsilonGreedyQ { n_heads, .. } => {
+            if *n_heads as u64 > MAX_HEADS {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "n_heads must be <= {MAX_HEADS} (got {n_heads})"
+                )));
+            }
+        }
+        _ => {}
+    }
+    let chance_items = |items: &mut Vec<(&'static str, u64)>, chance: &ChanceMode| {
+        if let ChanceMode::Committed { samples } = chance {
+            items.push(("chance samples", *samples as u64));
+        }
+    };
+    match policy {
+        PolicySpec::SelectiveExpectimax {
+            expansion_budget,
+            top_k,
+            max_depth,
+            chance,
+            ..
+        } => {
+            items.push(("expansion_budget", *expansion_budget as u64));
+            items.push(("top_k", *top_k as u64));
+            items.push(("max_depth", i64::from(*max_depth).max(0) as u64));
+            chance_items(&mut items, chance);
+        }
+        PolicySpec::Minimax {
+            depth,
+            top_k,
+            chance,
+        } => {
+            items.push(("depth", i64::from(*depth).max(0) as u64));
+            if let Some(k) = top_k {
+                items.push(("top_k", *k as u64));
+            }
+            chance_items(&mut items, chance);
+        }
+        PolicySpec::Mcts {
+            num_simulations,
+            max_depth,
+            chance,
+            ..
+        }
+        | PolicySpec::AlphaZero {
+            num_simulations,
+            max_depth,
+            chance,
+            ..
+        } => {
+            items.push(("num_simulations", *num_simulations as u64));
+            items.push(("max_depth", i64::from(*max_depth).max(0) as u64));
+            chance_items(&mut items, chance);
+        }
+        PolicySpec::EpsilonGreedyQ { .. } => {}
+    }
+    for (name, v) in items {
+        if v > MAX {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{name} must be <= {MAX} (got {v})"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_for_game<G: Game + Send + Sync + 'static>(
     game: G,
@@ -2629,6 +2703,32 @@ where
     let dim = c * h * w;
     let action_count = game.action_count();
     let num_agents = game.num_agents();
+    let n_heads = match &policy {
+        PolicySpec::SelectiveExpectimax { n_heads, .. }
+        | PolicySpec::EpsilonGreedyQ { n_heads, .. } => *n_heads,
+        _ => 1,
+    };
+    // per-call buffers scale with rows × these factors; bound them with checked products
+    // so no accepted composition can later allocate past 2^31 elements or overflow
+    let buffer_cell = |knob: &str, rows: usize| -> PyResult<()> {
+        let obs = rows.checked_mul(dim);
+        let out = rows
+            .checked_mul(n_heads)
+            .and_then(|t| t.checked_mul(action_count));
+        match (obs, out) {
+            (Some(o), Some(t)) if o <= 1 << 31 && t <= 1 << 31 => Ok(()),
+            _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{knob} ({rows}) is too large for this composition: rows x observation \
+                 size ({dim}) and rows x n_heads ({n_heads}) x actions ({action_count}) \
+                 must each stay within 2^31 elements"
+            ))),
+        }
+    };
+    check_search_budgets(&policy)?;
+    buffer_cell("n_games", engine_params.n_games)?;
+    if let Some(pad) = engine_params.pad_rows_to {
+        buffer_cell("pad_rows_to", pad)?;
+    }
     if let Some(lp) = &learn_players {
         if lp.is_empty() {
             return Err(pyo3::exceptions::PyValueError::new_err(
