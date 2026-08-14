@@ -8,13 +8,21 @@
 # To cut a release: bump `[workspace.package] version` in Cargo.toml (the single version source; maturin
 # reads it), merge, then publish a GitHub Release tagged `vX.Y.Z`. That fires this workflow, which builds
 # release (--release) abi3 wheels + an sdist and uploads them. Manual `workflow_dispatch` builds the
-# wheels but does NOT publish (the publish job is gated on a release event) — use it to smoke the build.
+# wheels and by default does NOT publish — use it to smoke the build. Dispatching with publish=testpypi
+# additionally uploads to TestPyPI (needs the same Trusted Publisher registered at
+# https://test.pypi.org/manage/account/publishing/) — the end-to-end dry run of the OIDC publish path.
 name: release
 
 on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "where to publish the built wheels"
+        type: choice
+        options: [none, testpypi]
+        default: none
 
 permissions:
   contents: read
@@ -77,8 +85,8 @@ jobs:
           path: dist/*.tar.gz
 
   publish:
-    name: publish to PyPI
-    if: github.event_name == 'release'
+    name: publish
+    if: github.event_name == 'release' || inputs.publish == 'testpypi'
     needs: [wheels, sdist]
     runs-on: ubuntu-latest
     permissions:
@@ -89,4 +97,14 @@ jobs:
           pattern: wheels-*
           path: dist
           merge-multiple: true
-      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+      - name: publish to PyPI
+        if: github.event_name == 'release'
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+      - name: publish to TestPyPI
+        if: github.event_name == 'workflow_dispatch'
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          # TestPyPI versions are immutable too; repeat dry runs at an unchanged version
+          # should no-op, not fail the workflow
+          skip-existing: true
