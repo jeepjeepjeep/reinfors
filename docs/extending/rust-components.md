@@ -78,9 +78,8 @@ How the engine and the search families consume chance, so a game knows what it i
   asserts exactly that.
 - **MCTS / AlphaZero** expand explicit chance nodes inside the tree; how outcomes are drawn or
   enumerated is the policy's [chance mode](../catalogue/algorithms.md).
-- **SelectiveExpectimax** resolves chance met along stepped edges per its chance mode; expanding an
-  explicit interior chance node is outside the family and fails loudly (`unimplemented!` — a
-  deliberate boundary, not a gap to fill in a game).
+- **SelectiveExpectimax** applies its chance mode while flattening chance chains along stepped
+  edges and never represents chance states as tree nodes.
 - **Minimax** expands each node exactly once, so it accepts only chance modes expressible in a
   single expansion and rejects per-traversal resampling at construction.
 
