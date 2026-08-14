@@ -116,7 +116,7 @@ def engine_from_config(config: dict[str, Any]) -> Engine:
         return kw
 
     schema = config.get("schema_version")
-    if schema is not None and schema != 1:
+    if schema is not None and (not isinstance(schema, int) or isinstance(schema, bool) or schema != 1):
         msg = f"unsupported config schema_version {schema!r}; this reinfors supports 1"
         raise ValueError(msg)
     g_name, g_kw = _split(config["game"])
@@ -131,7 +131,10 @@ def engine_from_config(config: dict[str, Any]) -> Engine:
             engine_kw["start_buffer_capacity"] = sb["capacity"]
             engine_kw["p_fresh"] = sb["p_fresh"]
     # The reward rides with the game block (YAML-friendly) or its own block; it goes to the Engine now.
-    reward_cfg = g_kw.pop("reward", None) or config.get("reward")
+    # Fall back on None only: a falsy malformed value must reach type validation, not vanish.
+    reward_cfg = g_kw.pop("reward", None)
+    if reward_cfg is None:
+        reward_cfg = config.get("reward")
     reward = Reward(**reward_cfg) if isinstance(reward_cfg, dict) else reward_cfg
     # `max_ticks` is the game's truncation horizon; accept it in the engine block (legacy) and route it.
     if "max_ticks" in engine_kw:
