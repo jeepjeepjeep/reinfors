@@ -177,6 +177,68 @@ def test_gym_rejects_nonpositive_or_noninteger_episode_limits() -> None:
             rfg.make(rf.games.GridWorld(), max_episode_steps=bad)
 
 
+_CONFIG_BASE: dict[str, Any] = {
+    "game": {"name": "connect4"},
+    "policy": {"name": "mcts", "num_simulations": 2},
+    "learner": {"name": "treestrap"},
+    "engine": {"n_games": 1},
+}
+
+
+def _config(**patch: Any) -> dict[str, Any]:
+    import copy
+
+    cfg = copy.deepcopy(_CONFIG_BASE)
+    cfg.update(patch)
+    return cfg
+
+
+_HOSTILE_CONFIGS: list[Any] = [
+    "garbage",
+    {},
+    {k: v for k, v in _CONFIG_BASE.items() if k != "game"},
+    {k: v for k, v in _CONFIG_BASE.items() if k != "policy"},
+    {k: v for k, v in _CONFIG_BASE.items() if k != "learner"},
+    _config(game={}),
+    _config(game="connect4"),
+    _config(game={"name": "zork"}),
+    _config(game={"name": "connect4", "zzz": 1}),
+    _config(game={"name": "connect4", "encoder": {}}),
+    _config(game={"name": "connect4", "encoder": {"name": "zork"}}),
+    _config(policy={"name": "mcts", "zzz": 1}),
+    _config(policy={"name": "mcts", "num_simulations": "x"}),
+    _config(policy={"name": "mcts", "chance": {"name": "committed", "samples": "x"}}),
+    _config(engine={"n_games": 1, "start_buffer": {"zzz": 1}}),
+    _config(engine={"n_games": 1, "zzz": 1}),
+    _config(reward=[1, 2]),
+    _config(reward={"zzz": 1.0}),
+    _config(learner={"name": "treestrap", "gamma": float("nan")}),
+    _config(schema_version=2),
+]
+
+
+@pytest.mark.parametrize("cfg", _HOSTILE_CONFIGS, ids=lambda c: repr(c)[:60])
+def test_engine_from_config_rejects_hostile_dicts(cfg: Any) -> None:
+    exc = _no_panic(lambda: rf.engine_from_config(cfg))
+    assert isinstance(exc, (ValueError, KeyError, TypeError, AttributeError, OverflowError))
+
+
+def test_engine_from_config_routes_through_composition_caps() -> None:
+    # dicts must not smuggle values past the boundary validation the typed path enforces
+    with pytest.raises(ValueError, match="n_games must be <="):
+        rf.engine_from_config(_config(engine={"n_games": 2**31 - 1}))
+    with pytest.raises(ValueError, match="num_simulations must be <="):
+        rf.engine_from_config(_config(policy={"name": "mcts", "num_simulations": 2**31 - 1}))
+    with pytest.raises(ValueError, match="n_heads must be <="):
+        rf.engine_from_config(
+            _config(
+                game={"name": "gridworld"},
+                policy={"name": "epsilon_greedy_q", "n_heads": 2**63},
+                learner={"name": "dqn"},
+            )
+        )
+
+
 def test_solver_methods_reject_hostile_inputs() -> None:
     with pytest.raises(ValueError, match="unknown CFR variant"):
         rf.solvers.Cfr(rf.games.KuhnPoker(), variant="bogus")
