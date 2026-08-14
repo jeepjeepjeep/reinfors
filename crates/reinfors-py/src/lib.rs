@@ -760,6 +760,19 @@ impl PyEngine {
                 "n_games must be >= 1",
             ));
         }
+        // eager per-game allocation: an absurd count must fail here, not OOM-kill the process
+        if n_games > 1 << 16 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "n_games must be <= {} (got {n_games})",
+                1 << 16
+            )));
+        }
+        if pad_rows_to > 1 << 16 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "pad_rows_to must be <= {} (got {pad_rows_to})",
+                1 << 16
+            )));
+        }
         if !matches!(n_groups, 1 | 2) {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "n_groups must be 1 or 2",
@@ -2593,6 +2606,114 @@ where
     e
 }
 
+fn check_search_budgets(policy: &PolicySpec) -> PyResult<()> {
+    const MAX: u64 = 1 << 20;
+    // n_heads multiplies per-node search memory (heads x actions per node), so its
+    // sane ceiling is far below the budget caps
+    const MAX_HEADS: u64 = 4096;
+    let mut items: Vec<(&'static str, u64)> = Vec::new();
+    match policy {
+        PolicySpec::SelectiveExpectimax { n_heads, .. }
+        | PolicySpec::EpsilonGreedyQ { n_heads, .. }
+            if *n_heads as u64 > MAX_HEADS =>
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "n_heads must be <= {MAX_HEADS} (got {n_heads})"
+            )));
+        }
+        _ => {}
+    }
+    let chance_items = |items: &mut Vec<(&'static str, u64)>, chance: &ChanceMode| {
+        if let ChanceMode::Committed { samples } = chance {
+            items.push(("chance samples", *samples as u64));
+        }
+    };
+    match policy {
+        PolicySpec::SelectiveExpectimax {
+            expansion_budget,
+            top_k,
+            max_depth,
+            chance,
+            ..
+        } => {
+            items.push(("expansion_budget", *expansion_budget as u64));
+            items.push(("top_k", *top_k as u64));
+            items.push(("max_depth", i64::from(*max_depth).max(0) as u64));
+            chance_items(&mut items, chance);
+        }
+        PolicySpec::Minimax {
+            depth,
+            top_k,
+            chance,
+        } => {
+            items.push(("depth", i64::from(*depth).max(0) as u64));
+            if let Some(k) = top_k {
+                items.push(("top_k", *k as u64));
+            }
+            chance_items(&mut items, chance);
+        }
+        PolicySpec::Mcts {
+            num_simulations,
+            max_depth,
+            chance,
+            ..
+        }
+        | PolicySpec::AlphaZero {
+            num_simulations,
+            max_depth,
+            chance,
+            ..
+        } => {
+            items.push(("num_simulations", *num_simulations as u64));
+            items.push(("max_depth", i64::from(*max_depth).max(0) as u64));
+            chance_items(&mut items, chance);
+        }
+        PolicySpec::EpsilonGreedyQ { .. } => {}
+    }
+    for (name, v) in items {
+        if v > MAX {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{name} must be <= {MAX} (got {v})"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Per-call buffers are eagerly allocated (and zero-filled on the fallback path), so every
+/// composition point must bound them by BYTES before any collect/choose can run: simultaneous
+/// games stage one row per ACTIVE AGENT (`agents` is the conservative multiplier; 1 where the
+/// knob already counts exact callback rows), observations stage rows x dim f32, callback
+/// outputs rows x heads x (actions+1) f64 (stride upper bound across both infer layouts).
+fn check_call_buffers(
+    knob: &str,
+    count: usize,
+    agents: usize,
+    dim: usize,
+    n_heads: usize,
+    action_count: usize,
+) -> PyResult<()> {
+    const MAX_BUFFER_BYTES: usize = 1 << 29;
+    let rows = count.checked_mul(agents.max(1));
+    let in_bytes = rows
+        .and_then(|r| r.checked_mul(dim))
+        .and_then(|t| t.checked_mul(4));
+    let out_bytes = rows
+        .and_then(|r| r.checked_mul(n_heads.max(1)))
+        .and_then(|t| t.checked_mul(action_count + 1))
+        .and_then(|t| t.checked_mul(8));
+    match (in_bytes, out_bytes) {
+        (Some(i), Some(o)) if i <= MAX_BUFFER_BYTES && o <= MAX_BUFFER_BYTES => Ok(()),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{knob} ({count}) is too large for this composition: with {agents} \
+             simultaneous agents per game, observation input (rows x {dim} f32) and \
+             callback output (rows x {n_heads} heads x {action_count} actions f64) \
+             must each stay under {} bytes",
+            MAX_BUFFER_BYTES
+        ))),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_for_game<G: Game + Send + Sync + 'static>(
     game: G,
@@ -2616,6 +2737,24 @@ where
     let dim = c * h * w;
     let action_count = game.action_count();
     let num_agents = game.num_agents();
+    let n_heads = match &policy {
+        PolicySpec::SelectiveExpectimax { n_heads, .. }
+        | PolicySpec::EpsilonGreedyQ { n_heads, .. } => *n_heads,
+        _ => 1,
+    };
+    check_search_budgets(&policy)?;
+    check_call_buffers(
+        "n_games",
+        engine_params.n_games,
+        num_agents,
+        dim,
+        n_heads,
+        action_count,
+    )?;
+    if let Some(pad) = engine_params.pad_rows_to {
+        // exact callback row count by contract: no agent multiplier
+        check_call_buffers("pad_rows_to", pad, 1, dim, n_heads, action_count)?;
+    }
     if let Some(lp) = &learn_players {
         if lp.is_empty() {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -5284,6 +5423,15 @@ impl PolicyHandle {
         };
         let dim = borrowed[0].inner.obs_dim();
         let action_count = borrowed[0].inner.action_count();
+        check_search_budgets(&self.spec)?;
+        check_call_buffers(
+            "envs",
+            envs.len(),
+            borrowed[0].inner.num_agents(),
+            dim,
+            expected_heads,
+            action_count,
+        )?;
         let callbacks = vec![infer.clone().unbind()];
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let callback_err = std::sync::Arc::new(std::sync::Mutex::new(None));
