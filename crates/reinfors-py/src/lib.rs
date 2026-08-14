@@ -2681,28 +2681,34 @@ fn check_search_budgets(policy: &PolicySpec) -> PyResult<()> {
 }
 
 /// Per-call buffers are eagerly allocated (and zero-filled on the fallback path), so every
-/// composition point must bound them by BYTES before any collect/choose can run: observations
-/// stage rows x dim f32, callback outputs rows x heads x (actions+1) f64 (stride upper bound
-/// across both infer layouts).
+/// composition point must bound them by BYTES before any collect/choose can run: simultaneous
+/// games stage one row per ACTIVE AGENT (`agents` is the conservative multiplier; 1 where the
+/// knob already counts exact callback rows), observations stage rows x dim f32, callback
+/// outputs rows x heads x (actions+1) f64 (stride upper bound across both infer layouts).
 fn check_call_buffers(
     knob: &str,
-    rows: usize,
+    count: usize,
+    agents: usize,
     dim: usize,
     n_heads: usize,
     action_count: usize,
 ) -> PyResult<()> {
     const MAX_BUFFER_BYTES: usize = 1 << 29;
-    let in_bytes = rows.checked_mul(dim).and_then(|t| t.checked_mul(4));
+    let rows = count.checked_mul(agents.max(1));
+    let in_bytes = rows
+        .and_then(|r| r.checked_mul(dim))
+        .and_then(|t| t.checked_mul(4));
     let out_bytes = rows
-        .checked_mul(n_heads.max(1))
+        .and_then(|r| r.checked_mul(n_heads.max(1)))
         .and_then(|t| t.checked_mul(action_count + 1))
         .and_then(|t| t.checked_mul(8));
     match (in_bytes, out_bytes) {
         (Some(i), Some(o)) if i <= MAX_BUFFER_BYTES && o <= MAX_BUFFER_BYTES => Ok(()),
         _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "{knob} ({rows}) is too large for this composition: observation input \
-             (rows x {dim} f32) and callback output (rows x {n_heads} heads x \
-             {action_count} actions f64) must each stay under {} bytes",
+            "{knob} ({count}) is too large for this composition: with {agents} \
+             simultaneous agents per game, observation input (rows x {dim} f32) and \
+             callback output (rows x {n_heads} heads x {action_count} actions f64) \
+             must each stay under {} bytes",
             MAX_BUFFER_BYTES
         ))),
     }
@@ -2737,9 +2743,17 @@ where
         _ => 1,
     };
     check_search_budgets(&policy)?;
-    check_call_buffers("n_games", engine_params.n_games, dim, n_heads, action_count)?;
+    check_call_buffers(
+        "n_games",
+        engine_params.n_games,
+        num_agents,
+        dim,
+        n_heads,
+        action_count,
+    )?;
     if let Some(pad) = engine_params.pad_rows_to {
-        check_call_buffers("pad_rows_to", pad, dim, n_heads, action_count)?;
+        // exact callback row count by contract: no agent multiplier
+        check_call_buffers("pad_rows_to", pad, 1, dim, n_heads, action_count)?;
     }
     if let Some(lp) = &learn_players {
         if lp.is_empty() {
@@ -5410,7 +5424,14 @@ impl PolicyHandle {
         let dim = borrowed[0].inner.obs_dim();
         let action_count = borrowed[0].inner.action_count();
         check_search_budgets(&self.spec)?;
-        check_call_buffers("envs", envs.len(), dim, expected_heads, action_count)?;
+        check_call_buffers(
+            "envs",
+            envs.len(),
+            borrowed[0].inner.num_agents(),
+            dim,
+            expected_heads,
+            action_count,
+        )?;
         let callbacks = vec![infer.clone().unbind()];
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let callback_err = std::sync::Arc::new(std::sync::Mutex::new(None));

@@ -313,6 +313,31 @@ def test_buffer_ceiling_is_dimension_aware() -> None:
         chess_engine(n_games=limit + 1)
 
 
+def test_buffer_ceiling_counts_simultaneous_agents() -> None:
+    # simultaneous games stage one row per ACTIVE AGENT: 8-player snake multiplies the
+    # per-call observation buffer x8 over the naive n_games x dim accounting
+    def snake8_engine(**kwargs: Any) -> rf.Engine:
+        return rf.Engine(
+            rf.games.Snake(num_snakes=8),
+            rf.Reward(),
+            rf.policies.SelectiveExpectimax(),
+            rf.learners.TreeStrap(),
+            **kwargs,
+        )
+
+    env = rf.Env(rf.games.Snake(num_snakes=8), rf.Reward(), seed=0)
+    env.reset()
+    dim = env.observe(0).size
+    naive_rows = (2**29 // 4) // dim
+    assert 2**16 <= naive_rows  # the reviewer scenario: passes agent-blind accounting...
+    with pytest.raises(ValueError, match="8 simultaneous agents"):
+        snake8_engine(n_games=2**16)  # ...but stages ~4 GiB once agents are counted
+    limit = naive_rows // 8
+    snake8_engine(n_games=limit)
+    with pytest.raises(ValueError, match="too large for this composition"):
+        snake8_engine(n_games=limit + 1)
+
+
 def test_search_budget_caps_boundary() -> None:
     def compose(policy: Any) -> None:
         rf.Engine(rf.games.Connect4(), rf.Reward(), policy, rf.learners.TreeStrap(), n_games=1)
