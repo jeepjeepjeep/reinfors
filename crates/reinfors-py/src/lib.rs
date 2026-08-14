@@ -2614,12 +2614,12 @@ fn check_search_budgets(policy: &PolicySpec) -> PyResult<()> {
     let mut items: Vec<(&'static str, u64)> = Vec::new();
     match policy {
         PolicySpec::SelectiveExpectimax { n_heads, .. }
-        | PolicySpec::EpsilonGreedyQ { n_heads, .. } => {
-            if *n_heads as u64 > MAX_HEADS {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "n_heads must be <= {MAX_HEADS} (got {n_heads})"
-                )));
-            }
+        | PolicySpec::EpsilonGreedyQ { n_heads, .. }
+            if *n_heads as u64 > MAX_HEADS =>
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "n_heads must be <= {MAX_HEADS} (got {n_heads})"
+            )));
         }
         _ => {}
     }
