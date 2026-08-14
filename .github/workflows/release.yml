@@ -37,7 +37,7 @@ jobs:
         include:
           - { os: ubuntu-latest, target: x86_64 }
           - { os: ubuntu-latest, target: aarch64 }
-          - { os: macos-15-intel, target: x86_64 } # last intel image; macos-13 retired 2025-12
+          - { os: macos-15-intel, target: x86_64 } # intel
           - { os: macos-15, target: aarch64 } # apple silicon
           - { os: windows-latest, target: x64 }
     steps:
@@ -82,8 +82,6 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.10"
-      # a source build from the exact tarball users would get — an sdist that archives
-      # fine but doesn't compile must never reach an index
       - name: install from the sdist
         run: |
           python -m pip install dist/*.tar.gz
@@ -106,8 +104,6 @@ jobs:
           pattern: wheels-*
           path: dist
           merge-multiple: true
-      # PyPI versions are immutable: artifacts carrying a version that disagrees with the
-      # release tag would permanently burn the tag's version number
       - name: assert artifact versions match the release tag
         if: github.event_name == 'release'
         run: |
@@ -129,6 +125,4 @@ jobs:
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
         with:
           repository-url: https://test.pypi.org/legacy/
-          # TestPyPI versions are immutable too; repeat dry runs at an unchanged version
-          # should no-op, not fail the workflow
           skip-existing: true
