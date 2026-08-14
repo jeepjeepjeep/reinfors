@@ -212,8 +212,13 @@ _HOSTILE_CONFIGS: list[Any] = [
     _config(engine={"n_games": 1, "zzz": 1}),
     _config(reward=[1, 2]),
     _config(reward={"zzz": 1.0}),
+    _config(game={"name": "connect4", "reward": False}),
+    _config(game={"name": "connect4", "reward": []}),
+    _config(game={"name": "connect4", "reward": 0}),
     _config(learner={"name": "treestrap", "gamma": float("nan")}),
     _config(schema_version=2),
+    _config(schema_version=True),
+    _config(schema_version=1.0),
 ]
 
 
