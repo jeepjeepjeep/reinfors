@@ -304,6 +304,27 @@ def test_rejects_malformed_infer_output(bad_infer: Callable[[np.ndarray], object
         _engine().collect(10, bad_infer)
 
 
+def test_non_tuple_infer_names_the_contract() -> None:
+    # the likeliest contract mix-up: a q-family (rows, heads, actions) callback on an AZ engine
+    with pytest.raises(TypeError) as error:
+        _engine().collect(10, lambda arr: np.zeros((arr.shape[0], 1, _A)))
+    message = str(error.value)
+    assert "must return a (policy_logits, values) tuple" in message
+    assert "got ndarray" in message
+
+
+def test_wrong_arity_tuple_reports_the_observed_length() -> None:
+    def three(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return np.zeros((arr.shape[0], _A)), np.zeros(arr.shape[0]), np.zeros(arr.shape[0])
+
+    with pytest.raises(TypeError) as error:
+        _engine().collect(10, three)
+    assert "got a 3-element tuple" in str(error.value)
+    with pytest.raises(TypeError) as error:
+        _engine().collect(10, lambda arr: (np.zeros((arr.shape[0], _A)),))
+    assert "got a 1-element tuple" in str(error.value)
+
+
 def test_rejects_unsupported_alphazero_dtype_with_observed_array() -> None:
     def bad_infer(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         return np.zeros((arr.shape[0], _A), dtype=np.int32), np.zeros(arr.shape[0])

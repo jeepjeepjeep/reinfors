@@ -267,7 +267,21 @@ where
         };
         let infer = callback.bind(py);
         let extracted = infer.call1((arr,)).and_then(|r| {
-            let (logits, values) = r.extract::<(Bound<'_, PyAny>, Bound<'_, PyAny>)>()?;
+            let (logits, values) = r
+                .extract::<(Bound<'_, PyAny>, Bound<'_, PyAny>)>()
+                .map_err(|_| {
+                    let got = match r.downcast::<pyo3::types::PyTuple>() {
+                        Ok(t) => format!("a {}-element tuple", t.len()),
+                        Err(_) => r
+                            .get_type()
+                            .name()
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|_| "an unknown type".to_string()),
+                    };
+                    pyo3::exceptions::PyTypeError::new_err(format!(
+                        "AlphaZero infer must return a (policy_logits, values) tuple; got {got}"
+                    ))
+                })?;
             let logits = infer_array::<2>(&logits, "AlphaZero infer policy_logits")?;
             let values = infer_rows_1d(&values, "AlphaZero infer values")?;
             Ok((logits, values))
