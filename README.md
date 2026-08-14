@@ -80,8 +80,6 @@ pip install "reinfors[train]" # PyTorch examples
 
 Contributing or building from source? See the [development setup guide](docs/development/setup.md).
 
-Reinfors is pre-1.0. Public contracts are documented, but breaking changes may still occur.
-
 ## Where next?
 
 - [Get started](docs/getting-started.md)
@@ -92,6 +90,14 @@ Reinfors is pre-1.0. Public contracts are documented, but breaking changes may s
 - [Evaluate searched agents with Arena](docs/guides/arena.md)
 - [Add a Rust game or algorithm](docs/extending/index.md)
 - [Read the complete documentation](docs/index.md)
+
+## Stability
+
+reinfors is pre-1.0: **any 0.x release may change any API, behavior, or serialized format**
+(including snapshot and config layouts) without deprecation. Pin an exact version
+(`reinfors==0.x.y`) and read release notes when upgrading. What does hold at every version:
+constructors validate their inputs, and no public Python input reaches a Rust panic — both
+enforced by adversarial test sweeps in CI.
 
 ## Citation
 

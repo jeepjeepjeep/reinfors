@@ -71,6 +71,25 @@ Important invariants:
 Prefer a chain of narrow chance nodes over eagerly constructing a combinatorial outcome when draws
 are naturally sequential.
 
+How the engine and the policies consume chance, so a game knows what it is signing up for:
+
+- **The rollout samples real chance.** Root chance chains are realized before any policy sees a
+  state (`realize_initial_state`), and after every played action the episode samples the complete
+  chance chain to the next decision or terminal state (`step_env`); both are cycle-guarded. The
+  policy chooses actions, but chance outcomes are always sampled from the game's declared
+  distributions, and non-search policies (e.g. DQN's) meet chance only this way. No policy ever
+  sees a chance state as its decision root; MCTS asserts exactly that.
+- **Search policies additionally choose how to model hypothetical chance during planning**, via
+  their [chance mode](../catalogue/algorithms.md): MCTS / AlphaZero expand explicit chance nodes
+  inside the tree; SelectiveExpectimax applies its chance mode while flattening chance chains along
+  stepped edges and never represents chance states as tree nodes; Minimax expands each node exactly
+  once, so it accepts only chance modes expressible in a single expansion and rejects per-traversal
+  resampling at construction.
+
+A game that emits `Actor::Chance` therefore works unmodified across policies: the realized
+trajectory always samples the game's distributions, and only the planning-time modeling of
+outcomes differs — selected on the policy, never in the game.
+
 ### 2. Add the representation and reward
 
 An encoder implements both traits in `crates/reinfors-core/src/encoder.rs`:
