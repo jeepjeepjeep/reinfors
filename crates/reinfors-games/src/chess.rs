@@ -278,8 +278,10 @@ fn insufficient_material(board: &Board) -> bool {
     square_colors.all(|c| c == first)
 }
 
-/// FIDE/OpenSpiel repetition identity: an en-passant square only distinguishes
-/// positions when a capturing pawn threatens it.
+/// OpenSpiel repetition identity: an en-passant square only distinguishes positions
+/// when an adjacent pawn could pseudo-legally capture (their `EpSquareThreatened`).
+/// Deliberately NOT strict FIDE 9.2.3.1, which requires the capture to be legal —
+/// a pinned adjacent pawn still counts here, matching the h2h counterpart.
 fn repetition_hash(board: &Board) -> u64 {
     let Some(ep_file) = board.en_passant() else {
         return board.hash();
@@ -289,14 +291,10 @@ fn repetition_hash(board: &Board) -> u64 {
     let threats = cozy_chess::get_pawn_attacks(ep_square, !stm)
         & board.colors(stm)
         & board.pieces(Piece::Pawn);
-    if !threats.is_empty() {
-        return board.hash();
-    }
-    let mut b = cozy_chess::BoardBuilder::from_board(board);
-    b.en_passant = None;
-    match b.build() {
-        Ok(cleared) => cleared.hash(),
-        Err(_) => board.hash(),
+    if threats.is_empty() {
+        board.hash_without_ep()
+    } else {
+        board.hash()
     }
 }
 
@@ -863,6 +861,23 @@ mod tests {
     }
 
     #[test]
+    fn pinned_pawn_still_counts_as_ep_threat_matching_openspiel() {
+        // white's f5 pawn is pinned by the f8 rook (exf6 e.p. would be ILLEGAL), so
+        // strict FIDE identity would treat the post-push position as repeatable;
+        // OpenSpiel's pseudo-legal threat test keeps ep in the hash, and we match it:
+        // no draw at the ply where the non-capturable case draws
+        let (game, state) = start_fen("5r1k/4p3/8/5P2/8/8/5K2/8 b - - 0 1");
+        let shuffle = ["f2f1", "h8g8", "f1f2", "g8h8"];
+        let mut seq = vec!["e7e5"];
+        seq.extend(shuffle.iter().cycle().take(8).copied());
+        let (_, terminal) = play_uci(&game, state, &seq);
+        assert!(
+            !terminal,
+            "pseudo-threatened ep keeps the first occurrence distinct"
+        );
+    }
+
+    #[test]
     fn illegal_action_is_immediate_loss() {
         let (game, state) = start();
         let bogus = encode_move("e2e4".parse().unwrap(), Color::White) + 1;
@@ -1281,11 +1296,11 @@ impl reinfors_core::StateCodec for Chess {
     type State = ChessState;
 
     fn encode(&self, s: &ChessState) -> Vec<u8> {
-        crate::codec_util::serde_encode(2, s)
+        crate::codec_util::serde_encode(3, s)
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<ChessState, String> {
-        let mut s: ChessState = crate::codec_util::serde_decode(2, bytes)?;
+        let mut s: ChessState = crate::codec_util::serde_decode(3, bytes)?;
         if s.hashes.is_empty() {
             return Err("empty hash history (must contain at least the current position)".into());
         }
