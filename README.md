@@ -11,9 +11,10 @@ observations and returns model outputs, so the network, framework, optimizer, re
 hardware placement, and distributed topology remain yours.
 
 Benchmarked against OpenSpiel's all-C++ libtorch AlphaZero on a matched chess training
-workload (2-hour rounds, each stack at its own best measured configuration, plus
-head-to-head play between the resulting models), reinfors' modular design shows no
-meaningful throughput cost (TBD — V1 campaign). Protocol, evidence, and full results:
+workload — two-hour rounds at each stack's best measured configuration, then
+head-to-head play between the resulting models — reinfors sustained **9.9% higher
+training throughput**, and its trained networks scored **0.605 ± 0.020** against
+OpenSpiel's over 300 paired games (**+74 Elo**). Protocol, evidence, and full results:
 [reinfors-benchmarks](https://github.com/jeepjeepjeep/reinfors-benchmarks).
 
 Reinfors is not designed to maximize throughput at any cost or to outperform a bespoke, fully
