@@ -783,6 +783,11 @@ mod tests {
             recent: Vec::new(),
             finished: None,
         };
+        assert_eq!(
+            position_outcome(&state),
+            None,
+            "99 half-moves is not yet a draw"
+        );
         let (s, terminal) = play_uci(&game, state, &["g1g2"]);
         assert!(terminal, "the 100th reversible half-move should draw");
         assert_eq!(s.finished, Some(ChessOutcome::Draw));
