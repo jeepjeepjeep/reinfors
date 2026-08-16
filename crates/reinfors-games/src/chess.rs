@@ -283,7 +283,10 @@ fn position_outcome(state: &ChessState) -> Option<ChessOutcome> {
         GameStatus::Won => Some(ChessOutcome::WonBy(1 - state.turn())),
         GameStatus::Drawn => Some(ChessOutcome::Draw),
         GameStatus::Ongoing => {
-            if state.repetition_count() >= 3 || insufficient_material(&state.board) {
+            if state.repetition_count() >= 3
+                || insufficient_material(&state.board)
+                || state.board.halfmove_clock() >= 100
+            {
                 Some(ChessOutcome::Draw)
             } else {
                 None
@@ -765,6 +768,28 @@ mod tests {
             terminal,
             "third occurrence of the start position should draw"
         );
+        assert_eq!(s.finished, Some(ChessOutcome::Draw));
+    }
+
+    #[test]
+    fn fifty_move_rule_draws_at_100_halfmoves() {
+        let game = Chess::default();
+        // KR vs K (sufficient material), one reversible move short of 100 half-moves
+        let board: Board = "8/8/8/3k4/8/3K4/8/6R1 w - - 99 60".parse().unwrap();
+        let hashes = vec![board.hash()];
+        let state = ChessState {
+            board,
+            hashes,
+            recent: Vec::new(),
+            finished: None,
+        };
+        assert_eq!(
+            position_outcome(&state),
+            None,
+            "99 half-moves is not yet a draw"
+        );
+        let (s, terminal) = play_uci(&game, state, &["g1g2"]);
+        assert!(terminal, "the 100th reversible half-move should draw");
         assert_eq!(s.finished, Some(ChessOutcome::Draw));
     }
 
