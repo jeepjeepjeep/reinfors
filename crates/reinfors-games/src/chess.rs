@@ -278,6 +278,28 @@ fn insufficient_material(board: &Board) -> bool {
     square_colors.all(|c| c == first)
 }
 
+/// FIDE/OpenSpiel repetition identity: an en-passant square only distinguishes
+/// positions when a capturing pawn threatens it.
+fn repetition_hash(board: &Board) -> u64 {
+    let Some(ep_file) = board.en_passant() else {
+        return board.hash();
+    };
+    let stm = board.side_to_move();
+    let ep_square = Square::new(ep_file, Rank::Sixth.relative_to(stm));
+    let threats = cozy_chess::get_pawn_attacks(ep_square, !stm)
+        & board.colors(stm)
+        & board.pieces(Piece::Pawn);
+    if !threats.is_empty() {
+        return board.hash();
+    }
+    let mut b = cozy_chess::BoardBuilder::from_board(board);
+    b.en_passant = None;
+    match b.build() {
+        Ok(cleared) => cleared.hash(),
+        Err(_) => board.hash(),
+    }
+}
+
 fn position_outcome(state: &ChessState) -> Option<ChessOutcome> {
     match state.board.status() {
         GameStatus::Won => Some(ChessOutcome::WonBy(1 - state.turn())),
@@ -367,7 +389,7 @@ impl Game for Chess {
         if next.board.halfmove_clock() == 0 {
             next.hashes.clear();
         }
-        next.hashes.push(next.board.hash());
+        next.hashes.push(repetition_hash(&next.board));
         if self.history_len > 0 {
             let count = next.repetition_count().min(u8::MAX as usize) as u8;
             next.recent.push((next.board.clone(), count));
@@ -398,7 +420,7 @@ impl Game for Chess {
 
     fn initial_state(&self) -> ChessState {
         let board = Board::default();
-        let hashes = vec![board.hash()];
+        let hashes = vec![repetition_hash(&board)];
         let recent = if self.history_len > 0 {
             vec![(board.clone(), 1)]
         } else {
@@ -697,6 +719,18 @@ mod tests {
         (game, state)
     }
 
+    fn start_fen(fen: &str) -> (Chess, ChessState) {
+        let board: Board = fen.parse().unwrap();
+        let hashes = vec![repetition_hash(&board)];
+        let state = ChessState {
+            board,
+            hashes,
+            recent: Vec::new(),
+            finished: None,
+        };
+        (Chess::default(), state)
+    }
+
     fn perft(game: &Chess, state: &ChessState, depth: usize) -> u64 {
         if depth == 0 {
             return 1;
@@ -776,7 +810,7 @@ mod tests {
         let game = Chess::default();
         // KR vs K (sufficient material), one reversible move short of 100 half-moves
         let board: Board = "8/8/8/3k4/8/3K4/8/6R1 w - - 99 60".parse().unwrap();
-        let hashes = vec![board.hash()];
+        let hashes = vec![repetition_hash(&board)];
         let state = ChessState {
             board,
             hashes,
@@ -791,6 +825,41 @@ mod tests {
         let (s, terminal) = play_uci(&game, state, &["g1g2"]);
         assert!(terminal, "the 100th reversible half-move should draw");
         assert_eq!(s.finished, Some(ChessOutcome::Draw));
+    }
+
+    #[test]
+    fn noncapturable_ep_position_counts_toward_repetition() {
+        // game-43 shape: a double push nobody can capture, then a 4-ply king shuffle;
+        // the post-push position recurs at plies +4 and +8 = threefold under FIDE
+        let (game, state) = start_fen("7k/4p3/8/8/8/8/8/7K b - - 0 1");
+        let shuffle = ["h1g1", "h8g8", "g1h1", "g8h8"];
+        let mut seq = vec!["e7e5"];
+        seq.extend(shuffle.iter().cycle().take(7).copied());
+        let (_, terminal) = play_uci(&game, state.clone(), &seq);
+        assert!(!terminal, "two occurrences is not yet a draw");
+        let mut seq = vec!["e7e5"];
+        seq.extend(shuffle.iter().cycle().take(8).copied());
+        let (s, terminal) = play_uci(&game, state, &seq);
+        assert!(
+            terminal,
+            "third occurrence of the post-push position should draw"
+        );
+        assert_eq!(s.finished, Some(ChessOutcome::Draw));
+    }
+
+    #[test]
+    fn capturable_ep_position_stays_distinct() {
+        // with a white pawn on f5 the push is ep-capturable, so the post-push position
+        // is NOT identical to the later shuffles; no draw at the +8 ply
+        let (game, state) = start_fen("7k/4p3/8/5P2/8/8/8/7K b - - 0 1");
+        let shuffle = ["h1g1", "h8g8", "g1h1", "g8h8"];
+        let mut seq = vec!["e7e5"];
+        seq.extend(shuffle.iter().cycle().take(8).copied());
+        let (_, terminal) = play_uci(&game, state, &seq);
+        assert!(
+            !terminal,
+            "the ep-capturable first occurrence must not count"
+        );
     }
 
     #[test]
@@ -850,7 +919,7 @@ mod tests {
     fn insufficient_material_draws() {
         let game = Chess::default();
         let board: Board = "8/8/8/3k4/8/2K1B3/8/8 w - - 0 1".parse().unwrap();
-        let hashes = vec![board.hash()];
+        let hashes = vec![repetition_hash(&board)];
         let state = ChessState {
             board,
             hashes,
@@ -1234,7 +1303,7 @@ impl reinfors_core::StateCodec for Chess {
                 state.hashes.len()
             ));
         }
-        if *state.hashes.last().expect("non-empty") != state.board.hash() {
+        if *state.hashes.last().expect("non-empty") != repetition_hash(&state.board) {
             return Err("hash history does not end at the current position".into());
         }
         if state.recent.len() > 8 {
