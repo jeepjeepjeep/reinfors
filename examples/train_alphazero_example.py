@@ -72,8 +72,8 @@ def make_infer(net: AlphaZeroNet, device: str) -> Callable[[np.ndarray], tuple[n
     `(policy_logits (N, A) f32, values (N,) f32)`. No-grad, eval-mode, side-effect free."""
     net.to(device)
     c, h, w = net.obs_shape
-    # Compiled default mode is the benchmarked operating config on CUDA; CPU runs skip
-    # the first-call compile cost, which would dominate a short example.
+    # Default-mode compile is the pattern the V1 benchmark favored (measure it on your
+    # workload); CPU runs skip the first-call compile cost, which would dominate a short example.
     forward = torch.compile(net) if device.startswith("cuda") else net
 
     def infer(obs_batch: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

@@ -64,7 +64,7 @@ net = nn.Sequential(
 ).to(device)
 target_net = copy.deepcopy(net).eval()
 optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
-# Compiled default mode is the benchmarked best inference configuration on CUDA.
+# Default-mode compile is the pattern the V1 benchmark favored; measure it on your workload.
 forward = torch.compile(net) if device.type == "cuda" else net
 
 
@@ -201,16 +201,16 @@ a collect or stream begins, since the callback shape is only known then.
 
 ## Compiling the inference callback
 
-The callback is plain Python, so `torch.compile` applies to it like any other inference
-path — no reinfors API is involved. The example above builds
+The PyTorch forward inside the callback can be compiled normally; no reinfors API
+changes are required. The example above builds
 `forward = torch.compile(net) if device.type == "cuda" else net` and calls it inside
-`infer`. Default mode over the engine's natural, varying batch
-sizes was the best measured configuration in the
-[V1 benchmarks](https://github.com/jeepjeepjeep/reinfors-benchmarks) — +19.6%
-completed-game throughput at the benchmark operating point on an A10G. Graph-capture
-modes (`reduce-overhead`) measured no better than eager there; if you use one anyway,
-its fixed-shape requirement is what `pad_rows_to` in the
-[inference contract](../reference/inference-contract.md#input) exists for. The first
+`infer`. Default mode over the engine's natural, varying batch sizes is the pattern the
+V1 benchmark favored —
+[+19.6% completed training states/s](https://github.com/jeepjeepjeep/reinfors-benchmarks/blob/main/docs/configuring-the-engines.md#reinfors-throughput-levers)
+at its operating point, measured on one chess ResNet workload on an A10G; measure it on
+your own workload. Graph-capture modes recapture or recompile per batch shape; a
+constant row count avoids that, which is what `pad_rows_to` in the
+[inference contract](../reference/inference-contract.md#input) provides. The first
 calls pay compilation latency, so short CPU example runs skip it.
 
 ## Per-player models

@@ -37,7 +37,7 @@ net = nn.Sequential(
 ).to(device)
 target_net = copy.deepcopy(net).eval()
 optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
-# Compiled default mode is the benchmarked best inference configuration on CUDA.
+# Default-mode compile is the pattern the V1 benchmark favored; measure it on your workload.
 forward = torch.compile(net) if device.type == "cuda" else net
 
 
