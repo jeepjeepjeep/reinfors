@@ -42,7 +42,7 @@ python examples/streaming.py --updates 3
 ### TensorBoard telemetry
 
 `examples/telemetry_tensorboard.py` writes search, inference, episode-length, and return metrics to
-TensorBoard. Install `reinfors[train]` and `tensorboard`.
+TensorBoard. Install `reinfors[train]`.
 
 **Runtime:** seconds to about a minute for the default on a laptop CPU.
 

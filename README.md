@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/reinfors-banner.svg" alt="Animated reinfors logo" width="100%">
+  <img src="https://raw.githubusercontent.com/jeepjeepjeep/reinfors/main/assets/reinfors-banner.svg" alt="Animated reinfors logo" width="100%">
 </p>
 
 High-throughput reinforcement-learning search and sampling in Rust, with caller-owned
@@ -55,15 +55,15 @@ print(batch.obs.shape, batch.targets.shape, batch.telemetry)
 - `collect` supports a simple synchronous loop; `collect_stream` runs parallel Rust search
   concurrently with Python training, with configurable queueing and bounded backpressure.
 - Networks are injectable per player and are not tied to a framework or device topology.
-- [`Arena`](docs/guides/arena.md) runs paired evaluation matches across concurrent slots, pooling
+- [`Arena`](https://github.com/jeepjeepjeep/reinfors/blob/main/docs/guides/arena.md) runs paired evaluation matches across concurrent slots, pooling
   native search while subprocess-backed external agents compute on bounded worker lanes.
 - Composable Rust traits make new games and algorithms straightforward to add, with safer,
   simpler native extension than comparable C++ infrastructure.
-- [Game semantics](docs/catalogue/games.md) cover single- and multi-agent, zero-sum,
+- [Game semantics](https://github.com/jeepjeepjeep/reinfors/blob/main/docs/catalogue/games.md) cover single- and multi-agent, zero-sum,
   cooperative, and general-sum tasks; one-shot and multi-step environments; turn-taking or
   simultaneous decisions; explicit chance; and perfect or imperfect information.
 - Algorithms span policy-driven value learning, search-guided learning, and standalone
-  game-theoretic solving; see the [algorithm catalogue](docs/catalogue/algorithms.md) for current
+  game-theoretic solving; see the [algorithm catalogue](https://github.com/jeepjeepjeep/reinfors/blob/main/docs/catalogue/algorithms.md) for current
   implementations.
 - Resolved configurations, snapshots, structured batches, and telemetry support
   reproducible experiments.
@@ -82,19 +82,19 @@ pip install "reinfors[train]" # PyTorch examples
 ```
 
 Contributing or building from source? Start with the
-[contributing guide](CONTRIBUTING.md) and the
-[development setup guide](docs/development/setup.md).
+[contributing guide](https://github.com/jeepjeepjeep/reinfors/blob/main/CONTRIBUTING.md) and the
+[development setup guide](https://github.com/jeepjeepjeep/reinfors/blob/main/docs/development/setup.md).
 
 ## Where next?
 
-- [Get started](docs/getting-started.md)
-- [Understand sampling and injectable training](docs/concepts/sampling-and-training.md)
-- [Choose a game](docs/catalogue/games.md), [algorithm](docs/catalogue/algorithms.md), or
-  [built-in composition](docs/catalogue/compatibility.md)
-- [Run the examples](docs/examples/index.md)
-- [Evaluate searched agents with Arena](docs/guides/arena.md)
-- [Add a Rust game or algorithm](docs/extending/index.md)
-- [Read the complete documentation](docs/index.md)
+- [Get started](https://github.com/jeepjeepjeep/reinfors/blob/main/docs/getting-started.md)
+- [Understand sampling and injectable training](https://github.com/jeepjeepjeep/reinfors/blob/main/docs/concepts/sampling-and-training.md)
+- [Choose a game](https://github.com/jeepjeepjeep/reinfors/blob/main/docs/catalogue/games.md), [algorithm](https://github.com/jeepjeepjeep/reinfors/blob/main/docs/catalogue/algorithms.md), or
+  [built-in composition](https://github.com/jeepjeepjeep/reinfors/blob/main/docs/catalogue/compatibility.md)
+- [Run the examples](https://github.com/jeepjeepjeep/reinfors/blob/main/docs/examples/index.md)
+- [Evaluate searched agents with Arena](https://github.com/jeepjeepjeep/reinfors/blob/main/docs/guides/arena.md)
+- [Add a Rust game or algorithm](https://github.com/jeepjeepjeep/reinfors/blob/main/docs/extending/index.md)
+- [Read the complete documentation](https://github.com/jeepjeepjeep/reinfors/blob/main/docs/index.md)
 
 ## Stability
 
@@ -107,13 +107,13 @@ enforced by adversarial test sweeps in CI.
 ## Citation
 
 If you use reinfors in your research, cite it via the repository's
-[CITATION.cff](CITATION.cff) (GitHub's "Cite this repository" button renders it
+[CITATION.cff](https://github.com/jeepjeepjeep/reinfors/blob/main/CITATION.cff) (GitHub's "Cite this repository" button renders it
 as BibTeX/APA). What reinfors itself builds on is catalogued in
-[References](docs/reference/references.md).
+[References](https://github.com/jeepjeepjeep/reinfors/blob/main/docs/reference/references.md).
 
 ## License
 
-Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your
+Licensed under either of [MIT](https://github.com/jeepjeepjeep/reinfors/blob/main/LICENSE-MIT) or [Apache-2.0](https://github.com/jeepjeepjeep/reinfors/blob/main/LICENSE-APACHE), at your
 option. Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in this work shall be dual-licensed as above, without any additional terms
 or conditions.
