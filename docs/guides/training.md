@@ -197,6 +197,24 @@ truncation-tail bootstrapping (tail forwards are ordinary inference requests). T
 remaining restriction — a single shared callback, not per-player routing — is checked when
 a collect or stream begins, since the callback shape is only known then.
 
+## Compiling the inference callback
+
+The callback is plain Python, so `torch.compile` applies to it like any other inference
+path — no reinfors API is involved:
+
+```python
+forward = torch.compile(net) if device.startswith("cuda") else net
+```
+
+then call `forward` inside `infer`. Default mode over the engine's natural, varying batch
+sizes was the best measured configuration in the
+[V1 benchmarks](https://github.com/jeepjeepjeep/reinfors-benchmarks) — +19.6%
+completed-game throughput at the benchmark operating point on an A10G. Graph-capture
+modes (`reduce-overhead`) measured no better than eager there; if you use one anyway,
+its fixed-shape requirement is what `pad_rows_to` in the
+[inference contract](../reference/inference-contract.md#input) exists for. The first
+calls pay compilation latency, so short CPU example runs skip it.
+
 ## Per-player models
 
 For a separate two-player experiment—for example, Connect 4 with a frozen opponent—pass one

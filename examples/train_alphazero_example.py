@@ -72,13 +72,16 @@ def make_infer(net: AlphaZeroNet, device: str) -> Callable[[np.ndarray], tuple[n
     `(policy_logits (N, A) f32, values (N,) f32)`. No-grad, eval-mode, side-effect free."""
     net.to(device)
     c, h, w = net.obs_shape
+    # Compiled default mode is the benchmarked operating config on CUDA; CPU runs skip
+    # the first-call compile cost, which would dominate a short example.
+    forward = torch.compile(net) if device.startswith("cuda") else net
 
     def infer(obs_batch: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         was_training = net.training
         net.eval()
         with torch.no_grad():
             x = torch.from_numpy(np.ascontiguousarray(obs_batch)).reshape(-1, c, h, w).to(device)
-            logits, values = net(x)
+            logits, values = forward(x)
         net.train(was_training)
         # Native f32 out: the engine widens exactly; skips the f64 conversion (GPU fast path).
         return logits.cpu().numpy(), values.cpu().numpy()
