@@ -489,14 +489,14 @@ dependencies = [
 
 [[package]]
 name = "reinfors-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "rayon",
 ]
 
 [[package]]
 name = "reinfors-games"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "cozy-chess",
  "postcard",
@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "reinfors-py"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "numpy",
  "pyo3",
