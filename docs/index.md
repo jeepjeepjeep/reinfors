@@ -1,82 +1,65 @@
-# Search in Rust. Train your network your way.
+# Overview
 
-Reinfors is a reinforcement-learning sampling library for experiments that combine games,
-planning, and neural networks. It keeps the throughput-sensitive work—game dynamics,
-parallel search, episode orchestration, and batch assembly—in Rust. It leaves the model,
-optimizer, replay system, and hardware topology in Python.
+Reinfors is a reinforcement-learning library for experiments involving games, planning, and
+neural networks. Game dynamics, search, episode orchestration, and batch assembly run in Rust.
+Model inference and training are caller-owned and connected through Python.
 
-The boundary is one inference callback:
+## Execution model
+
+In `Engine` workflows, policies request model evaluations while games and searches are running.
+The engine pools these requests into NumPy arrays, calls Python for inference, and routes the
+returned values to the requesting policies. Learners then convert completed decisions or
+trajectories into training records.
 
 ```text
-Rust games + search  ── pooled NumPy observations ──▶  your inference code
-Rust batch assembly  ◀────── NumPy model outputs ───  PyTorch / JAX / RPC / …
+Rust engine and policies ── pooled NumPy observations ──▶  Python inference callback
+Rust engine and policies ◀───── NumPy model outputs ───  Python inference callback
+Rust learners            ──── typed training records ────▶  Python training loop
 ```
 
-That design supports a laptop training loop, CPU search feeding one GPU, concurrent
-actor–learner collection, per-player networks, or a callback backed by a remote inference
-service without changing the engine.
+`Engine.collect` performs synchronous collection. `Engine.collect_stream` runs collection
+concurrently in Rust and passes batches to the Python training loop through a bounded queue that
+provides backpressure. Inference callbacks may use PyTorch, JAX, another local runtime, or a remote
+service; they may also differ by player.
 
-## Start at the level you need
+Other execution surfaces cover workflows that do not use learner-shaped engine collection:
+[`Env`](guides/evaluation.md) exposes caller-controlled play, [`Arena`](guides/arena.md) runs paired
+evaluations, and standalone solvers own algorithm-specific traversals such as CFR.
 
-### Try it
+## Documentation map
 
-Install reinfors and collect your first batch with a small synchronous example.
-
-[Getting started →](getting-started.md)
-
-### Build a training loop
-
-Connect an arbitrary network, choose synchronous or concurrent collection, and consume
-learner-shaped training records (rows).
-
-[Architecture →](concepts/architecture.md) · [Training guide →](guides/training.md)
-
-### Choose components
-
-Browse the supported games and algorithm compositions.
-
-[Games →](catalogue/games.md) · [Algorithms →](catalogue/algorithms.md)
-
-### Extend the library
-
-Implement games, encoders, rewards, policies, learners, or solvers against the Rust traits and
-expose them through Python.
-
-[Extension guide →](extending/index.md)
-
-## Core capabilities
-
-- **Batched search and sampling.** Inference requests are pooled across parallel games and
-  search leaves before crossing into Python.
-- **Injectable training.** The callback exchanges NumPy arrays; reinfors does not own a
-  framework, module, optimizer, replay buffer, or device.
-- **Two collection modes.** `Engine.collect` is a direct request/response loop.
-  `Engine.collect_stream` overlaps a background Rust collector with Python training and
-  provides bounded backpressure.
-- **Broad game semantics.** The core represents explicit chance, sequential or simultaneous
-  decisions, N-player rewards, and imperfect information.
-- **Native simulation, flexible models.** Games and search components run in Rust while Python
-  supplies networks, optimization, replay, and deployment logic.
-- **Evaluation, direct play, and standalone solving.** `Arena` runs concurrent paired matches with
-  pooled search; `Env` supports caller-driven and interactive play; solvers own algorithm-specific
-  traversals outside the policy/learner collection model.
-- **Experiment lifecycle.** Resolved configurations, configuration fingerprints, exact engine
-  snapshots, environment forks, structured telemetry, and per-player record routing are
-  part of the public surface.
-- **Ecosystem adapters.** Supported games expose Gymnasium or PettingZoo adapters where
-  those standards fit their interaction model; see the [adapter guide](guides/adapters.md).
+- [Getting started](getting-started.md) covers installation and a first collection call.
+- [Architecture](concepts/architecture.md) describes the execution surfaces and component
+  responsibilities.
+- [Training](guides/training.md) gives a complete Python training loop; the
+  [streaming guide](guides/streaming.md) covers concurrent collection.
+- The [game](catalogue/games.md), [algorithm](catalogue/algorithms.md), and
+  [compatibility](catalogue/compatibility.md) catalogues describe the built-in components.
+- [Examples](examples/index.md) links runnable scripts for collection, training, evaluation,
+  adapters, direct play, and solvers.
+- [Extending reinfors](extending/index.md) documents the Rust traits and Python registration path
+  for new components.
+- [Reference](reference/index.md) specifies inference shapes, batch fields, telemetry, terminology,
+  and current boundaries.
 
 ## Scope
 
-Reinfors optimizes for strong throughput across a reusable research system, not peak throughput for
-one fixed workload. A bespoke, fully fused JAX/XLA pipeline can be faster; reinfors deliberately
-retains modular games, algorithms, networks, batching, and deployment so researchers can change the
-composition without rebuilding the whole stack.
+Reinfors uses native simulation and search within a reusable experimental interface. It is not
+intended to maximize throughput for one fixed workload; a fully fused implementation specialized
+for a particular model, game, and device topology may be faster.
 
-Reinfors owns native simulation, search, and batched data generation; the caller owns model training
-and deployment. Games currently use
+The current scope includes:
+
+- native game simulation, planning, episode collection, and inference batching;
+- synchronous and concurrent collection with caller-owned models, optimization, and replay;
+- sequential and simultaneous decisions, explicit chance, multiple players, and imperfect
+  information where supported by the selected algorithm;
+- resolved configurations, snapshots, telemetry, per-player inference, and evaluation surfaces;
+- [Gymnasium and PettingZoo adapters](guides/adapters.md) for compatible games.
+
+Games currently use
 [fixed discrete action and observation spaces](reference/limits.md#fixed-observation-and-action-spaces),
 one [decision phase](reference/limits.md#decision-phases), and native Rust
-[component implementations](reference/limits.md#native-component-boundary). The project is pre-1.0,
-so review the canonical [current boundaries](reference/limits.md) before committing to an experiment
-design.
+[component implementations](reference/limits.md#native-component-boundary). Reinfors is pre-1.0;
+the [current boundaries](reference/limits.md) page records the applicable API and modeling
+constraints.
