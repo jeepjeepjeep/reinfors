@@ -127,7 +127,7 @@ def test_compatibility_catalogue_matches_builtin_construction(game_name: str, al
     if expected:
         build_workflow(GAME_FACTORIES[game_name](), algorithm)
     else:
-        with pytest.raises(ValueError, match=r"compatibility\.md"):
+        with pytest.raises(ValueError, match=r"catalogue/compatibility"):
             build_workflow(GAME_FACTORIES[game_name](), algorithm)
 
 
@@ -149,5 +149,5 @@ def test_reached_state_start_catalogue_matches_builtin_construction(game_name: s
     if expected:
         build()
     else:
-        with pytest.raises(ValueError, match=r"compatibility\.md"):
+        with pytest.raises(ValueError, match=r"catalogue/compatibility"):
             build()

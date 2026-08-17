@@ -126,7 +126,7 @@ def test_failed_collects_are_transactional() -> None:
 
 
 def test_construction_gates() -> None:
-    with pytest.raises(ValueError, match=r"compatibility\.md"):
+    with pytest.raises(ValueError, match=r"catalogue/compatibility"):
         rf.solvers.DeepCfr(rf.games.Connect4())
     # N-player hold'em now constructs (no Nash guarantee past 2 — documented at the gate).
     rf.solvers.DeepCfr(rf.games.TexasHoldem(num_players=3))

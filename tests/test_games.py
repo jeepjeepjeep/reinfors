@@ -138,7 +138,7 @@ def test_start_buffer_is_off_by_default_snake_only_and_tags_seeded() -> None:
     assert seeded_any, "p_fresh=0 should seed some episodes once the buffer fills"
     # A game without reached-state-start support rejects the composition and points at the
     # canonical capability matrix.
-    with pytest.raises(ValueError, match=r"compatibility\.md"):
+    with pytest.raises(ValueError, match=r"catalogue/compatibility"):
         rf.Engine(
             rf.games.Connect4(),
             rf.Reward(win=1.0),
