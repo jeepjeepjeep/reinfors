@@ -58,7 +58,7 @@ walkthrough is [add a policy or learner](docs/extending/policies-and-learners.md
 core traits (capability claims are deliberate, with no defaults), the per-(policy, learner)
 composition arm in the binding, and the self-enforcing registration — the sweep fails test
 collection until a new constructor's parameters are banked and its composition hook exists.
-State the algorithm's reference in `catalog.py` and its row in the compatibility matrix.
+State the algorithm's reference in `python/reinfors/catalog.py` and regenerate the compatibility matrix with `python scripts/generate_docs.py` — the matrix is generated, never edited directly.
 
 ## Licensing
 

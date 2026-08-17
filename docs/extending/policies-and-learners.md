@@ -28,10 +28,12 @@ The trait is in `crates/reinfors-core/src/policy.rs`. Its surface, in the order 
   hidden-information game is rejected at `Engine` construction, with a pointer to the
   [compatibility catalogue](../catalogue/compatibility.md).
 - `evaluate(...)` — the batch heart: a `Vec<(state, agent)>` of requests in, evaluations out.
-  All inference goes through the passed `Evaluator`; a policy never calls the network
-  directly, which is what lets the engine pool requests across games into batched callback
-  calls.
-- `select(eval, policy_state, rng)` — one action from one evaluation.
+  **Return exactly one evaluation per request, in request order** — the engine pairs them
+  positionally and asserts the lengths match. All inference goes through the passed
+  `Evaluator`; a policy never calls the network directly, which is what lets the engine pool
+  requests across games into batched callback calls.
+- `select(eval, policy_state, rng)` — one action from one evaluation. **The returned action
+  must be legal in the game-action frame** (a game action id, not a network-head index).
 - `fold_telemetry` (optional) — surface search statistics into `CollectStats`.
 
 Draw randomness only from the `rng` arguments: a policy must be deterministic given its
@@ -47,6 +49,9 @@ consumes:
   and per-finished-episode.
 - Behavior knobs with defaults: `needs_next_obs`, `needs_interior`, `uses_episode_tail` (+
   `tail_from_row` for truncation bootstraps), `value_only_evaluation`.
+- **Network-facing action ids go through the supplied `ActionView`** (as `tail_from_row`'s
+  default does with `head_index`): encoders may reorder or re-orient the action head, so a
+  learner that writes raw game-action ids into records corrupts them under those encoders.
 
 Document the record's shape, dtype, legal-action treatment, and terminal/truncation behavior —
 that description becomes the [batch-formats reference](../reference/batch-formats.md) entry.
