@@ -54,7 +54,7 @@ jobs:
       - uses: PyO3/maturin-action@fdd104694b233054d6e985e29b3af9f126af7ac6 # v1.9.0
         with:
           target: ${{ matrix.target }}
-          # --release is essential: a debug build runs the Rust core ~10x slower (see core_build_profile).
+          # --release is essential: a debug build runs the Rust core ~10x slower (build_info()["profile"] must be "release").
           args: --release --out dist
           manylinux: auto # build inside a manylinux container on Linux for broad compatibility
           sccache: "true"
