@@ -21,7 +21,7 @@ and collection therefore requires a Rust implementation; see [extending reinfors
 
 ## Out-of-tree native composition
 
-Out-of-tree composition is not yet a supported pre-release workflow. The intended stable boundary
+Out-of-tree composition is not a supported workflow pre-1.0. The intended stable boundary
 is published `reinfors-core` and `reinfors-games` crates plus a documented PyO3 registration
 mechanism. Until that boundary is published, contributors should use the in-tree extension path and
 expect native contracts and registration glue to change.

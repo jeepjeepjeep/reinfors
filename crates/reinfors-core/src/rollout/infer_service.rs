@@ -88,7 +88,7 @@ struct Begin {
 
 /// Resident service thread owning the callback for a session's lifetime: every
 /// callback invocation across every collect happens on its one thread. The service
-/// loop exits when the workers drop their senders; [`Self::wait_done`] awaits that.
+/// loop exits when the workers drop their senders; `wait_done` awaits that.
 pub struct ServiceHost {
     tx: Option<Sender<Begin>>,
     // Mutex for Sync: hosts are shared across `allow_threads`-style scopes

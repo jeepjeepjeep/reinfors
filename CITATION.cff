@@ -11,4 +11,4 @@ repository-code: "https://github.com/jeepjeepjeep/reinfors"
 license:
   - MIT
   - Apache-2.0
-abstract: "General-purpose gym-style simulation and batching engine for reinforcement learning: Rust core, Python API."
+abstract: "High-throughput reinforcement-learning search and sampling in Rust, with caller-owned Python networks and training."
