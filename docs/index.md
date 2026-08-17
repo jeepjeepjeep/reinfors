@@ -1,4 +1,4 @@
-# reinfors documentation
+# Overview
 
 Reinfors is a reinforcement-learning library for experiments involving games, planning, and
 neural networks. Game dynamics, search, episode orchestration, and batch assembly run in Rust.
@@ -12,19 +12,19 @@ returned values to the requesting policies. Learners then convert completed deci
 trajectories into training records.
 
 ```text
-Rust games and policies   ── pooled NumPy observations ──▶  Python inference
-Rust policies and search  ◀───── NumPy model outputs ───  Python inference
-Rust learners and batches ────── training records ───────▶  Python training
+Rust engine and policies ── pooled NumPy observations ──▶  Python inference callback
+Rust engine and policies ◀───── NumPy model outputs ───  Python inference callback
+Rust learners            ──── typed training records ────▶  Python training loop
 ```
 
-`Engine.collect` performs synchronous collection. `Engine.collect_stream` runs collection on a
-background thread and passes bounded batches to a concurrent Python training loop. Inference
-callbacks may use PyTorch, JAX, another local runtime, or a remote service; they may also differ by
-player.
+`Engine.collect` performs synchronous collection. `Engine.collect_stream` runs collection
+concurrently in Rust and passes batches to the Python training loop through a bounded queue that
+provides backpressure. Inference callbacks may use PyTorch, JAX, another local runtime, or a remote
+service; they may also differ by player.
 
 Other execution surfaces cover workflows that do not use learner-shaped engine collection:
-`Env` exposes caller-controlled play, `Arena` runs paired evaluations, and standalone solvers own
-algorithm-specific traversals such as CFR.
+[`Env`](guides/evaluation.md) exposes caller-controlled play, [`Arena`](guides/arena.md) runs paired
+evaluations, and standalone solvers own algorithm-specific traversals such as CFR.
 
 ## Documentation map
 
@@ -55,7 +55,7 @@ The current scope includes:
 - sequential and simultaneous decisions, explicit chance, multiple players, and imperfect
   information where supported by the selected algorithm;
 - resolved configurations, snapshots, telemetry, per-player inference, and evaluation surfaces;
-- Gymnasium and PettingZoo adapters for compatible games.
+- [Gymnasium and PettingZoo adapters](guides/adapters.md) for compatible games.
 
 Games currently use
 [fixed discrete action and observation spaces](reference/limits.md#fixed-observation-and-action-spaces),
