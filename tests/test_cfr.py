@@ -100,7 +100,7 @@ def test_mccfr_runs_on_heads_up_holdem() -> None:
 
 
 def test_construction_gates() -> None:
-    with pytest.raises(ValueError, match=r"compatibility\.md"):
+    with pytest.raises(ValueError, match=r"catalogue/compatibility"):
         rf.solvers.Cfr(rf.games.Connect4())
     with pytest.raises(ValueError, match="external_mccfr"):
         rf.solvers.Cfr(rf.games.TexasHoldem(num_players=2), variant="plus")

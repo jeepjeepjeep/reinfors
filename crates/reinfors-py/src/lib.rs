@@ -4387,7 +4387,7 @@ struct GameHandle {
 }
 
 const ENCODER_DOCS: &str =
-    "https://github.com/jeepjeepjeep/reinfors/blob/main/docs/catalogue/games.md#observation-encoders";
+    "https://jeepjeepjeep.github.io/reinfors/catalogue/games/#observation-encoders";
 
 fn game_handle(mut spec: GameSpec, encoder: Option<EncoderHandle>) -> PyResult<GameHandle> {
     let selected = encoder.map_or_else(|| spec.default_encoder(), |handle| handle.spec);

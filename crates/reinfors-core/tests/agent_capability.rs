@@ -289,7 +289,7 @@ fn mcts_cfg() -> MctsConfig {
 }
 
 #[test]
-#[should_panic(expected = "compatibility.md")]
+#[should_panic(expected = "catalogue/compatibility")]
 fn uct_rejects_sequential_three_agent_games() {
     let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2];
     let mut eval = Evaluator::new(&mut infer, reinfors_core::InferMode::Shared, None);
