@@ -30,7 +30,7 @@ game = rf.games.Connect4()
 engine = rf.Engine(
     game=game,
     reward=rf.Reward(win=1.0, loss=-1.0),
-    policy=rf.policies.Mcts(num_simulations=64),
+    policy=rf.policies.Minimax(depth=4),
     learner=rf.learners.TreeStrap(),
     n_games=32,  # parallel episode slots
     seed=0,
@@ -39,7 +39,9 @@ engine = rf.Engine(
 actions = game.action_space().n
 
 def infer(obs: np.ndarray) -> np.ndarray:
-    # Replace with PyTorch, JAX, an accelerator service, or any other backend.
+    # The network is the search's evaluation function: it scores every frontier leaf,
+    # pooled across games. Replace with PyTorch, JAX, an accelerator service, or any
+    # other backend; TreeStrap's targets train it toward its own deeper search results.
     return np.zeros((len(obs), 1, actions), dtype=np.float32)
 
 batch = engine.collect(n_records=1024, infer=infer)
