@@ -33,9 +33,9 @@ jobs:
         run: |
           python -m pip install numpy
           if [ "${{ inputs.index }}" = "testpypi" ]; then
-            python -m pip install --index-url https://test.pypi.org/simple --no-deps "reinfors==${{ inputs.version }}"
+            python -m pip install --index-url https://test.pypi.org/simple --no-deps --only-binary=:all: "reinfors==${{ inputs.version }}"
           else
-            python -m pip install --no-deps "reinfors==${{ inputs.version }}"
+            python -m pip install --no-deps --only-binary=:all: "reinfors==${{ inputs.version }}"
           fi
       - name: import and build_info assertions
         shell: bash
