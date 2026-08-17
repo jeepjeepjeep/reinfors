@@ -58,6 +58,9 @@ jobs:
           args: --release --out dist
           manylinux: auto # build inside a manylinux container on Linux for broad compatibility
           sccache: "true"
+          # the mounted workspace fails git's dubious-ownership check inside the container,
+          # which would strip git provenance from build_info on Linux wheels
+          docker-options: -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=*
       # Install + import the freshly built wheel before it can reach PyPI (versions there are immutable —
       # a broken upload burns the version number). Runs on every native-arch runner; only the QEMU-cross
       # aarch64-linux wheel can't be executed by its host, so that row stays build-only (standard tradeoff).
