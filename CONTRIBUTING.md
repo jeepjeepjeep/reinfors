@@ -51,6 +51,15 @@ whose parity asserts and the adversarial sweep then enforce completeness automat
 Games with an external reference implementation should ship a parity test against it,
 following the existing `tests/test_*_parity.py` suites.
 
+## Adding a policy or learner
+
+Policies and learners usually ship as a pair, meeting at the policy's evaluation type. The
+walkthrough is [add a policy or learner](docs/extending/policies-and-learners.md): the two
+core traits (capability claims are deliberate, with no defaults), the per-(policy, learner)
+composition arm in the binding, and the self-enforcing registration — the sweep fails test
+collection until a new constructor's parameters are banked and its composition hook exists.
+State the algorithm's reference in `python/reinfors/catalog.py` and regenerate the compatibility matrix with `python scripts/generate_docs.py` — the matrix is generated, never edited directly.
+
 ## Licensing
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion

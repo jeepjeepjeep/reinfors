@@ -23,8 +23,9 @@ familiarity and a working native build; they are not an introduction to Rust or 
 
 For an alternative view of an existing game, follow [Add an encoder](encoders.md). For a new game,
 follow [Add a game](rust-components.md), then
-[register its Python binding](python-bindings.md#register-a-built-in-game). Policy, learner, encoder,
-reward, chance-mode, and noise authors should continue through the
+[register its Python binding](python-bindings.md#register-a-built-in-game). For a new policy or
+learner, follow [Add a policy or learner](policies-and-learners.md). Reward, chance-mode, and
+noise authors should continue through the
 [native component contracts](component-contracts.md), then the
 [handle-based binding path](python-bindings.md#other-handle-based-components). Solver authors should
 start with the [solver contract](component-contracts.md#solvers).

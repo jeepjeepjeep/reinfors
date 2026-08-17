@@ -932,6 +932,13 @@ where
     L: Learner<P::Evaluation>,
 {
     let num_agents = game.num_agents();
+    assert_eq!(
+        evals.len(),
+        meta.len(),
+        "policy returned {} evaluations for {} requests — one per request, in order",
+        evals.len(),
+        meta.len()
+    );
     let mut acted: Vec<Vec<Option<usize>>> = vec![vec![None; num_agents]; episodes.len()];
     for (mut eval, &(gi, si)) in evals.into_iter().zip(meta.iter()) {
         stats.decisions += 1;

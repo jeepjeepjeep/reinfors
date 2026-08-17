@@ -66,6 +66,7 @@ nav:
       - Component contracts: extending/component-contracts.md
       - Add an encoder: extending/encoders.md
       - Add a game: extending/rust-components.md
+      - Add a policy or learner: extending/policies-and-learners.md
       - Python bindings: extending/python-bindings.md
   - Reference:
       - reference/index.md
