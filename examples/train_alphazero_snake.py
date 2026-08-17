@@ -69,11 +69,14 @@ class SnakeAzNet(nn.Module):
 
 def make_infer(net: SnakeAzNet, device: str) -> Callable[[np.ndarray], tuple[np.ndarray, np.ndarray]]:
     c, h, w = net.obs_shape
+    # Default-mode compile is the pattern the V1 benchmark favored (measure it on your
+    # workload); CPU runs skip the first-call compile cost, which would dominate a short example.
+    forward = torch.compile(net) if device.startswith("cuda") else net
 
     def infer(obs_batch: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         with torch.no_grad():
             x = torch.from_numpy(np.ascontiguousarray(obs_batch)).reshape(-1, c, h, w).to(device)
-            logits, values = net(x)
+            logits, values = forward(x)
         # Native f32 out: the engine widens exactly; skips the f64 conversion (GPU fast path).
         return logits.cpu().numpy(), values.cpu().numpy()
 
