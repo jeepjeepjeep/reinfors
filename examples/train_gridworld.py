@@ -37,6 +37,8 @@ net = nn.Sequential(
 ).to(device)
 target_net = copy.deepcopy(net).eval()
 optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
+# Compiled default mode is the benchmarked best inference configuration on CUDA.
+forward = torch.compile(net) if device.type == "cuda" else net
 
 
 def infer(obs_batch: np.ndarray) -> np.ndarray:
@@ -44,7 +46,7 @@ def infer(obs_batch: np.ndarray) -> np.ndarray:
     net.eval()
     with torch.no_grad():
         obs = torch.from_numpy(np.ascontiguousarray(obs_batch)).to(device)
-        return net(obs).unsqueeze(1).cpu().numpy()
+        return forward(obs).unsqueeze(1).cpu().numpy()
 
 
 for update in range(1, UPDATES + 1):

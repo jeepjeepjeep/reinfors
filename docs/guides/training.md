@@ -64,6 +64,8 @@ net = nn.Sequential(
 ).to(device)
 target_net = copy.deepcopy(net).eval()
 optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
+# Compiled default mode is the benchmarked best inference configuration on CUDA.
+forward = torch.compile(net) if device.type == "cuda" else net
 
 
 def infer(obs_batch: np.ndarray) -> np.ndarray:
@@ -71,7 +73,7 @@ def infer(obs_batch: np.ndarray) -> np.ndarray:
     net.eval()
     with torch.no_grad():
         obs = torch.from_numpy(np.ascontiguousarray(obs_batch)).to(device)
-        return net(obs).unsqueeze(1).cpu().numpy()
+        return forward(obs).unsqueeze(1).cpu().numpy()
 
 
 for update in range(1, UPDATES + 1):
@@ -200,13 +202,9 @@ a collect or stream begins, since the callback shape is only known then.
 ## Compiling the inference callback
 
 The callback is plain Python, so `torch.compile` applies to it like any other inference
-path — no reinfors API is involved:
-
-```python
-forward = torch.compile(net) if device.startswith("cuda") else net
-```
-
-then call `forward` inside `infer`. Default mode over the engine's natural, varying batch
+path — no reinfors API is involved. The example above builds
+`forward = torch.compile(net) if device.type == "cuda" else net` and calls it inside
+`infer`. Default mode over the engine's natural, varying batch
 sizes was the best measured configuration in the
 [V1 benchmarks](https://github.com/jeepjeepjeep/reinfors-benchmarks) — +19.6%
 completed-game throughput at the benchmark operating point on an A10G. Graph-capture
