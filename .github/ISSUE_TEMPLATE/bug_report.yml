@@ -1,0 +1,34 @@
+name: Bug report
+description: Something raised, panicked, crashed, or produced wrong results.
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: reinfors version
+      description: "`python -c \"import reinfors as rf; print(rf.build_info())\"`"
+      placeholder: '{"version": "0.1.0", "git_sha": "...", "profile": "release", ...}'
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: "Python 3.12, macOS 15 arm64 / Ubuntu 22.04 x86_64, install: pip wheel / source build"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest snippet that shows the problem — ideally constructing the engine/env inline.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected vs actual
+      description: Include the full error output. A Rust panic reaching Python from public inputs is always a bug — include the panic message verbatim.
+    validations:
+      required: true
