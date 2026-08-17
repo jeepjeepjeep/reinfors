@@ -94,7 +94,7 @@ Contributing or building from source? Start with the
 - [Run the examples](https://github.com/jeepjeepjeep/reinfors/blob/main/docs/examples/index.md)
 - [Evaluate searched agents with Arena](https://github.com/jeepjeepjeep/reinfors/blob/main/docs/guides/arena.md)
 - [Add a Rust game or algorithm](https://github.com/jeepjeepjeep/reinfors/blob/main/docs/extending/index.md)
-- [Read the complete documentation](https://github.com/jeepjeepjeep/reinfors/blob/main/docs/index.md)
+- [Read the complete documentation](https://jeepjeepjeep.github.io/reinfors/)
 
 ## Stability
 
