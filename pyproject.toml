@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "reinfors"
-description = "General-purpose gym-style simulation + batching engine (Rust core, Python API)"
+description = "High-throughput reinforcement-learning search and sampling in Rust, with caller-owned Python networks and training"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT OR Apache-2.0"
@@ -24,13 +24,15 @@ dynamic = ["version"]
 
 [project.urls]
 Repository = "https://github.com/jeepjeepjeep/reinfors"
+Documentation = "https://github.com/jeepjeepjeep/reinfors/blob/main/docs/index.md"
+Benchmarks = "https://github.com/jeepjeepjeep/reinfors-benchmarks"
 Issues = "https://github.com/jeepjeepjeep/reinfors/issues"
 
-# torch is needed only to run the training examples (`examples/`) and their smoke tests; the
+# torch and tensorboard are needed only to run the training examples (`examples/`) and their smoke tests; the
 # reinfors package itself (core/search/engine) needs just numpy. Install with `pip install reinfors[train]`.
 # `gym` pulls the standard-API adapters' backends (`reinfors.gym`), lazily imported so they're optional.
 [project.optional-dependencies]
-train = ["torch"]
+train = ["torch", "tensorboard"]
 gym = ["gymnasium", "pettingzoo"]
 docs = ["mkdocs==1.6.1", "mkdocs-material==9.7.7"]
 # `test` pulls everything the full test suite imports (both optional extras + pytest). It exists so a
