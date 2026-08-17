@@ -2,7 +2,7 @@
 
 /// Canonical built-in game/algorithm compatibility documentation.
 pub const COMPATIBILITY_DOCS: &str =
-    "https://github.com/jeepjeepjeep/reinfors/blob/main/docs/catalogue/compatibility.md";
+    "https://jeepjeepjeep.github.io/reinfors/catalogue/compatibility/";
 
 pub mod codec;
 pub mod encoder;
