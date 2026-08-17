@@ -17,8 +17,13 @@ CI runs three jobs; every command is reproducible locally:
   `cargo clippy --workspace --all-targets -- -D warnings`;
   `cargo test -p reinfors-core -p reinfors-games`
 - **python** — `uvx ruff@0.15.15 check .` and `uvx ruff@0.15.15 format --check .`;
-  `uvx --with numpy mypy@2.1.0 python`; then `pytest` against a freshly built wheel
-  (`uvx maturin@1.14.0 build`, tests run against the installed wheel, not an editable build)
+  `uvx --with numpy mypy@2.1.0 python`; then the tests against a freshly built wheel in an
+  isolated environment (not the editable build):
+
+  ```bash
+  uvx maturin@1.14.0 build --out dist --interpreter python3.12
+  uv run --no-project --python 3.12 --with dist/*.whl --with pytest==9.1.0 pytest
+  ```
 - **docs** — `python scripts/generate_docs.py --check`; `python scripts/check_docs.py`;
   `uvx --with mkdocs-material==9.7.7 mkdocs==1.6.1 build --strict`
 
