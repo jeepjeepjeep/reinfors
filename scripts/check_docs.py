@@ -42,7 +42,8 @@ def anchors(path: Path) -> set[str]:
 
 
 def markdown_files() -> list[Path]:
-    return [ROOT / "README.md", *sorted((ROOT / "docs").rglob("*.md"))]
+    roots = [ROOT / "README.md", ROOT / "CONTRIBUTING.md", ROOT / "SECURITY.md"]
+    return [p for p in roots if p.exists()] + sorted((ROOT / "docs").rglob("*.md"))
 
 
 def first_python_block(path: Path) -> str:
