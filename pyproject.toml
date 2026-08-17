@@ -24,7 +24,7 @@ dynamic = ["version"]
 
 [project.urls]
 Repository = "https://github.com/jeepjeepjeep/reinfors"
-Documentation = "https://github.com/jeepjeepjeep/reinfors/blob/main/docs/index.md"
+Documentation = "https://jeepjeepjeep.github.io/reinfors/"
 Benchmarks = "https://github.com/jeepjeepjeep/reinfors-benchmarks"
 Issues = "https://github.com/jeepjeepjeep/reinfors/issues"
 
