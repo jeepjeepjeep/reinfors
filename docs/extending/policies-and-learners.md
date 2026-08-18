@@ -58,10 +58,15 @@ that description becomes the [batch-formats reference](../reference/batch-format
 
 A new `Record` type must also cross the Python boundary: implement the binding's private
 `RecordBatch` conversion (`into_py_batch` in `crates/reinfors-py/src/lib.rs`), usually with a
-`#[pyclass]` batch struct registered with the PyO3 module and exposed through the stub and
-top-level API — the engine wrapper's `L::Record: RecordBatch` bound fails to compile without
+`#[pyclass]` batch struct registered with the PyO3 module (the `m.add_class` block at the end
+of `lib.rs`) and exposed through the stub and top-level API (`__init__.py`'s import list and
+`__all__`) — the engine wrapper's `L::Record: RecordBatch` bound fails to compile without
 it. A policy that introduces a new callback-output contract likewise selects or extends
-`InferLayout`, which sizes and validates the callback's return shape.
+`InferLayout`, which sizes and validates the callback's return shape. Reusing an existing
+layout across policies is the cheap path — PPO reuses `PolicyValue` — but contract errors
+name the composed policy through the label carried in the layout variant, and the
+[troubleshooting table](../reference/troubleshooting.md) matches those strings: keep existing
+labels byte-stable and add the new label's fragments to the table.
 
 ### 3. Bind and compose
 
@@ -70,7 +75,10 @@ one policy-specific addition. The binding dispatches compositions per **(policy,
 pair**: `build_for_game` in `crates/reinfors-py/src/lib.rs` has one arm per supported pairing,
 and unsupported pairings fall through to the incompatible-composition error. A new policy
 compatible with an existing learner adds an arm; a new pair adds one arm and its capability
-gates. Grep an existing `PolicySpec` variant to find every dispatch point.
+gates. Two further exhaustive matches always need arms — the `choose_batch` policy dispatch
+and the choose path's expected-heads/layout map — and the compiler names any others: grep an
+existing `PolicySpec` variant to find every dispatch point, then let `cargo check`'s
+non-exhaustive-match errors confirm you found them all.
 
 Composition is also where resource validation lives: budget-like constructor parameters
 (simulation counts, expansion budgets, depths) enroll in `check_search_budgets`, and anything
@@ -89,6 +97,11 @@ Registration is self-policing:
   name must have a composition hook (engine build + one collect) or collection fails with
   `"policies.X has no composition hook: enroll it in USE"` — both in
   `tests/test_constructor_validation.py`.
+- Two more assertions fail until updated, by design: `tests/test_catalog.py`'s
+  `build_workflow` needs an arm constructing the new composition (that arm is what makes the
+  generated compatibility matrix construction-tested), and
+  `tests/test_games.py::test_registries_list_the_built_in_names` pins the exact registry name
+  lists.
 - Add family tests alongside the sweep: record shapes and dtypes, determinism for a seed, and
   whatever the learner's targets claim (see `tests/test_engine.py` for the TreeStrap pattern
   of tying collected targets to the search's own outputs).
