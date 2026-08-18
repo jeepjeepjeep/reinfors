@@ -243,7 +243,7 @@ where
 
 // `label` names the composed policy in contract errors; the troubleshooting table matches
 // these strings, so existing labels must stay byte-stable.
-fn az_infer_closure<'a, 'py>(
+fn policy_value_infer_closure<'a, 'py>(
     py: Python<'py>,
     callbacks: &'a [Py<PyAny>],
     dim: usize,
@@ -358,7 +358,7 @@ fn infer_closure_gil<C: AsRef<[Py<PyAny>]> + Send>(
                         f(player, obs_flat, n)
                     }
                     InferLayout::PolicyValue { label } => {
-                        let mut f = az_infer_closure(
+                        let mut f = policy_value_infer_closure(
                             py,
                             callbacks.as_ref(),
                             dim,
@@ -1844,8 +1844,14 @@ where
             inner.collect_routed(n_records, mode, &mut infer_fn)
         }
         InferLayout::PolicyValue { label } => {
-            let mut infer_fn =
-                az_infer_closure(py, &callbacks, dim, action_count, label, &mut callback_err);
+            let mut infer_fn = policy_value_infer_closure(
+                py,
+                &callbacks,
+                dim,
+                action_count,
+                label,
+                &mut callback_err,
+            );
             inner.collect_routed(n_records, mode, &mut infer_fn)
         }
     };
