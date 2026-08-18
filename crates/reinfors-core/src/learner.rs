@@ -81,6 +81,11 @@ pub trait Learner<E> {
     ) -> Vec<Self::Record>;
 }
 
+/// The final-state bootstrap for PolicyValue rows, where the state value follows the logits.
+pub(crate) fn policy_value_tail(row: &[f64], action_count: usize) -> Vec<f64> {
+    vec![row[action_count]]
+}
+
 /// Sample an independent Bernoulli bootstrap mask for each ensemble head.
 pub(crate) fn sample_mask(rng: &mut dyn Rng, n_heads: usize, p: f64) -> Vec<f32> {
     (0..n_heads)

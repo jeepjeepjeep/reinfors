@@ -4,4 +4,5 @@
 
 pub mod alphazero;
 pub mod dqn;
+pub mod ppo;
 pub mod treestrap;

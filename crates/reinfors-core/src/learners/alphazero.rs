@@ -43,8 +43,7 @@ impl Learner<SearchEvaluation> for AlphaZeroLearner {
         _view: &dyn ActionView,
         _agent: usize,
     ) -> Vec<f64> {
-        // AlphaZero rows append the state value after the action logits.
-        vec![row[action_count]]
+        crate::learner::policy_value_tail(row, action_count)
     }
 
     fn value_only_evaluation(&self, action_count: usize) -> Option<SearchEvaluation> {
