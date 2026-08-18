@@ -1,6 +1,6 @@
 # Batch formats
 
-`Engine.collect` and `CollectStream.next` return `TreeStrapBatch`, `DqnBatch`, or `AlphaZeroBatch`,
+`Engine.collect` and `CollectStream.next` return `TreeStrapBatch`, `DqnBatch`, `AlphaZeroBatch`, or `PpoBatch`,
 according to the engine's learner. Use named fields; positional unpacking exists only for
 compatibility.
 
@@ -55,6 +55,36 @@ loss per head, multiply by `masks`, and reduce over non-zero entries.
 terminal or an alternating-game truncation tail, so its target is the immediate reward. Do not compute
 `(1 - done) * max(masked_q)`; multiplying zero by negative infinity can produce `NaN`, and
 `dones` does not encode every non-bootstrapping tail.
+
+### `PpoBatch`
+
+| Field | Shape | Meaning |
+| --- | --- | --- |
+| `obs` | `(records, observation_size)` | Acting-player observation |
+| `players` | `(records,)` | Acting player id |
+| `actions` | `(records,)` | Sampled action ids, encoder head frame |
+| `behavior_log_probs` | `(records,)` | Log-probability of the sampled action under the collection-time masked softmax |
+| `advantages` | `(records,)` | GAE(`lam`) advantages, seeded by the terminal/truncation tail |
+| `returns` | `(records,)` | `advantages + values` — the value-function regression target |
+| `values` | `(records,)` | Collection-time critic values, for PPO's clipped value loss |
+| `legal_ids`, `legal_offsets` | CSR (compressed sparse row) | Legal actions at each decision, head frame |
+| `telemetry` | dictionary | Collection measurements |
+
+Mask the training-time softmax with the same legal CSR before computing new log-probabilities:
+an unmasked distribution silently mismatches the recorded behavior log-probs and corrupts the
+clipped ratio. Normalize `advantages` per batch or minibatch in the loss, not in the data.
+
+PPO collection is windowed: `collect(n_records)` advances complete rounds under frozen
+weights until the usual record floor is met (overshoot is at most one decision per learning
+agent per game), then bootstraps every unfinished trajectory from the critic and emits the
+fragment, so no record ever spans two collect calls and every batch is internally
+single-version. Episodes persist across windows; each window's GAE recursion restarts from its
+own bootstrap (the standard truncated-GAE estimator). Sequential non-mover bootstraps query
+the critic off-turn — the same approximation the DQN tail accepts. Data is on-policy: run a
+few clipped epochs on a batch, discard it, and collect with the updated weights. The recorded
+ratio corrects the action-likelihood factor only — not state-visitation staleness — so strict
+PPO uses synchronous `collect`; a streamed window can additionally straddle a collector weight
+sync, and streamed PPO should be treated as approximately on-policy with coarse syncs.
 
 ### `AlphaZeroBatch`
 

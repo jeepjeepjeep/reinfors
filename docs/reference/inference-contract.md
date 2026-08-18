@@ -36,11 +36,12 @@ batch-coupled statistics — as the contract already requires for caching.
 | `SelectiveExpectimax` | Ensemble Q values, `(rows, heads, actions)` |
 | `Minimax` | Q values, `(rows, 1, actions)`—one ensemble head. Every frontier row is requested for the leaf's own mover (that player id appears in per-player routing) and collapsed by the masked max over its legal set; opponent horizons negate back to the searcher under the zero-sum contract, so a self-play network only ever serves on-turn inputs — the same distribution the paired TreeStrap learner trains |
 | `AlphaZero` | Tuple of policy logits `(rows, width)` where `width >= actions`, and values `(rows,)`; logit columns after `actions` are ignored |
+| `Ppo` | Same tuple contract as `AlphaZero`: policy logits `(rows, width)` with `width >= actions` (tail ignored) and values `(rows,)` — one actor-critic forward serves both |
 
 Every output array may be `float32` or `float64`. Returning the network's native `float32` is the
 recommended path: reinfors widens it exactly after crossing the boundary and avoids a caller-side
 conversion. Outputs must have exactly the requested row count and contain finite values. Q-family
-action widths are exact; AlphaZero alone permits a padded policy head and consumes its first
+action widths are exact; AlphaZero and PPO permit a padded policy head and consume its first
 `actions` columns. Constructor settings determine `n_heads` and the action count; see
 [head terminology](glossary.md#network-outputs-and-ensembles).
 

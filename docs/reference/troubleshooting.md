@@ -16,7 +16,7 @@ callback rather than corrupting search. Match a traceback fragment here first:
 | `expected … per-player infer callables` | The callback sequence does not match the player count | [Per-player callback count](#per-player-callback-count) |
 | `must be a float64 or float32 ndarray` | Unsupported callback dtype or non-array output | [Callback dtype or shape errors](#callback-dtype-or-shape-errors) |
 | `must be a 1-d ndarray`, `must be a 2-d ndarray`, or `must be a 3-d ndarray` | Wrong callback rank | [Callback dtype or shape errors](#callback-dtype-or-shape-errors) |
-| `infer returned shape` or `AlphaZero infer must return` | Wrong callback rows, heads, or action count | [Wrong row or action count](#wrong-row-or-action-count) |
+| `infer returned shape`, or `AlphaZero`/`Ppo` `infer must return` | Wrong callback rows, heads, or action count | [Wrong row or action count](#wrong-row-or-action-count) |
 | `outputs must contain only finite values` | The callback returned NaN or infinity | [NaN or infinity from inference](#nan-or-infinity-from-inference) |
 | `this engine is held by a collect_stream` | A stream still owns the engine | [The engine is held by a stream](#the-engine-is-held-by-a-stream) |
 | `snapshot is from a different composition` | Snapshot and Engine fingerprints differ | [Snapshot restoration is rejected](#snapshot-restoration-is-rejected) |

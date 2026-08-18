@@ -23,8 +23,10 @@ pub use game::{realize_initial_state, Actor, ChanceDist, Game, Rng, Transition};
 pub use learner::{Learner, Step};
 pub use learners::alphazero::{AlphaZeroLearner, AlphaZeroRecord};
 pub use learners::dqn::{Dqn, DqnRecord};
+pub use learners::ppo::{Ppo, PpoRecord};
 pub use learners::treestrap::{TreeStrap, TreeStrapRecord};
 pub use policies::modelfree::epsilon_greedy_q::{EpsilonGreedyQ, QEvaluation};
+pub use policies::modelfree::ppo::{PpoActor, PpoEvaluation};
 pub use policies::tree::alphazero::{alphazero_many, AlphaZero, AlphaZeroConfig};
 pub use policies::tree::expectimax::search::{
     search_many, InteriorTarget, Opponent, SearchConfig, SearchResult, SearchStats,

@@ -100,6 +100,7 @@ USE: dict[tuple[str, str], Any] = {
         rf.games.Connect4(), p, rf.learners.AlphaZero(), _zeros_az(7), ex
     ),
     ("policies", "minimax"): lambda p, ex: _collect(rf.games.Connect4(), p, rf.learners.TreeStrap(), _zeros_q(7), ex),
+    ("policies", "ppo"): lambda p, ex: _collect(rf.games.Connect4(), p, rf.learners.Ppo(), _zeros_az(7), ex),
     ("policies", "selective_expectimax"): lambda p, ex: _collect(
         rf.games.Snake(), p, rf.learners.TreeStrap(), _zeros_q(3), ex
     ),
@@ -112,6 +113,7 @@ USE: dict[tuple[str, str], Any] = {
     ("learners", "dqn"): lambda le, ex: _collect(
         rf.games.GridWorld(), rf.policies.EpsilonGreedyQ(), le, _zeros_q(4), ex
     ),
+    ("learners", "ppo"): lambda le, ex: _collect(rf.games.Connect4(), rf.policies.Ppo(), le, _zeros_az(7), ex),
     ("learners", "alphazero"): lambda le, ex: _collect(
         rf.games.Connect4(), rf.policies.AlphaZero(num_simulations=2), le, _zeros_az(7), ex
     ),

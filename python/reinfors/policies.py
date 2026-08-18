@@ -15,6 +15,7 @@ from .catalog import POLICIES
 SelectiveExpectimax = _reinfors.PolicyHandle.SelectiveExpectimax
 EpsilonGreedyQ = _reinfors.PolicyHandle.EpsilonGreedyQ
 Mcts = _reinfors.PolicyHandle.Mcts
+Ppo = _reinfors.PolicyHandle.Ppo
 Minimax = _reinfors.PolicyHandle.Minimax
 AlphaZero = _reinfors.PolicyHandle.AlphaZero
 
@@ -23,6 +24,7 @@ _REGISTRY: dict[str, Callable[..., Any]] = {
     "epsilon_greedy_q": EpsilonGreedyQ,
     "mcts": Mcts,
     "minimax": Minimax,
+    "ppo": Ppo,
     "alphazero": AlphaZero,
 }
 assert _REGISTRY.keys() == POLICIES, "policy registry and documentation catalogue diverged"

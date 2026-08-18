@@ -329,17 +329,20 @@ where
         let mut evaluator =
             Evaluator::new(&mut infer, mode, cache_slice).with_pad_rows_to(self.pad_rows_to);
 
-        while out.len() < n_records {
-            let mut requests: Vec<(G::State, usize)> = Vec::new();
-            let mut meta: Vec<(usize, usize)> = Vec::new();
-            for (gi, ep) in self.episodes.iter().enumerate() {
-                for si in 0..num_agents {
-                    if ep.agent_active(&self.game, si) {
-                        requests.push((ep.state.clone(), si));
-                        meta.push((gi, si));
-                    }
-                }
+        let fragments = self.learner.bootstraps_fragments();
+        if fragments {
+            discard_fragments(&mut self.traj);
+        }
+        loop {
+            let collected = if fragments {
+                fragment_potential(out.len(), &self.traj, &self.learn_mask)
+            } else {
+                out.len()
+            };
+            if collected >= n_records {
+                break;
             }
+            let (requests, meta) = gather_requests(&self.game, &self.episodes, num_agents);
             if requests.is_empty() {
                 break;
             }
@@ -382,6 +385,20 @@ where
                 )
             };
             self.flush_finished(&finished, &mut out, &mut stats, &mut evaluator);
+        }
+        if fragments {
+            flush_fragments_parts(
+                &self.game,
+                &self.policy,
+                &self.learner,
+                &*self.encoder,
+                &self.learn_mask,
+                self.sequential,
+                &mut self.episodes,
+                &mut self.traj,
+                &mut evaluator,
+                &mut out,
+            );
         }
         (stats.infer_seconds, stats.infer_calls, stats.infer_rows) =
             (evaluator.seconds, evaluator.calls, evaluator.rows);
@@ -1101,6 +1118,103 @@ fn flush_finished_parts<G, P, L>(
     }
 }
 
+/// Records a fragment cut would emit now: collected records plus buffered learning-player
+/// steps — the floor comparison must count buffered steps or the loop would never stop.
+fn fragment_potential<E>(out_len: usize, traj: &[Vec<Vec<Step<E>>>], learn_mask: &[bool]) -> usize {
+    out_len
+        + traj
+            .iter()
+            .map(|g| {
+                g.iter()
+                    .enumerate()
+                    .filter(|&(si, _)| learn_mask[si])
+                    .map(|(_, steps)| steps.len())
+                    .sum::<usize>()
+            })
+            .sum::<usize>()
+}
+
+type RequestParts<G> = (Vec<(<G as Game>::State, usize)>, Vec<(usize, usize)>);
+
+/// Gather every active game's requests for one round.
+fn gather_requests<G: Game>(
+    game: &G,
+    episodes: &[Episode<G>],
+    num_agents: usize,
+) -> RequestParts<G> {
+    let mut requests: Vec<(G::State, usize)> = Vec::new();
+    let mut meta: Vec<(usize, usize)> = Vec::new();
+    for (gi, ep) in episodes.iter().enumerate() {
+        for si in 0..num_agents {
+            if ep.agent_active(game, si) {
+                requests.push((ep.state.clone(), si));
+                meta.push((gi, si));
+            }
+        }
+    }
+    (requests, meta)
+}
+
+/// Roll back an aborted window: a failed collect (callback error, cancellation) leaves its
+/// buffered steps in `traj`, and a retry must not flush another version's steps into its batch.
+/// A successful window flushes everything, so this is a no-op except after an abort.
+fn discard_fragments<E>(traj: &mut [Vec<Vec<Step<E>>>]) {
+    for game in traj.iter_mut() {
+        for steps in game.iter_mut() {
+            steps.clear();
+        }
+    }
+}
+
+/// Cut the window: bootstrap every live learning trajectory from its own tail and emit its
+/// records; episode state, ticks, and telemetry persist into the next window.
+#[allow(clippy::too_many_arguments)]
+fn flush_fragments_parts<G, P, L, F>(
+    game: &G,
+    policy: &P,
+    learner: &L,
+    encoder: &dyn StateEncoder<State = G::State>,
+    learn_mask: &[bool],
+    sequential: bool,
+    episodes: &mut [Episode<G>],
+    traj: &mut [Vec<Vec<Step<P::Evaluation>>>],
+    evaluator: &mut Evaluator<'_, F>,
+    out: &mut Vec<L::Record>,
+) where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
+    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+{
+    let live: Vec<(usize, bool)> = traj
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| g.iter().any(|steps| !steps.is_empty()))
+        .map(|(gi, _)| (gi, false))
+        .collect();
+    if live.is_empty() {
+        return;
+    }
+    let tails = tail_values_parts(
+        &live, game, policy, learner, encoder, sequential, episodes, traj, evaluator,
+    );
+    for &(gi, _) in &live {
+        for si in 0..game.num_agents() {
+            if !learn_mask[si] {
+                traj[gi][si].clear();
+                continue;
+            }
+            let steps = std::mem::take(&mut traj[gi][si]);
+            if steps.is_empty() {
+                continue;
+            }
+            let tail = tails.get(&(gi, si)).cloned().unwrap_or_default();
+            out.extend(learner.episode_records(&steps, &tail, encoder, si, &mut episodes[gi].rng));
+        }
+    }
+}
+
 /// Truncation-tail bootstrapping, field-split like [`process_tick`].
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::needless_range_loop)]
@@ -1128,9 +1242,9 @@ where
     }
     let a = game.action_count();
     let num_agents = game.num_agents();
-    // Value-only trajectories need a tail for every consumed perspective, not only the mover.
-    let all_perspectives = policy.evaluates_all_perspectives(sequential, num_agents)
-        && learner.value_only_evaluation(a).is_some();
+    let all_perspectives = (policy.evaluates_all_perspectives(sequential, num_agents)
+        && learner.value_only_evaluation(a).is_some())
+        || learner.tails_all_trajectories();
     let mut obs_flat: Vec<f32> = Vec::new();
     let mut meta: Vec<(usize, usize)> = Vec::new();
     for &(gi, terminal) in finished {
@@ -1149,6 +1263,11 @@ where
         let players: Vec<usize> = meta.iter().map(|&(_, si)| si).collect();
         let q = evaluator.forward(&players, obs_flat, meta.len());
         let stride = q.len() / meta.len();
+        // Cancellation yields zero-width rows; empty tails degrade to the terminal path and
+        // the aborted collect's records are discarded by the caller.
+        if stride == 0 {
+            return tails;
+        }
         for (i, &(gi, si)) in meta.iter().enumerate() {
             let row = &q[i * stride..(i + 1) * stride];
             let state = &episodes[gi].state;
@@ -1251,17 +1370,20 @@ where
     let mut out: Vec<L::Record> = Vec::new();
     let mut stats = CollectStats::default();
     let num_agents = game.num_agents();
-    while out.len() < floor && !cancel.load(Ordering::Relaxed) {
-        let mut requests: Vec<(G::State, usize)> = Vec::new();
-        let mut meta: Vec<(usize, usize)> = Vec::new();
-        for (gi, ep) in episodes.iter().enumerate() {
-            for si in 0..num_agents {
-                if ep.agent_active(game, si) {
-                    requests.push((ep.state.clone(), si));
-                    meta.push((gi, si));
-                }
-            }
+    let fragments = learner.bootstraps_fragments();
+    if fragments {
+        discard_fragments(traj);
+    }
+    while !cancel.load(Ordering::Relaxed) {
+        let collected = if fragments {
+            fragment_potential(out.len(), traj, learn_mask)
+        } else {
+            out.len()
+        };
+        if collected >= floor {
+            break;
         }
+        let (requests, meta) = gather_requests(game, episodes, num_agents);
         if requests.is_empty() {
             break;
         }
@@ -1309,9 +1431,8 @@ where
             traj,
             &mut evaluator,
         );
-        if cancel.load(Ordering::Relaxed) {
-            break;
-        }
+        // Finish the tick even when cancelled: skipping the flush would strand finished
+        // episodes in a terminal or over-horizon state that the next collect would advance.
         flush_finished_parts(
             &finished,
             &tails,
@@ -1328,6 +1449,20 @@ where
             &mut start,
             &mut out,
             &mut stats,
+        );
+    }
+    if fragments && !cancel.load(Ordering::Relaxed) {
+        flush_fragments_parts(
+            game,
+            policy,
+            learner,
+            encoder,
+            learn_mask,
+            sequential,
+            episodes,
+            traj,
+            &mut evaluator,
+            &mut out,
         );
     }
     stats.infer_rows = evaluator.rows;

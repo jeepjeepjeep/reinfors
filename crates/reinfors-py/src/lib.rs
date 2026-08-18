@@ -241,16 +241,36 @@ where
     }
 }
 
-fn az_infer_closure<'a, 'py>(
+// `labels.label` names the composed policy in contract errors; the troubleshooting table
+// matches these strings, so existing labels must stay byte-stable.
+struct PvLabels {
+    label: &'static str,
+    logits: String,
+    values: String,
+}
+
+impl PvLabels {
+    fn new(label: &'static str) -> Self {
+        PvLabels {
+            label,
+            logits: format!("{label} infer policy_logits"),
+            values: format!("{label} infer values"),
+        }
+    }
+}
+
+fn policy_value_infer_closure<'a, 'py>(
     py: Python<'py>,
     callbacks: &'a [Py<PyAny>],
     dim: usize,
     action_count: usize,
+    labels: &'a PvLabels,
     callback_err: &'a mut Option<PyErr>,
 ) -> impl FnMut(usize, Vec<f32>, usize) -> Vec<f64> + 'a
 where
     'py: 'a,
 {
+    let label = labels.label;
     move |player: usize, obs_flat: Vec<f32>, n: usize| -> Vec<f64> {
         let stride = action_count + 1;
         if callback_err.is_some() {
@@ -279,11 +299,11 @@ where
                             .unwrap_or_else(|_| "an unknown type".to_string()),
                     };
                     pyo3::exceptions::PyTypeError::new_err(format!(
-                        "AlphaZero infer must return a (policy_logits, values) tuple; got {got}"
+                        "{label} infer must return a (policy_logits, values) tuple; got {got}"
                     ))
                 })?;
-            let logits = infer_array::<2>(&logits, "AlphaZero infer policy_logits")?;
-            let values = infer_rows_1d(&values, "AlphaZero infer values")?;
+            let logits = infer_array::<2>(&logits, &labels.logits)?;
+            let values = infer_rows_1d(&values, &labels.values)?;
             Ok((logits, values))
         });
         // Callback/extraction failures take precedence; binding-owned shape checks run only after a
@@ -294,7 +314,7 @@ where
                 if lshape[0] != n || lshape[1] < action_count || values.len() != n {
                     callback_err.get_or_insert_with(|| {
                         pyo3::exceptions::PyValueError::new_err(format!(
-                            "AlphaZero infer must return (policy_logits ({n}, >={action_count}), \
+                            "{label} infer must return (policy_logits ({n}, >={action_count}), \
                              values ({n},)); got logits {lshape:?} and values ({},)",
                             values.len()
                         ))
@@ -304,9 +324,9 @@ where
                 let packed = logits.pack_policy_value(&values, action_count);
                 if packed.iter().any(|value| !value.is_finite()) {
                     callback_err.get_or_insert_with(|| {
-                        pyo3::exceptions::PyValueError::new_err(
-                            "AlphaZero infer outputs must contain only finite values",
-                        )
+                        pyo3::exceptions::PyValueError::new_err(format!(
+                            "{label} infer outputs must contain only finite values"
+                        ))
                     });
                     return vec![0.0; n * stride];
                 }
@@ -329,10 +349,14 @@ fn infer_closure_gil<C: AsRef<[Py<PyAny>]> + Send>(
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     callback_err: std::sync::Arc<std::sync::Mutex<Option<PyErr>>>,
 ) -> impl FnMut(usize, Vec<f32>, usize) -> Vec<f64> + Send {
+    let pv_labels = match layout {
+        InferLayout::PolicyValue { label } => Some(PvLabels::new(label)),
+        InferLayout::ValueHeads => None,
+    };
     move |player: usize, obs_flat: Vec<f32>, n: usize| -> Vec<f64> {
         let fallback_len = match layout {
             InferLayout::ValueHeads => n * expected_heads * action_count,
-            InferLayout::PolicyValue => n * (action_count + 1),
+            InferLayout::PolicyValue { .. } => n * (action_count + 1),
         };
         if stop.load(std::sync::atomic::Ordering::Relaxed) || callback_err.lock().unwrap().is_some()
         {
@@ -354,9 +378,15 @@ fn infer_closure_gil<C: AsRef<[Py<PyAny>]> + Send>(
                         );
                         f(player, obs_flat, n)
                     }
-                    InferLayout::PolicyValue => {
-                        let mut f =
-                            az_infer_closure(py, callbacks.as_ref(), dim, action_count, &mut err);
+                    InferLayout::PolicyValue { .. } => {
+                        let mut f = policy_value_infer_closure(
+                            py,
+                            callbacks.as_ref(),
+                            dim,
+                            action_count,
+                            pv_labels.as_ref().expect("labels exist for PolicyValue"),
+                            &mut err,
+                        );
                         f(player, obs_flat, n)
                     }
                 }
@@ -548,6 +578,7 @@ fn policy_cfg(spec: &PolicySpec) -> Value {
         PolicySpec::EpsilonGreedyQ { n_heads, epsilon } => {
             json!({"name": "epsilon_greedy_q", "n_heads": n_heads, "epsilon": epsilon})
         }
+        PolicySpec::Ppo => json!({"name": "ppo"}),
         PolicySpec::Mcts {
             num_simulations,
             uct_c,
@@ -625,6 +656,7 @@ fn learner_cfg(spec: &LearnerSpec) -> Value {
             "interior_targets": interior_targets,
         }),
         LearnerSpec::Dqn { bootstrap_p } => json!({"name": "dqn", "bootstrap_p": bootstrap_p}),
+        LearnerSpec::Ppo { gamma, lam } => json!({"name": "ppo", "gamma": gamma, "lam": lam}),
         LearnerSpec::AlphaZero { gamma } => json!({"name": "alphazero", "gamma": gamma}),
     }
 }
@@ -1434,6 +1466,30 @@ struct DqnBatch {
     telemetry: Py<PyDict>,
 }
 
+#[pyclass]
+struct PpoBatch {
+    #[pyo3(get)]
+    obs: Py<PyArray2<f32>>,
+    #[pyo3(get)]
+    players: Py<PyArray1<i64>>,
+    #[pyo3(get)]
+    actions: Py<PyArray1<i64>>,
+    #[pyo3(get)]
+    behavior_log_probs: Py<PyArray1<f64>>,
+    #[pyo3(get)]
+    advantages: Py<PyArray1<f64>>,
+    #[pyo3(get)]
+    returns: Py<PyArray1<f64>>,
+    #[pyo3(get)]
+    values: Py<PyArray1<f64>>,
+    #[pyo3(get)]
+    legal_ids: Py<PyArray1<i64>>,
+    #[pyo3(get)]
+    legal_offsets: Py<PyArray1<i64>>,
+    #[pyo3(get)]
+    telemetry: Py<PyDict>,
+}
+
 #[pymethods]
 impl TreeStrapBatch {
     fn __len__(&self) -> usize {
@@ -1689,10 +1745,62 @@ impl RecordBatch for DqnRecord {
     }
 }
 
+impl RecordBatch for reinfors_core::PpoRecord {
+    fn into_py_batch<'py>(
+        records: Vec<Self>,
+        py: Python<'py>,
+        dim: usize,
+        _n_heads: usize,
+        telemetry: Bound<'py, PyDict>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let m = records.len();
+        let mut obs_flat: Vec<f32> = Vec::with_capacity(m * dim);
+        let mut players: Vec<i64> = Vec::with_capacity(m);
+        let mut actions: Vec<i64> = Vec::with_capacity(m);
+        let mut behavior_log_probs: Vec<f64> = Vec::with_capacity(m);
+        let mut advantages: Vec<f64> = Vec::with_capacity(m);
+        let mut returns: Vec<f64> = Vec::with_capacity(m);
+        let mut values: Vec<f64> = Vec::with_capacity(m);
+        let mut legal_ids: Vec<i64> = Vec::new();
+        let mut legal_offsets: Vec<i64> = Vec::with_capacity(m + 1);
+        legal_offsets.push(0);
+        for r in records {
+            obs_flat.extend(r.obs);
+            players.push(r.player as i64);
+            actions.push(r.action as i64);
+            behavior_log_probs.push(r.behavior_log_prob);
+            advantages.push(r.advantage);
+            returns.push(r.ret);
+            values.push(r.value);
+            legal_ids.extend(r.legal.iter().map(|&a| a as i64));
+            legal_offsets.push(legal_ids.len() as i64);
+        }
+        let obs_arr = Array2::from_shape_vec((m, dim), obs_flat)
+            .expect("obs shape")
+            .into_pyarray(py);
+        Ok(Bound::new(
+            py,
+            PpoBatch {
+                obs: obs_arr.unbind(),
+                players: players.into_pyarray(py).unbind(),
+                actions: actions.into_pyarray(py).unbind(),
+                behavior_log_probs: behavior_log_probs.into_pyarray(py).unbind(),
+                advantages: advantages.into_pyarray(py).unbind(),
+                returns: returns.into_pyarray(py).unbind(),
+                values: values.into_pyarray(py).unbind(),
+                legal_ids: legal_ids.into_pyarray(py).unbind(),
+                legal_offsets: legal_offsets.into_pyarray(py).unbind(),
+                telemetry: telemetry.unbind(),
+            },
+        )?
+        .into_any())
+    }
+}
+
 #[derive(Clone, Copy)]
 enum InferLayout {
     ValueHeads,
-    PolicyValue,
+    PolicyValue { label: &'static str },
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1756,9 +1864,16 @@ where
             );
             inner.collect_routed(n_records, mode, &mut infer_fn)
         }
-        InferLayout::PolicyValue => {
-            let mut infer_fn =
-                az_infer_closure(py, &callbacks, dim, action_count, &mut callback_err);
+        InferLayout::PolicyValue { label } => {
+            let labels = PvLabels::new(label);
+            let mut infer_fn = policy_value_infer_closure(
+                py,
+                &callbacks,
+                dim,
+                action_count,
+                &labels,
+                &mut callback_err,
+            );
             inner.collect_routed(n_records, mode, &mut infer_fn)
         }
     };
@@ -2247,6 +2362,7 @@ enum PolicySpec {
         n_heads: usize,
         epsilon: f64,
     },
+    Ppo,
     Minimax {
         depth: i32,
         top_k: Option<usize>,
@@ -2287,6 +2403,10 @@ enum LearnerSpec {
     },
     Dqn {
         bootstrap_p: f64,
+    },
+    Ppo {
+        gamma: f64,
+        lam: f64,
     },
     AlphaZero {
         gamma: f64,
@@ -2643,6 +2763,7 @@ fn check_search_budgets(policy: &PolicySpec) -> PyResult<()> {
         }
     };
     match policy {
+        PolicySpec::Ppo => {}
         PolicySpec::SelectiveExpectimax {
             expansion_budget,
             top_k,
@@ -2990,7 +3111,33 @@ where
                 dim,
                 action_count,
                 n_heads: 1,
-                layout: InferLayout::PolicyValue,
+                layout: InferLayout::PolicyValue { label: "AlphaZero" },
+                num_agents,
+            }))
+        }
+        (PolicySpec::Ppo, LearnerSpec::Ppo { gamma, lam }) => {
+            let policy = reinfors_core::PpoActor::new();
+            check_max_agents(&policy, "Ppo", &game)?;
+            let learner = reinfors_core::Ppo::new(gamma, lam);
+            Ok(Box::new(EngineImpl {
+                codec: codec.take(),
+                n_groups: engine_params.n_groups,
+                pad_rows_to: engine_params.pad_rows_to,
+                inner: build_inner(
+                    game,
+                    enc,
+                    reward,
+                    policy,
+                    learner,
+                    engine_params,
+                    start_dist,
+                    infer_caches,
+                    learn_players,
+                ),
+                dim,
+                action_count,
+                n_heads: 1,
+                layout: InferLayout::PolicyValue { label: "Ppo" },
                 num_agents,
             }))
         }
@@ -3917,6 +4064,12 @@ where
                 let states: Vec<usize> = (0..impls.len())
                     .map(|i| policy.begin_episode(&mut choose_env_rng(seed, i, CHOOSE_HEAD_SALT)))
                     .collect();
+                run_choose(&policy, game, enc, reward, requests, seed, states, infer)
+            }
+            PolicySpec::Ppo => {
+                let policy = reinfors_core::PpoActor::new();
+                check_max_agents(&policy, "Ppo", game)?;
+                let states = vec![(); impls.len()];
                 run_choose(&policy, game, enc, reward, requests, seed, states, infer)
             }
             PolicySpec::EpsilonGreedyQ { n_heads, epsilon } => {
@@ -5284,6 +5437,14 @@ impl PolicyHandle {
     }
 
     #[staticmethod]
+    #[pyo3(name = "Ppo")]
+    fn ppo() -> PolicyHandle {
+        PolicyHandle {
+            spec: PolicySpec::Ppo,
+        }
+    }
+
+    #[staticmethod]
     #[pyo3(signature = (num_simulations=64, uct_c=2.0, max_depth=64, act_by="value", temperature=0.0, temperature_drop=None, chance=None))]
     #[pyo3(name = "Mcts")]
     #[allow(clippy::too_many_arguments)]
@@ -5429,11 +5590,14 @@ impl PolicyHandle {
             None => borrowed.iter().map(|b| b.inner.ticks()).collect(),
         };
         let (expected_heads, layout) = match &self.spec {
-            PolicySpec::AlphaZero { .. } => (1usize, InferLayout::PolicyValue),
+            PolicySpec::AlphaZero { .. } => {
+                (1usize, InferLayout::PolicyValue { label: "AlphaZero" })
+            }
             PolicySpec::Mcts { .. } => (1, InferLayout::ValueHeads),
             PolicySpec::SelectiveExpectimax { n_heads, .. } => (*n_heads, InferLayout::ValueHeads),
             PolicySpec::EpsilonGreedyQ { n_heads, .. } => (*n_heads, InferLayout::ValueHeads),
             PolicySpec::Minimax { .. } => (1, InferLayout::ValueHeads),
+            PolicySpec::Ppo => (1, InferLayout::PolicyValue { label: "Ppo" }),
         };
         let dim = borrowed[0].inner.obs_dim();
         let action_count = borrowed[0].inner.action_count();
@@ -5516,6 +5680,17 @@ impl LearnerHandle {
         check_unit("bootstrap_p", bootstrap_p)?;
         Ok(LearnerHandle {
             spec: LearnerSpec::Dqn { bootstrap_p },
+        })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (gamma=0.99, lam=0.95))]
+    #[pyo3(name = "Ppo")]
+    fn ppo(gamma: f64, lam: f64) -> PyResult<Self> {
+        check_unit("gamma", gamma)?;
+        check_unit("lam", lam)?;
+        Ok(LearnerHandle {
+            spec: LearnerSpec::Ppo { gamma, lam },
         })
     }
 
@@ -5860,6 +6035,7 @@ fn _reinfors(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ChanceModeHandle>()?;
     m.add_class::<NoiseHandle>()?;
     m.add_class::<DqnBatch>()?;
+    m.add_class::<PpoBatch>()?;
     m.add_class::<PyBox>()?;
     m.add_class::<PyDiscrete>()?;
     Ok(())

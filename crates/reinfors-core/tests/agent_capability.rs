@@ -1347,3 +1347,124 @@ fn forced_maxn_truncation_bootstraps_both_perspectives() {
         );
     }
 }
+
+#[test]
+fn ppo_truncation_bootstraps_every_perspectives_own_tail() {
+    // Zero rewards, gamma 1, per-agent constant critic: ret must equal the agent's OWN
+    // value; a missing non-mover tail would leave ret = 0.
+    let mut engine = Engine::new(
+        EndlessRR,
+        Box::new(Enc),
+        Box::new(Zero),
+        reinfors_core::PpoActor::new(),
+        reinfors_core::Ppo::new(1.0, 0.95),
+        EngineParams {
+            n_games: 1,
+            seed: 9,
+            n_groups: 1,
+            ..Default::default()
+        },
+    );
+    let infer = |obs: Vec<f32>, n: usize| {
+        let mut out = Vec::with_capacity(n * 3);
+        for r in 0..n {
+            let agent = f64::from(obs[r * 2 + 1]);
+            out.extend([0.0, 0.0, (agent + 1.0) / 10.0]);
+        }
+        out
+    };
+    let (records, _stats) = engine.collect(4, infer);
+    assert!(!records.is_empty());
+    for r in &records {
+        let expect = (r.player as f64 + 1.0) / 10.0;
+        assert!(
+            (r.ret - expect).abs() < 1e-12,
+            "agent {} must bootstrap from its own tail: ret {} want {expect}",
+            r.player,
+            r.ret
+        );
+        assert!(r.advantage.abs() < 1e-12);
+    }
+}
+
+#[test]
+fn ppo_windows_meet_the_floor_and_stay_single_version() {
+    // Complete-round floor; every record carries THIS window's critic constant.
+    let mut engine = Engine::new(
+        EndlessRR,
+        Box::new(Enc),
+        Box::new(Zero),
+        reinfors_core::PpoActor::new(),
+        reinfors_core::Ppo::new(1.0, 0.95),
+        EngineParams {
+            n_games: 3,
+            seed: 11,
+            n_groups: 1,
+            ..Default::default()
+        },
+    );
+    let constant = |v: f64| {
+        move |_obs: Vec<f32>, n: usize| (0..n).flat_map(|_| [0.0, 0.0, v]).collect::<Vec<f64>>()
+    };
+    for (window, v) in [(5usize, 1.0), (7, 2.0), (4, 3.0)] {
+        let (records, _stats) = engine.collect(window, constant(v));
+        assert!(
+            records.len() >= window && records.len() < window + 3,
+            "floor within one 3-game round at v={v}, got {}",
+            records.len()
+        );
+        for r in &records {
+            assert_eq!(
+                r.value, v,
+                "a stale-version step leaked into the v={v} window"
+            );
+        }
+    }
+}
+
+#[test]
+fn grouped_tail_failure_leaves_the_pool_respawnable() {
+    // A callback that dies exactly on truncation-tail inference (obs tick 2 exists only
+    // there) must not strand finished episodes: the retry may see no over-horizon state.
+    let mut engine = Engine::new(
+        EndlessRR,
+        Box::new(Enc),
+        Box::new(Zero),
+        reinfors_core::PpoActor::new(),
+        reinfors_core::Ppo::new(1.0, 0.95),
+        EngineParams {
+            n_games: 2,
+            seed: 3,
+            n_groups: 2,
+            ..Default::default()
+        },
+    );
+    let flaky = reinfors_core::ServiceHost::spawn(|_p, obs: Vec<f32>, n| {
+        if obs.chunks(2).any(|row| row[0] >= 2.0) {
+            panic!("tail inference failed");
+        }
+        (0..n).flat_map(|_| [0.0, 0.0, 1.0]).collect()
+    });
+    // The error surfaces as a panic (the Python layer converts it to an exception); the
+    // engine must stay usable afterwards, exactly as it does across the binding.
+    let aborted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        engine.collect_grouped_hosted(8, reinfors_core::InferMode::Shared, &flaky)
+    }));
+    assert!(
+        aborted.is_err(),
+        "the flaky callback must surface its failure"
+    );
+    let ok = reinfors_core::ServiceHost::spawn(|_p, _obs, n: usize| {
+        (0..n).flat_map(|_| [0.0, 0.0, 2.0]).collect::<Vec<f64>>()
+    });
+    let (records, _stats) = engine.collect_grouped_hosted(8, reinfors_core::InferMode::Shared, &ok);
+    assert!(records.len() >= 8, "retry met the floor: {}", records.len());
+    for r in &records {
+        assert!(
+            r.obs[0] < 2.0,
+            "a stranded over-horizon episode was advanced: obs {:?}",
+            r.obs
+        );
+        assert_eq!(r.value, 2.0, "an aborted-window step leaked into the retry");
+    }
+}
