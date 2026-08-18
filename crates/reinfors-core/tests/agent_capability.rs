@@ -1347,3 +1347,77 @@ fn forced_maxn_truncation_bootstraps_both_perspectives() {
         );
     }
 }
+
+#[test]
+fn ppo_truncation_bootstraps_every_perspectives_own_tail() {
+    // The horizon truncates at tick 2, when only agent 2 is active; agents 0 and 1 own the
+    // buffered steps. With zero rewards, gamma 1, and a per-agent constant critic, each
+    // record's delta is V_tail - V = 0, so ret must equal the agent's OWN value — a missing
+    // non-mover tail would instead leave ret = 0.
+    let mut engine = Engine::new(
+        EndlessRR,
+        Box::new(Enc),
+        Box::new(Zero),
+        reinfors_core::PpoActor::new(),
+        reinfors_core::Ppo::new(1.0, 0.95),
+        EngineParams {
+            n_games: 1,
+            seed: 9,
+            n_groups: 1,
+            ..Default::default()
+        },
+    );
+    let infer = |obs: Vec<f32>, n: usize| {
+        let mut out = Vec::with_capacity(n * 3);
+        for r in 0..n {
+            let agent = f64::from(obs[r * 2 + 1]);
+            out.extend([0.0, 0.0, (agent + 1.0) / 10.0]);
+        }
+        out
+    };
+    let (records, _stats) = engine.collect(4, infer);
+    assert!(!records.is_empty());
+    for r in &records {
+        let expect = (r.player as f64 + 1.0) / 10.0;
+        assert!(
+            (r.ret - expect).abs() < 1e-12,
+            "agent {} must bootstrap from its own tail: ret {} want {expect}",
+            r.player,
+            r.ret
+        );
+        assert!(r.advantage.abs() < 1e-12);
+    }
+}
+
+#[test]
+fn ppo_windows_are_exact_and_single_version() {
+    // Sequential game, every player learning: collect(n) returns exactly n records, and every
+    // record's collection-time critic value carries THIS window's constant — no step buffered
+    // under the previous callback may surface in a later batch.
+    let mut engine = Engine::new(
+        EndlessRR,
+        Box::new(Enc),
+        Box::new(Zero),
+        reinfors_core::PpoActor::new(),
+        reinfors_core::Ppo::new(1.0, 0.95),
+        EngineParams {
+            n_games: 3,
+            seed: 11,
+            n_groups: 1,
+            ..Default::default()
+        },
+    );
+    let constant = |v: f64| {
+        move |_obs: Vec<f32>, n: usize| (0..n).flat_map(|_| [0.0, 0.0, v]).collect::<Vec<f64>>()
+    };
+    for (window, v) in [(5usize, 1.0), (7, 2.0), (4, 3.0)] {
+        let (records, _stats) = engine.collect(window, constant(v));
+        assert_eq!(records.len(), window, "exact window at v={v}");
+        for r in &records {
+            assert_eq!(
+                r.value, v,
+                "a stale-version step leaked into the v={v} window"
+            );
+        }
+    }
+}

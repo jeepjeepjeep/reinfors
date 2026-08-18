@@ -346,7 +346,9 @@ class LearnerHandle:
     # GAE(lam) advantages and returns over each agent's own-decision trajectory, seeded by the
     # terminal/truncation tail (truncated episodes bootstrap from the critic's V(s_T)). Records
     # carry behavior log-probs, advantages, returns, and V_old for value clipping; discounting is
-    # per own decision, the DQN convention. Data is on-policy: collect, update, discard.
+    # per own decision, the DQN convention. Collection is windowed: collect(n) is exactly n
+    # records under frozen weights (simultaneous ticks round up), with unfinished trajectories
+    # bootstrapped and emitted at the boundary. Data is on-policy: collect, update, discard.
     @staticmethod
     def Ppo(gamma: float = 0.99, lam: float = 0.95) -> LearnerHandle: ...
     # AlphaZero record production: (obs, pi, z) — pi = tau=1 root visit distribution, z = discounted

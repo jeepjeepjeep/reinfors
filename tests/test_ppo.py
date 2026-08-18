@@ -97,3 +97,85 @@ def test_imperfect_information_composes() -> None:
         seed=0,
     ).collect(n_records=8, infer=zeros_pv(2))
     assert len(batch.obs) >= 8
+
+
+def test_windows_are_exact_for_sequential_games() -> None:
+    engine = connect4_engine()
+    for n in (17, 64, 5):
+        batch = engine.collect(n_records=n, infer=zeros_pv(7))
+        assert len(batch.obs) == n, "sequential PPO windows are exact"
+
+
+def test_simultaneous_windows_quantize_to_tick_boundaries() -> None:
+    engine = rf.Engine(
+        rf.games.Snake(grid_size=8, num_snakes=3),
+        rf.Reward(food=1.0, loss=-1.0),
+        rf.policies.Ppo(),
+        rf.learners.Ppo(),
+        n_games=2,
+        seed=0,
+    )
+    batch = engine.collect(n_records=10, infer=zeros_pv(3))
+    assert 10 <= len(batch.obs) <= 12, "quantized up by at most k-1 for k learning agents"
+
+
+def test_windows_are_single_version_across_collects() -> None:
+    # Distinct constant critic values per collect: every record must carry the value of the
+    # window that produced it, proving no trajectory fragment crossed the boundary.
+    engine = connect4_engine()
+
+    def constant(v: float):
+        def infer(obs: np.ndarray):
+            rows = len(obs)
+            return (
+                np.zeros((rows, 7), dtype=np.float32),
+                np.full(rows, v, dtype=np.float32),
+            )
+
+        return infer
+
+    for n, v in ((16, 1.0), (24, 2.0), (8, 3.0)):
+        batch = engine.collect(n_records=n, infer=constant(v))
+        assert len(batch.obs) == n
+        assert np.all(batch.values == v), f"stale step leaked into the v={v} window"
+
+
+def test_grouped_windows_stay_exact_and_single_version() -> None:
+    engine = rf.Engine(
+        rf.games.Connect4(),
+        rf.Reward(win=1.0, loss=-1.0),
+        rf.policies.Ppo(),
+        rf.learners.Ppo(),
+        n_games=4,
+        seed=0,
+        n_groups=2,
+    )
+
+    def constant(v: float):
+        def infer(obs: np.ndarray):
+            rows = len(obs)
+            return (
+                np.zeros((rows, 7), dtype=np.float32),
+                np.full(rows, v, dtype=np.float32),
+            )
+
+        return infer
+
+    for n, v in ((32, 1.0), (20, 2.0)):
+        batch = engine.collect(n_records=n, infer=constant(v))
+        assert len(batch.obs) == n, "per-group quotas sum to exactly n"
+        assert np.all(batch.values == v)
+
+
+def test_snapshot_round_trips_across_a_fragment_cut() -> None:
+    a = connect4_engine(seed=5)
+    a.collect(n_records=16, infer=zeros_pv(7))
+    snap = rf.EngineSnapshot.from_bytes(a.snapshot().to_bytes())
+    follow_a = a.collect(n_records=16, infer=zeros_pv(7))
+
+    b = connect4_engine(seed=5)
+    b.restore(snap)
+    follow_b = b.collect(n_records=16, infer=zeros_pv(7))
+    assert np.array_equal(follow_a.obs, follow_b.obs)
+    assert np.array_equal(follow_a.actions, follow_b.actions)
+    assert np.array_equal(follow_a.advantages, follow_b.advantages)

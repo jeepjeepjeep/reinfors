@@ -73,8 +73,18 @@ terminal or an alternating-game truncation tail, so its target is the immediate 
 Mask the training-time softmax with the same legal CSR before computing new log-probabilities:
 an unmasked distribution silently mismatches the recorded behavior log-probs and corrupts the
 clipped ratio. Normalize `advantages` per batch or minibatch in the loss, not in the data.
-Data is on-policy: run a few clipped epochs on a batch, discard it, and collect with the
-updated weights. Streamed batches are one generation stale; the recorded ratio corrects for it.
+
+PPO collection is windowed rather than floor-based: `collect(n_records)` advances exactly
+`n_records` learning-player decisions under frozen weights (simultaneous games round up by at
+most one tick's records), then bootstraps every unfinished trajectory from the critic and emits
+the fragment, so no record ever spans two collect calls and every batch is internally
+single-version. Episodes persist across windows; each window's GAE recursion restarts from its
+own bootstrap (the standard truncated-GAE estimator). Sequential non-mover bootstraps query
+the critic off-turn — the same approximation the DQN tail accepts. Data is on-policy: run a
+few clipped epochs on a batch, discard it, and collect with the updated weights. The recorded
+ratio corrects the action-likelihood factor only — not state-visitation staleness — so strict
+PPO uses synchronous `collect`; a streamed window can additionally straddle a collector weight
+sync, and streamed PPO should be treated as approximately on-policy with coarse syncs.
 
 ### `AlphaZeroBatch`
 

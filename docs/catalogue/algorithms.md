@@ -38,7 +38,7 @@ Engine rows name the exact policy/learner handles passed to `rf.Engine`. Standal
 
 ### PPO
 
-On-policy clipped policy gradient over GAE(lambda) advantages. Batches carry the behavior log-probabilities the clipped ratio needs, so data is collect-update-discard: train a few epochs on a batch, then collect with the updated weights. Streamed batches are one generation stale; the recorded ratio corrects for it.
+On-policy clipped policy gradient over GAE(lambda) advantages. Collection is windowed: collect(n) advances exactly n decisions under frozen weights, bootstraps unfinished trajectories from the critic, and emits them, so every batch is internally single-version. Train a few clipped epochs per batch, discard it, and collect with the updated weights; the recorded ratio corrects action likelihood only, so strict PPO uses synchronous collect.
 
 **Sources:** [Proximal Policy Optimization Algorithms](https://arxiv.org/abs/1707.06347).
 

@@ -46,7 +46,8 @@ These terms describe reinfors' public data and execution model.
 
 **Record floor**
 : The minimum number of records requested from `Engine.collect`. The engine preserves completed
-  episode and search work, so the returned batch can contain more rows than the floor.
+  episode and search work, so the returned batch can contain more rows than the floor. Fragment-bootstrapping learners (PPO) are the exception: their collects are exact
+  windows, not floors.
 
 **`n_games`**
 : The number of episode slots the engine advances in parallel. Slots reset and start new episodes as

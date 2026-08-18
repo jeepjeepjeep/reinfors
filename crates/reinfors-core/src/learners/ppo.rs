@@ -34,6 +34,14 @@ impl Learner<PpoEvaluation> for Ppo {
         true
     }
 
+    fn tails_all_trajectories(&self) -> bool {
+        true
+    }
+
+    fn bootstraps_fragments(&self) -> bool {
+        true
+    }
+
     fn tail_from_row(
         &self,
         row: &[f64],
