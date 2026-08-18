@@ -164,6 +164,51 @@ def test_grouped_windows_meet_the_floor_and_stay_single_version() -> None:
         assert np.all(batch.values == v)
 
 
+def _flaky_then_constant(engine: rf.Engine, n_records: int, bound: int) -> None:
+    calls = {"n": 0}
+
+    def flaky(obs: np.ndarray):
+        calls["n"] += 1
+        if calls["n"] > 2:
+            raise RuntimeError("infer failed mid-window")
+        rows = len(obs)
+        return (
+            np.zeros((rows, 7), dtype=np.float32),
+            np.full(rows, 1.0, dtype=np.float32),
+        )
+
+    def constant(obs: np.ndarray):
+        rows = len(obs)
+        return (
+            np.zeros((rows, 7), dtype=np.float32),
+            np.full(rows, 2.0, dtype=np.float32),
+        )
+
+    with pytest.raises(RuntimeError, match="infer failed mid-window"):
+        engine.collect(n_records=n_records, infer=flaky)
+    # The failed window's buffered steps (value 1.0) must not leak into the retry.
+    batch = engine.collect(n_records=n_records, infer=constant)
+    assert n_records <= len(batch.obs) < n_records + bound
+    assert np.all(batch.values == 2.0), "a step from the aborted window leaked into the retry"
+
+
+def test_callback_error_discards_the_failed_window() -> None:
+    _flaky_then_constant(connect4_engine(), n_records=16, bound=4)
+
+
+def test_grouped_callback_error_discards_the_failed_window() -> None:
+    engine = rf.Engine(
+        rf.games.Connect4(),
+        rf.Reward(win=1.0, loss=-1.0),
+        rf.policies.Ppo(),
+        rf.learners.Ppo(),
+        n_games=4,
+        seed=0,
+        n_groups=2,
+    )
+    _flaky_then_constant(engine, n_records=16, bound=4)
+
+
 def test_snapshot_round_trips_across_a_fragment_cut() -> None:
     a = connect4_engine(seed=5)
     a.collect(n_records=16, infer=zeros_pv(7))

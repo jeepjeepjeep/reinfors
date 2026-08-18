@@ -254,6 +254,8 @@ fn policy_value_infer_closure<'a, 'py>(
 where
     'py: 'a,
 {
+    let logits_label = format!("{label} infer policy_logits");
+    let values_label = format!("{label} infer values");
     move |player: usize, obs_flat: Vec<f32>, n: usize| -> Vec<f64> {
         let stride = action_count + 1;
         if callback_err.is_some() {
@@ -285,8 +287,8 @@ where
                         "{label} infer must return a (policy_logits, values) tuple; got {got}"
                     ))
                 })?;
-            let logits = infer_array::<2>(&logits, &format!("{label} infer policy_logits"))?;
-            let values = infer_rows_1d(&values, &format!("{label} infer values"))?;
+            let logits = infer_array::<2>(&logits, &logits_label)?;
+            let values = infer_rows_1d(&values, &values_label)?;
             Ok((logits, values))
         });
         // Callback/extraction failures take precedence; binding-owned shape checks run only after a

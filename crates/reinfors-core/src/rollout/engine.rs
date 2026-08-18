@@ -330,6 +330,9 @@ where
             Evaluator::new(&mut infer, mode, cache_slice).with_pad_rows_to(self.pad_rows_to);
 
         let fragments = self.learner.bootstraps_fragments();
+        if fragments {
+            discard_fragments(&mut self.traj);
+        }
         loop {
             let collected = if fragments {
                 fragment_potential(out.len(), &self.traj, &self.learn_mask)
@@ -1152,6 +1155,17 @@ fn gather_requests<G: Game>(
     (requests, meta)
 }
 
+/// Roll back an aborted window: a failed collect (callback error, cancellation) leaves its
+/// buffered steps in `traj`, and a retry must not flush another version's steps into its batch.
+/// A successful window flushes everything, so this is a no-op except after an abort.
+fn discard_fragments<E>(traj: &mut [Vec<Vec<Step<E>>>]) {
+    for game in traj.iter_mut() {
+        for steps in game.iter_mut() {
+            steps.clear();
+        }
+    }
+}
+
 /// Cut the window: bootstrap every live learning trajectory from its own tail and emit its
 /// records; episode state, ticks, and telemetry persist into the next window.
 #[allow(clippy::too_many_arguments)]
@@ -1352,6 +1366,9 @@ where
     let mut stats = CollectStats::default();
     let num_agents = game.num_agents();
     let fragments = learner.bootstraps_fragments();
+    if fragments {
+        discard_fragments(traj);
+    }
     while !cancel.load(Ordering::Relaxed) {
         let collected = if fragments {
             fragment_potential(out.len(), traj, learn_mask)
