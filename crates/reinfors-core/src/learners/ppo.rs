@@ -71,8 +71,6 @@ impl Learner<PpoEvaluation> for Ppo {
         agent: usize,
         _rng: &mut dyn Rng,
     ) -> Vec<PpoRecord> {
-        // Discounting is per own-decision step (the DQN convention): rewards between this
-        // agent's decisions are already accumulated onto the step that caused them.
         let mut next_value = tail.first().copied().unwrap_or(0.0);
         let mut gae = 0.0;
         let mut out: Vec<PpoRecord> = Vec::with_capacity(trajectory.len());
@@ -156,7 +154,6 @@ mod tests {
         for (got, want) in adv.iter().zip([2.58128, 2.474, 4.2]) {
             assert!((got - want).abs() < 1e-9, "{adv:?}");
         }
-        // Returns are advantage + V_old.
         for x in &r {
             assert!((x.ret - (x.advantage + x.value)).abs() < 1e-12);
         }
@@ -164,13 +161,11 @@ mod tests {
 
     #[test]
     fn lambda_endpoints_reduce_to_td_error_and_monte_carlo() {
-        // lam = 0: A_t is exactly the one-step TD error.
         let td = records(0.9, 0.0, &[]);
         let want_td = [0.0 + 0.9 * 2.0 - 1.0, 1.0 + 0.9 * 0.5 - 2.0, 2.0 - 0.5];
         for (x, want) in td.iter().zip(want_td) {
             assert!((x.advantage - want).abs() < 1e-12);
         }
-        // lam = 1: A_t telescopes to the full discounted return minus V(s_t).
         let mc = records(0.9, 1.0, &[]);
         let g2 = 2.0;
         let g1 = 1.0 + 0.9 * g2;
@@ -187,7 +182,6 @@ mod tests {
     #[test]
     fn behavior_log_prob_matches_the_actors_sampling_distribution() {
         let r = records(1.0, 1.0, &[]);
-        // Action 1 with logits [0, 1, -1] over full legality.
         let lp = masked_log_probs(&[0.0, 1.0, -1.0], &[0, 1, 2]);
         assert!((r[1].behavior_log_prob - lp[1]).abs() < 1e-12);
         let total: f64 = lp.iter().map(|l| l.exp()).sum();

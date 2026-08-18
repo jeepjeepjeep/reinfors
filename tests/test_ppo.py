@@ -45,9 +45,7 @@ def test_batch_contract() -> None:
     # Uniform behavior under zero logits: log-prob is -log(n_legal) exactly.
     counts = np.diff(batch.legal_offsets)
     assert np.allclose(batch.behavior_log_probs, -np.log(counts))
-    # Returns decompose as advantage + collection-time value.
     assert np.allclose(batch.returns, batch.advantages + batch.values)
-    # Actions are always legal under the recorded CSR.
     for i in range(m):
         legal = batch.legal_ids[batch.legal_offsets[i] : batch.legal_offsets[i + 1]]
         assert batch.actions[i] in legal
@@ -120,8 +118,7 @@ def test_simultaneous_windows_quantize_to_tick_boundaries() -> None:
 
 
 def test_windows_are_single_version_across_collects() -> None:
-    # Distinct constant critic values per collect: every record must carry the value of the
-    # window that produced it, proving no trajectory fragment crossed the boundary.
+    # Every record must carry its own window's critic constant: no fragment crosses the cut.
     engine = connect4_engine()
 
     def constant(v: float):

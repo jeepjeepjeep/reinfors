@@ -450,7 +450,7 @@ where
         let n_games = self.episodes.len();
         let half = n_games / 2;
         // Proportional per-group floors: finish order never changes what is collected.
-        // Fragment learners get an exact split so per-group windows sum to exactly n_records.
+        // Exact split: per-group windows must sum to n_records.
         let floors = if self.learner.bootstraps_fragments() {
             let q0 = (n_records * half) / n_games;
             [q0, n_records - q0]
@@ -1131,8 +1131,7 @@ fn flush_finished_parts<G, P, L>(
     }
 }
 
-/// Records a fragment cut would emit right now: already-collected records plus every buffered
-/// learning-player step (fragment learners emit exactly one record per step).
+/// Records a fragment cut would emit now: collected records plus buffered learning-player steps.
 fn fragment_potential<E>(out_len: usize, traj: &[Vec<Vec<Step<E>>>], learn_mask: &[bool]) -> usize {
     out_len
         + traj
@@ -1149,10 +1148,9 @@ fn fragment_potential<E>(out_len: usize, traj: &[Vec<Vec<Step<E>>>], learn_mask:
 
 type RequestParts<G> = (Vec<(<G as Game>::State, usize)>, Vec<(usize, usize)>);
 
-/// Gather one round's requests. `trim` is the fragment window's remaining record quota: games
-/// are included in slot order until their predicted learning-decision additions reach it, and a
-/// crossing game is included whole — a simultaneous tick cannot split across a window without
-/// leaking a stale-policy step into the next batch. `None` gathers every active game.
+/// Gather one round's requests. `trim` is the window's remaining record quota: games join in
+/// slot order until predicted learning decisions reach it, the crossing game included whole —
+/// a simultaneous tick cannot split across a window. `None` gathers every active game.
 fn gather_requests<G: Game>(
     game: &G,
     episodes: &[Episode<G>],
@@ -1182,9 +1180,8 @@ fn gather_requests<G: Game>(
     (requests, meta)
 }
 
-/// Cut the fragment window: bootstrap every live learning trajectory from its own tail and emit
-/// its records, leaving episode state, tick counts, and telemetry untouched — the episodes
-/// continue in the next window.
+/// Cut the window: bootstrap every live learning trajectory from its own tail and emit its
+/// records; episode state, ticks, and telemetry persist into the next window.
 #[allow(clippy::too_many_arguments)]
 fn flush_fragments_parts<G, P, L, F>(
     game: &G,
@@ -1259,8 +1256,6 @@ where
     }
     let a = game.action_count();
     let num_agents = game.num_agents();
-    // Value-only trajectories need a tail for every consumed perspective, not only the mover;
-    // fragment learners request the same for every non-empty trajectory.
     let all_perspectives = (policy.evaluates_all_perspectives(sequential, num_agents)
         && learner.value_only_evaluation(a).is_some())
         || learner.tails_all_trajectories();

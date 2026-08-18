@@ -9,19 +9,16 @@ use crate::policy::Policy;
 use crate::reward::Reward;
 use crate::rollout::evaluator::Evaluator;
 
-/// One decision's sampling distribution: masked-softmax log-probabilities parallel to
-/// `legal`, the critic's state value, and the game-frame legal action ids. Storing the
-/// `legal`-width log-probs instead of the full logit row keeps buffered decisions at
-/// O(legal_count), and the learner records the same numbers the actor sampled from.
+/// Masked-softmax log-probabilities parallel to `legal`, the critic's state value, and the
+/// game-frame legal action ids for one decision.
 pub struct PpoEvaluation {
     pub log_probs: Vec<f64>,
     pub value: f64,
     pub legal: Vec<usize>,
 }
 
-/// Log-probabilities of the masked softmax over `legal`, parallel to `legal`.
-/// Both action sampling and the recorded behavior log-probability derive from this one
-/// function so the acting distribution and the stored ratio denominator cannot drift.
+/// Log-probabilities of the masked softmax over `legal`, parallel to `legal`. Sampling and
+/// the recorded behavior log-prob both come from here so they cannot drift.
 pub fn masked_log_probs(logits: &[f64], legal: &[usize]) -> Vec<f64> {
     let max = legal
         .iter()
@@ -145,7 +142,7 @@ impl Policy for PpoActor {
                     .or_insert_with(|| head_permutation(enc, a, *agent));
                 let row = &rows[i * width..(i + 1) * width];
                 let legal = game.legal_actions(state, *agent);
-                // Softmax over the same value set either frame; index head logits directly.
+                // Same softmax either frame: index head logits directly.
                 let log_probs = if *identity {
                     masked_log_probs(&row[..a], &legal)
                 } else {
@@ -192,7 +189,7 @@ mod tests {
 
     #[test]
     fn masked_log_probs_normalize_over_legal_only() {
-        // Illegal slot 1 carries a huge logit that must not influence the distribution.
+        // The huge illegal logit must not influence the distribution.
         let lp = masked_log_probs(&[1.0, 50.0, 1.0, 0.0], &[0, 2, 3]);
         let total: f64 = lp.iter().map(|l| l.exp()).sum();
         assert!((total - 1.0).abs() < 1e-12);
@@ -233,7 +230,6 @@ mod tests {
         assert_eq!(back.log_probs, eval.log_probs);
         assert_eq!(back.value, eval.value);
         assert_eq!(back.legal, eval.legal);
-        // Legal id 2 is out of range when the game has only 2 actions.
         assert!(policy.decode_eval(&mut Reader::new(&buf), 2).is_err());
     }
 }

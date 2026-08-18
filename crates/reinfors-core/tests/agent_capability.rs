@@ -1350,10 +1350,8 @@ fn forced_maxn_truncation_bootstraps_both_perspectives() {
 
 #[test]
 fn ppo_truncation_bootstraps_every_perspectives_own_tail() {
-    // The horizon truncates at tick 2, when only agent 2 is active; agents 0 and 1 own the
-    // buffered steps. With zero rewards, gamma 1, and a per-agent constant critic, each
-    // record's delta is V_tail - V = 0, so ret must equal the agent's OWN value — a missing
-    // non-mover tail would instead leave ret = 0.
+    // Zero rewards, gamma 1, per-agent constant critic: ret must equal the agent's OWN
+    // value; a missing non-mover tail would leave ret = 0.
     let mut engine = Engine::new(
         EndlessRR,
         Box::new(Enc),
@@ -1391,9 +1389,7 @@ fn ppo_truncation_bootstraps_every_perspectives_own_tail() {
 
 #[test]
 fn ppo_windows_are_exact_and_single_version() {
-    // Sequential game, every player learning: collect(n) returns exactly n records, and every
-    // record's collection-time critic value carries THIS window's constant — no step buffered
-    // under the previous callback may surface in a later batch.
+    // collect(n) is exactly n records, each carrying THIS window's critic constant.
     let mut engine = Engine::new(
         EndlessRR,
         Box::new(Enc),

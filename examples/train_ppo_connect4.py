@@ -29,7 +29,6 @@ engine = rf.Engine(
     seed=0,
 )
 
-# One shared actor-critic for both self-play seats.
 trunk = nn.Sequential(nn.Linear(obs_size, 128), nn.ReLU(), nn.Linear(128, 128), nn.ReLU())
 policy_head = nn.Linear(128, n_actions)
 value_head = nn.Linear(128, 1)
@@ -60,7 +59,6 @@ def dense_legal_mask(batch: rf.PpoBatch) -> np.ndarray:
 
 
 for update in range(1, UPDATES + 1):
-    # Collect on-policy data, then run a few clipped epochs and discard it.
     batch = engine.collect(n_records=RECORDS_PER_UPDATE, infer=infer)
 
     obs = torch.as_tensor(batch.obs, device=device)
