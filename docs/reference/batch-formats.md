@@ -1,12 +1,13 @@
 # Batch formats
 
-`Engine.collect` and `CollectStream.next` return `TreeStrapBatch`, `DqnBatch`, or `AlphaZeroBatch`,
+`Engine.collect` and `CollectStream.next` return `TreeStrapBatch`, `DqnBatch`, `AlphaZeroBatch`, or `PpoBatch`,
 according to the engine's learner. Use named fields; positional unpacking exists only for
 compatibility.
 
 `n_records` and streaming `collect_size` are record floors, not exact sizes. Completed episode or
 search work can make a returned batch larger than requested; see the
-[record-floor definition](glossary.md#collection).
+[record-floor definition](glossary.md#collection). PPO is the exception: its collects are exact
+windows, described under [`PpoBatch`](#ppobatch).
 
 All observations are flattened `float32` rows. Targets are `float64` unless noted.
 Shape terms and sparse encodings are defined in the [glossary](glossary.md).

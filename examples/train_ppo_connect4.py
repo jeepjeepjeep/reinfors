@@ -75,8 +75,9 @@ for update in range(1, UPDATES + 1):
     net.train()
     m = len(obs)
     for _ in range(EPOCHS):
+        perm = torch.randperm(m, device=device)
         for start in range(0, m, MINIBATCH):
-            idx = torch.randperm(m, device=device)[start : start + MINIBATCH]
+            idx = perm[start : start + MINIBATCH]
             logits, values = forward(obs[idx])
             # Mask with the SAME legality the actor sampled under, or the ratio is wrong.
             logits = logits.masked_fill(~legal[idx], torch.finfo(logits.dtype).min)

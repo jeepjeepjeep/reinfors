@@ -1,9 +1,9 @@
 //! PPO training-record production: GAE(lambda) advantages over own-decision trajectories.
 
-use crate::encoder::{head_permutation, ActionView};
+use crate::encoder::ActionView;
 use crate::game::Rng;
 use crate::learner::{policy_value_tail, Learner, Step};
-use crate::policies::modelfree::ppo::{masked_log_probs, PpoEvaluation};
+use crate::policies::modelfree::ppo::PpoEvaluation;
 
 pub struct PpoRecord {
     pub player: usize,
@@ -71,8 +71,6 @@ impl Learner<PpoEvaluation> for Ppo {
         agent: usize,
         _rng: &mut dyn Rng,
     ) -> Vec<PpoRecord> {
-        let a = trajectory.first().map_or(0, |s| s.evaluation.logits.len());
-        let (perm, identity) = head_permutation(view, a, agent);
         // Discounting is per own-decision step (the DQN convention): rewards between this
         // agent's decisions are already accumulated onto the step that caused them.
         let mut next_value = tail.first().copied().unwrap_or(0.0);
@@ -82,27 +80,23 @@ impl Learner<PpoEvaluation> for Ppo {
             let value = step.evaluation.value;
             let delta = step.reward + self.gamma * next_value - value;
             gae = delta + self.gamma * self.lam * gae;
-            let log_probs = masked_log_probs(&step.evaluation.logits, &step.evaluation.legal);
             let slot = step
                 .evaluation
                 .legal
                 .iter()
                 .position(|&x| x == step.action)
                 .expect("the executed action is legal");
-            let legal: Vec<usize> = if identity {
-                step.evaluation.legal.clone()
-            } else {
-                step.evaluation.legal.iter().map(|&x| perm[x]).collect()
-            };
+            let legal: Vec<usize> = step
+                .evaluation
+                .legal
+                .iter()
+                .map(|&x| view.head_index(x, agent))
+                .collect();
             out.push(PpoRecord {
                 player: agent,
                 obs: step.obs.clone(),
-                action: if identity {
-                    step.action
-                } else {
-                    perm[step.action]
-                },
-                behavior_log_prob: log_probs[slot],
+                action: view.head_index(step.action, agent),
+                behavior_log_prob: step.evaluation.log_probs[slot],
                 advantage: gae,
                 ret: gae + value,
                 value,
@@ -119,13 +113,14 @@ impl Learner<PpoEvaluation> for Ppo {
 mod tests {
     use super::*;
     use crate::encoder::IdentityView;
+    use crate::policies::modelfree::ppo::masked_log_probs;
     use crate::rng::SplitMix64;
 
     fn step(reward: f64, value: f64, action: usize) -> Step<PpoEvaluation> {
         Step {
             obs: vec![value as f32],
             evaluation: PpoEvaluation {
-                logits: vec![0.0, 1.0, -1.0],
+                log_probs: masked_log_probs(&[0.0, 1.0, -1.0], &[0, 1, 2]),
                 value,
                 legal: vec![0, 1, 2],
             },

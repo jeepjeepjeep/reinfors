@@ -22,7 +22,7 @@ Reinfors keeps the public composition surface small and typed.
 | `EngineSnapshot`, `EnvSnapshot` | Opaque continuation and environment snapshots |
 | `Env` | Caller-driven single-game play |
 | `Reward` | Named event-weight configuration |
-| `TreeStrapBatch`, `DqnBatch`, `AlphaZeroBatch` | Engine learner-specific training batches |
+| `TreeStrapBatch`, `DqnBatch`, `AlphaZeroBatch`, `PpoBatch` | Engine learner-specific training batches |
 | `DeepCfrBatch` | Training samples returned by `solvers.DeepCfr.collect` |
 | `engine_from_config` | Reconstruct an engine from resolved configuration |
 

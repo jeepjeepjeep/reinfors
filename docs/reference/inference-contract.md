@@ -41,7 +41,7 @@ batch-coupled statistics — as the contract already requires for caching.
 Every output array may be `float32` or `float64`. Returning the network's native `float32` is the
 recommended path: reinfors widens it exactly after crossing the boundary and avoids a caller-side
 conversion. Outputs must have exactly the requested row count and contain finite values. Q-family
-action widths are exact; AlphaZero alone permits a padded policy head and consumes its first
+action widths are exact; AlphaZero and PPO permit a padded policy head and consume its first
 `actions` columns. Constructor settings determine `n_heads` and the action count; see
 [head terminology](glossary.md#network-outputs-and-ensembles).
 

@@ -9,9 +9,12 @@ use crate::policy::Policy;
 use crate::reward::Reward;
 use crate::rollout::evaluator::Evaluator;
 
-/// Game-frame policy logits, the critic's state value, and legal actions for one decision.
+/// One decision's sampling distribution: masked-softmax log-probabilities parallel to
+/// `legal`, the critic's state value, and the game-frame legal action ids. Storing the
+/// `legal`-width log-probs instead of the full logit row keeps buffered decisions at
+/// O(legal_count), and the learner records the same numbers the actor sampled from.
 pub struct PpoEvaluation {
-    pub logits: Vec<f64>,
+    pub log_probs: Vec<f64>,
     pub value: f64,
     pub legal: Vec<usize>,
 }
@@ -62,30 +65,31 @@ impl Policy for PpoActor {
 
     fn encode_eval(&self, eval: &PpoEvaluation, out: &mut Vec<u8>) {
         use crate::codec::bytes::*;
-        put_f64s(out, &eval.logits);
+        put_f64s(out, &eval.log_probs);
         put_f64(out, eval.value);
         put_usizes(out, &eval.legal);
     }
 
     fn decode_eval(&self, r: &mut Reader, action_count: usize) -> Result<PpoEvaluation, String> {
         use crate::codec::bytes::*;
-        let logits = f64s(r)?;
-        if logits.len() != action_count {
-            return Err(format!(
-                "logit row width {} != action count {action_count}",
-                logits.len()
-            ));
-        }
+        let log_probs = f64s(r)?;
         let value = r.f64()?;
-        if logits.iter().any(|v| !v.is_finite()) || !value.is_finite() {
-            return Err("non-finite logit or value in evaluation".into());
+        if log_probs.iter().any(|v| !v.is_finite()) || !value.is_finite() {
+            return Err("non-finite log-prob or value in evaluation".into());
         }
         let legal = usizes(r)?;
+        if legal.len() != log_probs.len() {
+            return Err(format!(
+                "log-prob row width {} != legal count {}",
+                log_probs.len(),
+                legal.len()
+            ));
+        }
         if legal.iter().any(|&a| a >= action_count) {
             return Err("legal action id out of range".into());
         }
         Ok(PpoEvaluation {
-            logits,
+            log_probs,
             value,
             legal,
         })
@@ -140,15 +144,18 @@ impl Policy for PpoActor {
                     .entry(*agent)
                     .or_insert_with(|| head_permutation(enc, a, *agent));
                 let row = &rows[i * width..(i + 1) * width];
-                let logits = if *identity {
-                    row[..a].to_vec()
+                let legal = game.legal_actions(state, *agent);
+                // Softmax over the same value set either frame; index head logits directly.
+                let log_probs = if *identity {
+                    masked_log_probs(&row[..a], &legal)
                 } else {
-                    perm.iter().map(|&p| row[p]).collect()
+                    let head_legal: Vec<usize> = legal.iter().map(|&g| perm[g]).collect();
+                    masked_log_probs(&row[..a], &head_legal)
                 };
                 PpoEvaluation {
-                    logits,
+                    log_probs,
                     value: row[a],
-                    legal: game.legal_actions(state, *agent),
+                    legal,
                 }
             })
             .collect()
@@ -159,7 +166,7 @@ impl Policy for PpoActor {
             !eval.legal.is_empty(),
             "select on a state with no legal actions"
         );
-        let log_probs = masked_log_probs(&eval.logits, &eval.legal);
+        let log_probs = &eval.log_probs;
         let mut r = rng.unit();
         for (i, lp) in log_probs.iter().enumerate() {
             r -= lp.exp();
@@ -197,7 +204,7 @@ mod tests {
     fn selection_frequencies_follow_the_masked_softmax() {
         let eval = PpoEvaluation {
             // exp(2)/[exp(2)+exp(0)] ~ 0.881 on action 0 among legal {0, 2}.
-            logits: vec![2.0, 9.0, 0.0],
+            log_probs: masked_log_probs(&[2.0, 9.0, 0.0], &[0, 2]),
             value: 0.0,
             legal: vec![0, 2],
         };
@@ -216,16 +223,17 @@ mod tests {
     fn eval_codec_round_trips_and_validates() {
         let policy = PpoActor::new();
         let eval = PpoEvaluation {
-            logits: vec![0.5, -1.0, 2.0],
+            log_probs: masked_log_probs(&[0.5, -1.0, 2.0], &[0, 2]),
             value: 0.25,
             legal: vec![0, 2],
         };
         let mut buf = Vec::new();
         policy.encode_eval(&eval, &mut buf);
         let back = policy.decode_eval(&mut Reader::new(&buf), 3).unwrap();
-        assert_eq!(back.logits, eval.logits);
+        assert_eq!(back.log_probs, eval.log_probs);
         assert_eq!(back.value, eval.value);
         assert_eq!(back.legal, eval.legal);
-        assert!(policy.decode_eval(&mut Reader::new(&buf), 4).is_err());
+        // Legal id 2 is out of range when the game has only 2 actions.
+        assert!(policy.decode_eval(&mut Reader::new(&buf), 2).is_err());
     }
 }
