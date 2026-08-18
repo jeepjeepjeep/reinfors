@@ -97,6 +97,25 @@ def test_imperfect_information_composes() -> None:
     assert len(batch.obs) >= 8
 
 
+def test_complete_rounds_batch_the_full_pool() -> None:
+    # A one-record floor still advances the whole pool in one batched callback: no slot
+    # is preferentially advanced and inference stays fully batched.
+    engine = connect4_engine()
+    rows_seen: list[int] = []
+
+    def infer(obs: np.ndarray):
+        rows_seen.append(len(obs))
+        rows = len(obs)
+        return (
+            np.zeros((rows, 7), dtype=np.float32),
+            np.zeros(rows, dtype=np.float32),
+        )
+
+    batch = engine.collect(n_records=1, infer=infer)
+    assert len(batch.obs) == 4, "one complete round of the whole 4-game pool"
+    assert rows_seen[0] == 4, "the first callback batches every game"
+
+
 def test_windows_meet_the_record_floor() -> None:
     engine = connect4_engine()
     for n in (17, 64, 5):

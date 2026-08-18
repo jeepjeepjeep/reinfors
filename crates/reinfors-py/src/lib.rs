@@ -241,21 +241,36 @@ where
     }
 }
 
-// `label` names the composed policy in contract errors; the troubleshooting table matches
-// these strings, so existing labels must stay byte-stable.
+// `labels.label` names the composed policy in contract errors; the troubleshooting table
+// matches these strings, so existing labels must stay byte-stable.
+struct PvLabels {
+    label: &'static str,
+    logits: String,
+    values: String,
+}
+
+impl PvLabels {
+    fn new(label: &'static str) -> Self {
+        PvLabels {
+            label,
+            logits: format!("{label} infer policy_logits"),
+            values: format!("{label} infer values"),
+        }
+    }
+}
+
 fn policy_value_infer_closure<'a, 'py>(
     py: Python<'py>,
     callbacks: &'a [Py<PyAny>],
     dim: usize,
     action_count: usize,
-    label: &'static str,
+    labels: &'a PvLabels,
     callback_err: &'a mut Option<PyErr>,
 ) -> impl FnMut(usize, Vec<f32>, usize) -> Vec<f64> + 'a
 where
     'py: 'a,
 {
-    let logits_label = format!("{label} infer policy_logits");
-    let values_label = format!("{label} infer values");
+    let label = labels.label;
     move |player: usize, obs_flat: Vec<f32>, n: usize| -> Vec<f64> {
         let stride = action_count + 1;
         if callback_err.is_some() {
@@ -287,8 +302,8 @@ where
                         "{label} infer must return a (policy_logits, values) tuple; got {got}"
                     ))
                 })?;
-            let logits = infer_array::<2>(&logits, &logits_label)?;
-            let values = infer_rows_1d(&values, &values_label)?;
+            let logits = infer_array::<2>(&logits, &labels.logits)?;
+            let values = infer_rows_1d(&values, &labels.values)?;
             Ok((logits, values))
         });
         // Callback/extraction failures take precedence; binding-owned shape checks run only after a
@@ -334,6 +349,10 @@ fn infer_closure_gil<C: AsRef<[Py<PyAny>]> + Send>(
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     callback_err: std::sync::Arc<std::sync::Mutex<Option<PyErr>>>,
 ) -> impl FnMut(usize, Vec<f32>, usize) -> Vec<f64> + Send {
+    let pv_labels = match layout {
+        InferLayout::PolicyValue { label } => Some(PvLabels::new(label)),
+        InferLayout::ValueHeads => None,
+    };
     move |player: usize, obs_flat: Vec<f32>, n: usize| -> Vec<f64> {
         let fallback_len = match layout {
             InferLayout::ValueHeads => n * expected_heads * action_count,
@@ -359,13 +378,13 @@ fn infer_closure_gil<C: AsRef<[Py<PyAny>]> + Send>(
                         );
                         f(player, obs_flat, n)
                     }
-                    InferLayout::PolicyValue { label } => {
+                    InferLayout::PolicyValue { .. } => {
                         let mut f = policy_value_infer_closure(
                             py,
                             callbacks.as_ref(),
                             dim,
                             action_count,
-                            label,
+                            pv_labels.as_ref().expect("labels exist for PolicyValue"),
                             &mut err,
                         );
                         f(player, obs_flat, n)
@@ -1846,12 +1865,13 @@ where
             inner.collect_routed(n_records, mode, &mut infer_fn)
         }
         InferLayout::PolicyValue { label } => {
+            let labels = PvLabels::new(label);
             let mut infer_fn = policy_value_infer_closure(
                 py,
                 &callbacks,
                 dim,
                 action_count,
-                label,
+                &labels,
                 &mut callback_err,
             );
             inner.collect_routed(n_records, mode, &mut infer_fn)

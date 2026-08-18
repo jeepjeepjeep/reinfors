@@ -1263,6 +1263,11 @@ where
         let players: Vec<usize> = meta.iter().map(|&(_, si)| si).collect();
         let q = evaluator.forward(&players, obs_flat, meta.len());
         let stride = q.len() / meta.len();
+        // Cancellation yields zero-width rows; empty tails degrade to the terminal path and
+        // the aborted collect's records are discarded by the caller.
+        if stride == 0 {
+            return tails;
+        }
         for (i, &(gi, si)) in meta.iter().enumerate() {
             let row = &q[i * stride..(i + 1) * stride];
             let state = &episodes[gi].state;
@@ -1426,9 +1431,8 @@ where
             traj,
             &mut evaluator,
         );
-        if cancel.load(Ordering::Relaxed) {
-            break;
-        }
+        // Finish the tick even when cancelled: skipping the flush would strand finished
+        // episodes in a terminal or over-horizon state that the next collect would advance.
         flush_finished_parts(
             &finished,
             &tails,
