@@ -16,11 +16,13 @@ from .catalog import LEARNERS
 TreeStrap = _reinfors.LearnerHandle.TreeStrap
 Dqn = _reinfors.LearnerHandle.Dqn
 AlphaZero = _reinfors.LearnerHandle.AlphaZero
+Ppo = _reinfors.LearnerHandle.Ppo
 
 _REGISTRY: dict[str, Callable[..., Any]] = {
     "treestrap": TreeStrap,
     "dqn": Dqn,
     "alphazero": AlphaZero,
+    "ppo": Ppo,
 }
 assert _REGISTRY.keys() == LEARNERS, "learner registry and documentation catalogue diverged"
 

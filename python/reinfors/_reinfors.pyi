@@ -255,6 +255,12 @@ class PolicyHandle:
     ) -> PolicyHandle: ...
     @staticmethod
     def EpsilonGreedyQ(n_heads: int = 1, epsilon: float = 0.1) -> PolicyHandle: ...
+    # Stochastic actor for PPO: samples the softmax over legal-action logits from a PolicyValue
+    # row (`(rows, actions + 1)`: logits then state value — AlphaZero's callback shape). The
+    # recorded behavior log-probability uses the same masked softmax as sampling. Pairs with
+    # `rf.learners.Ppo`. Model-free: any player count, perfect or imperfect information.
+    @staticmethod
+    def Ppo() -> PolicyHandle: ...
     # One batched decision per env: pooled search, one shared infer callback. STATELESS —
     # nothing persists between calls (multi-head Thompson draws are per call, not per
     # episode; the engine is the reference for training semantics). Reproducible for the
@@ -337,10 +343,31 @@ class LearnerHandle:
     ) -> LearnerHandle: ...
     @staticmethod
     def Dqn(bootstrap_p: float = ...) -> LearnerHandle: ...
+    # GAE(lam) advantages and returns over each agent's own-decision trajectory, seeded by the
+    # terminal/truncation tail (truncated episodes bootstrap from the critic's V(s_T)). Records
+    # carry behavior log-probs, advantages, returns, and V_old for value clipping; discounting is
+    # per own decision, the DQN convention. Data is on-policy: collect, update, discard.
+    @staticmethod
+    def Ppo(gamma: float = 0.99, lam: float = 0.95) -> LearnerHandle: ...
     # AlphaZero record production: (obs, pi, z) — pi = tau=1 root visit distribution, z = discounted
     # realized return (gamma=1 + win/loss rewards = the paper's z). Pairs with policies.AlphaZero.
     @staticmethod
     def AlphaZero(gamma: float = ...) -> LearnerHandle: ...
+
+class PpoBatch:
+    obs: NDArray[np.float32]
+    players: NDArray[np.int64]
+    # Head-frame action ids; mask the training-time softmax with the same legal CSR or the
+    # clipped ratio silently mismatches the behavior distribution.
+    actions: NDArray[np.int64]
+    behavior_log_probs: NDArray[np.float64]
+    advantages: NDArray[np.float64]
+    returns: NDArray[np.float64]
+    # The collection-time critic values, for PPO's clipped value loss.
+    values: NDArray[np.float64]
+    legal_ids: NDArray[np.int64]
+    legal_offsets: NDArray[np.int64]
+    telemetry: dict[str, Any]
 
 class AlphaZeroBatch:
     """`Engine.collect` result for the AlphaZero family. Also unpacks positionally as

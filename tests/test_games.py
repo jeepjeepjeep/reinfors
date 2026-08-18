@@ -160,8 +160,15 @@ def test_registries_list_the_built_in_names() -> None:
         "snake",
         "texas_holdem",
     ]
-    assert rf.registered_policies() == ["alphazero", "epsilon_greedy_q", "mcts", "minimax", "selective_expectimax"]
-    assert rf.registered_learners() == ["alphazero", "dqn", "treestrap"]
+    assert rf.registered_policies() == [
+        "alphazero",
+        "epsilon_greedy_q",
+        "mcts",
+        "minimax",
+        "ppo",
+        "selective_expectimax",
+    ]
+    assert rf.registered_learners() == ["alphazero", "dqn", "ppo", "treestrap"]
 
 
 def test_game_handles_advertise_spaces() -> None:

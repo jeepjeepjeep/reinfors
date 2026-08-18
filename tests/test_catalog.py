@@ -107,6 +107,8 @@ def build_workflow(game: Any, algorithm: str) -> Any:
         )
     if algorithm == "treestrap_mcts":
         return rf.Engine(game, None, rf.policies.Mcts(), rf.learners.TreeStrap(), n_games=1)
+    if algorithm == "ppo":
+        return rf.Engine(game, None, rf.policies.Ppo(), rf.learners.Ppo(), n_games=1)
     if algorithm == "minimax":
         return rf.Engine(game, None, rf.policies.Minimax(), rf.learners.TreeStrap(), n_games=1)
     if algorithm == "alphazero":

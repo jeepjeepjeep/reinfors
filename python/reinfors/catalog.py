@@ -66,7 +66,7 @@ GAMES: dict[str, GameInfo] = {
         (("win", 1.0), ("gammon", 2.0), ("backgammon", 3.0)),
         "PettingZoo AEC",
         False,
-        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero", "minimax"),
+        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero", "minimax", "ppo"),
         "Standard play without the doubling cube; win, gammon and backgammon outcomes.",
     ),
     "chess": GameInfo(
@@ -80,7 +80,7 @@ GAMES: dict[str, GameInfo] = {
         (("win", 1.0), ("loss", -1.0), ("draw", 0.0)),
         "PettingZoo AEC",
         False,
-        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero", "minimax"),
+        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero", "minimax", "ppo"),
         "Standard chess with minimal, relative, OpenSpiel and AlphaZero observation views.",
     ),
     "connect4": GameInfo(
@@ -94,7 +94,7 @@ GAMES: dict[str, GameInfo] = {
         (("win", 1.0), ("loss", -1.0), ("draw", 0.0)),
         "PettingZoo AEC",
         False,
-        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero", "minimax"),
+        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero", "minimax", "ppo"),
         "Compact deterministic benchmark for value learning, MCTS and AlphaZero.",
     ),
     "gridworld": GameInfo(
@@ -108,7 +108,7 @@ GAMES: dict[str, GameInfo] = {
         (("step", 0.0), ("goal", 1.0)),
         "Gymnasium",
         False,
-        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero"),
+        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero", "ppo"),
         "Small single-agent environment for checking basic training and integration loops.",
     ),
     "kuhn_poker": GameInfo(
@@ -122,7 +122,7 @@ GAMES: dict[str, GameInfo] = {
         (("scale", 1.0),),
         "PettingZoo AEC",
         False,
-        ("dqn", "cfr", "external_mccfr", "deep_cfr"),
+        ("dqn", "cfr", "external_mccfr", "deep_cfr", "ppo"),
         "OpenSpiel-compatible N-player Kuhn poker for CFR and Deep CFR experiments.",
     ),
     "leduc_poker": GameInfo(
@@ -136,7 +136,7 @@ GAMES: dict[str, GameInfo] = {
         (("scale", 1.0),),
         "PettingZoo AEC",
         False,
-        ("dqn", "cfr", "external_mccfr", "deep_cfr"),
+        ("dqn", "cfr", "external_mccfr", "deep_cfr", "ppo"),
         "Two-round imperfect-information benchmark between Kuhn and full Hold'em.",
     ),
     "snake": GameInfo(
@@ -158,7 +158,7 @@ GAMES: dict[str, GameInfo] = {
         ),
         "PettingZoo Parallel",
         True,
-        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero"),
+        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero", "ppo"),
         "Simultaneous multiplayer game with dynamic bodies and explicit respawn chance.",
     ),
     "texas_holdem": GameInfo(
@@ -172,7 +172,7 @@ GAMES: dict[str, GameInfo] = {
         (("scale", 1.0),),
         "PettingZoo AEC",
         False,
-        ("dqn", "external_mccfr", "deep_cfr"),
+        ("dqn", "external_mccfr", "deep_cfr", "ppo"),
         "Multiway no-limit-style poker surface with all-ins, side pots and chance runouts.",
     ),
 }
@@ -261,6 +261,30 @@ ENCODER_INFO: dict[str, EncoderInfo] = {
 
 
 ALGORITHMS: dict[str, AlgorithmInfo] = {
+    "ppo": AlgorithmInfo(
+        "PPO",
+        "Engine",
+        "rf.policies.Ppo",
+        "rf.learners.Ppo",
+        "PpoBatch",
+        "Connect 4 PPO training example",
+        "train-ppo",
+        "Any N",
+        "Sequential or simultaneous",
+        "Sampled by the engine",
+        "Perfect or imperfect",
+        "Policy logits plus value: (rows, actions + 1)",
+        "On-policy clipped policy gradient over GAE(lambda) advantages. Batches carry the "
+        "behavior log-probabilities the clipped ratio needs, so data is collect-update-discard: "
+        "train a few epochs on a batch, then collect with the updated weights. Streamed batches "
+        "are one generation stale; the recorded ratio corrects for it.",
+        (
+            (
+                "Proximal Policy Optimization Algorithms",
+                "https://arxiv.org/abs/1707.06347",
+            ),
+        ),
+    ),
     "dqn": AlgorithmInfo(
         "DQN",
         "Engine",
@@ -433,8 +457,8 @@ ALGORITHMS: dict[str, AlgorithmInfo] = {
 
 # Public constructor registries. Keeping this small list here lets documentation generation stay
 # Rust-free; runtime tests compare it with every actual `registered()` result.
-POLICIES = frozenset({"alphazero", "epsilon_greedy_q", "mcts", "minimax", "selective_expectimax"})
-LEARNERS = frozenset({"alphazero", "dqn", "treestrap"})
+POLICIES = frozenset({"alphazero", "epsilon_greedy_q", "mcts", "minimax", "ppo", "selective_expectimax"})
+LEARNERS = frozenset({"alphazero", "dqn", "ppo", "treestrap"})
 ENCODERS = frozenset(ENCODER_INFO)
 CHANCE_MODES = frozenset({"always_resample", "committed", "expand_all"})
 NOISE = frozenset({"dirichlet"})
