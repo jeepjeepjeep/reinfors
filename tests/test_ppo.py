@@ -101,7 +101,7 @@ def test_windows_meet_the_record_floor() -> None:
     engine = connect4_engine()
     for n in (17, 64, 5):
         batch = engine.collect(n_records=n, infer=zeros_pv(7))
-        assert n <= len(batch.obs) < n + 3, "floor met within one complete round"
+        assert n <= len(batch.obs) < n + 4, "floor met within one 4-game round"
 
 
 def test_simultaneous_windows_overshoot_at_most_one_round() -> None:
