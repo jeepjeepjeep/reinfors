@@ -331,25 +331,15 @@ where
 
         let fragments = self.learner.bootstraps_fragments();
         loop {
-            let trim = if fragments {
-                let potential = fragment_potential(out.len(), &self.traj, &self.learn_mask);
-                if potential >= n_records {
-                    break;
-                }
-                Some(n_records - potential)
+            let collected = if fragments {
+                fragment_potential(out.len(), &self.traj, &self.learn_mask)
             } else {
-                if out.len() >= n_records {
-                    break;
-                }
-                None
+                out.len()
             };
-            let (requests, meta) = gather_requests(
-                &self.game,
-                &self.episodes,
-                num_agents,
-                &self.learn_mask,
-                trim,
-            );
+            if collected >= n_records {
+                break;
+            }
+            let (requests, meta) = gather_requests(&self.game, &self.episodes, num_agents);
             if requests.is_empty() {
                 break;
             }
@@ -450,14 +440,8 @@ where
         let n_games = self.episodes.len();
         let half = n_games / 2;
         // Proportional per-group floors: finish order never changes what is collected.
-        // Exact split: per-group windows must sum to n_records.
-        let floors = if self.learner.bootstraps_fragments() {
-            let q0 = (n_records * half) / n_games;
-            [q0, n_records - q0]
-        } else {
-            let floor = |size: usize| (n_records * size).div_ceil(n_games);
-            [floor(half), floor(n_games - half)]
-        };
+        let floor = |size: usize| (n_records * size).div_ceil(n_games);
+        let floors = [floor(half), floor(n_games - half)];
 
         if let Some(caches) = self.sharded_caches.as_ref() {
             for cache in caches {
@@ -1131,7 +1115,8 @@ fn flush_finished_parts<G, P, L>(
     }
 }
 
-/// Records a fragment cut would emit now: collected records plus buffered learning-player steps.
+/// Records a fragment cut would emit now: collected records plus buffered learning-player
+/// steps — the floor comparison must count buffered steps or the loop would never stop.
 fn fragment_potential<E>(out_len: usize, traj: &[Vec<Vec<Step<E>>>], learn_mask: &[bool]) -> usize {
     out_len
         + traj
@@ -1148,32 +1133,19 @@ fn fragment_potential<E>(out_len: usize, traj: &[Vec<Vec<Step<E>>>], learn_mask:
 
 type RequestParts<G> = (Vec<(<G as Game>::State, usize)>, Vec<(usize, usize)>);
 
-/// Gather one round's requests. `trim` is the window's remaining record quota: games join in
-/// slot order until predicted learning decisions reach it, the crossing game included whole —
-/// a simultaneous tick cannot split across a window. `None` gathers every active game.
+/// Gather every active game's requests for one round.
 fn gather_requests<G: Game>(
     game: &G,
     episodes: &[Episode<G>],
     num_agents: usize,
-    learn_mask: &[bool],
-    trim: Option<usize>,
 ) -> RequestParts<G> {
     let mut requests: Vec<(G::State, usize)> = Vec::new();
     let mut meta: Vec<(usize, usize)> = Vec::new();
-    let mut predicted = 0usize;
     for (gi, ep) in episodes.iter().enumerate() {
-        if let Some(quota) = trim {
-            if predicted >= quota {
-                break;
-            }
-        }
-        for (si, learns) in learn_mask.iter().enumerate().take(num_agents) {
+        for si in 0..num_agents {
             if ep.agent_active(game, si) {
                 requests.push((ep.state.clone(), si));
                 meta.push((gi, si));
-                if *learns {
-                    predicted += 1;
-                }
             }
         }
     }
@@ -1381,19 +1353,15 @@ where
     let num_agents = game.num_agents();
     let fragments = learner.bootstraps_fragments();
     while !cancel.load(Ordering::Relaxed) {
-        let trim = if fragments {
-            let potential = fragment_potential(out.len(), traj, learn_mask);
-            if potential >= floor {
-                break;
-            }
-            Some(floor - potential)
+        let collected = if fragments {
+            fragment_potential(out.len(), traj, learn_mask)
         } else {
-            if out.len() >= floor {
-                break;
-            }
-            None
+            out.len()
         };
-        let (requests, meta) = gather_requests(game, episodes, num_agents, learn_mask, trim);
+        if collected >= floor {
+            break;
+        }
+        let (requests, meta) = gather_requests(game, episodes, num_agents);
         if requests.is_empty() {
             break;
         }

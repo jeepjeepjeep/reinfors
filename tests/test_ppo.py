@@ -97,14 +97,14 @@ def test_imperfect_information_composes() -> None:
     assert len(batch.obs) >= 8
 
 
-def test_windows_are_exact_for_sequential_games() -> None:
+def test_windows_meet_the_record_floor() -> None:
     engine = connect4_engine()
     for n in (17, 64, 5):
         batch = engine.collect(n_records=n, infer=zeros_pv(7))
-        assert len(batch.obs) == n, "sequential PPO windows are exact"
+        assert n <= len(batch.obs) < n + 3, "floor met within one complete round"
 
 
-def test_simultaneous_windows_quantize_to_tick_boundaries() -> None:
+def test_simultaneous_windows_overshoot_at_most_one_round() -> None:
     engine = rf.Engine(
         rf.games.Snake(grid_size=8, num_snakes=3),
         rf.Reward(food=1.0, loss=-1.0),
@@ -114,7 +114,7 @@ def test_simultaneous_windows_quantize_to_tick_boundaries() -> None:
         seed=0,
     )
     batch = engine.collect(n_records=10, infer=zeros_pv(3))
-    assert 10 <= len(batch.obs) <= 12, "quantized up by at most k-1 for k learning agents"
+    assert 10 <= len(batch.obs) < 10 + 6, "floor met within one 2-game round of 3 snakes"
 
 
 def test_windows_are_single_version_across_collects() -> None:
@@ -137,7 +137,7 @@ def test_windows_are_single_version_across_collects() -> None:
         assert np.all(batch.values == v), f"stale step leaked into the v={v} window"
 
 
-def test_grouped_windows_stay_exact_and_single_version() -> None:
+def test_grouped_windows_meet_the_floor_and_stay_single_version() -> None:
     engine = rf.Engine(
         rf.games.Connect4(),
         rf.Reward(win=1.0, loss=-1.0),
@@ -160,7 +160,7 @@ def test_grouped_windows_stay_exact_and_single_version() -> None:
 
     for n, v in ((32, 1.0), (20, 2.0)):
         batch = engine.collect(n_records=n, infer=constant(v))
-        assert len(batch.obs) == n, "per-group quotas sum to exactly n"
+        assert n <= len(batch.obs) < n + 4, "both group floors met within one round"
         assert np.all(batch.values == v)
 
 

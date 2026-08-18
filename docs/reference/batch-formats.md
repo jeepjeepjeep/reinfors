@@ -6,8 +6,7 @@ compatibility.
 
 `n_records` and streaming `collect_size` are record floors, not exact sizes. Completed episode or
 search work can make a returned batch larger than requested; see the
-[record-floor definition](glossary.md#collection). PPO is the exception: its collects are exact
-windows, described under [`PpoBatch`](#ppobatch).
+[record-floor definition](glossary.md#collection).
 
 All observations are flattened `float32` rows. Targets are `float64` unless noted.
 Shape terms and sparse encodings are defined in the [glossary](glossary.md).
@@ -75,10 +74,10 @@ Mask the training-time softmax with the same legal CSR before computing new log-
 an unmasked distribution silently mismatches the recorded behavior log-probs and corrupts the
 clipped ratio. Normalize `advantages` per batch or minibatch in the loss, not in the data.
 
-PPO collection is windowed rather than floor-based: `collect(n_records)` advances exactly
-`n_records` learning-player decisions under frozen weights (simultaneous games round up by at
-most one tick's records), then bootstraps every unfinished trajectory from the critic and emits
-the fragment, so no record ever spans two collect calls and every batch is internally
+PPO collection is windowed: `collect(n_records)` advances complete rounds under frozen
+weights until the usual record floor is met (overshoot is at most one decision per learning
+agent per game), then bootstraps every unfinished trajectory from the critic and emits the
+fragment, so no record ever spans two collect calls and every batch is internally
 single-version. Episodes persist across windows; each window's GAE recursion restarts from its
 own bootstrap (the standard truncated-GAE estimator). Sequential non-mover bootstraps query
 the critic off-turn — the same approximation the DQN tail accepts. Data is on-policy: run a

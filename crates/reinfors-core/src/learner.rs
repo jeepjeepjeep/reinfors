@@ -67,9 +67,9 @@ pub trait Learner<E> {
         false
     }
 
-    /// Whether collection is windowed: `collect(n)` advances exactly `n` learning-player
-    /// decisions under frozen weights (up to simultaneous-tick rounding), then bootstraps and
-    /// emits every live trajectory fragment so no record ever spans two collect calls.
+    /// Whether collection is windowed: `collect(n)` advances complete rounds under frozen
+    /// weights until the record floor is met, then bootstraps and emits every live trajectory
+    /// fragment so no record ever spans two collect calls.
     fn bootstraps_fragments(&self) -> bool {
         false
     }

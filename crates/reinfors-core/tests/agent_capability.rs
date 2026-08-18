@@ -1388,8 +1388,8 @@ fn ppo_truncation_bootstraps_every_perspectives_own_tail() {
 }
 
 #[test]
-fn ppo_windows_are_exact_and_single_version() {
-    // collect(n) is exactly n records, each carrying THIS window's critic constant.
+fn ppo_windows_meet_the_floor_and_stay_single_version() {
+    // Complete-round floor; every record carries THIS window's critic constant.
     let mut engine = Engine::new(
         EndlessRR,
         Box::new(Enc),
@@ -1408,7 +1408,11 @@ fn ppo_windows_are_exact_and_single_version() {
     };
     for (window, v) in [(5usize, 1.0), (7, 2.0), (4, 3.0)] {
         let (records, _stats) = engine.collect(window, constant(v));
-        assert_eq!(records.len(), window, "exact window at v={v}");
+        assert!(
+            records.len() >= window && records.len() < window + 3,
+            "floor within one 3-game round at v={v}, got {}",
+            records.len()
+        );
         for r in &records {
             assert_eq!(
                 r.value, v,
