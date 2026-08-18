@@ -8,6 +8,7 @@ Choose a workflow first: Engine algorithms emit training records while standalon
 
 | Algorithm | Execution | Policy or solver | Learner | Training output | Example |
 | --- | --- | --- | --- | --- | --- |
+| PPO | Engine | `rf.policies.Ppo` | `rf.learners.Ppo` | PpoBatch | [Connect 4 PPO training example](../examples/index.md#train-ppo) |
 | DQN | Engine | `rf.policies.EpsilonGreedyQ` | `rf.learners.Dqn` | [`DqnBatch`](../reference/batch-formats.md#dqnbatch) | [GridWorld DQN training example](../examples/index.md#train-gridworld) |
 | TreeStrap + selective expectimax | Engine | `rf.policies.SelectiveExpectimax` | `rf.learners.TreeStrap` | [`TreeStrapBatch`](../reference/batch-formats.md#treestrapbatch) | [TreeStrap training example](../examples/index.md#treestrap-snake) |
 | TreeStrap + UCT MCTS | Engine | `rf.policies.Mcts` | `rf.learners.TreeStrap` | [`TreeStrapBatch`](../reference/batch-formats.md#treestrapbatch) | [TreeStrap MCTS training example](../examples/index.md#treestrap-snake) |
@@ -23,6 +24,7 @@ Engine rows name the exact policy/learner handles passed to `rf.Engine`. Standal
 
 | Algorithm | Workflow | Players | Decisions | Chance | Information | Network output |
 | --- | --- | --- | --- | --- | --- | --- |
+| PPO | Engine | Any N | Sequential or simultaneous | Sampled by the engine | Perfect or imperfect | Policy logits plus value: (rows, actions + 1) |
 | DQN | Engine | Any N | Sequential or simultaneous | Sampled by the engine | Perfect or imperfect | Q values: (rows, heads, actions) |
 | TreeStrap + selective expectimax | Engine | Any N | Sequential or simultaneous | Committed or ExpandAll | Perfect only | Ensemble action values |
 | TreeStrap + UCT MCTS | Engine | Sequential <=2; simultaneous N | Sequential or simultaneous | AlwaysResample, Committed, or ExpandAll | Perfect only | One ensemble head of action values |
@@ -33,6 +35,12 @@ Engine rows name the exact policy/learner handles passed to `rf.Engine`. Standal
 | Deep CFR | Standalone data-generating solver | Kuhn 2-10; Leduc 2; Hold'em 2-9 | Sequential | Sampled | Imperfect-information native | Per-player advantage networks; average-policy samples |
 
 ## Algorithm families
+
+### PPO
+
+On-policy clipped policy gradient over GAE(lambda) advantages. Batches carry the behavior log-probabilities the clipped ratio needs, so data is collect-update-discard: train a few epochs on a batch, then collect with the updated weights. Streamed batches are one generation stale; the recorded ratio corrects for it.
+
+**Sources:** [Proximal Policy Optimization Algorithms](https://arxiv.org/abs/1707.06347).
 
 ### DQN
 

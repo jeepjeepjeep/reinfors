@@ -67,6 +67,18 @@ reporting—because they demonstrate complete research workflows.
 python examples/train_treestrap_snake.py --iterations 20
 ```
 
+### Train PPO
+
+`examples/train_ppo_connect4.py` trains [PPO](../catalogue/algorithms.md#ppo) self-play with a
+shared actor-critic: clipped-ratio epochs over collected batches, legality-masked log-probs, GAE
+advantages, and value clipping against the collection-time critic. Install `reinfors[train]`.
+
+**Runtime:** the twenty-update default finishes in seconds on a laptop CPU.
+
+```bash
+python examples/train_ppo_connect4.py
+```
+
 ### AlphaZero Connect 4
 
 `examples/train_alphazero_example.py` covers policy/value heads, visit targets, synchronous or

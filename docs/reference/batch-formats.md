@@ -56,6 +56,26 @@ terminal or an alternating-game truncation tail, so its target is the immediate 
 `(1 - done) * max(masked_q)`; multiplying zero by negative infinity can produce `NaN`, and
 `dones` does not encode every non-bootstrapping tail.
 
+### `PpoBatch`
+
+| Field | Shape | Meaning |
+| --- | --- | --- |
+| `obs` | `(records, observation_size)` | Acting-player observation |
+| `players` | `(records,)` | Acting player id |
+| `actions` | `(records,)` | Sampled action ids, encoder head frame |
+| `behavior_log_probs` | `(records,)` | Log-probability of the sampled action under the collection-time masked softmax |
+| `advantages` | `(records,)` | GAE(`lam`) advantages, seeded by the terminal/truncation tail |
+| `returns` | `(records,)` | `advantages + values` — the value-function regression target |
+| `values` | `(records,)` | Collection-time critic values, for PPO's clipped value loss |
+| `legal_ids`, `legal_offsets` | CSR (compressed sparse row) | Legal actions at each decision, head frame |
+| `telemetry` | dictionary | Collection measurements |
+
+Mask the training-time softmax with the same legal CSR before computing new log-probabilities:
+an unmasked distribution silently mismatches the recorded behavior log-probs and corrupts the
+clipped ratio. Normalize `advantages` per batch or minibatch in the loss, not in the data.
+Data is on-policy: run a few clipped epochs on a batch, discard it, and collect with the
+updated weights. Streamed batches are one generation stale; the recorded ratio corrects for it.
+
 ### `AlphaZeroBatch`
 
 | Field | Shape | Meaning |
