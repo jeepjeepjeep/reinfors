@@ -1,9 +1,11 @@
 name: ci
 
+# One run per change: PRs (any base, so stacked PRs are covered) build via pull_request;
+# direct pushes build only on main, the post-merge run.
 on:
   push:
-  pull_request:
     branches: [main]
+  pull_request:
 
 jobs:
   docs:
