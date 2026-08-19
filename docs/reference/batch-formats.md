@@ -51,10 +51,14 @@ successor. This is CSR storage without a dense action mask.
 For Q output shaped `(records, heads, actions)`, gather each record's chosen action, compute one TD
 loss per head, multiply by `masks`, and reduce over non-zero entries.
 
-Target-rule variants are caller-side: the engine records transitions, never target values, so
-Double DQN needs no engine support — take the masked argmax over the row's `next_` legal slice
-with the online network and evaluate that action with the target network. The
-[Hold'em example](../examples/index.md#dqn-holdem)'s `--double` flag shows the ensemble form.
+Target-rule and replay variants are caller-side: the engine records transitions, never target
+values or buffer positions, so neither Double DQN nor prioritized replay needs engine support.
+For Double DQN, take the masked argmax over the row's `next_` legal slice with the online
+network and evaluate that action with the target network. For prioritized replay, keep a
+priority per stored row, insert fresh rows at the running max, and write |TD error| back after
+each minibatch — the TD errors are already computed caller-side at training time. The
+[Hold'em example](../examples/index.md#dqn-holdem)'s `--double` and `--per` flags show both in
+ensemble form.
 
 `can_bootstrap` is true exactly when the row's next-legal CSR slice is non-empty. Empty means
 terminal or an alternating-game truncation tail, so its target is the immediate reward. Do not compute

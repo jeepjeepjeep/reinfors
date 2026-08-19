@@ -7,7 +7,9 @@ transitions. reinfors owns the data generation; this script owns the learning: a
 with K ensemble heads, a uniform replay buffer (legality densified from the batch's CSR fields at
 insert), 1-step Q targets from a periodically synced target network (`--double` switches to
 Double DQN targets: the online net selects the bootstrap action, the target net evaluates it),
-and per-head bootstrap masks. Rewards are chip deltas scaled to big
+and per-head bootstrap masks. `--per` switches the buffer to prioritized replay (Schaul et al.
+2016): sampling proportional to |TD error|^alpha, annealed importance weights in the loss, and
+priorities written back after every minibatch. Rewards are chip deltas scaled to big
 blinds; one episode = one hand, so gamma multiplies across the streets of a single hand.
 
 The eval probe seats the GREEDY policy head at a rotating position against scripted opponents
@@ -64,13 +66,21 @@ def dense_mask(offsets: np.ndarray, ids: np.ndarray, m: int, a: int) -> np.ndarr
 
 
 class Replay:
-    """Uniform ring buffer over the DqnBatch columns, next-state legality densified at insert."""
+    """Ring buffer over the DqnBatch columns, next-state legality densified at insert.
 
-    def __init__(self, capacity: int) -> None:
+    Uniform by default. With `alpha` set, samples proportional to priority^alpha and returns
+    importance weights (PER): fresh rows enter at the running max priority so they are seen
+    at least once before their TD error is known, and `update` writes |TD| back after training.
+    """
+
+    def __init__(self, capacity: int, alpha: float | None = None) -> None:
         self.capacity = capacity
         self.cols: list[np.ndarray] | None = None
         self.size = 0
         self.head = 0
+        self.alpha = alpha
+        self.priorities = np.zeros(capacity, dtype=np.float64) if alpha is not None else None
+        self.max_priority = 1.0
 
     def push(self, batch: DqnBatch, n_actions: int) -> None:
         m = batch.obs.shape[0]
@@ -89,13 +99,30 @@ class Replay:
         idx = (self.head + np.arange(m)) % self.capacity
         for buf, c in zip(self.cols, cols, strict=True):
             buf[idx] = c
+        if self.priorities is not None:
+            self.priorities[idx] = self.max_priority
         self.head = (self.head + m) % self.capacity
         self.size = min(self.size + m, self.capacity)
 
-    def sample(self, n: int, rng: np.random.Generator) -> list[np.ndarray]:
+    def sample(
+        self, n: int, rng: np.random.Generator, beta: float = 0.0
+    ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray]:
         assert self.cols is not None
-        idx = rng.integers(self.size, size=n)
-        return [c[idx] for c in self.cols]
+        if self.priorities is None:
+            idx = rng.integers(self.size, size=n)
+            weights = np.ones(n, dtype=np.float32)
+        else:
+            p = self.priorities[: self.size] ** self.alpha
+            p /= p.sum()
+            idx = rng.choice(self.size, size=n, p=p)
+            w = (self.size * p[idx]) ** -beta
+            weights = (w / w.max()).astype(np.float32)
+        return [c[idx] for c in self.cols], idx, weights
+
+    def update(self, idx: np.ndarray, td_abs: np.ndarray) -> None:
+        assert self.priorities is not None
+        self.priorities[idx] = td_abs + 1e-3
+        self.max_priority = max(self.max_priority, float(self.priorities[idx].max()))
 
 
 def train_step(
@@ -109,10 +136,12 @@ def train_step(
     batch_size: int,
     device: str,
     double: bool,
+    beta: float,
 ) -> float:
     total, batches = 0.0, 0
     for _ in range(updates):
-        obs_n, actions_n, rewards_n, next_obs_n, dones_n, masks_n, legal_n = replay.sample(batch_size, rng)
+        cols, idx, weights_n = replay.sample(batch_size, rng, beta)
+        obs_n, actions_n, rewards_n, next_obs_n, dones_n, masks_n, legal_n = cols
         obs = torch.from_numpy(obs_n).to(device)
         next_obs = torch.from_numpy(next_obs_n).to(device)
         actions = torch.from_numpy(actions_n).long().to(device)
@@ -133,7 +162,12 @@ def train_step(
             boot = torch.where(legal.any(dim=1, keepdim=True), boot, torch.zeros_like(boot))
             td = rewards.unsqueeze(1) + gamma * boot * (~dones).unsqueeze(1).float()
         huber = nn.functional.smooth_l1_loss(q_sa, td, reduction="none")
-        loss = (masks * huber).sum() / masks.sum().clamp(min=1.0)
+        weights = torch.from_numpy(weights_n).to(device)
+        loss = (weights.unsqueeze(1) * masks * huber).sum() / masks.sum().clamp(min=1.0)
+        if replay.priorities is not None:
+            included = masks.sum(dim=1).clamp(min=1.0)
+            td_abs = ((masks * (q_sa - td).abs()).sum(dim=1) / included).detach().cpu().numpy()
+            replay.update(idx, td_abs)
         optimizer.zero_grad()
         loss.backward()  # type: ignore[no-untyped-call]  # torch stubs leave Tensor.backward untyped
         optimizer.step()
@@ -202,6 +236,13 @@ def main() -> None:
         action="store_true",
         help="Double DQN targets: the online net selects the bootstrap action, the target net evaluates it",
     )
+    parser.add_argument(
+        "--per",
+        action="store_true",
+        help="prioritized replay: sample by |TD|^alpha with annealed importance weights",
+    )
+    parser.add_argument("--per-alpha", type=float, default=0.6, help="priority exponent")
+    parser.add_argument("--per-beta", type=float, default=0.4, help="initial importance-weight exponent")
     parser.add_argument("--replay-capacity", type=int, default=100_000)
     parser.add_argument("--updates-per-iter", type=int, default=4)
     parser.add_argument("--eval-every", type=int, default=100, help="iterations between probes (0 = off)")
@@ -223,7 +264,7 @@ def main() -> None:
     target = QNet(dim, args.heads, 3, args.width).to(args.device)
     target.load_state_dict(net.state_dict())
     optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
-    replay = Replay(args.replay_capacity)
+    replay = Replay(args.replay_capacity, alpha=args.per_alpha if args.per else None)
     rng = np.random.default_rng(args.seed)
     engine = rf.Engine(
         game,
@@ -242,6 +283,8 @@ def main() -> None:
     t0 = time.perf_counter()
     print(f"DQN hold'em: {args.num_players} seats, {args.heads} heads, {args.n_games} games/collect")
     for it in range(1, args.iterations + 1):
+        # Anneal the IS correction to full strength by the final iteration (Schaul et al. 2016).
+        beta = args.per_beta + (1.0 - args.per_beta) * (it / args.iterations) if args.per else 0.0
         batch = engine.collect(n_records=args.collect_size, infer=infer)
         assert isinstance(batch, DqnBatch)
         replay.push(batch, 3)
@@ -256,6 +299,7 @@ def main() -> None:
             args.batch_size,
             args.device,
             double=args.double,
+            beta=beta,
         )
         if it % args.target_sync == 0:
             target.load_state_dict(net.state_dict())
