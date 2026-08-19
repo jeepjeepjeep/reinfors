@@ -8,7 +8,11 @@ with K ensemble heads, a uniform replay buffer (legality densified from the batc
 insert), 1-step Q targets from a periodically synced target network (`--double` switches to
 Double DQN targets: the online net selects the bootstrap action, the target net evaluates it),
 and per-head bootstrap masks. `--dueling` splits each head into state-value and zero-mean
-advantage streams (Wang et al. 2016). `--per` switches the buffer to prioritized replay (Schaul et al.
+advantage streams (Wang et al. 2016). `--c51` makes each head distributional (Bellemare et al.
+2017): the net predicts categorical return distributions on a fixed support spanning the stack
+in big blinds, trained by cross-entropy against the projected Bellman target, while the infer
+callback hands the engine expected Q — the engine contract never changes. `--per` switches the
+buffer to prioritized replay (Schaul et al.
 2016): sampling proportional to |TD error|^alpha, annealed importance weights in the loss, and
 priorities written back after every minibatch. Rewards are chip deltas scaled to big
 blinds; one episode = one hand, so gamma multiplies across the streets of a single hand.
@@ -48,27 +52,54 @@ class QNet(nn.Module):
     unchanged.
     """
 
-    def __init__(self, dim: int, n_heads: int, n_actions: int, width: int = 256, dueling: bool = False) -> None:
+    def __init__(
+        self,
+        dim: int,
+        n_heads: int,
+        n_actions: int,
+        width: int = 256,
+        dueling: bool = False,
+        atoms: int | None = None,
+        v_span: float = 20.0,
+    ) -> None:
         super().__init__()
         self.n_heads = n_heads
         self.n_actions = n_actions
+        self.atoms = atoms
         self.trunk = nn.Sequential(
             nn.Linear(dim, width),
             nn.ReLU(),
             nn.Linear(width, width),
             nn.ReLU(),
         )
-        self.adv = nn.Linear(width, n_heads * n_actions)
-        self.value = nn.Linear(width, n_heads) if dueling else None
+        per_out = atoms if atoms is not None else 1
+        self.adv = nn.Linear(width, n_heads * n_actions * per_out)
+        self.value = nn.Linear(width, n_heads * per_out) if dueling else None
+        if atoms is not None:
+            self.register_buffer("support", torch.linspace(-v_span, v_span, atoms))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """(B, K, A) Q values, or (B, K, A, Z) atom logits when distributional."""
         h = self.trunk(x)
-        q = self.adv(h).view(-1, self.n_heads, self.n_actions)
-        if self.value is None:
-            return q
-        # Zero-mean advantages pin the otherwise unidentifiable V/A split (Wang et al. 2016).
-        v = self.value(h).view(-1, self.n_heads, 1)
-        return v + q - q.mean(dim=2, keepdim=True)
+        if self.atoms is None:
+            q = self.adv(h).view(-1, self.n_heads, self.n_actions)
+            if self.value is None:
+                return q
+            # Zero-mean advantages pin the otherwise unidentifiable V/A split (Wang et al. 2016).
+            v = self.value(h).view(-1, self.n_heads, 1)
+            return v + q - q.mean(dim=2, keepdim=True)
+        logits = self.adv(h).view(-1, self.n_heads, self.n_actions, self.atoms)
+        if self.value is not None:
+            v = self.value(h).view(-1, self.n_heads, 1, self.atoms)
+            logits = v + logits - logits.mean(dim=2, keepdim=True)
+        return logits
+
+    def q_values(self, x: torch.Tensor) -> torch.Tensor:
+        """(B, K, A) expected Q either way: the engine and eval always see scalars."""
+        out = self.forward(x)
+        if self.atoms is None:
+            return out
+        return (out.softmax(-1) * self.support).sum(-1)  # type: ignore[operator]  # buffer typing
 
 
 def dense_mask(offsets: np.ndarray, ids: np.ndarray, m: int, a: int) -> np.ndarray:
@@ -166,25 +197,54 @@ def train_step(
         dones = torch.from_numpy(dones_n).to(device)
         masks = torch.from_numpy(masks_n).float().to(device)  # (B, K) bootstrap masks
         legal = torch.from_numpy(legal_n).to(device)
-        q = net(obs)  # (B, K, A)
-        q_sa = q.gather(2, actions.view(-1, 1, 1).expand(-1, net.n_heads, 1)).squeeze(2)
-        with torch.no_grad():
-            q_next = target(next_obs)  # (B, K, A)
-            if double:
-                # Decouple: the online net's masked argmax picks, the target net scores.
-                sel = net(next_obs).masked_fill(~legal.unsqueeze(1), -1e9).argmax(dim=2, keepdim=True)
-                boot = q_next.gather(2, sel).squeeze(2)
-            else:
-                boot = q_next.masked_fill(~legal.unsqueeze(1), -1e9).max(dim=2).values
-            boot = torch.where(legal.any(dim=1, keepdim=True), boot, torch.zeros_like(boot))
-            td = rewards.unsqueeze(1) + gamma * boot * (~dones).unsqueeze(1).float()
-        huber = nn.functional.smooth_l1_loss(q_sa, td, reduction="none")
+        if net.atoms is None:
+            q = net(obs)  # (B, K, A)
+            q_sa = q.gather(2, actions.view(-1, 1, 1).expand(-1, net.n_heads, 1)).squeeze(2)
+            with torch.no_grad():
+                q_next = target(next_obs)  # (B, K, A)
+                if double:
+                    # Decouple: the online net's masked argmax picks, the target net scores.
+                    sel = net(next_obs).masked_fill(~legal.unsqueeze(1), -1e9).argmax(dim=2, keepdim=True)
+                    boot = q_next.gather(2, sel).squeeze(2)
+                else:
+                    boot = q_next.masked_fill(~legal.unsqueeze(1), -1e9).max(dim=2).values
+                boot = torch.where(legal.any(dim=1, keepdim=True), boot, torch.zeros_like(boot))
+                td = rewards.unsqueeze(1) + gamma * boot * (~dones).unsqueeze(1).float()
+            elem = nn.functional.smooth_l1_loss(q_sa, td, reduction="none")  # (B, K)
+            err = (q_sa - td).abs()
+        else:
+            z = net.support  # (Z,)
+            logits = net(obs)  # (B, K, A, Z)
+            chosen = logits.gather(2, actions.view(-1, 1, 1, 1).expand(-1, net.n_heads, 1, net.atoms)).squeeze(
+                2
+            )  # (B, K, Z)
+            with torch.no_grad():
+                t_dist_all = target(next_obs).softmax(-1)  # (B, K, A, Z)
+                sel_q = (net(next_obs).softmax(-1) * z).sum(-1) if double else (t_dist_all * z).sum(-1)
+                sel = sel_q.masked_fill(~legal.unsqueeze(1), -1e9).argmax(dim=2)  # (B, K)
+                t_dist = t_dist_all.gather(2, sel.view(-1, net.n_heads, 1, 1).expand(-1, -1, 1, net.atoms)).squeeze(
+                    2
+                )  # (B, K, Z)
+                # Bellman-shift the support, then re-bin onto the fixed atoms (Bellemare et
+                # al. 2017). Non-bootstrap rows shift every atom to r, so all mass projects
+                # onto r's neighbours regardless of t_dist.
+                bootf = (legal.any(dim=1) & ~dones).float().view(-1, 1)
+                tz = (rewards.view(-1, 1) + gamma * bootf * z).clamp(z[0], z[-1])  # (B, Z)
+                b = ((tz - z[0]) / (z[1] - z[0])).clamp(0, net.atoms - 1)  # float-safe indices
+                low, up = b.floor().long(), b.ceil().long()
+                low_w = up.float() - b + (low == up).float()  # exact hits keep full mass
+                up_w = b - low.float()
+                m = torch.zeros_like(t_dist)
+                m.scatter_add_(2, low.unsqueeze(1).expand_as(t_dist), t_dist * low_w.unsqueeze(1))
+                m.scatter_add_(2, up.unsqueeze(1).expand_as(t_dist), t_dist * up_w.unsqueeze(1))
+            elem = -(m * chosen.log_softmax(-1)).sum(-1)  # (B, K) cross-entropy
+            err = elem
         weights = torch.from_numpy(weights_n).to(device)
-        loss = (weights.unsqueeze(1) * masks * huber).sum() / masks.sum().clamp(min=1.0)
+        loss = (weights.unsqueeze(1) * masks * elem).sum() / masks.sum().clamp(min=1.0)
         if replay.priorities is not None:
             included = masks.sum(dim=1).clamp(min=1.0)
-            td_abs = ((masks * (q_sa - td).abs()).sum(dim=1) / included).detach().cpu().numpy()
-            replay.update(idx, td_abs)
+            per_row = ((masks * err.abs()).sum(dim=1) / included).detach().cpu().numpy()
+            replay.update(idx, per_row)
         optimizer.zero_grad()
         loss.backward()  # type: ignore[no-untyped-call]  # torch stubs leave Tensor.backward untyped
         optimizer.step()
@@ -218,7 +278,7 @@ def eval_vs(net: QNet, args: argparse.Namespace, opponent: str, games: int, seed
             if agent == net_seat:
                 with torch.no_grad():
                     x = torch.from_numpy(env.observe(agent).reshape(1, -1)).to(args.device)
-                    q = net(x)[0].mean(dim=0).cpu().numpy()  # head-mean Q
+                    q = net.q_values(x)[0].mean(dim=0).cpu().numpy()  # head-mean Q
                 action = max(legal, key=lambda a: q[a])
             elif opponent == "random":
                 action = rng.choice(legal)
@@ -264,6 +324,18 @@ def main() -> None:
         action="store_true",
         help="dueling heads: Q = V + A - mean(A), sharing value learning across actions",
     )
+    parser.add_argument(
+        "--c51",
+        action="store_true",
+        help="distributional heads: categorical return distributions, trained by projected cross-entropy",
+    )
+    parser.add_argument("--atoms", type=int, default=51, help="C51 support size")
+    parser.add_argument(
+        "--v-span",
+        type=float,
+        default=None,
+        help="C51 support half-range in big blinds (default: stack / big blind)",
+    )
     parser.add_argument("--per-beta", type=float, default=0.4, help="initial importance-weight exponent")
     parser.add_argument("--replay-capacity", type=int, default=100_000)
     parser.add_argument("--updates-per-iter", type=int, default=4)
@@ -282,8 +354,12 @@ def main() -> None:
     )
     c, h, w = game.observation_space().shape
     dim = c * h * w
-    net = QNet(dim, args.heads, 3, args.width, dueling=args.dueling).to(args.device)
-    target = QNet(dim, args.heads, 3, args.width, dueling=args.dueling).to(args.device)
+    # Symmetric support spanning the stack: rewards are bb-scaled chip deltas, so a hand's
+    # return is bounded by the stack in big blinds.
+    v_span = args.v_span if args.v_span is not None else args.stack / args.big_blind
+    atoms = args.atoms if args.c51 else None
+    net = QNet(dim, args.heads, 3, args.width, dueling=args.dueling, atoms=atoms, v_span=v_span).to(args.device)
+    target = QNet(dim, args.heads, 3, args.width, dueling=args.dueling, atoms=atoms, v_span=v_span).to(args.device)
     target.load_state_dict(net.state_dict())
     optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
     replay = Replay(args.replay_capacity, alpha=args.per_alpha if args.per else None)
@@ -300,7 +376,8 @@ def main() -> None:
     def infer(arr: np.ndarray) -> np.ndarray:
         with torch.no_grad():
             x = torch.from_numpy(arr).to(args.device)
-            return np.asarray(net(x).cpu().numpy())  # native f32; the engine widens exactly
+            # The engine always sees scalar Q rows: C51 atoms collapse to expectations here.
+            return np.asarray(net.q_values(x).cpu().numpy())  # native f32; the engine widens exactly
 
     t0 = time.perf_counter()
     print(f"DQN hold'em: {args.num_players} seats, {args.heads} heads, {args.n_games} games/collect")
