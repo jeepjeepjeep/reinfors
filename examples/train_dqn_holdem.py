@@ -5,8 +5,9 @@ values would be clairvoyant about hole cards), so training runs through the obse
 family — `EpsilonGreedyQ` acts on each seat's own egocentric observation, `Dqn` emits off-policy
 transitions. reinfors owns the data generation; this script owns the learning: a small torch MLP
 with K ensemble heads, a uniform replay buffer (legality densified from the batch's CSR fields at
-insert), 1-step Q targets from a periodically synced target network, and per-head bootstrap
-masks. Rewards are chip deltas scaled to big
+insert), 1-step Q targets from a periodically synced target network (`--double` switches to
+Double DQN targets: the online net selects the bootstrap action, the target net evaluates it),
+and per-head bootstrap masks. Rewards are chip deltas scaled to big
 blinds; one episode = one hand, so gamma multiplies across the streets of a single hand.
 
 The eval probe seats the GREEDY policy head at a rotating position against scripted opponents
@@ -107,6 +108,7 @@ def train_step(
     gamma: float,
     batch_size: int,
     device: str,
+    double: bool,
 ) -> float:
     total, batches = 0.0, 0
     for _ in range(updates):
@@ -122,8 +124,12 @@ def train_step(
         q_sa = q.gather(2, actions.view(-1, 1, 1).expand(-1, net.n_heads, 1)).squeeze(2)
         with torch.no_grad():
             q_next = target(next_obs)  # (B, K, A)
-            q_next = q_next.masked_fill(~legal.unsqueeze(1), -1e9)
-            boot = q_next.max(dim=2).values
+            if double:
+                # Decouple: the online net's masked argmax picks, the target net scores.
+                sel = net(next_obs).masked_fill(~legal.unsqueeze(1), -1e9).argmax(dim=2, keepdim=True)
+                boot = q_next.gather(2, sel).squeeze(2)
+            else:
+                boot = q_next.masked_fill(~legal.unsqueeze(1), -1e9).max(dim=2).values
             boot = torch.where(legal.any(dim=1, keepdim=True), boot, torch.zeros_like(boot))
             td = rewards.unsqueeze(1) + gamma * boot * (~dones).unsqueeze(1).float()
         huber = nn.functional.smooth_l1_loss(q_sa, td, reduction="none")
@@ -191,6 +197,11 @@ def main() -> None:
     parser.add_argument("--gamma", type=float, default=1.0)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--target-sync", type=int, default=10, help="iterations between target-net syncs")
+    parser.add_argument(
+        "--double",
+        action="store_true",
+        help="Double DQN targets: the online net selects the bootstrap action, the target net evaluates it",
+    )
     parser.add_argument("--replay-capacity", type=int, default=100_000)
     parser.add_argument("--updates-per-iter", type=int, default=4)
     parser.add_argument("--eval-every", type=int, default=100, help="iterations between probes (0 = off)")
@@ -235,7 +246,16 @@ def main() -> None:
         assert isinstance(batch, DqnBatch)
         replay.push(batch, 3)
         loss = train_step(
-            net, target, optimizer, replay, rng, args.updates_per_iter, args.gamma, args.batch_size, args.device
+            net,
+            target,
+            optimizer,
+            replay,
+            rng,
+            args.updates_per_iter,
+            args.gamma,
+            args.batch_size,
+            args.device,
+            double=args.double,
         )
         if it % args.target_sync == 0:
             target.load_state_dict(net.state_dict())

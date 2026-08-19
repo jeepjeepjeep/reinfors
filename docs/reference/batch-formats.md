@@ -51,6 +51,11 @@ successor. This is CSR storage without a dense action mask.
 For Q output shaped `(records, heads, actions)`, gather each record's chosen action, compute one TD
 loss per head, multiply by `masks`, and reduce over non-zero entries.
 
+Target-rule variants are caller-side: the engine records transitions, never target values, so
+Double DQN needs no engine support — take the masked argmax over the row's `next_` legal slice
+with the online network and evaluate that action with the target network. The
+[Hold'em example](../examples/index.md#dqn-holdem)'s `--double` flag shows the ensemble form.
+
 `can_bootstrap` is true exactly when the row's next-legal CSR slice is non-empty. Empty means
 terminal or an alternating-game truncation tail, so its target is the immediate reward. Do not compute
 `(1 - done) * max(masked_q)`; multiplying zero by negative infinity can produce `NaN`, and
