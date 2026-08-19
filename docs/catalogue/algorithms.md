@@ -46,7 +46,7 @@ On-policy clipped policy gradient over GAE(lambda) advantages. Collection is win
 
 Observation-only off-policy value learning with sparse legal-action records.
 
-**Sources:** [Human-level control through deep reinforcement learning](https://doi.org/10.1038/nature14236), [Deep Exploration via Bootstrapped DQN](https://papers.nips.cc/paper_files/paper/2016/hash/8d8818c8e140c64c743113f563cf750f-Abstract.html).
+**Sources:** [Human-level control through deep reinforcement learning](https://doi.org/10.1038/nature14236), [Deep Exploration via Bootstrapped DQN](https://papers.nips.cc/paper_files/paper/2016/hash/8d8818c8e140c64c743113f563cf750f-Abstract.html), [Deep Reinforcement Learning with Double Q-learning](https://arxiv.org/abs/1509.06461), [Prioritized Experience Replay](https://arxiv.org/abs/1511.05952), [Dueling Network Architectures for Deep Reinforcement Learning](https://arxiv.org/abs/1511.06581).
 
 ### TreeStrap + selective expectimax
 

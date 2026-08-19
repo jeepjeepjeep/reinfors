@@ -7,7 +7,8 @@ transitions. reinfors owns the data generation; this script owns the learning: a
 with K ensemble heads, a uniform replay buffer (legality densified from the batch's CSR fields at
 insert), 1-step Q targets from a periodically synced target network (`--double` switches to
 Double DQN targets: the online net selects the bootstrap action, the target net evaluates it),
-and per-head bootstrap masks. `--per` switches the buffer to prioritized replay (Schaul et al.
+and per-head bootstrap masks. `--dueling` splits each head into state-value and zero-mean
+advantage streams (Wang et al. 2016). `--per` switches the buffer to prioritized replay (Schaul et al.
 2016): sampling proportional to |TD error|^alpha, annealed importance weights in the loss, and
 priorities written back after every minibatch. Rewards are chip deltas scaled to big
 blinds; one episode = one hand, so gamma multiplies across the streets of a single hand.
@@ -39,9 +40,15 @@ from torch import nn
 
 
 class QNet(nn.Module):
-    """Flattened-obs MLP -> (B, K, A) ensemble Q values."""
+    """Flattened-obs MLP -> (B, K, A) ensemble Q values, optionally through dueling V/A heads.
 
-    def __init__(self, dim: int, n_heads: int, n_actions: int, width: int = 256) -> None:
+    The dueling advantage mean runs over ALL actions — the callback never sees legality (it
+    lives in the engine and the batch CSR), and the zero-mean constraint is an identifiability
+    device, not a semantic one: any offset is constant per state, so action selection is
+    unchanged.
+    """
+
+    def __init__(self, dim: int, n_heads: int, n_actions: int, width: int = 256, dueling: bool = False) -> None:
         super().__init__()
         self.n_heads = n_heads
         self.n_actions = n_actions
@@ -50,11 +57,18 @@ class QNet(nn.Module):
             nn.ReLU(),
             nn.Linear(width, width),
             nn.ReLU(),
-            nn.Linear(width, n_heads * n_actions),
         )
+        self.adv = nn.Linear(width, n_heads * n_actions)
+        self.value = nn.Linear(width, n_heads) if dueling else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.trunk(x).view(-1, self.n_heads, self.n_actions)  # type: ignore[no-any-return]  # torch stub gap
+        h = self.trunk(x)
+        q = self.adv(h).view(-1, self.n_heads, self.n_actions)
+        if self.value is None:
+            return q
+        # Zero-mean advantages pin the otherwise unidentifiable V/A split (Wang et al. 2016).
+        v = self.value(h).view(-1, self.n_heads, 1)
+        return v + q - q.mean(dim=2, keepdim=True)
 
 
 def dense_mask(offsets: np.ndarray, ids: np.ndarray, m: int, a: int) -> np.ndarray:
@@ -245,6 +259,11 @@ def main() -> None:
         help="prioritized replay: sample by |TD|^alpha with annealed importance weights",
     )
     parser.add_argument("--per-alpha", type=float, default=0.6, help="priority exponent")
+    parser.add_argument(
+        "--dueling",
+        action="store_true",
+        help="dueling heads: Q = V + A - mean(A), sharing value learning across actions",
+    )
     parser.add_argument("--per-beta", type=float, default=0.4, help="initial importance-weight exponent")
     parser.add_argument("--replay-capacity", type=int, default=100_000)
     parser.add_argument("--updates-per-iter", type=int, default=4)
@@ -263,8 +282,8 @@ def main() -> None:
     )
     c, h, w = game.observation_space().shape
     dim = c * h * w
-    net = QNet(dim, args.heads, 3, args.width).to(args.device)
-    target = QNet(dim, args.heads, 3, args.width).to(args.device)
+    net = QNet(dim, args.heads, 3, args.width, dueling=args.dueling).to(args.device)
+    target = QNet(dim, args.heads, 3, args.width, dueling=args.dueling).to(args.device)
     target.load_state_dict(net.state_dict())
     optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
     replay = Replay(args.replay_capacity, alpha=args.per_alpha if args.per else None)
