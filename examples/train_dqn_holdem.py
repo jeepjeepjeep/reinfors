@@ -34,6 +34,7 @@ for this example.
 from __future__ import annotations
 
 import argparse
+import math
 import random
 import time
 
@@ -75,6 +76,12 @@ class QNet(nn.Module):
             nn.Linear(width, width),
             nn.ReLU(),
         )
+        if atoms is not None:
+            if atoms < 2:
+                raise ValueError(f"C51 needs atoms >= 2, got {atoms}")
+            lo, hi = v_bounds
+            if not (math.isfinite(lo) and math.isfinite(hi) and lo < hi):
+                raise ValueError(f"C51 support bounds must be finite with v_min < v_max, got {v_bounds}")
         per_out = atoms if atoms is not None else 1
         self.adv = nn.Linear(width, n_heads * n_actions * per_out)
         self.value = nn.Linear(width, n_heads * per_out) if dueling else None
@@ -103,6 +110,31 @@ class QNet(nn.Module):
         if self.atoms is None:
             return out
         return (out.softmax(-1) * self.support).sum(-1)  # type: ignore[operator]  # buffer typing
+
+
+def project_distribution(
+    t_dist: torch.Tensor,
+    rewards: torch.Tensor,
+    bootstrap: torch.Tensor,
+    support: torch.Tensor,
+    gamma: float,
+) -> torch.Tensor:
+    """Re-bin the Bellman-shifted support `r + gamma z` onto the fixed atoms (Bellemare et al. 2017).
+
+    `t_dist` is `(B, K, Z)` next-state probabilities, `rewards`/`bootstrap` are `(B,)`.
+    Non-bootstrap rows shift every atom to r, so all mass projects onto r's neighbours
+    regardless of `t_dist`.
+    """
+    atoms = support.shape[0]
+    tz = (rewards.view(-1, 1) + gamma * bootstrap.float().view(-1, 1) * support).clamp(support[0], support[-1])
+    b = ((tz - support[0]) / (support[1] - support[0])).clamp(0, atoms - 1)  # float-safe indices
+    low, up = b.floor().long(), b.ceil().long()
+    low_w = up.float() - b + (low == up).float()  # exact hits keep full mass
+    up_w = b - low.float()
+    m = torch.zeros_like(t_dist)
+    m.scatter_add_(2, low.unsqueeze(1).expand_as(t_dist), t_dist * low_w.unsqueeze(1))
+    m.scatter_add_(2, up.unsqueeze(1).expand_as(t_dist), t_dist * up_w.unsqueeze(1))
+    return m
 
 
 def dense_mask(offsets: np.ndarray, ids: np.ndarray, m: int, a: int) -> np.ndarray:
@@ -228,18 +260,7 @@ def train_step(
                 t_dist = t_dist_all.gather(2, sel.view(-1, net.n_heads, 1, 1).expand(-1, -1, 1, net.atoms)).squeeze(
                     2
                 )  # (B, K, Z)
-                # Bellman-shift the support, then re-bin onto the fixed atoms (Bellemare et
-                # al. 2017). Non-bootstrap rows shift every atom to r, so all mass projects
-                # onto r's neighbours regardless of t_dist.
-                bootf = (legal.any(dim=1) & ~dones).float().view(-1, 1)
-                tz = (rewards.view(-1, 1) + gamma * bootf * z).clamp(z[0], z[-1])  # (B, Z)
-                b = ((tz - z[0]) / (z[1] - z[0])).clamp(0, net.atoms - 1)  # float-safe indices
-                low, up = b.floor().long(), b.ceil().long()
-                low_w = up.float() - b + (low == up).float()  # exact hits keep full mass
-                up_w = b - low.float()
-                m = torch.zeros_like(t_dist)
-                m.scatter_add_(2, low.unsqueeze(1).expand_as(t_dist), t_dist * low_w.unsqueeze(1))
-                m.scatter_add_(2, up.unsqueeze(1).expand_as(t_dist), t_dist * up_w.unsqueeze(1))
+                m = project_distribution(t_dist, rewards, legal.any(dim=1) & ~dones, z, gamma)
             elem = -(m * chosen.log_softmax(-1)).sum(-1)  # (B, K) cross-entropy
             err = elem
         weights = torch.from_numpy(weights_n).to(device)
