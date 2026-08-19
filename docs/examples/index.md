@@ -103,7 +103,7 @@ python examples/train_alphazero_snake.py
 
 ### DQN Hold'em
 
-`examples/train_dqn_holdem.py` covers imperfect observations, replay, ensemble DQN, and sparse legal
+`examples/train_rainbow_holdem.py` covers imperfect observations, replay, ensemble DQN, and sparse legal
 actions. Its flags assemble the full
 [Rainbow](https://arxiv.org/abs/1710.02298) stack and compose freely — `--double` (decoupled
 target selection), `--per` (prioritized replay), `--dueling` (value/advantage heads), `--c51`
@@ -111,7 +111,7 @@ target selection), `--per` (prioritized replay), `--dueling` (value/advantage he
 returns):
 
 ```bash
-python examples/train_dqn_holdem.py --double --per --dueling --c51 --noisy --n-step 3 --heads 1
+python examples/train_rainbow_holdem.py --double --per --dueling --c51 --noisy --n-step 3 --heads 1
 ```
 
 Every component except `--n-step` is caller-side; see the
@@ -120,7 +120,7 @@ Every component except `--n-step` is caller-side; see the
 **Runtime:** minutes or longer for the default; use `--iterations 1 --eval-every 0` for a smoke test.
 
 ```bash
-python examples/train_dqn_holdem.py
+python examples/train_rainbow_holdem.py
 ```
 
 ### Deep CFR training

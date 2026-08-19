@@ -1,4 +1,4 @@
-"""Numerical tests for the hold'em example's C51 machinery (`examples/train_dqn_holdem.py`):
+"""Numerical tests for the hold'em example's C51 machinery (`examples/train_rainbow_holdem.py`):
 the categorical projection and the support/atom validation. torch-gated like the other
 example tests.
 """
@@ -15,8 +15,8 @@ torch = pytest.importorskip("torch")
 
 
 def _load_example() -> Any:
-    path = os.path.join(os.path.dirname(__file__), "..", "examples", "train_dqn_holdem.py")
-    spec = importlib.util.spec_from_file_location("train_dqn_holdem", path)
+    path = os.path.join(os.path.dirname(__file__), "..", "examples", "train_rainbow_holdem.py")
+    spec = importlib.util.spec_from_file_location("train_rainbow_holdem", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
