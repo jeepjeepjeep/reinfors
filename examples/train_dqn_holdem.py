@@ -69,8 +69,8 @@ class Replay:
     """Ring buffer over the DqnBatch columns, next-state legality densified at insert.
 
     Uniform by default. With `alpha` set, samples proportional to priority^alpha and returns
-    importance weights (PER): fresh rows enter at the running max priority so they are seen
-    at least once before their TD error is known, and `update` writes |TD| back after training.
+    importance weights (PER): fresh rows enter at the running max priority, favouring them
+    until their first sampled TD error, which `update` writes back after training.
     """
 
     def __init__(self, capacity: int, alpha: float | None = None) -> None:
@@ -116,7 +116,10 @@ class Replay:
             p /= p.sum()
             idx = rng.choice(self.size, size=n, p=p)
             w = (self.size * p[idx]) ** -beta
-            weights = (w / w.max()).astype(np.float32)
+            # Normalize by the buffer-wide max weight (min probability), not the batch max:
+            # batch normalization weakens the correction for whichever rows were sampled.
+            max_w = (self.size * p.min()) ** -beta
+            weights = (w / max_w).astype(np.float32)
         return [c[idx] for c in self.cols], idx, weights
 
     def update(self, idx: np.ndarray, td_abs: np.ndarray) -> None:
@@ -283,8 +286,9 @@ def main() -> None:
     t0 = time.perf_counter()
     print(f"DQN hold'em: {args.num_players} seats, {args.heads} heads, {args.n_games} games/collect")
     for it in range(1, args.iterations + 1):
-        # Anneal the IS correction to full strength by the final iteration (Schaul et al. 2016).
-        beta = args.per_beta + (1.0 - args.per_beta) * (it / args.iterations) if args.per else 0.0
+        # Anneal the IS correction from per_beta to full strength (Schaul et al. 2016).
+        progress = (it - 1) / max(args.iterations - 1, 1)
+        beta = args.per_beta + (1.0 - args.per_beta) * progress if args.per else 0.0
         batch = engine.collect(n_records=args.collect_size, infer=infer)
         assert isinstance(batch, DqnBatch)
         replay.push(batch, 3)
