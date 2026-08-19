@@ -44,7 +44,9 @@ from torch import nn
 
 
 class QNet(nn.Module):
-    """Flattened-obs MLP -> (B, K, A) ensemble Q values, optionally through dueling V/A heads.
+    """Flattened-obs MLP ensemble: `forward` gives (B, K, A) Q values, or (B, K, A, atoms)
+    return-distribution logits when distributional; `q_values` gives (B, K, A) expected Q in
+    both modes. Optional dueling V/A heads compose with either.
 
     The dueling advantage mean runs over ALL actions — the callback never sees legality (it
     lives in the engine and the batch CSR), and the zero-mean constraint is an identifiability
