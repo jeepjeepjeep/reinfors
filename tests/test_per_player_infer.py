@@ -211,13 +211,12 @@ def test_exploiter_calibration_on_leduc() -> None:
         rf.games.LeducPoker(),
         rf.Reward(),
         rf.policies.EpsilonGreedyQ(n_heads=1, epsilon=0.15),
-        rf.learners.Dqn(),
+        rf.learners.Dqn(gamma=1.0),
         n_games=8,
         seed=11,
         learn_players=[exploiter_player],
     )
     infer = [frozen_uniform, learner_net]
-    gamma = 1.0
     for _ in range(60):
         batch = collect_dqn(engine, 600, infer)
         offsets = batch.next_legal_offsets
@@ -228,7 +227,7 @@ def test_exploiter_calibration_on_leduc() -> None:
                 bootstrap = float(max(nxt[ids]))
             else:
                 bootstrap = 0.0
-            target = batch.rewards[i] + gamma * bootstrap
+            target = batch.rewards[i] + batch.discounts[i] * bootstrap
             q = table.setdefault(batch.obs[i].tobytes(), np.zeros(3))
             a = batch.actions[i]
             q[a] += 0.2 * (target - q[a])

@@ -52,8 +52,11 @@ successor. This is CSR storage without a dense action mask.
 For Q output shaped `(records, heads, actions)`, gather each record's chosen action, compute one TD
 loss per head, multiply by `masks`, and reduce over non-zero entries. Use `discounts` as the
 bootstrap coefficient — never a caller-side gamma: it is the engine's `gamma^k` per record, and
-`k` varies at episode tails (a truncation with `n_step=3` emits windows of 3, 2, then 1
-decisions). `rf.learners.Dqn(n_step=...)` counts each agent's own decisions, not environment
+`k` varies at episode tails. A bootstrappable truncation (single-agent or simultaneous games,
+where the truncated state has own-perspective legal actions) with `n_step=3` emits windows of
+3, 2, then 1 decisions; in alternating sequential games the truncated state belongs to the
+opponent, so tail records cannot bootstrap and carry `discounts` of `0` regardless of window
+length. `rf.learners.Dqn(n_step=...)` counts each agent's own decisions, not environment
 ticks, and the window's intermediate actions come from the behaviour policy — the estimator is
 uncorrected off-policy (Rainbow's convention), so keep `n_step` small.
 
@@ -75,7 +78,7 @@ realization, so construct with `infer_cache=0` or call `Engine.weights_updated` 
 resampling noise, exactly as after a weight sync.
 
 `can_bootstrap` is true exactly when the row's next-legal CSR slice is non-empty. Empty means
-terminal or an alternating-game truncation tail, so its target is the immediate reward. Do not compute
+terminal or an alternating-game truncation tail, so its target is the record's reward sum. Do not compute
 `(1 - done) * max(masked_q)`; multiplying zero by negative infinity can produce `NaN`, and
 `dones` does not encode every non-bootstrapping tail.
 

@@ -1468,3 +1468,33 @@ fn grouped_tail_failure_leaves_the_pool_respawnable() {
         assert_eq!(r.value, 2.0, "an aborted-window step leaked into the retry");
     }
 }
+
+#[test]
+fn nstep_alternating_truncation_tails_cannot_bootstrap() {
+    // EndlessRR truncates at tick 2, when the state belongs to agent 2: every buffered
+    // trajectory's tail sees an empty own-perspective legal set, so even wide n-step windows
+    // must emit discount 0 (target = the window's reward sum, no bootstrap).
+    let mut engine = Engine::new(
+        EndlessRR,
+        Box::new(Enc),
+        Box::new(Zero),
+        EpsilonGreedyQ::new(1, 0.1),
+        Dqn::new(1, 1.0, 3, 0.9),
+        EngineParams {
+            n_games: 2,
+            seed: 4,
+            n_groups: 1,
+            ..Default::default()
+        },
+    );
+    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+    let (records, _stats) = engine.collect(12, &mut infer);
+    assert!(!records.is_empty());
+    for r in &records {
+        assert!(
+            r.next_legal.is_empty(),
+            "the truncated state is the opponent's"
+        );
+        assert_eq!(r.discount, 0.0, "alternating tails must not bootstrap");
+    }
+}

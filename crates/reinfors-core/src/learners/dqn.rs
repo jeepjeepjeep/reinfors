@@ -184,9 +184,11 @@ mod tests {
     }
 
     #[test]
-    fn nstep_truncation_tails_shorten_with_matching_discounts() {
-        // gamma 0.5, n 3, truncated after 3 steps: every window ends at the truncated state,
-        // bootstrapping with gamma^k for the k own decisions actually spanned.
+    fn nstep_bootstrappable_truncation_tails_shorten_with_matching_discounts() {
+        // gamma 0.5, n 3, truncated after 3 steps with own-perspective legal actions at the
+        // tail (single-agent/simultaneous): every window ends at the truncated state,
+        // bootstrapping with gamma^k for the k own decisions actually spanned. Alternating
+        // games instead surface an empty tail legal set and discount 0 (engine test).
         let learner = Dqn::new(1, 1.0, 3, 0.5);
         let traj = vec![
             trunc_step(vec![1.0], 1.0, vec![9.0]),

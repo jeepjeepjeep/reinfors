@@ -74,8 +74,9 @@ there is no in-place scheduler. To change epsilon:
 
 Discount ownership also differs by learner family:
 
-- DQN batches contain immediate rewards and next states; apply the chosen gamma in the caller's TD
-  loss. `rf.learners.Dqn` therefore has no `gamma` argument.
+- `rf.learners.Dqn(gamma=..., n_step=...)` discounts engine-side: batches carry the window's
+  reward sum plus per-record `discounts` (`gamma^k`), and the caller's TD loss is
+  `rewards + discounts * bootstrap` with no caller gamma.
 - `rf.learners.TreeStrap(gamma=...)` discounts its generated search/return targets internally.
 - `rf.learners.AlphaZero(gamma=...)` discounts its realized value targets internally; its default
   `1.0` matches the usual undiscounted game-outcome target.
