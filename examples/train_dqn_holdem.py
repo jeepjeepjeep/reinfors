@@ -24,10 +24,13 @@ games — standard for parallelised noisy nets. Perturbations still differ per g
 states, but in a game with no chance and a fixed start, shared noise plus greedy selection
 makes every parallel game play identically, so parallelism adds no exploration diversity;
 hold'em's dealt cards diverge the pool. Seed torch for reproducible collection — exploration
-randomness lives caller-side under this flag. The sigma parameters anneal during training, so
-the high-epsilon cycling caution above applies with extra force (measured: noisy-only
-exploration hovers near 0 bb/hand vs random where eps 0.6 holds ~+5.8 — expected for
-independent Q-learning in imperfect information, not a defect of the layer). `--n-step`
+randomness lives caller-side under this flag. Note `--noisy` alone is not
+noisy-ONLY exploration: with the default 4-head ensemble, `EpsilonGreedyQ` still
+Thompson-samples a head per episode, an independent per-game diversity source — `--heads 1` is
+the canonical Rainbow composition. The sigma parameters anneal during training, so the
+high-epsilon cycling caution above applies with extra force (measured at 4 heads and at
+`--heads 1` alike: near 0 bb/hand vs random where eps 0.6 holds ~+5.8 — the documented
+self-play cycling, not a defect of the layer). `--n-step`
 widens TD windows to n of the seat's own decisions (Rainbow's multi-step returns): the engine
 emits the discounted n-step reward sum and per-record `discounts` = gamma^k, the single
 discount source for every target rule here.
