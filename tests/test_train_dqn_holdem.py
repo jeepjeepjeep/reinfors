@@ -102,3 +102,32 @@ def test_nstep_discounts_expose_shortened_windows() -> None:
     assert set(np.round(d[d > 0], 6)) <= {0.5, 0.25, 0.125}, "discounts are gamma^k, k <= n"
     assert ((d == 0) == ~np.asarray(batch.can_bootstrap)).all()
     assert "n_step" in engine.resolved_config()["learner"]
+
+
+def test_noisy_linear_eval_mode_is_the_mean_network() -> None:
+    layer = ex.NoisyLinear(4, 3)
+    layer.eval()
+    x = torch.randn(2, 4, generator=torch.Generator().manual_seed(0))
+    a = layer(x)
+    layer.resample_noise()
+    assert torch.equal(a, layer(x)), "eval mode ignores noise entirely"
+    assert torch.allclose(a, torch.nn.functional.linear(x, layer.w_mu, layer.b_mu))
+
+
+def test_noisy_linear_training_noise_is_fixed_between_resamples() -> None:
+    layer = ex.NoisyLinear(4, 3)
+    layer.train()
+    layer.resample_noise()
+    x = torch.randn(2, 4, generator=torch.Generator().manual_seed(1))
+    a = layer(x)
+    assert torch.equal(a, layer(x)), "a held draw gives a deterministic perturbed layer"
+    layer.resample_noise()
+    assert not torch.equal(a, layer(x)), "a fresh draw changes the perturbation"
+
+
+def test_qnet_resample_is_a_noop_without_noisy_layers() -> None:
+    net = ex.QNet(4, 1, 3)
+    x = torch.randn(1, 4)
+    a = net(x)
+    net.resample_noise()
+    assert torch.equal(a, net(x))

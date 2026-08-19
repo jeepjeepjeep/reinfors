@@ -74,8 +74,13 @@ stay caller-side with one adapter: the callback collapses each action's atom dis
 its expected Q, so the engine selects on scalars while training regresses full distributions —
 the example's `--c51` flag shows the projection loss. Stochastic layers (noisy networks)
 preserve the callback shape but interact with inference caching: a cached row freezes one noise
-realization, so construct with `infer_cache=0` or call `Engine.weights_updated` after
-resampling noise, exactly as after a weight sync.
+realization, so construct with `infer_cache=0` (the default) or call `Engine.weights_updated`
+after resampling noise, exactly as after a weight sync. One callback also serves the whole game
+pool, so a noise draw is shared across every game in a round — the standard property of
+parallelised noisy nets. In a game with no chance events and a fixed start, shared noise plus
+greedy selection makes every parallel game play identically, so parallelism adds no exploration
+diversity there; chance events (dealt cards, stochastic spawns) diverge the pool. The
+[Hold'em example](../examples/index.md#dqn-holdem)'s `--noisy` flag shows the recipe.
 
 `can_bootstrap` is true exactly when the row's next-legal CSR slice is non-empty. Empty means
 terminal or an alternating-game truncation tail, so its target is the record's reward sum. Do not compute
