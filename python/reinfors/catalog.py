@@ -328,6 +328,10 @@ ALGORITHMS: dict[str, AlgorithmInfo] = {
                 "A Distributional Perspective on Reinforcement Learning",
                 "https://arxiv.org/abs/1707.06887",
             ),
+            (
+                "Rainbow: Combining Improvements in Deep Reinforcement Learning",
+                "https://arxiv.org/abs/1710.02298",
+            ),
         ),
     ),
     "treestrap_expectimax": AlgorithmInfo(

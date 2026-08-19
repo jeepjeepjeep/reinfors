@@ -15,8 +15,11 @@ cross-entropy against the projected Bellman target, while the infer
 callback hands the engine expected Q — the engine contract never changes. `--per` switches the
 buffer to prioritized replay (Schaul et al.
 2016): sampling proportional to |TD error|^alpha, annealed importance weights in the loss, and
-priorities written back after every minibatch. Rewards are chip deltas scaled to big
-blinds; one episode = one hand, so gamma multiplies across the streets of a single hand.
+priorities written back after every minibatch. `--n-step` widens TD windows to n of the seat's
+own decisions (Rainbow's multi-step returns): the engine emits the discounted n-step reward sum
+and per-record `discounts` = gamma^k, the single discount source for every target rule here.
+Rewards are chip deltas scaled to big blinds; one episode = one hand, so gamma (now a
+`Dqn` constructor argument) multiplies across the streets of a single hand.
 
 The eval probe seats the GREEDY policy head at a rotating position against scripted opponents
 (uniform-random or always-call) and reports mean big blinds per hand — the standard sanity that
@@ -115,18 +118,18 @@ class QNet(nn.Module):
 def project_distribution(
     t_dist: torch.Tensor,
     rewards: torch.Tensor,
-    bootstrap: torch.Tensor,
+    discounts: torch.Tensor,
     support: torch.Tensor,
-    gamma: float,
 ) -> torch.Tensor:
-    """Re-bin the Bellman-shifted support `r + gamma z` onto the fixed atoms (Bellemare et al. 2017).
+    """Re-bin the Bellman-shifted support `r + discount z` onto the fixed atoms (Bellemare et
+    al. 2017).
 
-    `t_dist` is `(B, K, Z)` next-state probabilities, `rewards`/`bootstrap` are `(B,)`.
-    Non-bootstrap rows shift every atom to r, so all mass projects onto r's neighbours
-    regardless of `t_dist`.
+    `t_dist` is `(B, K, Z)` next-state probabilities; `rewards`/`discounts` are `(B,)`, with
+    `discounts` the batch's per-record gamma^k. A zero discount shifts every atom to r, so all
+    mass projects onto r's neighbours regardless of `t_dist`.
     """
     atoms = support.shape[0]
-    tz = (rewards.view(-1, 1) + gamma * bootstrap.float().view(-1, 1) * support).clamp(support[0], support[-1])
+    tz = (rewards.view(-1, 1) + discounts.view(-1, 1) * support).clamp(support[0], support[-1])
     b = ((tz - support[0]) / (support[1] - support[0])).clamp(0, atoms - 1)  # float-safe indices
     low, up = b.floor().long(), b.ceil().long()
     low_w = up.float() - b + (low == up).float()  # exact hits keep full mass
@@ -169,6 +172,7 @@ class Replay:
             batch.obs,
             batch.actions,
             batch.rewards,
+            batch.discounts,
             batch.next_obs,
             batch.dones,
             batch.masks,
@@ -215,7 +219,6 @@ def train_step(
     replay: Replay,
     rng: np.random.Generator,
     updates: int,
-    gamma: float,
     batch_size: int,
     device: str,
     double: bool,
@@ -224,12 +227,12 @@ def train_step(
     total, batches = 0.0, 0
     for _ in range(updates):
         cols, idx, weights_n = replay.sample(batch_size, rng, beta)
-        obs_n, actions_n, rewards_n, next_obs_n, dones_n, masks_n, legal_n = cols
+        obs_n, actions_n, rewards_n, discounts_n, next_obs_n, _dones_n, masks_n, legal_n = cols
         obs = torch.from_numpy(obs_n).to(device)
         next_obs = torch.from_numpy(next_obs_n).to(device)
         actions = torch.from_numpy(actions_n).long().to(device)
         rewards = torch.from_numpy(rewards_n).float().to(device)
-        dones = torch.from_numpy(dones_n).to(device)
+        discounts = torch.from_numpy(discounts_n).float().to(device)
         masks = torch.from_numpy(masks_n).float().to(device)  # (B, K) bootstrap masks
         legal = torch.from_numpy(legal_n).to(device)
         if net.atoms is None:
@@ -244,7 +247,7 @@ def train_step(
                 else:
                     boot = q_next.masked_fill(~legal.unsqueeze(1), -1e9).max(dim=2).values
                 boot = torch.where(legal.any(dim=1, keepdim=True), boot, torch.zeros_like(boot))
-                td = rewards.unsqueeze(1) + gamma * boot * (~dones).unsqueeze(1).float()
+                td = rewards.unsqueeze(1) + discounts.unsqueeze(1) * boot
             elem = nn.functional.smooth_l1_loss(q_sa, td, reduction="none")  # (B, K)
             err = (q_sa - td).abs()
         else:
@@ -260,7 +263,7 @@ def train_step(
                 t_dist = t_dist_all.gather(2, sel.view(-1, net.n_heads, 1, 1).expand(-1, -1, 1, net.atoms)).squeeze(
                     2
                 )  # (B, K, Z)
-                m = project_distribution(t_dist, rewards, legal.any(dim=1) & ~dones, z, gamma)
+                m = project_distribution(t_dist, rewards, discounts, z)
             elem = -(m * chosen.log_softmax(-1)).sum(-1)  # (B, K) cross-entropy
             err = elem
         weights = torch.from_numpy(weights_n).to(device)
@@ -329,7 +332,13 @@ def main() -> None:
     parser.add_argument("--heads", type=int, default=4)
     parser.add_argument("--width", type=int, default=256)
     parser.add_argument("--epsilon", type=float, default=0.6)
-    parser.add_argument("--gamma", type=float, default=1.0)
+    parser.add_argument("--gamma", type=float, default=1.0, help="engine-side discount over own decisions")
+    parser.add_argument(
+        "--n-step",
+        type=int,
+        default=1,
+        help="multi-step return window over own decisions; uncorrected off-policy, keep small",
+    )
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--target-sync", type=int, default=10, help="iterations between target-net syncs")
     parser.add_argument(
@@ -402,7 +411,7 @@ def main() -> None:
         game,
         rf.Reward(scale=1.0 / args.big_blind),  # rewards in big blinds
         rf.policies.EpsilonGreedyQ(n_heads=args.heads, epsilon=args.epsilon),
-        rf.learners.Dqn(),
+        rf.learners.Dqn(n_step=args.n_step, gamma=args.gamma),
         n_games=args.n_games,
         seed=args.seed,
     )
@@ -429,7 +438,6 @@ def main() -> None:
             replay,
             rng,
             args.updates_per_iter,
-            args.gamma,
             args.batch_size,
             args.device,
             double=args.double,

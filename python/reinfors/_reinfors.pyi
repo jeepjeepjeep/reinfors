@@ -440,7 +440,7 @@ class DqnBatch:
     #   counts = np.diff(next_legal_offsets); rows = np.repeat(np.arange(M), counts)
     #   mask = np.zeros((M, A), bool); mask[rows, next_legal_ids] = True
     #   q  = np.where(mask, q_next, -np.inf).max(-1)
-    #   td = rewards + gamma * np.where(np.isfinite(q), q, 0.0)
+    #   td = rewards + discounts * np.where(np.isfinite(q), q, 0.0)
     legal_ids: NDArray[np.int64]
     legal_offsets: NDArray[np.int64]
     next_legal_ids: NDArray[np.int64]

@@ -37,7 +37,6 @@ from torch.nn import functional as F
 
 UPDATES = 10
 RECORDS_PER_UPDATE = 256
-GAMMA = 0.99
 TARGET_SYNC = 5
 
 torch.manual_seed(0)
@@ -51,7 +50,7 @@ engine = rf.Engine(
     game=game,
     reward=rf.Reward(step=-0.01, goal=1.0),  # Weight the events emitted by GridWorld.
     policy=rf.policies.EpsilonGreedyQ(n_heads=1, epsilon=0.1),  # Explore on 10% of decisions.
-    learner=rf.learners.Dqn(),  # Emit one-step transition records for the DQN loss.
+    learner=rf.learners.Dqn(gamma=0.99),  # Emit transition records; gamma lives engine-side.
     n_games=8,  # Advance eight independent episode slots in parallel.
     seed=0,
 )
@@ -85,13 +84,15 @@ for update in range(1, UPDATES + 1):
     rewards = torch.as_tensor(batch.rewards, dtype=torch.float32, device=device)
     next_obs = torch.as_tensor(batch.next_obs, device=device)
     can_bootstrap = torch.as_tensor(batch.can_bootstrap, device=device)
+    discounts = torch.as_tensor(batch.discounts, dtype=torch.float32, device=device)
 
-    # Compute DQN targets.
+    # Compute DQN targets. `discounts` is the engine's gamma^k per record (0 at terminals),
+    # so the same line is correct for 1-step and n-step collection.
     net.train()
     chosen_q = net(obs).gather(1, actions[:, None]).squeeze(1)
     with torch.no_grad():
         next_value = target_net(next_obs).max(dim=1).values
-        targets = rewards + GAMMA * torch.where(can_bootstrap, next_value, 0.0)
+        targets = rewards + discounts * torch.where(can_bootstrap, next_value, 0.0)
 
     # Update the online network.
     loss = F.smooth_l1_loss(chosen_q, targets)
