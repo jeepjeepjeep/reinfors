@@ -58,7 +58,9 @@ network and evaluate that action with the target network. For prioritized replay
 priority per stored row, insert fresh rows at the running max, and write |TD error| back after
 each minibatch — the TD errors are already computed caller-side at training time. The
 [Hold'em example](../examples/index.md#dqn-holdem)'s `--double` and `--per` flags show both in
-ensemble form.
+ensemble form. Architecture variants (dueling heads, noisy layers) never touch the seam at all:
+the callback contract is Q rows, however they were produced — the example's `--dueling` flag
+splits value and advantage streams inside the network.
 
 `can_bootstrap` is true exactly when the row's next-legal CSR slice is non-empty. Empty means
 terminal or an alternating-game truncation tail, so its target is the immediate reward. Do not compute
