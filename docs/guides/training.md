@@ -127,7 +127,7 @@ stays inside the game and policy. Use the
 [troubleshooting table](../reference/troubleshooting.md) when a callback or composition is rejected.
 
 Every GridWorld move is legal, so the target network can take a dense maximum over its four outputs.
-`batch.can_bootstrap` is false when the TD target should contain only the immediate reward. Games
+`batch.can_bootstrap` is false when the TD target should contain only the record's reward sum. Games
 with variable legal actions must also maximize over their provided legal action IDs. The
 [Hold'em DQN example](../examples/index.md#dqn-holdem) demonstrates that general case.
 
