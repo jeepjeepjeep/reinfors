@@ -9,8 +9,9 @@ insert), 1-step Q targets from a periodically synced target network (`--double` 
 Double DQN targets: the online net selects the bootstrap action, the target net evaluates it),
 and per-head bootstrap masks. `--dueling` splits each head into state-value and zero-mean
 advantage streams (Wang et al. 2016). `--c51` makes each head distributional (Bellemare et al.
-2017): the net predicts categorical return distributions on a fixed support spanning the stack
-in big blinds, trained by cross-entropy against the projected Bellman target, while the infer
+2017): the net predicts categorical return distributions on a fixed support covering the reachable
+bb-scaled returns (lose at most your stack, win at most the other players'), trained by
+cross-entropy against the projected Bellman target, while the infer
 callback hands the engine expected Q — the engine contract never changes. `--per` switches the
 buffer to prioritized replay (Schaul et al.
 2016): sampling proportional to |TD error|^alpha, annealed importance weights in the loss, and
@@ -62,7 +63,7 @@ class QNet(nn.Module):
         width: int = 256,
         dueling: bool = False,
         atoms: int | None = None,
-        v_span: float = 20.0,
+        v_bounds: tuple[float, float] = (-20.0, 20.0),
     ) -> None:
         super().__init__()
         self.n_heads = n_heads
@@ -78,7 +79,7 @@ class QNet(nn.Module):
         self.adv = nn.Linear(width, n_heads * n_actions * per_out)
         self.value = nn.Linear(width, n_heads * per_out) if dueling else None
         if atoms is not None:
-            self.register_buffer("support", torch.linspace(-v_span, v_span, atoms))
+            self.register_buffer("support", torch.linspace(v_bounds[0], v_bounds[1], atoms))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """(B, K, A) Q values, or (B, K, A, Z) atom logits when distributional."""
@@ -333,10 +334,16 @@ def main() -> None:
     )
     parser.add_argument("--atoms", type=int, default=51, help="C51 support size")
     parser.add_argument(
-        "--v-span",
+        "--v-min",
         type=float,
         default=None,
-        help="C51 support half-range in big blinds (default: stack / big blind)",
+        help="C51 support lower bound in big blinds (default: -stack)",
+    )
+    parser.add_argument(
+        "--v-max",
+        type=float,
+        default=None,
+        help="C51 support upper bound in big blinds (default: (players - 1) * stack)",
     )
     parser.add_argument("--per-beta", type=float, default=0.4, help="initial importance-weight exponent")
     parser.add_argument("--replay-capacity", type=int, default=100_000)
@@ -356,12 +363,16 @@ def main() -> None:
     )
     c, h, w = game.observation_space().shape
     dim = c * h * w
-    # Symmetric support spanning the stack: rewards are bb-scaled chip deltas, so a hand's
-    # return is bounded by the stack in big blinds.
-    v_span = args.v_span if args.v_span is not None else args.stack / args.big_blind
+    # Asymmetric support: a hand's bb-scaled chip delta is bounded below by the player's own
+    # stack but above by the other (N-1) stacks they can win.
+    stack_bb = args.stack / args.big_blind
+    v_bounds = (
+        args.v_min if args.v_min is not None else -stack_bb,
+        args.v_max if args.v_max is not None else (args.num_players - 1) * stack_bb,
+    )
     atoms = args.atoms if args.c51 else None
-    net = QNet(dim, args.heads, 3, args.width, dueling=args.dueling, atoms=atoms, v_span=v_span).to(args.device)
-    target = QNet(dim, args.heads, 3, args.width, dueling=args.dueling, atoms=atoms, v_span=v_span).to(args.device)
+    net = QNet(dim, args.heads, 3, args.width, dueling=args.dueling, atoms=atoms, v_bounds=v_bounds).to(args.device)
+    target = QNet(dim, args.heads, 3, args.width, dueling=args.dueling, atoms=atoms, v_bounds=v_bounds).to(args.device)
     target.load_state_dict(net.state_dict())
     optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
     replay = Replay(args.replay_capacity, alpha=args.per_alpha if args.per else None)
