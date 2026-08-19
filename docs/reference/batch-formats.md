@@ -73,9 +73,18 @@ flag splits value and advantage streams inside the network. Distributional heads
 stay caller-side with one adapter: the callback collapses each action's atom distribution to
 its expected Q, so the engine selects on scalars while training regresses full distributions —
 the example's `--c51` flag shows the projection loss. Stochastic layers (noisy networks)
-preserve the callback shape but interact with inference caching: a cached row freezes one noise
-realization, so construct with `infer_cache=0` or call `Engine.weights_updated` after
-resampling noise, exactly as after a weight sync.
+preserve the callback shape but interact with inference caching: cache lookups run before the
+callback, so under per-callback resampling a hit would serve an old draw while misses use a new
+one, and an all-hit round never resamples at all. Per-callback resampling therefore requires
+`infer_cache=0` (the default). Caching composes only with an externally held draw: resample
+between collects, call `Engine.weights_updated` before collecting, and keep the draw fixed for
+that collect. A draw's scope is one callback invocation — normally the full pooled round,
+though `pad_rows_to` splits oversized rounds into chunks with distinct draws. The shared draw
+is the standard property of parallelised noisy nets: in a game with no chance events and a
+fixed start, shared noise plus greedy single-head selection plays every parallel game
+identically, adding no exploration diversity. Chance events (dealt cards, stochastic spawns)
+diverge the pool — as do per-episode Thompson head draws at `n_heads >= 2`. The
+[Hold'em example](../examples/index.md#dqn-holdem)'s `--noisy` flag shows the recipe.
 
 `can_bootstrap` is true exactly when the row's next-legal CSR slice is non-empty. Empty means
 terminal or an alternating-game truncation tail, so its target is the record's reward sum. Do not compute

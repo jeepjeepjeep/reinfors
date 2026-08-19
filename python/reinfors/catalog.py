@@ -329,6 +329,10 @@ ALGORITHMS: dict[str, AlgorithmInfo] = {
                 "https://arxiv.org/abs/1707.06887",
             ),
             (
+                "Noisy Networks for Exploration",
+                "https://arxiv.org/abs/1706.10295",
+            ),
+            (
                 "Rainbow: Combining Improvements in Deep Reinforcement Learning",
                 "https://arxiv.org/abs/1710.02298",
             ),

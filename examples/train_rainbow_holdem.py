@@ -15,9 +15,25 @@ cross-entropy against the projected Bellman target, while the infer
 callback hands the engine expected Q — the engine contract never changes. `--per` switches the
 buffer to prioritized replay (Schaul et al.
 2016): sampling proportional to |TD error|^alpha, annealed importance weights in the loss, and
-priorities written back after every minibatch. `--n-step` widens TD windows to n of the seat's
-own decisions (Rainbow's multi-step returns): the engine emits the discounted n-step reward sum
-and per-record `discounts` = gamma^k, the single discount source for every target rule here.
+priorities written back after every minibatch. `--noisy` replaces every linear layer with a
+factorized-Gaussian noisy layer (Fortunato et al. 2018) and forces epsilon to 0: learned weight
+noise replaces epsilon as the action-noise source, resampled per inference callback (canonical
+Rainbow) and per training minibatch (online and target independently); the eval probe's
+`net.eval()` uses mean weights. Exploration is noisy-ONLY at `--heads 1`, the canonical Rainbow
+composition — with the default 4-head ensemble, `EpsilonGreedyQ` still Thompson-samples a head
+per episode, an independent per-game diversity source. One callback serves the whole game pool,
+so each round's noise draw is shared across games — standard for parallelised noisy nets.
+Perturbations still differ per game through the states, but with no chance, a fixed start, and
+a single shared head, shared noise plus greedy selection plays every parallel game identically,
+adding no exploration diversity; hold'em's dealt cards (and per-episode head draws) diverge the
+pool. Seed torch for reproducible collection — exploration randomness lives caller-side under
+this flag. The sigma parameters anneal during training, so the
+high-epsilon cycling caution above applies with extra force (measured at 4 heads and at
+`--heads 1` alike: near 0 bb/hand vs random where eps 0.6 holds ~+5.8 — the documented
+self-play cycling, not a defect of the layer). `--n-step`
+widens TD windows to n of the seat's own decisions (Rainbow's multi-step returns): the engine
+emits the discounted n-step reward sum and per-record `discounts` = gamma^k, the single
+discount source for every target rule here.
 Rewards are chip deltas scaled to big blinds; one episode = one hand, so gamma (now a
 `Dqn` constructor argument) multiplies across the streets of a single hand.
 
@@ -31,7 +47,7 @@ what the probes measure (measured: eps 0.1-0.3 drift to ~0 bb/hand vs random, ep
 ~+5.8 across seeds). Principled self-play convergence for poker (NFSP/CFR-style) is out of scope
 for this example.
 
-    uv run --with torch python examples/train_dqn_holdem.py --iterations 60
+    uv run --with torch python examples/train_rainbow_holdem.py --iterations 60
 """
 
 from __future__ import annotations
@@ -46,6 +62,38 @@ import reinfors as rf
 import torch
 from reinfors import DqnBatch
 from torch import nn
+
+
+class NoisyLinear(nn.Module):
+    """Factorized Gaussian noisy layer (Fortunato et al. 2018): weights are mu + sigma * eps
+    with learned sigma, so exploration lives in weight space and anneals via the loss. Training
+    mode uses the current noise draw; eval mode uses the mean weights."""
+
+    def __init__(self, in_features: int, out_features: int, sigma0: float = 0.5) -> None:
+        super().__init__()
+        self.w_mu = nn.Parameter(torch.empty(out_features, in_features))
+        self.w_sigma = nn.Parameter(torch.empty(out_features, in_features))
+        self.b_mu = nn.Parameter(torch.empty(out_features))
+        self.b_sigma = nn.Parameter(torch.empty(out_features))
+        self.register_buffer("eps_in", torch.zeros(in_features))
+        self.register_buffer("eps_out", torch.zeros(out_features))
+        bound = 1.0 / math.sqrt(in_features)
+        nn.init.uniform_(self.w_mu, -bound, bound)
+        nn.init.uniform_(self.b_mu, -bound, bound)
+        nn.init.constant_(self.w_sigma, sigma0 / math.sqrt(in_features))
+        nn.init.constant_(self.b_sigma, sigma0 / math.sqrt(in_features))
+
+    def resample_noise(self) -> None:
+        for eps in (self.eps_in, self.eps_out):
+            eps.normal_()
+            eps.copy_(eps.sign() * eps.abs().sqrt())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.training:
+            return nn.functional.linear(x, self.w_mu, self.b_mu)
+        w = self.w_mu + self.w_sigma * torch.outer(self.eps_out, self.eps_in)
+        b = self.b_mu + self.b_sigma * self.eps_out
+        return nn.functional.linear(x, w, b)
 
 
 class QNet(nn.Module):
@@ -68,15 +116,17 @@ class QNet(nn.Module):
         dueling: bool = False,
         atoms: int | None = None,
         v_bounds: tuple[float, float] = (-20.0, 20.0),
+        noisy: bool = False,
     ) -> None:
         super().__init__()
         self.n_heads = n_heads
         self.n_actions = n_actions
         self.atoms = atoms
+        linear = NoisyLinear if noisy else nn.Linear
         self.trunk = nn.Sequential(
-            nn.Linear(dim, width),
+            linear(dim, width),
             nn.ReLU(),
-            nn.Linear(width, width),
+            linear(width, width),
             nn.ReLU(),
         )
         if atoms is not None:
@@ -86,8 +136,8 @@ class QNet(nn.Module):
             if not (math.isfinite(lo) and math.isfinite(hi) and lo < hi):
                 raise ValueError(f"C51 support bounds must be finite with v_min < v_max, got {v_bounds}")
         per_out = atoms if atoms is not None else 1
-        self.adv = nn.Linear(width, n_heads * n_actions * per_out)
-        self.value = nn.Linear(width, n_heads * per_out) if dueling else None
+        self.adv = linear(width, n_heads * n_actions * per_out)
+        self.value = linear(width, n_heads * per_out) if dueling else None
         if atoms is not None:
             self.register_buffer("support", torch.linspace(v_bounds[0], v_bounds[1], atoms))
 
@@ -106,6 +156,12 @@ class QNet(nn.Module):
             v = self.value(h).view(-1, self.n_heads, 1, self.atoms)
             logits = v + logits - logits.mean(dim=2, keepdim=True)
         return logits
+
+    def resample_noise(self) -> None:
+        """No-op without noisy layers, so call sites need no branching."""
+        for module in self.modules():
+            if isinstance(module, NoisyLinear):
+                module.resample_noise()
 
     def q_values(self, x: torch.Tensor) -> torch.Tensor:
         """(B, K, A) expected Q either way: the engine and eval always see scalars."""
@@ -226,6 +282,8 @@ def train_step(
 ) -> float:
     total, batches = 0.0, 0
     for _ in range(updates):
+        net.resample_noise()
+        target.resample_noise()
         cols, idx, weights_n = replay.sample(batch_size, rng, beta)
         obs_n, actions_n, rewards_n, discounts_n, next_obs_n, _dones_n, masks_n, legal_n = cols
         obs = torch.from_numpy(obs_n).to(device)
@@ -332,6 +390,11 @@ def main() -> None:
     parser.add_argument("--heads", type=int, default=4)
     parser.add_argument("--width", type=int, default=256)
     parser.add_argument("--epsilon", type=float, default=0.6)
+    parser.add_argument(
+        "--noisy",
+        action="store_true",
+        help="noisy-net exploration: learned weight noise, epsilon forced to 0",
+    )
     parser.add_argument("--gamma", type=float, default=1.0, help="engine-side discount over own decisions")
     parser.add_argument(
         "--n-step",
@@ -401,8 +464,12 @@ def main() -> None:
         args.v_max if args.v_max is not None else (args.num_players - 1) * stack_bb,
     )
     atoms = args.atoms if args.c51 else None
-    net = QNet(dim, args.heads, 3, args.width, dueling=args.dueling, atoms=atoms, v_bounds=v_bounds).to(args.device)
-    target = QNet(dim, args.heads, 3, args.width, dueling=args.dueling, atoms=atoms, v_bounds=v_bounds).to(args.device)
+    net = QNet(
+        dim, args.heads, 3, args.width, dueling=args.dueling, atoms=atoms, v_bounds=v_bounds, noisy=args.noisy
+    ).to(args.device)
+    target = QNet(
+        dim, args.heads, 3, args.width, dueling=args.dueling, atoms=atoms, v_bounds=v_bounds, noisy=args.noisy
+    ).to(args.device)
     target.load_state_dict(net.state_dict())
     optimizer = torch.optim.Adam(net.parameters(), lr=args.lr)
     replay = Replay(args.replay_capacity, alpha=args.per_alpha if args.per else None)
@@ -410,7 +477,7 @@ def main() -> None:
     engine = rf.Engine(
         game,
         rf.Reward(scale=1.0 / args.big_blind),  # rewards in big blinds
-        rf.policies.EpsilonGreedyQ(n_heads=args.heads, epsilon=args.epsilon),
+        rf.policies.EpsilonGreedyQ(n_heads=args.heads, epsilon=0.0 if args.noisy else args.epsilon),
         rf.learners.Dqn(n_step=args.n_step, gamma=args.gamma),
         n_games=args.n_games,
         seed=args.seed,
@@ -418,6 +485,7 @@ def main() -> None:
 
     def infer(arr: np.ndarray) -> np.ndarray:
         with torch.no_grad():
+            net.resample_noise()  # per-forward, the canonical NoisyNets cadence
             x = torch.from_numpy(arr).to(args.device)
             # The engine always sees scalar Q rows: C51 atoms collapse to expectations here.
             return np.asarray(net.q_values(x).cpu().numpy())  # native f32; the engine widens exactly
