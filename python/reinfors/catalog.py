@@ -310,6 +310,18 @@ ALGORITHMS: dict[str, AlgorithmInfo] = {
                 "Deep Exploration via Bootstrapped DQN",
                 "https://papers.nips.cc/paper_files/paper/2016/hash/8d8818c8e140c64c743113f563cf750f-Abstract.html",
             ),
+            (
+                "Deep Reinforcement Learning with Double Q-learning",
+                "https://arxiv.org/abs/1509.06461",
+            ),
+            (
+                "Prioritized Experience Replay",
+                "https://arxiv.org/abs/1511.05952",
+            ),
+            (
+                "Dueling Network Architectures for Deep Reinforcement Learning",
+                "https://arxiv.org/abs/1511.06581",
+            ),
         ),
     ),
     "treestrap_expectimax": AlgorithmInfo(
