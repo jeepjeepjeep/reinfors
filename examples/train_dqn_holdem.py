@@ -16,18 +16,18 @@ callback hands the engine expected Q — the engine contract never changes. `--p
 buffer to prioritized replay (Schaul et al.
 2016): sampling proportional to |TD error|^alpha, annealed importance weights in the loss, and
 priorities written back after every minibatch. `--noisy` replaces every linear layer with a
-factorized-Gaussian noisy layer (Fortunato et al. 2018) and forces epsilon to 0: exploration
-comes from learned weight noise, resampled per inference callback (canonical Rainbow) and per
-training minibatch (online and target independently); the eval probe's `net.eval()` uses mean
-weights. One callback serves the whole game pool, so each round's noise draw is shared across
-games — standard for parallelised noisy nets. Perturbations still differ per game through the
-states, but in a game with no chance and a fixed start, shared noise plus greedy selection
-makes every parallel game play identically, so parallelism adds no exploration diversity;
-hold'em's dealt cards diverge the pool. Seed torch for reproducible collection — exploration
-randomness lives caller-side under this flag. Note `--noisy` alone is not
-noisy-ONLY exploration: with the default 4-head ensemble, `EpsilonGreedyQ` still
-Thompson-samples a head per episode, an independent per-game diversity source — `--heads 1` is
-the canonical Rainbow composition. The sigma parameters anneal during training, so the
+factorized-Gaussian noisy layer (Fortunato et al. 2018) and forces epsilon to 0: learned weight
+noise replaces epsilon as the action-noise source, resampled per inference callback (canonical
+Rainbow) and per training minibatch (online and target independently); the eval probe's
+`net.eval()` uses mean weights. Exploration is noisy-ONLY at `--heads 1`, the canonical Rainbow
+composition — with the default 4-head ensemble, `EpsilonGreedyQ` still Thompson-samples a head
+per episode, an independent per-game diversity source. One callback serves the whole game pool,
+so each round's noise draw is shared across games — standard for parallelised noisy nets.
+Perturbations still differ per game through the states, but with no chance, a fixed start, and
+a single shared head, shared noise plus greedy selection plays every parallel game identically,
+adding no exploration diversity; hold'em's dealt cards (and per-episode head draws) diverge the
+pool. Seed torch for reproducible collection — exploration randomness lives caller-side under
+this flag. The sigma parameters anneal during training, so the
 high-epsilon cycling caution above applies with extra force (measured at 4 heads and at
 `--heads 1` alike: near 0 bb/hand vs random where eps 0.6 holds ~+5.8 — the documented
 self-play cycling, not a defect of the layer). `--n-step`
