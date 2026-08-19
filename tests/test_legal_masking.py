@@ -85,13 +85,12 @@ def test_documented_td_target_is_finite_for_every_record() -> None:
     # truncation tails (done=False with an empty slice, which tight max_ticks reliably produces).
     batch = _chess_dqn(seed=1).collect(60, _zeros_infer)
     assert isinstance(batch, DqnBatch)
-    gamma = 0.99
     m = batch.obs.shape[0]
     mask = _densify(batch.next_legal_ids, batch.next_legal_offsets, 4672)
     q_next = np.random.default_rng(0).normal(size=(m, 4672))
     # the documented incantation, verbatim:
     q = np.where(mask, q_next, -np.inf).max(axis=1)
-    td = batch.rewards + gamma * np.where(np.isfinite(q), q, 0.0)
+    td = batch.rewards + batch.discounts * np.where(np.isfinite(q), q, 0.0)
     assert np.all(np.isfinite(td)), "the complete target must never be inf/NaN"
     # no-bootstrap rows (terminals AND truncation tails) collapse to target = r exactly
     no_bootstrap = np.diff(batch.next_legal_offsets) == 0
@@ -100,7 +99,7 @@ def test_documented_td_target_is_finite_for_every_record() -> None:
     # and the naive (1 - done) * max pattern really does blow up on these records — the reason
     # the docs forbid it (regression guard for the documentation itself)
     with np.errstate(invalid="ignore"):
-        naive = batch.rewards + gamma * (1.0 - batch.dones) * q
+        naive = batch.rewards + 0.99 * (1.0 - batch.dones) * q
     assert not np.all(np.isfinite(naive))
 
 

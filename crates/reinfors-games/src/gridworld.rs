@@ -399,7 +399,7 @@ mod tests {
         use reinfors_core::{Dqn, EpsilonGreedyQ};
 
         let policy = EpsilonGreedyQ::new(2, 0.0);
-        let learner = Dqn::new(2, 1.0);
+        let learner = Dqn::new(2, 1.0, 1, 0.99);
         let params = EngineParams {
             n_games: 3,
             seed: 0,

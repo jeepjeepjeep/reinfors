@@ -342,7 +342,11 @@ class LearnerHandle:
         interior_targets: bool = ...,
     ) -> LearnerHandle: ...
     @staticmethod
-    def Dqn(bootstrap_p: float = ...) -> LearnerHandle: ...
+    # n_step > 1 emits multi-step windows over each agent's OWN decisions: `rewards` becomes
+    # the gamma-discounted n-step sum, `next_obs` the state n own decisions ahead (windows
+    # shorten at episode tails), and `discounts` carries gamma^k per record. The window's
+    # intermediate actions are the behaviour policy's — uncorrected off-policy, keep n small.
+    def Dqn(bootstrap_p: float = ..., n_step: int = ..., gamma: float = ...) -> LearnerHandle: ...
     # GAE(lam) advantages and returns over each agent's own-decision trajectory, seeded by the
     # terminal/truncation tail (truncated episodes bootstrap from the critic's V(s_T)). Records
     # carry behavior log-probs, advantages, returns, and V_old for value clipping; discounting is
@@ -424,6 +428,9 @@ class DqnBatch:
     dones: NDArray[np.bool_]
     # Authoritative TD bootstrap rule: false at terminals and no-successor truncation tails.
     can_bootstrap: NDArray[np.bool_]
+    # gamma^k for each record's window (k own decisions actually spanned); 0 where the record
+    # cannot bootstrap. The single discount source: td = rewards + discounts * next_value.
+    discounts: NDArray[np.float64]
     masks: NDArray[np.float32]
     # Legality in CSR form (record i's ids = ids[offsets[i]:offsets[i+1]]) — sparse because dense
     # (M, A) masks dwarf the observations on wide action spaces (~37 GB per 1M chess transitions).
@@ -433,7 +440,7 @@ class DqnBatch:
     #   counts = np.diff(next_legal_offsets); rows = np.repeat(np.arange(M), counts)
     #   mask = np.zeros((M, A), bool); mask[rows, next_legal_ids] = True
     #   q  = np.where(mask, q_next, -np.inf).max(-1)
-    #   td = rewards + gamma * np.where(np.isfinite(q), q, 0.0)
+    #   td = rewards + discounts * np.where(np.isfinite(q), q, 0.0)
     legal_ids: NDArray[np.int64]
     legal_offsets: NDArray[np.int64]
     next_legal_ids: NDArray[np.int64]

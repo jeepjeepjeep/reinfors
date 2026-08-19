@@ -300,7 +300,9 @@ ALGORITHMS: dict[str, AlgorithmInfo] = {
         "Sampled by the engine",
         "Perfect or imperfect",
         "Q values: (rows, heads, actions)",
-        "Observation-only off-policy value learning with sparse legal-action records.",
+        "Observation-only off-policy value learning with sparse legal-action records. "
+        "n_step > 1 emits multi-step windows over each agent's own decisions, with per-record "
+        "gamma^k discounts; the window is uncorrected off-policy, so keep n small.",
         (
             (
                 "Human-level control through deep reinforcement learning",
@@ -325,6 +327,10 @@ ALGORITHMS: dict[str, AlgorithmInfo] = {
             (
                 "A Distributional Perspective on Reinforcement Learning",
                 "https://arxiv.org/abs/1707.06887",
+            ),
+            (
+                "Rainbow: Combining Improvements in Deep Reinforcement Learning",
+                "https://arxiv.org/abs/1710.02298",
             ),
         ),
     ),

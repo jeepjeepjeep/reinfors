@@ -37,9 +37,10 @@ included pairs. A zero entry means that record is outside that head's bootstrap 
 | `obs`, `next_obs` | `(records, observation_size)` | Transition endpoints |
 | `players` | `(records,)` | Record perspective |
 | `actions` | `(records,)` | Chosen action ids |
-| `rewards` | `(records,)` | Immediate scalar rewards |
+| `rewards` | `(records,)` | Reward sums over each record's window (the immediate reward at `n_step=1`) |
 | `dones` | `(records,)` | Episode-ended flag, not the bootstrap rule |
 | `can_bootstrap` | `(records,)` | Whether the TD target includes a next-state value |
+| `discounts` | `(records,)` | `gamma^k` over the `k` decisions spanned; `0` where `can_bootstrap` is false |
 | `masks` | `(records, heads)` | Record/head bootstrap membership, `float32` |
 | `legal_ids`, `legal_offsets` | CSR (compressed sparse row) | Current legal actions |
 | `next_legal_ids`, `next_legal_offsets` | CSR (compressed sparse row) | Next legal actions |
@@ -49,7 +50,15 @@ For record `i`, its current legal ids are
 successor. This is CSR storage without a dense action mask.
 
 For Q output shaped `(records, heads, actions)`, gather each record's chosen action, compute one TD
-loss per head, multiply by `masks`, and reduce over non-zero entries.
+loss per head, multiply by `masks`, and reduce over non-zero entries. Use `discounts` as the
+bootstrap coefficient — never a caller-side gamma: it is the engine's `gamma^k` per record, and
+`k` varies at episode tails. A bootstrappable truncation (single-agent or simultaneous games,
+where the truncated state has own-perspective legal actions) with `n_step=3` emits windows of
+3, 2, then 1 decisions; in alternating sequential games the truncated state belongs to the
+opponent, so tail records cannot bootstrap and carry `discounts` of `0` regardless of window
+length. `rf.learners.Dqn(n_step=...)` counts each agent's own decisions, not environment
+ticks, and the window's intermediate actions come from the behaviour policy — the estimator is
+uncorrected off-policy (Rainbow's convention), so keep `n_step` small.
 
 Target-rule and replay variants are caller-side: the engine records transitions, never target
 values or buffer positions, so neither Double DQN nor prioritized replay needs engine support.
@@ -69,7 +78,7 @@ realization, so construct with `infer_cache=0` or call `Engine.weights_updated` 
 resampling noise, exactly as after a weight sync.
 
 `can_bootstrap` is true exactly when the row's next-legal CSR slice is non-empty. Empty means
-terminal or an alternating-game truncation tail, so its target is the immediate reward. Do not compute
+terminal or an alternating-game truncation tail, so its target is the record's reward sum. Do not compute
 `(1 - done) * max(masked_q)`; multiplying zero by negative infinity can produce `NaN`, and
 `dones` does not encode every non-bootstrapping tail.
 

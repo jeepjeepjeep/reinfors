@@ -655,7 +655,11 @@ fn learner_cfg(spec: &LearnerSpec) -> Value {
             "bootstrap_p": bootstrap_p,
             "interior_targets": interior_targets,
         }),
-        LearnerSpec::Dqn { bootstrap_p } => json!({"name": "dqn", "bootstrap_p": bootstrap_p}),
+        LearnerSpec::Dqn {
+            bootstrap_p,
+            n_step,
+            gamma,
+        } => json!({"name": "dqn", "bootstrap_p": bootstrap_p, "n_step": n_step, "gamma": gamma}),
         LearnerSpec::Ppo { gamma, lam } => json!({"name": "ppo", "gamma": gamma, "lam": lam}),
         LearnerSpec::AlphaZero { gamma } => json!({"name": "alphazero", "gamma": gamma}),
     }
@@ -1451,6 +1455,10 @@ struct DqnBatch {
     dones: Py<PyArray1<bool>>,
     #[pyo3(get)]
     can_bootstrap: Py<PyArray1<bool>>,
+    // gamma^k for each record's own-decision window; 0 where it cannot bootstrap. The single
+    // discount source: TD targets are `rewards + discounts * next_value`, no caller-side gamma.
+    #[pyo3(get)]
+    discounts: Py<PyArray1<f64>>,
     #[pyo3(get)]
     masks: Py<PyArray2<f32>>,
     // Legal actions use CSR; an empty next-state slice means the row cannot bootstrap.
@@ -1694,6 +1702,7 @@ impl RecordBatch for DqnRecord {
         let mut rewards: Vec<f64> = Vec::with_capacity(m);
         let mut dones: Vec<bool> = Vec::with_capacity(m);
         let mut can_bootstrap: Vec<bool> = Vec::with_capacity(m);
+        let mut discounts: Vec<f64> = Vec::with_capacity(m);
         let mut legal_ids: Vec<i64> = Vec::new();
         let mut legal_offsets: Vec<i64> = Vec::with_capacity(m + 1);
         let mut next_legal_ids: Vec<i64> = Vec::new();
@@ -1713,6 +1722,7 @@ impl RecordBatch for DqnRecord {
             players.push(t.player as i64);
             rewards.push(t.reward);
             dones.push(t.terminal);
+            discounts.push(t.discount);
         }
         let obs_arr = Array2::from_shape_vec((m, dim), obs_flat)
             .expect("obs shape")
@@ -1733,6 +1743,7 @@ impl RecordBatch for DqnRecord {
                 next_obs: next_arr.unbind(),
                 dones: dones.into_pyarray(py).unbind(),
                 can_bootstrap: can_bootstrap.into_pyarray(py).unbind(),
+                discounts: discounts.into_pyarray(py).unbind(),
                 masks: mask_arr.unbind(),
                 legal_ids: legal_ids.into_pyarray(py).unbind(),
                 legal_offsets: legal_offsets.into_pyarray(py).unbind(),
@@ -2403,6 +2414,8 @@ enum LearnerSpec {
     },
     Dqn {
         bootstrap_p: f64,
+        n_step: usize,
+        gamma: f64,
     },
     Ppo {
         gamma: f64,
@@ -3141,11 +3154,18 @@ where
                 num_agents,
             }))
         }
-        (PolicySpec::EpsilonGreedyQ { n_heads, epsilon }, LearnerSpec::Dqn { bootstrap_p }) => {
+        (
+            PolicySpec::EpsilonGreedyQ { n_heads, epsilon },
+            LearnerSpec::Dqn {
+                bootstrap_p,
+                n_step,
+                gamma,
+            },
+        ) => {
             check_unit("bootstrap_p", bootstrap_p)?;
             let policy = qgreedy_from_spec(n_heads, epsilon)?;
             check_max_agents(&policy, "EpsilonGreedyQ", &game)?;
-            let learner = Dqn::new(n_heads, bootstrap_p);
+            let learner = Dqn::new(n_heads, bootstrap_p, n_step, gamma);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
                 n_groups: engine_params.n_groups,
@@ -5674,12 +5694,22 @@ impl LearnerHandle {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (bootstrap_p=1.0))]
+    #[pyo3(signature = (bootstrap_p=1.0, n_step=1, gamma=0.99))]
     #[pyo3(name = "Dqn")]
-    fn dqn(bootstrap_p: f64) -> PyResult<Self> {
+    fn dqn(bootstrap_p: f64, n_step: usize, gamma: f64) -> PyResult<Self> {
         check_unit("bootstrap_p", bootstrap_p)?;
+        check_unit("gamma", gamma)?;
+        if n_step < 1 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "n_step must be at least 1, got {n_step}"
+            )));
+        }
         Ok(LearnerHandle {
-            spec: LearnerSpec::Dqn { bootstrap_p },
+            spec: LearnerSpec::Dqn {
+                bootstrap_p,
+                n_step,
+                gamma,
+            },
         })
     }
 

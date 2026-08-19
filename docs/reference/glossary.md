@@ -61,7 +61,8 @@ These terms describe reinfors' public data and execution model.
 **Truncation tail**
 : A DQN record at an episode-length boundary in an alternating game whose post-move state belongs to
   the opponent. The record's player has no legal next action, so the row is non-bootstrapping even
-  though the game did not reach a rules-terminal state; its TD target contains only immediate reward.
+  though the game did not reach a rules-terminal state; its TD target contains only the record's
+  reward sum.
 
 ## Game information
 

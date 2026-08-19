@@ -687,7 +687,7 @@ fn value_only_rows_carry_each_agents_own_return() {
 #[test]
 fn a_capability_free_policy_collects_on_a_three_agent_game() {
     let policy = EpsilonGreedyQ::new(1, 0.0);
-    let learner = Dqn::new(1, 1.0);
+    let learner = Dqn::new(1, 1.0, 1, 0.99);
     let mut engine = Engine::new(
         ThreeWay,
         Box::new(Enc),
@@ -1091,7 +1091,7 @@ fn episode_birth_realizes_root_chance_chains() {
         Box::new(Enc),
         Box::new(Zero),
         EpsilonGreedyQ::new(2, 0.1),
-        Dqn::new(2, 1.0),
+        Dqn::new(2, 1.0, 1, 0.99),
         EngineParams {
             n_games: 2,
             seed: 0,
@@ -1154,7 +1154,7 @@ fn start_distribution_restores_must_be_decision_states() {
         Box::new(Enc),
         Box::new(Zero),
         EpsilonGreedyQ::new(2, 0.1),
-        Dqn::new(2, 1.0),
+        Dqn::new(2, 1.0, 1, 0.99),
         EngineParams {
             n_games: 1,
             seed: 0,
@@ -1466,5 +1466,35 @@ fn grouped_tail_failure_leaves_the_pool_respawnable() {
             r.obs
         );
         assert_eq!(r.value, 2.0, "an aborted-window step leaked into the retry");
+    }
+}
+
+#[test]
+fn nstep_alternating_truncation_tails_cannot_bootstrap() {
+    // EndlessRR truncates at tick 2, when the state belongs to agent 2: every buffered
+    // trajectory's tail sees an empty own-perspective legal set, so even wide n-step windows
+    // must emit discount 0 (target = the window's reward sum, no bootstrap).
+    let mut engine = Engine::new(
+        EndlessRR,
+        Box::new(Enc),
+        Box::new(Zero),
+        EpsilonGreedyQ::new(1, 0.1),
+        Dqn::new(1, 1.0, 3, 0.9),
+        EngineParams {
+            n_games: 2,
+            seed: 4,
+            n_groups: 1,
+            ..Default::default()
+        },
+    );
+    let mut infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 2];
+    let (records, _stats) = engine.collect(12, &mut infer);
+    assert!(!records.is_empty());
+    for r in &records {
+        assert!(
+            r.next_legal.is_empty(),
+            "the truncated state is the opponent's"
+        );
+        assert_eq!(r.discount, 0.0, "alternating tails must not bootstrap");
     }
 }
