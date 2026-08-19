@@ -182,7 +182,7 @@ mod tests {
                 enc,
                 Box::new(NoReward),
                 EpsilonGreedyQ::new(1, 0.0),
-                Dqn::new(1, 1.0),
+                Dqn::new(1, 1.0, 1, 0.99),
                 EngineParams {
                     n_games: 1,
                     seed: 0,
@@ -298,7 +298,7 @@ mod dispatch_tests {
             Box::new(RotEnc),
             Box::new(NoReward),
             EpsilonGreedyQ::new(1, 0.0),
-            Dqn::new(1, 1.0),
+            Dqn::new(1, 1.0, 1, 0.99),
             EngineParams {
                 n_games: 1,
                 seed: 0,

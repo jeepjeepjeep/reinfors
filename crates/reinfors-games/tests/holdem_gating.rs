@@ -72,7 +72,7 @@ fn dqn_family_collects_poker_hands() {
         Box::new(FlatEnc),
         Box::new(HoldemReward { scale: 0.1 }),
         EpsilonGreedyQ::new(2, 0.2),
-        Dqn::new(2, 1.0),
+        Dqn::new(2, 1.0, 1, 0.99),
         EngineParams {
             n_games: 4,
             seed: 3,

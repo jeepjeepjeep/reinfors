@@ -70,7 +70,7 @@ fn engine() -> Engine<Alt, EpsilonGreedyQ, Dqn> {
         Box::new(Zero),
         // Greedy selection makes the network-routing assertions deterministic.
         EpsilonGreedyQ::new(1, 0.0),
-        Dqn::new(1, 1.0),
+        Dqn::new(1, 1.0, 1, 0.99),
         EngineParams {
             n_games: 2,
             seed: 3,
@@ -199,7 +199,7 @@ fn per_player_row_widths_must_agree_across_players() {
         Box::new(Enc),
         Box::new(Zero),
         EpsilonGreedyQ::new(1, 0.0),
-        Dqn::new(1, 1.0),
+        Dqn::new(1, 1.0, 1, 0.99),
         EngineParams {
             n_games: 1,
             seed: 3,

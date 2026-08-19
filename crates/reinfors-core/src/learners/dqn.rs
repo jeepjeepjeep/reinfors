@@ -12,6 +12,9 @@ pub struct DqnRecord {
     pub reward: f64,
     pub next_obs: Vec<f32>,
     pub terminal: bool,
+    /// gamma^k for the k own-decision steps this record's window spans; 0 when it cannot
+    /// bootstrap. The caller's TD target is `reward + discount * next_value` — no caller gamma.
+    pub discount: f64,
     pub mask: Vec<f32>,
     pub legal: Vec<usize>,
     pub next_legal: Vec<usize>,
@@ -20,13 +23,17 @@ pub struct DqnRecord {
 pub struct Dqn {
     n_heads: usize,
     bootstrap_p: f64,
+    n_step: usize,
+    gamma: f64,
 }
 
 impl Dqn {
-    pub fn new(n_heads: usize, bootstrap_p: f64) -> Self {
+    pub fn new(n_heads: usize, bootstrap_p: f64, n_step: usize, gamma: f64) -> Self {
         Dqn {
             n_heads: n_heads.max(1),
             bootstrap_p,
+            n_step: n_step.max(1),
+            gamma,
         }
     }
 }
@@ -57,25 +64,40 @@ impl Learner<QEvaluation> for Dqn {
         rng: &mut dyn Rng,
     ) -> Vec<DqnRecord> {
         let to_head = |ids: &[usize]| ids.iter().map(|&x| view.head_index(x, agent)).collect();
-        trajectory
-            .iter()
-            .enumerate()
-            .map(|(t, s)| {
+        let len = trajectory.len();
+        (0..len)
+            .map(|t| {
+                let s = &trajectory[t];
+                // Window over this agent's OWN decisions t..e, shortened at the episode tail.
+                let e = (t + self.n_step).min(len);
+                let mut reward = 0.0;
+                let mut discount = 1.0;
+                for step in &trajectory[t..e] {
+                    reward += discount * step.reward;
+                    discount *= self.gamma;
+                }
+                let last = &trajectory[e - 1];
                 // Bootstrap from this agent's next decision, not an intervening opponent turn.
-                let (next_obs, next_legal) = match trajectory.get(t + 1) {
+                let (next_obs, next_legal): (Vec<f32>, Vec<usize>) = match trajectory.get(e) {
                     Some(succ) => (succ.obs.clone(), to_head(&succ.evaluation.legal)),
-                    None => (s.next_obs.clone(), to_head(&s.next_legal)),
+                    None => (last.next_obs.clone(), to_head(&last.next_legal)),
+                };
+                let next_legal = if last.terminal {
+                    Vec::new()
+                } else {
+                    next_legal
                 };
                 DqnRecord {
                     player: agent,
                     obs: s.obs.clone(),
                     action: view.head_index(s.action, agent),
-                    reward: s.reward,
+                    reward,
                     next_obs,
-                    terminal: s.terminal,
+                    terminal: last.terminal,
+                    discount: if next_legal.is_empty() { 0.0 } else { discount },
                     mask: sample_mask(rng, self.n_heads, self.bootstrap_p),
                     legal: to_head(&s.evaluation.legal),
-                    next_legal: if s.terminal { Vec::new() } else { next_legal },
+                    next_legal,
                 }
             })
             .collect()
@@ -114,7 +136,7 @@ mod tests {
 
     #[test]
     fn episode_records_emit_one_masked_transition_per_step() {
-        let learner = Dqn::new(3, 1.0);
+        let learner = Dqn::new(3, 1.0, 1, 0.99);
         let traj = vec![
             step(vec![1.0], 0, 0.5, vec![2.0], false),
             step(vec![2.0], 1, -1.0, vec![], true),
@@ -130,9 +152,98 @@ mod tests {
         assert!(recs[1].terminal);
     }
 
+    fn trunc_step(obs: Vec<f32>, reward: f64, next_obs: Vec<f32>) -> Step<QEvaluation> {
+        let mut s = step(obs, 0, reward, next_obs, false);
+        s.next_legal = vec![0, 1];
+        s
+    }
+
+    #[test]
+    fn nstep_windows_sum_hand_derived_returns() {
+        // gamma 0.5, n 2, rewards [1, 2, 4], terminal end:
+        //   t0: 1 + 0.5*2 = 2, bootstraps from t2's obs with discount 0.25
+        //   t1: 2 + 0.5*4 = 4, terminal tail -> no bootstrap
+        //   t2: 4, terminal -> no bootstrap
+        let learner = Dqn::new(1, 1.0, 2, 0.5);
+        let traj = vec![
+            step(vec![1.0], 0, 1.0, vec![2.0], false),
+            step(vec![2.0], 1, 2.0, vec![3.0], false),
+            step(vec![3.0], 0, 4.0, vec![], true),
+        ];
+        let recs = learner.episode_records(&traj, &[], &IdentityView, 0, &mut SplitMix64::new(1));
+        assert_eq!(recs[0].reward, 2.0);
+        assert_eq!(recs[0].next_obs, vec![3.0]);
+        assert_eq!(recs[0].discount, 0.25);
+        assert!(!recs[0].terminal);
+        assert_eq!(recs[1].reward, 4.0);
+        assert!(recs[1].terminal);
+        assert_eq!(recs[1].discount, 0.0);
+        assert!(recs[1].next_legal.is_empty());
+        assert_eq!(recs[2].reward, 4.0);
+        assert_eq!(recs[2].discount, 0.0);
+    }
+
+    #[test]
+    fn nstep_truncation_tails_shorten_with_matching_discounts() {
+        // gamma 0.5, n 3, truncated after 3 steps: every window ends at the truncated state,
+        // bootstrapping with gamma^k for the k own decisions actually spanned.
+        let learner = Dqn::new(1, 1.0, 3, 0.5);
+        let traj = vec![
+            trunc_step(vec![1.0], 1.0, vec![9.0]),
+            trunc_step(vec![2.0], 2.0, vec![9.0]),
+            trunc_step(vec![3.0], 4.0, vec![9.0]),
+        ];
+        let recs = learner.episode_records(&traj, &[], &IdentityView, 0, &mut SplitMix64::new(1));
+        assert_eq!(recs[0].reward, 1.0 + 0.5 * 2.0 + 0.25 * 4.0);
+        assert_eq!(recs[0].discount, 0.125);
+        assert_eq!(recs[1].reward, 2.0 + 0.5 * 4.0);
+        assert_eq!(recs[1].discount, 0.25);
+        assert_eq!(recs[2].reward, 4.0);
+        assert_eq!(recs[2].discount, 0.5);
+        for r in &recs {
+            assert_eq!(
+                r.next_obs,
+                vec![9.0],
+                "all tails bootstrap from the truncated state"
+            );
+            assert_eq!(r.next_legal, vec![0, 1]);
+        }
+    }
+
+    #[test]
+    fn nstep_larger_than_the_episode_degrades_to_monte_carlo() {
+        let learner = Dqn::new(1, 1.0, 10, 0.5);
+        let traj = vec![
+            step(vec![1.0], 0, 1.0, vec![2.0], false),
+            step(vec![2.0], 1, 2.0, vec![], true),
+        ];
+        let recs = learner.episode_records(&traj, &[], &IdentityView, 0, &mut SplitMix64::new(1));
+        assert_eq!(recs[0].reward, 1.0 + 0.5 * 2.0);
+        assert_eq!(recs[0].discount, 0.0);
+        assert_eq!(recs[1].reward, 2.0);
+    }
+
+    #[test]
+    fn one_step_matches_the_original_semantics_with_discount_gamma() {
+        let learner = Dqn::new(1, 1.0, 1, 0.9);
+        let traj = vec![
+            trunc_step(vec![1.0], 1.0, vec![9.0]),
+            trunc_step(vec![2.0], 2.0, vec![9.0]),
+        ];
+        let recs = learner.episode_records(&traj, &[], &IdentityView, 0, &mut SplitMix64::new(1));
+        assert_eq!(recs[0].reward, 1.0);
+        assert_eq!(
+            recs[0].next_obs,
+            vec![2.0],
+            "interior bootstraps from the next decision"
+        );
+        assert_eq!(recs[0].discount, 0.9);
+        assert_eq!(recs[1].discount, 0.9);
+    }
+
     #[test]
     fn learner_declares_transition_needs() {
-        let learner = Dqn::new(2, 0.5);
+        let learner = Dqn::new(2, 0.5, 1, 0.99);
         assert!(learner.needs_next_obs());
         assert!(!learner.uses_episode_tail());
         assert!(learner

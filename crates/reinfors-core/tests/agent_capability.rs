@@ -687,7 +687,7 @@ fn value_only_rows_carry_each_agents_own_return() {
 #[test]
 fn a_capability_free_policy_collects_on_a_three_agent_game() {
     let policy = EpsilonGreedyQ::new(1, 0.0);
-    let learner = Dqn::new(1, 1.0);
+    let learner = Dqn::new(1, 1.0, 1, 0.99);
     let mut engine = Engine::new(
         ThreeWay,
         Box::new(Enc),
@@ -1091,7 +1091,7 @@ fn episode_birth_realizes_root_chance_chains() {
         Box::new(Enc),
         Box::new(Zero),
         EpsilonGreedyQ::new(2, 0.1),
-        Dqn::new(2, 1.0),
+        Dqn::new(2, 1.0, 1, 0.99),
         EngineParams {
             n_games: 2,
             seed: 0,
@@ -1154,7 +1154,7 @@ fn start_distribution_restores_must_be_decision_states() {
         Box::new(Enc),
         Box::new(Zero),
         EpsilonGreedyQ::new(2, 0.1),
-        Dqn::new(2, 1.0),
+        Dqn::new(2, 1.0, 1, 0.99),
         EngineParams {
             n_games: 1,
             seed: 0,
