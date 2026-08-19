@@ -60,7 +60,10 @@ each minibatch — the TD errors are already computed caller-side at training ti
 [Hold'em example](../examples/index.md#dqn-holdem)'s `--double` and `--per` flags show both in
 ensemble form. Deterministic architecture variants such as dueling heads never touch the seam
 at all: the callback contract is Q rows, however they were produced — the example's `--dueling`
-flag splits value and advantage streams inside the network. Stochastic layers (noisy networks)
+flag splits value and advantage streams inside the network. Distributional heads (C51) also
+stay caller-side with one adapter: the callback collapses each action's atom distribution to
+its expected Q, so the engine selects on scalars while training regresses full distributions —
+the example's `--c51` flag shows the projection loss. Stochastic layers (noisy networks)
 preserve the callback shape but interact with inference caching: a cached row freezes one noise
 realization, so construct with `infer_cache=0` or call `Engine.weights_updated` after
 resampling noise, exactly as after a weight sync.

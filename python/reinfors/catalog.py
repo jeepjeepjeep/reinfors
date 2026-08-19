@@ -322,6 +322,10 @@ ALGORITHMS: dict[str, AlgorithmInfo] = {
                 "Dueling Network Architectures for Deep Reinforcement Learning",
                 "https://arxiv.org/abs/1511.06581",
             ),
+            (
+                "A Distributional Perspective on Reinforcement Learning",
+                "https://arxiv.org/abs/1707.06887",
+            ),
         ),
     ),
     "treestrap_expectimax": AlgorithmInfo(
