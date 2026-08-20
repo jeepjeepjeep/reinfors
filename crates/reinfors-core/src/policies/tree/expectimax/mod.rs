@@ -78,50 +78,71 @@ impl Policy for SelectiveExpectimax {
         rng.below(self.n_heads)
     }
 
-    type Search<S: Send> = core::marker::PhantomData<S>;
+    type Search<S: Send> = search::Stepper<S>;
 
     fn begin_search<G: Game + Sync>(
         &self,
-        _ctx: crate::policy::SearchCtx<'_, G>,
-        _state: &G::State,
-        _perspectives: &[usize],
+        ctx: crate::policy::SearchCtx<'_, G>,
+        state: &G::State,
+        perspectives: &[usize],
     ) -> Self::Search<G::State>
     where
         G::State: Send,
     {
-        unimplemented!("stepped migration: milestone 2")
+        debug_assert_eq!(perspectives.len(), 1, "one search per perspective");
+        search::Stepper::new(state.clone(), perspectives[0], ctx.rng.next_u64())
     }
 
     fn round<G: Game + Sync>(
         &self,
-        _ctx: crate::policy::SearchCtx<'_, G>,
-        _search: &mut Self::Search<G::State>,
-        _out: &mut crate::policy::RequestSink,
+        ctx: crate::policy::SearchCtx<'_, G>,
+        search: &mut Self::Search<G::State>,
+        out: &mut crate::policy::RequestSink,
     ) -> crate::policy::RoundStatus
     where
         G::State: Send,
     {
-        unimplemented!("stepped migration: milestone 2")
+        search::stepper_round(search, ctx.game, ctx.enc, ctx.reward, &self.cfg, out)
     }
 
     fn absorb<S: Send>(
         &self,
-        _search: &mut Self::Search<S>,
-        _rows: crate::policy::RowsView<'_>,
+        search: &mut Self::Search<S>,
+        rows: crate::policy::RowsView<'_>,
         _rng: &mut dyn Rng,
     ) {
-        unimplemented!("stepped migration: milestone 2")
+        search.absorb(rows);
     }
 
     fn finish<G: Game + Sync>(
         &self,
-        _ctx: crate::policy::SearchCtx<'_, G>,
-        _search: Self::Search<G::State>,
-    ) -> Vec<(Self::Evaluation, Vec<crate::learner::InteriorTarget>)>
+        ctx: crate::policy::SearchCtx<'_, G>,
+        search: Self::Search<G::State>,
+    ) -> Vec<(SearchEvaluation, Vec<crate::learner::InteriorTarget>)>
     where
         G::State: Send,
     {
-        unimplemented!("stepped migration: milestone 2")
+        let agent = search.agent();
+        let legal = ctx
+            .game
+            .legal_actions(/*state at root*/ search.root_state(), agent);
+        let (values, interior, stats) =
+            search::stepper_finish(search, ctx.game, ctx.enc, &self.cfg, ctx.collect_interior);
+        let values = if values.len() < self.n_heads {
+            vec![values[0].clone(); self.n_heads]
+        } else {
+            values
+        };
+        vec![(
+            SearchEvaluation {
+                values,
+                visits: Vec::new(),
+                interior: Vec::new(),
+                legal,
+                stats,
+            },
+            interior,
+        )]
     }
 
     fn evaluate<G, F>(

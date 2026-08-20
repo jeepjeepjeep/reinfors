@@ -48,6 +48,10 @@ pub(crate) fn weighted_index(rng: &mut dyn Rng, probs: &[f64]) -> usize {
 }
 
 impl Rng for SplitMix64 {
+    fn next_u64(&mut self) -> u64 {
+        SplitMix64::next_u64(self)
+    }
+
     fn below(&mut self, n: usize) -> usize {
         (self.next_u64() % n as u64) as usize
     }

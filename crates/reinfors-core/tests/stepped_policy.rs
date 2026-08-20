@@ -147,3 +147,32 @@ fn ppo_stepped_matches_evaluate() {
         assert_eq!(o.legal, eval.legal);
     }
 }
+
+#[test]
+fn minimax_stepped_matches_evaluate_on_a_chance_free_game() {
+    use reinfors_core::{ChanceMode, Minimax};
+    // Chance-free game + Committed{1}: the search consumes no randomness, so the stepped
+    // machine must reproduce `evaluate` byte-for-byte through the shared engine.
+    let policy = Minimax::new(2, None, ChanceMode::Committed { samples: 1 }, 1.0);
+    let perms = PermTable::build(&Enc, 3, 2);
+    let mut f1 = infer(3);
+    let mut e1 = Evaluator::new(&mut f1, InferMode::Shared, None);
+    let old = policy.evaluate(&RR, &Enc, &Zero, requests(), 7, true, &mut e1);
+    let decisions: Vec<(St, Vec<usize>)> =
+        requests().into_iter().map(|(s, a)| (s, vec![a])).collect();
+    let mut f2 = infer(3);
+    let mut e2 = Evaluator::new(&mut f2, InferMode::Shared, None);
+    let mut rng = reinfors_core::SplitMix64::new(0);
+    let new = drive_to_completion(
+        &policy, &RR, &Enc, &Zero, &perms, true, &decisions, &mut rng, &mut e2,
+    );
+    for (o, n) in old.iter().zip(&new) {
+        let (eval, targets) = &n[0];
+        assert_eq!(o.values, eval.values);
+        assert_eq!(o.legal, eval.legal);
+        assert_eq!(
+            o.interior, *targets,
+            "interior targets move to the paired return"
+        );
+    }
+}

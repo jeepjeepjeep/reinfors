@@ -1851,3 +1851,150 @@ mod joint_fan_bound_tests {
         );
     }
 }
+
+/// Stepped wrapper over one [`Search`]: expand-and-emit per round, integrate lazily when
+/// ctx is next available (absorb has no `G`).
+pub struct Stepper<S> {
+    s: Search<S>,
+    first: bool,
+    pending: Option<(Vec<f64>, usize)>,
+}
+
+impl<S> Stepper<S> {
+    pub(crate) fn new(state: S, agent: usize, seed: u64) -> Self {
+        Stepper {
+            s: Search::new(state, agent, seed),
+            first: true,
+            pending: None,
+        }
+    }
+
+    pub(crate) fn agent(&self) -> usize {
+        self.s.agent
+    }
+
+    pub(crate) fn root_state(&self) -> &S {
+        &self.s.arena[0].state
+    }
+
+    pub(crate) fn absorb(&mut self, rows: crate::policy::RowsView<'_>) {
+        let flat: Vec<f64> = (0..rows.len())
+            .flat_map(|i| rows.row(i).iter().copied())
+            .collect();
+        self.pending = Some((flat, rows.stride()));
+    }
+}
+
+fn stepper_integrate<G: Game>(
+    st: &mut Stepper<G::State>,
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    cfg: &SearchConfig,
+) {
+    let a = game.action_count();
+    let (q, stride) = match st.pending.take() {
+        Some(p) => p,
+        None => return,
+    };
+    let n_opp = st.s.opp_legal.len();
+    let n_heads = if stride > 0 {
+        stride / a
+    } else {
+        st.s.n_heads.max(1)
+    };
+    st.s.n_heads = n_heads;
+    let agent = st.s.agent;
+    let legal_of = |state: &G::State| match game.actor(state) {
+        Actor::Agent(mover) => game.legal_actions(state, mover),
+        Actor::Simultaneous => game.legal_actions(state, agent),
+        Actor::Chance => unreachable!("chance actors are not searched"),
+    };
+    evaluate(
+        &mut st.s.arena,
+        &st.s.batch,
+        &st.s.new_leaves,
+        &st.s.opp_legal,
+        enc,
+        agent,
+        &legal_of,
+        &q,
+        n_opp,
+        n_heads,
+        a,
+        cfg,
+        &mut st.s.stats,
+    );
+}
+
+pub(crate) fn stepper_round<G: Game + Sync>(
+    st: &mut Stepper<G::State>,
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
+    cfg: &SearchConfig,
+    out: &mut crate::policy::RequestSink,
+) -> crate::policy::RoundStatus
+where
+    G::State: Send,
+{
+    stepper_integrate(st, game, enc, cfg);
+    if !st.s.active(cfg.expansion_budget) {
+        return crate::policy::RoundStatus::Done;
+    }
+    expand_round(&mut st.s, game, enc, reward, cfg, st.first);
+    st.first = false;
+    for k in 0..st.s.new_leaves.len() {
+        let li = st.s.new_leaves[k];
+        if st.s.arena[li].depth < cfg.max_depth {
+            st.s.frontier.push(li);
+        }
+    }
+    let before = out.len();
+    for (o, (mover, _)) in st.s.opp_obs.iter().zip(&st.s.opp_legal) {
+        out.push(*mover, o);
+    }
+    for &li in &st.s.new_leaves {
+        out.push(st.s.arena[li].eval_agent, &st.s.arena[li].obs);
+    }
+    if out.len() == before {
+        st.pending = Some((Vec::new(), 0));
+    }
+    crate::policy::RoundStatus::Pending
+}
+
+pub(crate) fn stepper_finish<G: Game + Sync>(
+    mut st: Stepper<G::State>,
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    cfg: &SearchConfig,
+    collect_interior: bool,
+) -> SearchResult
+where
+    G::State: Send,
+{
+    stepper_integrate(&mut st, game, enc, cfg);
+    let a = game.action_count();
+    let mut s = st.s;
+    resolve(&mut s.arena, 0, cfg.gamma, s.n_heads);
+    let agent = s.agent;
+    let legal_of = |state: &G::State| game.legal_actions(state, agent);
+    let values = node_action_values(&s.arena, 0, cfg.gamma, s.n_heads, a, &legal_of);
+    let mut interior: Vec<InteriorTarget> = Vec::new();
+    if collect_interior && s.arena[0].edges.is_some() {
+        let root_edges = take_edges(&s.arena, 0);
+        for edge in &root_edges {
+            for &(_, _, child) in edge {
+                collect_interior_targets(
+                    &s.arena,
+                    child,
+                    cfg.gamma,
+                    s.n_heads,
+                    a,
+                    &legal_of,
+                    &mut interior,
+                );
+            }
+        }
+    }
+    (values, interior, s.stats)
+}
