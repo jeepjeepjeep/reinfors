@@ -4,10 +4,11 @@ use crate::codec::bytes::Reader;
 use crate::encoder::StateEncoder;
 use crate::game::{Game, Rng};
 use crate::policies::tree::expectimax::{decode_search_eval, encode_search_eval, SearchEvaluation};
+use crate::policies::tree::fold_search_stats;
 use crate::policies::tree::mcts::{
     sample_visits, search_many, Guidance, NoiseScope, SequentialBackup,
 };
-use crate::policy::{argmax, fold_search_stats, ply_from_u64, ChanceMode, Policy};
+use crate::policy::{argmax, ply_from_u64, ChanceMode, Policy};
 use crate::reward::Reward;
 use crate::rollout::engine::CollectStats;
 use crate::rollout::evaluator::Evaluator;

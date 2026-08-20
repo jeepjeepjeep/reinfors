@@ -16,6 +16,7 @@ pub(crate) mod rng;
 pub mod rollout;
 pub mod solvers;
 pub mod space;
+pub mod stats;
 
 pub use codec::StateCodec;
 pub use encoder::{check_action_view, ActionView, IdentityView, StateEncoder};
