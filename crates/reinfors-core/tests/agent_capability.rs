@@ -149,6 +149,50 @@ struct CappedStub;
 impl Policy for CappedStub {
     type Evaluation = ();
     type PolicyState = ();
+    type Search<S: Send> = core::marker::PhantomData<S>;
+    fn begin_search<G: Game + Sync>(
+        &self,
+        _ctx: reinfors_core::policy::SearchCtx<'_, G>,
+        _state: &G::State,
+        _perspectives: &[usize],
+    ) -> Self::Search<G::State>
+    where
+        G::State: Send,
+    {
+        unimplemented!()
+    }
+    fn round<G: Game + Sync>(
+        &self,
+        _ctx: reinfors_core::policy::SearchCtx<'_, G>,
+        _search: &mut Self::Search<G::State>,
+        _out: &mut reinfors_core::policy::RequestSink,
+    ) -> reinfors_core::policy::RoundStatus
+    where
+        G::State: Send,
+    {
+        unimplemented!()
+    }
+    fn absorb<S: Send>(
+        &self,
+        _search: &mut Self::Search<S>,
+        _rows: reinfors_core::policy::RowsView<'_>,
+        _rng: &mut dyn Rng,
+    ) {
+        unimplemented!()
+    }
+    fn finish<G: Game + Sync>(
+        &self,
+        _ctx: reinfors_core::policy::SearchCtx<'_, G>,
+        _search: Self::Search<G::State>,
+    ) -> Vec<(
+        Self::Evaluation,
+        Vec<reinfors_core::learner::InteriorTarget>,
+    )>
+    where
+        G::State: Send,
+    {
+        unimplemented!()
+    }
     fn max_agents(&self, _sequential: bool) -> Option<usize> {
         Some(2)
     }

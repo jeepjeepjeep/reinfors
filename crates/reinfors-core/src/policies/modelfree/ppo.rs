@@ -103,6 +103,82 @@ impl Policy for PpoActor {
         Ok(())
     }
 
+    type Search<S: Send> = super::OneShot<S>;
+
+    fn begin_search<G: Game + Sync>(
+        &self,
+        ctx: crate::policy::SearchCtx<'_, G>,
+        state: &G::State,
+        perspectives: &[usize],
+    ) -> Self::Search<G::State>
+    where
+        G::State: Send,
+    {
+        super::one_shot_begin(&ctx, state, perspectives)
+    }
+
+    fn round<G: Game + Sync>(
+        &self,
+        _ctx: crate::policy::SearchCtx<'_, G>,
+        search: &mut Self::Search<G::State>,
+        out: &mut crate::policy::RequestSink,
+    ) -> crate::policy::RoundStatus
+    where
+        G::State: Send,
+    {
+        super::one_shot_round(search, out)
+    }
+
+    fn absorb<S: Send>(
+        &self,
+        search: &mut Self::Search<S>,
+        rows: crate::policy::RowsView<'_>,
+        _rng: &mut dyn Rng,
+    ) {
+        super::one_shot_absorb(search, rows);
+    }
+
+    fn finish<G: Game + Sync>(
+        &self,
+        ctx: crate::policy::SearchCtx<'_, G>,
+        search: Self::Search<G::State>,
+    ) -> Vec<(PpoEvaluation, Vec<crate::learner::InteriorTarget>)>
+    where
+        G::State: Send,
+    {
+        let a = ctx.game.action_count();
+        debug_assert!(
+            search.agents.is_empty() || search.stride == a + 1,
+            "PolicyValue row width {} != {}",
+            search.stride,
+            a + 1
+        );
+        search
+            .agents
+            .iter()
+            .zip(search.legal)
+            .enumerate()
+            .map(|(i, (&agent, legal))| {
+                let (perm, identity) = ctx.perms.get(agent);
+                let row = &search.rows[i * search.stride..(i + 1) * search.stride];
+                let log_probs = if identity {
+                    masked_log_probs(&row[..a], &legal)
+                } else {
+                    let head_legal: Vec<usize> = legal.iter().map(|&g| perm[g]).collect();
+                    masked_log_probs(&row[..a], &head_legal)
+                };
+                (
+                    PpoEvaluation {
+                        log_probs,
+                        value: row[a],
+                        legal,
+                    },
+                    Vec::new(),
+                )
+            })
+            .collect()
+    }
+
     fn evaluate<G, F>(
         &self,
         game: &G,

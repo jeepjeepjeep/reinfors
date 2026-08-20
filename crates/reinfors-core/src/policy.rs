@@ -14,6 +14,75 @@ pub const MAX_JOINT_SLOTS: usize = 1 << 20;
 /// Maximum chance fan materialized by exhaustive search modes.
 pub const MAX_ENUMERATED_OUTCOMES: usize = 1 << 20;
 
+/// Per-call context for the stepped search machine: everything a search consults but must
+/// never store. `rng` is the owning game's stream, mutably borrowed for this call only —
+/// policies never construct or hold a generator.
+pub struct SearchCtx<'a, G: Game> {
+    pub game: &'a G,
+    pub enc: &'a dyn StateEncoder<State = G::State>,
+    pub reward: &'a dyn Reward<Event = G::Event>,
+    pub rng: &'a mut dyn Rng,
+    pub perms: &'a crate::encoder::PermTable,
+    pub collect_interior: bool,
+}
+
+/// Whether a search needs more inference rounds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RoundStatus {
+    Pending,
+    Done,
+}
+
+/// Collects one round's evaluation requests: `(player, encoded obs)` rows.
+#[derive(Default)]
+pub struct RequestSink {
+    pub(crate) players: Vec<usize>,
+    pub(crate) obs: Vec<f32>,
+}
+
+impl RequestSink {
+    pub fn push(&mut self, player: usize, obs: &[f32]) {
+        self.players.push(player);
+        self.obs.extend_from_slice(obs);
+    }
+
+    pub fn len(&self) -> usize {
+        self.players.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.players.is_empty()
+    }
+}
+
+/// The complete rows answering one search round, in emission order.
+pub struct RowsView<'a> {
+    pub(crate) data: &'a [f64],
+    pub(crate) stride: usize,
+}
+
+impl<'a> RowsView<'a> {
+    pub fn row(&self, i: usize) -> &'a [f64] {
+        &self.data[i * self.stride..(i + 1) * self.stride]
+    }
+
+    pub fn stride(&self) -> usize {
+        self.stride
+    }
+
+    pub fn len(&self) -> usize {
+        if self.stride == 0 {
+            0
+        } else {
+            self.data.len() / self.stride
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+}
+
 /// How an algorithm evaluates states and acts.
 pub trait Policy {
     type Evaluation;
@@ -59,6 +128,43 @@ pub trait Policy {
         G: Game + Sync,
         G::State: Send,
         F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>;
+
+    /// Per-decision search state (GAT over the STATE type): stored by the engine between
+    /// rounds, so it owns what persists and borrows nothing. Never outlives a collect call.
+    type Search<S: Send>: Send;
+
+    fn begin_search<G: Game + Sync>(
+        &self,
+        ctx: SearchCtx<'_, G>,
+        state: &G::State,
+        perspectives: &[usize],
+    ) -> Self::Search<G::State>
+    where
+        G::State: Send;
+
+    /// Emit this round's evaluation requests into `out`. `Done` means `finish` may be
+    /// called without further inference.
+    fn round<G: Game + Sync>(
+        &self,
+        ctx: SearchCtx<'_, G>,
+        search: &mut Self::Search<G::State>,
+        out: &mut RequestSink,
+    ) -> RoundStatus
+    where
+        G::State: Send;
+
+    /// Consume the complete rows for this search's last round, in emission order — called
+    /// once per round, only when every request is answered.
+    fn absorb<S: Send>(&self, search: &mut Self::Search<S>, rows: RowsView<'_>, rng: &mut dyn Rng);
+
+    /// One `(evaluation, its interior targets)` per perspective, in `perspectives` order.
+    fn finish<G: Game + Sync>(
+        &self,
+        ctx: SearchCtx<'_, G>,
+        search: Self::Search<G::State>,
+    ) -> Vec<(Self::Evaluation, Vec<crate::learner::InteriorTarget>)>
+    where
+        G::State: Send;
 
     /// Choose an action from an evaluation.
     fn select(

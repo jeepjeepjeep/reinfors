@@ -4,6 +4,9 @@ use crate::encoder::ActionView;
 use crate::game::Rng;
 
 /// One buffered decision. Action ids remain in the game frame until record construction.
+/// Auxiliary search target: `(observation, per-head value rows)` from an interior node.
+pub type InteriorTarget = (Vec<f32>, Vec<Vec<f64>>);
+
 pub struct Step<E> {
     pub obs: Vec<f32>,
     pub evaluation: E,

@@ -34,6 +34,28 @@ pub fn head_permutation(
     (perm, identity)
 }
 
+/// Per-agent head permutations, built once at engine construction (an encoder-lifetime
+/// constant; rebuilding per call was the pre-scheduler wart).
+pub struct PermTable {
+    perms: Vec<(Vec<usize>, bool)>,
+}
+
+impl PermTable {
+    pub fn build(view: &dyn ActionView, action_count: usize, num_agents: usize) -> Self {
+        PermTable {
+            perms: (0..num_agents)
+                .map(|agent| head_permutation(view, action_count, agent))
+                .collect(),
+        }
+    }
+
+    /// `(game->head permutation, is_identity)` for `agent`.
+    pub fn get(&self, agent: usize) -> (&[usize], bool) {
+        let (perm, identity) = &self.perms[agent];
+        (perm, *identity)
+    }
+}
+
 /// Assert that each agent's action mapping is bijective and invertible.
 pub fn check_action_view(view: &dyn ActionView, action_count: usize, num_agents: usize) {
     for agent in 0..num_agents {

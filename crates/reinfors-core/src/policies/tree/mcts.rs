@@ -1721,6 +1721,52 @@ impl Policy for Mcts {
         0
     }
 
+    type Search<S: Send> = core::marker::PhantomData<S>;
+
+    fn begin_search<G: Game + Sync>(
+        &self,
+        _ctx: crate::policy::SearchCtx<'_, G>,
+        _state: &G::State,
+        _perspectives: &[usize],
+    ) -> Self::Search<G::State>
+    where
+        G::State: Send,
+    {
+        unimplemented!("stepped migration: milestone 2")
+    }
+
+    fn round<G: Game + Sync>(
+        &self,
+        _ctx: crate::policy::SearchCtx<'_, G>,
+        _search: &mut Self::Search<G::State>,
+        _out: &mut crate::policy::RequestSink,
+    ) -> crate::policy::RoundStatus
+    where
+        G::State: Send,
+    {
+        unimplemented!("stepped migration: milestone 2")
+    }
+
+    fn absorb<S: Send>(
+        &self,
+        _search: &mut Self::Search<S>,
+        _rows: crate::policy::RowsView<'_>,
+        _rng: &mut dyn Rng,
+    ) {
+        unimplemented!("stepped migration: milestone 2")
+    }
+
+    fn finish<G: Game + Sync>(
+        &self,
+        _ctx: crate::policy::SearchCtx<'_, G>,
+        _search: Self::Search<G::State>,
+    ) -> Vec<(Self::Evaluation, Vec<crate::learner::InteriorTarget>)>
+    where
+        G::State: Send,
+    {
+        unimplemented!("stepped migration: milestone 2")
+    }
+
     fn evaluate<G, F>(
         &self,
         game: &G,

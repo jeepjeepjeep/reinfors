@@ -53,7 +53,7 @@ pub struct SearchStats {
     pub extra_eval_rows: usize,
 }
 
-pub type InteriorTarget = (Vec<f32>, Vec<Vec<f64>>);
+pub use crate::learner::InteriorTarget;
 
 pub type SearchResult = (Vec<Vec<f64>>, Vec<InteriorTarget>, SearchStats);
 
