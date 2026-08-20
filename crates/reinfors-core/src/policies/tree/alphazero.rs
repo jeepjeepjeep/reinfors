@@ -114,50 +114,81 @@ impl Policy for AlphaZero {
         0
     }
 
-    type Search<S: Send> = core::marker::PhantomData<S>;
+    type Search<S: Send> = crate::policies::tree::mcts::MctsStepper<S>;
 
     fn begin_search<G: Game + Sync>(
         &self,
-        _ctx: crate::policy::SearchCtx<'_, G>,
-        _state: &G::State,
-        _perspectives: &[usize],
+        ctx: crate::policy::SearchCtx<'_, G>,
+        state: &G::State,
+        perspectives: &[usize],
     ) -> Self::Search<G::State>
     where
         G::State: Send,
     {
-        unimplemented!("stepped migration: milestone 2")
+        debug_assert_eq!(perspectives.len(), 1, "one search per perspective");
+        let guidance = Guidance::Puct {
+            c: self.cfg.c_puct,
+            noise: Some((
+                self.cfg.noise_epsilon,
+                self.cfg.noise_alpha,
+                ctx.rng.next_u64(),
+            )),
+            noise_all: matches!(self.cfg.noise_scope, NoiseScope::All),
+        };
+        crate::policies::tree::mcts::mcts_stepper_new(
+            ctx.game,
+            ctx.enc,
+            state.clone(),
+            perspectives[0],
+            ctx.rng.next_u64(),
+            guidance,
+            matches!(self.cfg.sequential_backup, SequentialBackup::MaxN),
+        )
     }
 
     fn round<G: Game + Sync>(
         &self,
-        _ctx: crate::policy::SearchCtx<'_, G>,
-        _search: &mut Self::Search<G::State>,
-        _out: &mut crate::policy::RequestSink,
+        ctx: crate::policy::SearchCtx<'_, G>,
+        search: &mut Self::Search<G::State>,
+        out: &mut crate::policy::RequestSink,
     ) -> crate::policy::RoundStatus
     where
         G::State: Send,
     {
-        unimplemented!("stepped migration: milestone 2")
+        crate::policies::tree::mcts::mcts_stepper_round(
+            search,
+            ctx.game,
+            ctx.enc,
+            ctx.reward,
+            self.cfg.num_simulations,
+            self.cfg.gamma,
+            self.cfg.max_depth,
+            self.cfg.chance,
+            out,
+        )
     }
 
     fn absorb<S: Send>(
         &self,
-        _search: &mut Self::Search<S>,
-        _rows: crate::policy::RowsView<'_>,
+        search: &mut Self::Search<S>,
+        rows: crate::policy::RowsView<'_>,
         _rng: &mut dyn Rng,
     ) {
-        unimplemented!("stepped migration: milestone 2")
+        search.absorb(rows);
     }
 
     fn finish<G: Game + Sync>(
         &self,
-        _ctx: crate::policy::SearchCtx<'_, G>,
-        _search: Self::Search<G::State>,
-    ) -> Vec<(Self::Evaluation, Vec<crate::learner::InteriorTarget>)>
+        ctx: crate::policy::SearchCtx<'_, G>,
+        search: Self::Search<G::State>,
+    ) -> Vec<(SearchEvaluation, Vec<crate::learner::InteriorTarget>)>
     where
         G::State: Send,
     {
-        unimplemented!("stepped migration: milestone 2")
+        vec![(
+            crate::policies::tree::mcts::mcts_stepper_finish(search, ctx.game.action_count()),
+            Vec::new(),
+        )]
     }
 
     fn evaluate<G, F>(

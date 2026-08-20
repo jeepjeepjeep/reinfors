@@ -176,3 +176,42 @@ fn minimax_stepped_matches_evaluate_on_a_chance_free_game() {
         );
     }
 }
+
+#[test]
+fn mcts_stepped_matches_evaluate_on_a_deterministic_config() {
+    use reinfors_core::policies::tree::mcts::{ActBy, Mcts, MctsConfig};
+    use reinfors_core::ChanceMode;
+    // Chance-free game + UCT: search results must match `evaluate` exactly; telemetry
+    // counters (rounds, hit/shared rows) legitimately differ under per-eval suspension.
+    let policy = Mcts::new(
+        MctsConfig {
+            num_simulations: 8,
+            uct_c: 1.4,
+            gamma: 1.0,
+            max_depth: 16,
+            temperature: 0.0,
+            temperature_drop: 0,
+            chance: ChanceMode::AlwaysResample,
+        },
+        ActBy::Visits,
+    );
+    let perms = PermTable::build(&Enc, 3, 2);
+    let mut f1 = infer(3);
+    let mut e1 = Evaluator::new(&mut f1, InferMode::Shared, None);
+    let old = policy.evaluate(&RR, &Enc, &Zero, requests(), 7, false, &mut e1);
+    let decisions: Vec<(St, Vec<usize>)> =
+        requests().into_iter().map(|(s, a)| (s, vec![a])).collect();
+    let mut f2 = infer(3);
+    let mut e2 = Evaluator::new(&mut f2, InferMode::Shared, None);
+    let mut rng = reinfors_core::SplitMix64::new(0);
+    let new = drive_to_completion(
+        &policy, &RR, &Enc, &Zero, &perms, false, &decisions, &mut rng, &mut e2,
+    );
+    for (o, n) in old.iter().zip(&new) {
+        let (eval, targets) = &n[0];
+        assert!(targets.is_empty());
+        assert_eq!(o.values, eval.values);
+        assert_eq!(o.visits, eval.visits);
+        assert_eq!(o.legal, eval.legal);
+    }
+}

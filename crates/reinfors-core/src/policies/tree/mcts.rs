@@ -1721,50 +1721,73 @@ impl Policy for Mcts {
         0
     }
 
-    type Search<S: Send> = core::marker::PhantomData<S>;
+    type Search<S: Send> = MctsStepper<S>;
 
     fn begin_search<G: Game + Sync>(
         &self,
-        _ctx: crate::policy::SearchCtx<'_, G>,
-        _state: &G::State,
-        _perspectives: &[usize],
+        ctx: crate::policy::SearchCtx<'_, G>,
+        state: &G::State,
+        perspectives: &[usize],
     ) -> Self::Search<G::State>
     where
         G::State: Send,
     {
-        unimplemented!("stepped migration: milestone 2")
+        debug_assert_eq!(perspectives.len(), 1, "one search per perspective");
+        let guidance = Guidance::Uct { c: self.cfg.uct_c };
+        mcts_stepper_new(
+            ctx.game,
+            ctx.enc,
+            state.clone(),
+            perspectives[0],
+            ctx.rng.next_u64(),
+            guidance,
+            false,
+        )
     }
 
     fn round<G: Game + Sync>(
         &self,
-        _ctx: crate::policy::SearchCtx<'_, G>,
-        _search: &mut Self::Search<G::State>,
-        _out: &mut crate::policy::RequestSink,
+        ctx: crate::policy::SearchCtx<'_, G>,
+        search: &mut Self::Search<G::State>,
+        out: &mut crate::policy::RequestSink,
     ) -> crate::policy::RoundStatus
     where
         G::State: Send,
     {
-        unimplemented!("stepped migration: milestone 2")
+        mcts_stepper_round(
+            search,
+            ctx.game,
+            ctx.enc,
+            ctx.reward,
+            self.cfg.num_simulations,
+            self.cfg.gamma,
+            self.cfg.max_depth,
+            self.cfg.chance,
+            out,
+        )
     }
 
     fn absorb<S: Send>(
         &self,
-        _search: &mut Self::Search<S>,
-        _rows: crate::policy::RowsView<'_>,
+        search: &mut Self::Search<S>,
+        rows: crate::policy::RowsView<'_>,
         _rng: &mut dyn Rng,
     ) {
-        unimplemented!("stepped migration: milestone 2")
+        search.absorb(rows);
     }
 
     fn finish<G: Game + Sync>(
         &self,
-        _ctx: crate::policy::SearchCtx<'_, G>,
-        _search: Self::Search<G::State>,
-    ) -> Vec<(Self::Evaluation, Vec<crate::learner::InteriorTarget>)>
+        ctx: crate::policy::SearchCtx<'_, G>,
+        search: Self::Search<G::State>,
+    ) -> Vec<(SearchEvaluation, Vec<crate::learner::InteriorTarget>)>
     where
         G::State: Send,
     {
-        unimplemented!("stepped migration: milestone 2")
+        vec![(
+            mcts_stepper_finish(search, ctx.game.action_count()),
+            Vec::new(),
+        )]
     }
 
     fn evaluate<G, F>(
@@ -3432,4 +3455,165 @@ mod pooled_lifecycle_tests {
             assert_eq!(evals[0].values, reference[0].values);
         }
     }
+}
+
+/// Single-tree stepped search. Every eval row is emitted as a request (the scheduler's
+/// evaluator dedups; there is no inline cache resolution, so hit/shared telemetry counters
+/// differ from the pooled path while search results are identical — rows are pure).
+pub struct MctsStepper<S> {
+    tree: Tree<S>,
+    guidance: Guidance,
+    waiting: Vec<(usize, usize)>,
+    pending_rows: Option<(Vec<f64>, usize)>,
+}
+
+impl<S> MctsStepper<S> {
+    pub(crate) fn absorb(&mut self, rows: crate::policy::RowsView<'_>) {
+        let flat: Vec<f64> = (0..rows.len())
+            .flat_map(|i| rows.row(i).iter().copied())
+            .collect();
+        self.pending_rows = Some((flat, rows.stride()));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn mcts_stepper_new<G: Game>(
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    state: G::State,
+    agent: usize,
+    chance_seed: u64,
+    guidance: Guidance,
+    force_maxn: bool,
+) -> MctsStepper<G::State>
+where
+    G::State: Clone,
+{
+    MctsStepper {
+        tree: Tree::new(game, enc, state, agent, chance_seed, force_maxn),
+        guidance,
+        waiting: Vec::new(),
+        pending_rows: None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn mcts_stepper_round<G: Game>(
+    st: &mut MctsStepper<G::State>,
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
+    num_simulations: usize,
+    gamma: f64,
+    max_depth: i32,
+    chance: ChanceMode,
+    out: &mut crate::policy::RequestSink,
+) -> crate::policy::RoundStatus
+where
+    G::State: Clone,
+{
+    let a = game.action_count();
+    if let Some((rows, stride)) = st.pending_rows.take() {
+        for (i, &(node, slot)) in st.waiting.iter().enumerate() {
+            consume_row(
+                &mut st.tree,
+                node,
+                slot,
+                &rows[i * stride..(i + 1) * stride],
+                &st.guidance,
+                gamma,
+                a,
+                0,
+                enc,
+            );
+        }
+        st.waiting.clear();
+    }
+    debug_assert!(st.tree.pending.is_none(), "round with work outstanding");
+    let tree = &mut st.tree;
+    while tree.sims < num_simulations {
+        tree.sims += 1;
+        match tree.select_expand(game, enc, reward, max_depth, &st.guidance, chance) {
+            Reached::Terminal => {
+                tree.terminal_sims += 1;
+                tree.backup_terminal(gamma);
+            }
+            Reached::DepthCapped => {
+                tree.depthcap_sims += 1;
+                tree.backup_leaf_values(gamma);
+            }
+            Reached::Eval => {
+                let leaf = tree.leaf;
+                let multi_row = matches!(tree.arena[leaf].kind, NodeKind::Simultaneous(_))
+                    || tree.mode == TreeMode::SeqMaxN;
+                if multi_row {
+                    let n = tree.n_agents;
+                    tree.extra_eval_rows += n - 1;
+                    tree.pending = Some((PendingWork::NodeEval(leaf), n));
+                    for ag in 0..n {
+                        let obs = match &mut tree.arena[leaf].kind {
+                            NodeKind::Simultaneous(sim) => std::mem::take(&mut sim.tables[ag].obs),
+                            _ => std::mem::take(&mut tree.arena[leaf].obs_all[ag]),
+                        };
+                        out.push(ag, &obs);
+                        st.waiting.push((leaf, ag));
+                    }
+                } else {
+                    tree.pending = Some((PendingWork::NodeEval(leaf), 1));
+                    let obs = std::mem::take(&mut tree.arena[leaf].obs);
+                    out.push(tree.arena[leaf].actor, &obs);
+                    st.waiting.push((leaf, 0));
+                }
+                tree.fresh_rows += st.waiting.len();
+                return crate::policy::RoundStatus::Pending;
+            }
+            Reached::Fan => {
+                let cni = tree.leaf;
+                let kids: Vec<usize> = tree.arena[cni]
+                    .child
+                    .iter()
+                    .map(|&c| c as usize)
+                    .filter(|&c| !tree.arena[c].terminal)
+                    .collect();
+                let rows_per_child = match tree.mode {
+                    TreeMode::SeqNegamax => 1,
+                    _ => tree.n_agents,
+                };
+                let total_rows = kids.len() * rows_per_child;
+                if total_rows == 0 {
+                    tree.terminal_sims += 1;
+                    tree.fan_backprop(gamma);
+                    continue;
+                }
+                tree.extra_eval_rows += total_rows.saturating_sub(1);
+                tree.pending = Some((PendingWork::Fan, total_rows));
+                for child in kids {
+                    for ag in 0..rows_per_child {
+                        let obs = match &mut tree.arena[child].kind {
+                            NodeKind::Simultaneous(sim) => std::mem::take(&mut sim.tables[ag].obs),
+                            _ if tree.mode == TreeMode::SeqMaxN => {
+                                std::mem::take(&mut tree.arena[child].obs_all[ag])
+                            }
+                            _ => std::mem::take(&mut tree.arena[child].obs),
+                        };
+                        let row_player = if rows_per_child == 1 {
+                            tree.arena[child].actor
+                        } else {
+                            ag
+                        };
+                        out.push(row_player, &obs);
+                        st.waiting.push((child, ag));
+                    }
+                }
+                tree.fresh_rows += st.waiting.len();
+                return crate::policy::RoundStatus::Pending;
+            }
+        }
+    }
+    crate::policy::RoundStatus::Done
+}
+
+pub(crate) fn mcts_stepper_finish<S: Clone>(st: MctsStepper<S>, a: usize) -> SearchEvaluation {
+    debug_assert!(st.tree.pending.is_none() && st.waiting.is_empty());
+    st.tree.evaluation(a)
 }
