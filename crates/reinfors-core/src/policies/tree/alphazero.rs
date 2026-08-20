@@ -114,7 +114,7 @@ impl Policy for AlphaZero {
         0
     }
 
-    type Search<S: Send> = crate::policies::tree::mcts::MctsStepper<S>;
+    type Search<S: Send> = crate::policies::tree::mcts::MctsMulti<S>;
 
     fn begin_search<G: Game + Sync>(
         &self,
@@ -125,24 +125,30 @@ impl Policy for AlphaZero {
     where
         G::State: Send,
     {
-        debug_assert_eq!(perspectives.len(), 1, "one search per perspective");
-        let guidance = Guidance::Puct {
-            c: self.cfg.c_puct,
-            noise: Some((
-                self.cfg.noise_epsilon,
-                self.cfg.noise_alpha,
-                ctx.rng.next_u64(),
-            )),
-            noise_all: matches!(self.cfg.noise_scope, NoiseScope::All),
-        };
-        crate::policies::tree::mcts::mcts_stepper_new(
-            ctx.game,
-            ctx.enc,
-            state.clone(),
-            perspectives[0],
-            ctx.rng.next_u64(),
-            guidance,
-            matches!(self.cfg.sequential_backup, SequentialBackup::MaxN),
+        crate::policies::tree::mcts::MctsMulti::new(
+            perspectives
+                .iter()
+                .map(|&agent| {
+                    let guidance = Guidance::Puct {
+                        c: self.cfg.c_puct,
+                        noise: Some((
+                            self.cfg.noise_epsilon,
+                            self.cfg.noise_alpha,
+                            ctx.rng.next_u64(),
+                        )),
+                        noise_all: matches!(self.cfg.noise_scope, NoiseScope::All),
+                    };
+                    crate::policies::tree::mcts::mcts_stepper_new(
+                        ctx.game,
+                        ctx.enc,
+                        state.clone(),
+                        agent,
+                        ctx.rng.next_u64(),
+                        guidance,
+                        matches!(self.cfg.sequential_backup, SequentialBackup::MaxN),
+                    )
+                })
+                .collect(),
         )
     }
 
@@ -155,7 +161,7 @@ impl Policy for AlphaZero {
     where
         G::State: Send,
     {
-        crate::policies::tree::mcts::mcts_stepper_round(
+        crate::policies::tree::mcts::mcts_multi_round(
             search,
             ctx.game,
             ctx.enc,
@@ -185,10 +191,17 @@ impl Policy for AlphaZero {
     where
         G::State: Send,
     {
-        vec![(
-            crate::policies::tree::mcts::mcts_stepper_finish(search, ctx.game.action_count()),
-            Vec::new(),
-        )]
+        let a = ctx.game.action_count();
+        search
+            .steppers
+            .into_iter()
+            .map(|st| {
+                (
+                    crate::policies::tree::mcts::mcts_stepper_finish(st, a),
+                    Vec::new(),
+                )
+            })
+            .collect()
     }
 
     fn evaluate<G, F>(

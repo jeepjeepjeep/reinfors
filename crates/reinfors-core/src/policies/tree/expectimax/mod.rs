@@ -78,7 +78,7 @@ impl Policy for SelectiveExpectimax {
         rng.below(self.n_heads)
     }
 
-    type Search<S: Send> = search::Stepper<S>;
+    type Search<S: Send> = search::MultiStepper<S>;
 
     fn begin_search<G: Game + Sync>(
         &self,
@@ -89,8 +89,12 @@ impl Policy for SelectiveExpectimax {
     where
         G::State: Send,
     {
-        debug_assert_eq!(perspectives.len(), 1, "one search per perspective");
-        search::Stepper::new(state.clone(), perspectives[0], ctx.rng.next_u64())
+        search::MultiStepper::new(
+            perspectives
+                .iter()
+                .map(|&agent| search::Stepper::new(state.clone(), agent, ctx.rng.next_u64()))
+                .collect(),
+        )
     }
 
     fn round<G: Game + Sync>(
@@ -102,7 +106,7 @@ impl Policy for SelectiveExpectimax {
     where
         G::State: Send,
     {
-        search::stepper_round(search, ctx.game, ctx.enc, ctx.reward, &self.cfg, out)
+        search::multi_round(search, ctx.game, ctx.enc, ctx.reward, &self.cfg, out)
     }
 
     fn absorb<S: Send>(
@@ -122,27 +126,31 @@ impl Policy for SelectiveExpectimax {
     where
         G::State: Send,
     {
-        let agent = search.agent();
-        let legal = ctx
-            .game
-            .legal_actions(/*state at root*/ search.root_state(), agent);
-        let (values, interior, stats) =
-            search::stepper_finish(search, ctx.game, ctx.enc, &self.cfg, ctx.collect_interior);
-        let values = if values.len() < self.n_heads {
-            vec![values[0].clone(); self.n_heads]
-        } else {
-            values
-        };
-        vec![(
-            SearchEvaluation {
-                values,
-                visits: Vec::new(),
-                interior: Vec::new(),
-                legal,
-                stats,
-            },
-            interior,
-        )]
+        search
+            .steppers
+            .into_iter()
+            .map(|st| {
+                let agent = st.agent();
+                let legal = ctx.game.legal_actions(st.root_state(), agent);
+                let (values, interior, stats) =
+                    search::stepper_finish(st, ctx.game, ctx.enc, &self.cfg, ctx.collect_interior);
+                let values = if values.len() < self.n_heads {
+                    vec![values[0].clone(); self.n_heads]
+                } else {
+                    values
+                };
+                (
+                    SearchEvaluation {
+                        values,
+                        visits: Vec::new(),
+                        interior: Vec::new(),
+                        legal,
+                        stats,
+                    },
+                    interior,
+                )
+            })
+            .collect()
     }
 
     fn evaluate<G, F>(

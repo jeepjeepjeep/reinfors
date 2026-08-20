@@ -1998,3 +1998,56 @@ where
     }
     (values, interior, s.stats)
 }
+
+/// One stepper per perspective of a decision (simultaneous games evaluate several).
+pub struct MultiStepper<S> {
+    pub(crate) steppers: Vec<Stepper<S>>,
+    counts: Vec<usize>,
+}
+
+impl<S> MultiStepper<S> {
+    pub(crate) fn new(steppers: Vec<Stepper<S>>) -> Self {
+        MultiStepper {
+            steppers,
+            counts: Vec::new(),
+        }
+    }
+
+    pub(crate) fn absorb(&mut self, rows: crate::policy::RowsView<'_>) {
+        let mut offset = 0;
+        for (st, &count) in self.steppers.iter_mut().zip(&self.counts) {
+            if count > 0 {
+                st.absorb(rows.slice(offset, count));
+                offset += count;
+            }
+        }
+    }
+}
+
+pub(crate) fn multi_round<G: Game + Sync>(
+    ms: &mut MultiStepper<G::State>,
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
+    cfg: &SearchConfig,
+    out: &mut crate::policy::RequestSink,
+) -> crate::policy::RoundStatus
+where
+    G::State: Send,
+{
+    ms.counts.clear();
+    let mut all_done = true;
+    for st in &mut ms.steppers {
+        let before = out.len();
+        let status = stepper_round(st, game, enc, reward, cfg, out);
+        ms.counts.push(out.len() - before);
+        if status == crate::policy::RoundStatus::Pending {
+            all_done = false;
+        }
+    }
+    if all_done {
+        crate::policy::RoundStatus::Done
+    } else {
+        crate::policy::RoundStatus::Pending
+    }
+}

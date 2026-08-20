@@ -101,6 +101,7 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     policy_states: Vec<P::PolicyState>,
     ticks: Vec<usize>,
     traj: Vec<Vec<Vec<Step<P::Evaluation>>>>,
+    perms: crate::encoder::PermTable,
 }
 
 impl<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> Engine<G, P, L>
@@ -176,6 +177,7 @@ where
             .collect();
         let buffer_rng = SplitMix64::new(params.seed ^ 0x2545_F491_4F6C_DD1D);
         let seeded = vec![false; params.n_games];
+        let perms = crate::encoder::PermTable::build(&*encoder, game.action_count(), num_agents);
         Engine {
             game,
             encoder,
@@ -198,6 +200,7 @@ where
             policy_states,
             ticks,
             traj,
+            perms,
         }
     }
 
@@ -313,19 +316,19 @@ where
             if collected >= n_records {
                 break;
             }
-            let (requests, meta) = gather_requests(&self.game, &self.episodes, num_agents);
-            if requests.is_empty() {
+            let (groups, meta) = gather_decisions(&self.game, &self.episodes, num_agents);
+            if groups.is_empty() {
                 break;
             }
-
-            let search_seed = self.search_rng.next_u64();
-            let evals = self.policy.evaluate(
+            let evals = drive_decisions(
+                &self.policy,
                 &self.game,
                 &*self.encoder,
                 &*self.reward,
-                requests,
-                search_seed,
+                &self.perms,
                 collect_interior,
+                &groups,
+                &mut self.episodes,
                 &mut evaluator,
             );
 
@@ -442,6 +445,7 @@ where
             traj,
             group_rngs,
             sharded_caches,
+            perms,
             ..
         } = self;
         let game: &G = game;
@@ -450,6 +454,7 @@ where
         let policy: &P = &*policy;
         let learner: &L = &*learner;
         let learn_mask: &[bool] = learn_mask;
+        let perms: &crate::encoder::PermTable = perms;
         let sequential = *sequential;
         let slots = sharded_caches.as_deref();
         let start = std::sync::Mutex::new(StartParts {
@@ -488,6 +493,7 @@ where
                             policy,
                             learner,
                             learn_mask,
+                            perms,
                             sequential,
                             collect_interior,
                             mode,
@@ -529,6 +535,7 @@ where
                             policy,
                             learner,
                             learn_mask,
+                            perms,
                             sequential,
                             collect_interior,
                             mode,
@@ -902,7 +909,7 @@ fn process_tick<G, P, L>(
     learn_mask: &[bool],
     sequential: bool,
     games: std::ops::Range<usize>,
-    evals: Vec<P::Evaluation>,
+    evals: Vec<(P::Evaluation, Vec<crate::learner::InteriorTarget>)>,
     meta: &[(usize, usize)],
     episodes: &mut [Episode<G>],
     traj: &mut [Vec<Vec<Step<P::Evaluation>>>],
@@ -928,7 +935,7 @@ where
         meta.len()
     );
     let mut acted: Vec<Vec<Option<usize>>> = vec![vec![None; num_agents]; episodes.len()];
-    for (mut eval, &(gi, si)) in evals.into_iter().zip(meta.iter()) {
+    for ((eval, targets), &(gi, si)) in evals.into_iter().zip(meta.iter()) {
         stats.decisions += 1;
         policy.fold_telemetry(&eval, stats);
         if !learn_mask[si] {
@@ -936,7 +943,7 @@ where
             acted[gi][si] = Some(rel);
             continue;
         }
-        out.extend(learner.eval_records(&mut eval, encoder, si, &mut episodes[gi].rng));
+        out.extend(learner.eval_records(&eval, targets, encoder, si, &mut episodes[gi].rng));
         let rel = policy.select(&eval, &mut policy_states[gi], &mut episodes[gi].rng);
         acted[gi][si] = Some(rel);
         traj[gi][si].push(Step {
@@ -1105,25 +1112,120 @@ fn fragment_potential<E>(out_len: usize, traj: &[Vec<Vec<Step<E>>>], learn_mask:
             .sum::<usize>()
 }
 
-type RequestParts<G> = (Vec<(<G as Game>::State, usize)>, Vec<(usize, usize)>);
+type DecisionParts = (Vec<(usize, Vec<usize>)>, Vec<(usize, usize)>);
 
 /// Gather every active game's requests for one round.
-fn gather_requests<G: Game>(
+fn gather_decisions<G: Game>(
     game: &G,
     episodes: &[Episode<G>],
     num_agents: usize,
-) -> RequestParts<G> {
-    let mut requests: Vec<(G::State, usize)> = Vec::new();
+) -> DecisionParts {
+    let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
     let mut meta: Vec<(usize, usize)> = Vec::new();
     for (gi, ep) in episodes.iter().enumerate() {
-        for si in 0..num_agents {
-            if ep.agent_active(game, si) {
-                requests.push((ep.state.clone(), si));
+        let perspectives: Vec<usize> = (0..num_agents)
+            .filter(|&si| ep.agent_active(game, si))
+            .collect();
+        if !perspectives.is_empty() {
+            for &si in &perspectives {
                 meta.push((gi, si));
             }
+            groups.push((gi, perspectives));
         }
     }
-    (requests, meta)
+    (groups, meta)
+}
+
+/// Drive every gathered decision's stepped search to completion, one pooled infer call per
+/// barrier round (the Stage A lockstep driver over engine state — per-game ctx borrows).
+#[allow(clippy::too_many_arguments)]
+fn drive_decisions<G, P, F>(
+    policy: &P,
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
+    perms: &crate::encoder::PermTable,
+    collect_interior: bool,
+    groups: &[(usize, Vec<usize>)],
+    episodes: &mut [Episode<G>],
+    eval: &mut Evaluator<'_, F>,
+) -> Vec<(P::Evaluation, Vec<crate::learner::InteriorTarget>)>
+where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+{
+    use crate::policy::{RequestSink, RoundStatus, RowsView, SearchCtx};
+    let mut searches: Vec<_> = groups
+        .iter()
+        .map(|(gi, perspectives)| {
+            let ep = &mut episodes[*gi];
+            let ctx = SearchCtx {
+                game,
+                enc,
+                reward,
+                rng: &mut ep.rng,
+                perms,
+                collect_interior,
+            };
+            policy.begin_search(ctx, &ep.state, perspectives)
+        })
+        .collect();
+    let mut done = vec![false; searches.len()];
+    loop {
+        let mut sink = RequestSink::default();
+        let mut spans: Vec<(usize, usize, usize)> = Vec::new();
+        for (i, search) in searches.iter_mut().enumerate() {
+            if done[i] {
+                continue;
+            }
+            let ep = &mut episodes[groups[i].0];
+            let start = sink.len();
+            let ctx = SearchCtx {
+                game,
+                enc,
+                reward,
+                rng: &mut ep.rng,
+                perms,
+                collect_interior,
+            };
+            let status = policy.round(ctx, search, &mut sink);
+            let count = sink.len() - start;
+            if count > 0 {
+                spans.push((i, start, count));
+            } else if status == RoundStatus::Done {
+                done[i] = true;
+            }
+        }
+        if spans.is_empty() {
+            break;
+        }
+        let n = sink.len();
+        let rows = eval.forward(&sink.players, sink.obs, n);
+        let stride = rows.len() / n;
+        for &(i, start, count) in &spans {
+            let view = RowsView {
+                data: &rows[start * stride..(start + count) * stride],
+                stride,
+            };
+            policy.absorb(&mut searches[i], view, &mut episodes[groups[i].0].rng);
+        }
+    }
+    let mut out = Vec::new();
+    for (search, (gi, _)) in searches.into_iter().zip(groups) {
+        let ep = &mut episodes[*gi];
+        let ctx = SearchCtx {
+            game,
+            enc,
+            reward,
+            rng: &mut ep.rng,
+            perms,
+            collect_interior,
+        };
+        out.extend(policy.finish(ctx, search));
+    }
+    out
 }
 
 /// Roll back an aborted window: a failed collect (callback error, cancellation) leaves its
@@ -1285,6 +1387,7 @@ fn run_group_worker<G, P, L>(
     policy: &P,
     learner: &L,
     learn_mask: &[bool],
+    perms: &crate::encoder::PermTable,
     sequential: bool,
     collect_interior: bool,
     mode: InferMode,
@@ -1295,7 +1398,7 @@ fn run_group_worker<G, P, L>(
     policy_states: &mut [P::PolicyState],
     episode_returns: &mut [Vec<f64>],
     seeded: &mut [bool],
-    rng: &mut SplitMix64,
+    _rng: &mut SplitMix64,
     slots: Option<&[crate::rollout::infer_cache::ShardedInferCache]>,
     pad_rows_to: Option<usize>,
     req_tx: std::sync::mpsc::SyncSender<crate::rollout::infer_service::InferRequest>,
@@ -1354,18 +1457,19 @@ where
         if collected >= floor {
             break;
         }
-        let (requests, meta) = gather_requests(game, episodes, num_agents);
-        if requests.is_empty() {
+        let (groups, meta) = gather_decisions(game, episodes, num_agents);
+        if groups.is_empty() {
             break;
         }
-        let seed = rng.next_u64();
-        let evals = policy.evaluate(
+        let evals = drive_decisions(
+            policy,
             game,
             encoder,
             reward,
-            requests,
-            seed,
+            perms,
             collect_interior,
+            &groups,
+            episodes,
             &mut evaluator,
         );
         if cancel.load(Ordering::Relaxed) {

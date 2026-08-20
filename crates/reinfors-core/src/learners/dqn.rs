@@ -2,7 +2,7 @@
 
 use crate::encoder::ActionView;
 use crate::game::Rng;
-use crate::learner::{sample_mask, Learner, Step};
+use crate::learner::{sample_mask, InteriorTarget, Learner, Step};
 use crate::policies::modelfree::epsilon_greedy_q::QEvaluation;
 
 pub struct DqnRecord {
@@ -47,7 +47,8 @@ impl Learner<QEvaluation> for Dqn {
 
     fn eval_records(
         &self,
-        _eval: &mut QEvaluation,
+        _eval: &QEvaluation,
+        _targets: Vec<InteriorTarget>,
         _view: &dyn ActionView,
         _agent: usize,
         _rng: &mut dyn Rng,
@@ -250,10 +251,11 @@ mod tests {
         assert!(!learner.uses_episode_tail());
         assert!(learner
             .eval_records(
-                &mut QEvaluation {
+                &QEvaluation {
                     values: vec![vec![0.0; 2]],
                     legal: vec![0, 1],
                 },
+                Vec::new(),
                 &IdentityView,
                 0,
                 &mut SplitMix64::new(0)

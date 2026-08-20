@@ -242,7 +242,8 @@ impl reinfors_core::Learner<()> for StubLearner {
     type Record = ();
     fn eval_records(
         &self,
-        _evaluation: &mut (),
+        _evaluation: &(),
+        _targets: Vec<reinfors_core::learner::InteriorTarget>,
         _view: &dyn reinfors_core::ActionView,
         _agent: usize,
         _rng: &mut dyn Rng,

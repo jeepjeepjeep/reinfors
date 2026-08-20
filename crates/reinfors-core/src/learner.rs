@@ -81,7 +81,8 @@ pub trait Learner<E> {
     /// out immediate-only payloads instead of retaining them in the episode trajectory.
     fn eval_records(
         &self,
-        evaluation: &mut E,
+        evaluation: &E,
+        targets: Vec<InteriorTarget>,
         view: &dyn ActionView,
         agent: usize,
         rng: &mut dyn Rng,

@@ -81,6 +81,14 @@ impl<'a> RowsView<'a> {
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
+
+    /// Sub-view over `count` rows starting at `start`.
+    pub fn slice(&self, start: usize, count: usize) -> RowsView<'a> {
+        RowsView {
+            data: &self.data[start * self.stride..(start + count) * self.stride],
+            stride: self.stride,
+        }
+    }
 }
 
 /// How an algorithm evaluates states and acts.

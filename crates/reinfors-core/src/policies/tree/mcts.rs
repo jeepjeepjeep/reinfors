@@ -1721,7 +1721,7 @@ impl Policy for Mcts {
         0
     }
 
-    type Search<S: Send> = MctsStepper<S>;
+    type Search<S: Send> = MctsMulti<S>;
 
     fn begin_search<G: Game + Sync>(
         &self,
@@ -1732,16 +1732,21 @@ impl Policy for Mcts {
     where
         G::State: Send,
     {
-        debug_assert_eq!(perspectives.len(), 1, "one search per perspective");
-        let guidance = Guidance::Uct { c: self.cfg.uct_c };
-        mcts_stepper_new(
-            ctx.game,
-            ctx.enc,
-            state.clone(),
-            perspectives[0],
-            ctx.rng.next_u64(),
-            guidance,
-            false,
+        MctsMulti::new(
+            perspectives
+                .iter()
+                .map(|&agent| {
+                    mcts_stepper_new(
+                        ctx.game,
+                        ctx.enc,
+                        state.clone(),
+                        agent,
+                        ctx.rng.next_u64(),
+                        Guidance::Uct { c: self.cfg.uct_c },
+                        false,
+                    )
+                })
+                .collect(),
         )
     }
 
@@ -1754,7 +1759,7 @@ impl Policy for Mcts {
     where
         G::State: Send,
     {
-        mcts_stepper_round(
+        mcts_multi_round(
             search,
             ctx.game,
             ctx.enc,
@@ -1784,10 +1789,12 @@ impl Policy for Mcts {
     where
         G::State: Send,
     {
-        vec![(
-            mcts_stepper_finish(search, ctx.game.action_count()),
-            Vec::new(),
-        )]
+        let a = ctx.game.action_count();
+        search
+            .steppers
+            .into_iter()
+            .map(|st| (mcts_stepper_finish(st, a), Vec::new()))
+            .collect()
     }
 
     fn evaluate<G, F>(
@@ -3616,4 +3623,71 @@ where
 pub(crate) fn mcts_stepper_finish<S: Clone>(st: MctsStepper<S>, a: usize) -> SearchEvaluation {
     debug_assert!(st.tree.pending.is_none() && st.waiting.is_empty());
     st.tree.evaluation(a)
+}
+
+/// One tree stepper per perspective of a decision.
+pub struct MctsMulti<S> {
+    pub(crate) steppers: Vec<MctsStepper<S>>,
+    counts: Vec<usize>,
+}
+
+impl<S> MctsMulti<S> {
+    pub(crate) fn new(steppers: Vec<MctsStepper<S>>) -> Self {
+        MctsMulti {
+            steppers,
+            counts: Vec::new(),
+        }
+    }
+
+    pub(crate) fn absorb(&mut self, rows: crate::policy::RowsView<'_>) {
+        let mut offset = 0;
+        for (st, &count) in self.steppers.iter_mut().zip(&self.counts) {
+            if count > 0 {
+                st.absorb(rows.slice(offset, count));
+                offset += count;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn mcts_multi_round<G: Game>(
+    ms: &mut MctsMulti<G::State>,
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
+    num_simulations: usize,
+    gamma: f64,
+    max_depth: i32,
+    chance: ChanceMode,
+    out: &mut crate::policy::RequestSink,
+) -> crate::policy::RoundStatus
+where
+    G::State: Clone,
+{
+    ms.counts.clear();
+    let mut all_done = true;
+    for st in &mut ms.steppers {
+        let before = out.len();
+        let status = mcts_stepper_round(
+            st,
+            game,
+            enc,
+            reward,
+            num_simulations,
+            gamma,
+            max_depth,
+            chance,
+            out,
+        );
+        ms.counts.push(out.len() - before);
+        if status == crate::policy::RoundStatus::Pending {
+            all_done = false;
+        }
+    }
+    if all_done {
+        crate::policy::RoundStatus::Done
+    } else {
+        crate::policy::RoundStatus::Pending
+    }
 }
