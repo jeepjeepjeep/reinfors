@@ -243,10 +243,6 @@ impl Game for CarRacing {
         }
     }
 
-    fn chance_enumerable(&self) -> bool {
-        false
-    }
-
     fn chance_node(&self, state: &CarRacingState) -> ChanceDist {
         assert!(
             matches!(state, CarRacingState::Pending),
