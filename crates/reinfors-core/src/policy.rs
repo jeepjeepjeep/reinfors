@@ -74,11 +74,7 @@ impl<'a> RowsView<'a> {
     }
 
     pub fn len(&self) -> usize {
-        if self.stride == 0 {
-            0
-        } else {
-            self.data.len() / self.stride
-        }
+        self.data.len().checked_div(self.stride).unwrap_or(0)
     }
 
     pub fn is_empty(&self) -> bool {
