@@ -577,60 +577,61 @@ where
                                 }
                             })
                         }));
-                        if let Err(payload) = fired {
-                            // Drain in-flight completions before surfacing: an episode
-                            // that just finished must respawn, never strand over-horizon.
-                            while in_flight > 0 {
-                                let msg = rx.recv().expect("scheduler channel closed");
-                                in_flight -= 1;
-                                if let TaskOut::Completed {
-                                    finished: Some(terminal),
-                                    ..
-                                } = msg.out
-                                {
-                                    let mut guard = slots[msg.gi].lock().expect("slot lock");
-                                    let slot: &mut SlotCtx<'_, G, P> = &mut guard;
-                                    if !terminal {
-                                        flush_records_game(
-                                            &HashMap::new(),
-                                            game,
-                                            learner,
-                                            encoder,
-                                            slot,
-                                            &mut out,
-                                            &mut stats,
-                                        );
+                        let freed = match fired {
+                            Ok(freed) => freed,
+                            Err(payload) => {
+                                // Drain in-flight completions before surfacing: an episode
+                                // that just finished must respawn, never strand over-horizon.
+                                while in_flight > 0 {
+                                    let msg = rx.recv().expect("scheduler channel closed");
+                                    in_flight -= 1;
+                                    if let TaskOut::Completed {
+                                        finished: Some(terminal),
+                                        ..
+                                    } = msg.out
+                                    {
+                                        let mut guard = slots[msg.gi].lock().expect("slot lock");
+                                        let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                                        if !terminal {
+                                            flush_records_game(
+                                                &HashMap::new(),
+                                                game,
+                                                learner,
+                                                encoder,
+                                                slot,
+                                                &mut out,
+                                                &mut stats,
+                                            );
+                                        }
+                                        respawn_game(game, policy, slot, &mut start);
                                     }
-                                    respawn_game(game, policy, slot, &mut start);
                                 }
+                                std::panic::resume_unwind(payload);
                             }
-                            std::panic::resume_unwind(payload);
-                        }
-                        for gi in 0..n_games {
-                            if matches!(phases[gi], SlotPhase::Blocked { outstanding: 0, .. }) {
-                                let taken = std::mem::replace(&mut phases[gi], SlotPhase::Idle);
-                                let SlotPhase::Blocked {
+                        };
+                        for gi in freed {
+                            let taken = std::mem::replace(&mut phases[gi], SlotPhase::Idle);
+                            let SlotPhase::Blocked {
+                                search,
+                                perspectives,
+                                rows,
+                                stride,
+                                ..
+                            } = taken
+                            else {
+                                unreachable!("a freed slot must hold its blocked round")
+                            };
+                            spawn(
+                                gi,
+                                Work::Resume {
                                     search,
                                     perspectives,
                                     rows,
                                     stride,
-                                    ..
-                                } = taken
-                                else {
-                                    unreachable!()
-                                };
-                                spawn(
-                                    gi,
-                                    Work::Resume {
-                                        search,
-                                        perspectives,
-                                        rows,
-                                        stride,
-                                    },
-                                    &mut phases,
-                                    &mut in_flight,
-                                );
-                            }
+                                },
+                                &mut phases,
+                                &mut in_flight,
+                            );
                         }
                     }};
                 }
@@ -676,9 +677,7 @@ where
                             n,
                         } => {
                             match mode {
-                                InferMode::Shared => {
-                                    queues[0].push(players.clone(), obs, msg.gi, n)
-                                }
+                                InferMode::Shared => queues[0].push(players, obs, msg.gi, n),
                                 InferMode::PerPlayer => {
                                     let dim = obs.len() / n;
                                     for (pos, &p) in players.iter().enumerate() {
@@ -1568,13 +1567,16 @@ impl RequestQueue {
     }
 }
 
+/// Returns the slots whose outstanding rows reached zero with this batch (each at most
+/// once, in routing order) so the caller settles only those.
 fn fire_batch<SE, F>(
     queue: &mut RequestQueue,
     take: usize,
     phases: &mut [SE],
     evaluator: &mut Evaluator<'_, F>,
     mut route: impl FnMut(&mut SE) -> (&mut usize, &mut Vec<f64>, &mut usize, usize),
-) where
+) -> Vec<usize>
+where
     F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
 {
     let (start, dim) = (queue.head, queue.dim);
@@ -1582,6 +1584,7 @@ fn fire_batch<SE, F>(
     let obs = queue.obs[start * dim..(start + take) * dim].to_vec();
     let rows = evaluator.forward(players, obs, take);
     let stride = rows.len() / take;
+    let mut freed = Vec::new();
     for (i, (&gi, &pos)) in queue.dest[start..start + take]
         .iter()
         .zip(&queue.pos[start..start + take])
@@ -1599,8 +1602,12 @@ fn fire_batch<SE, F>(
         }
         buf[pos * stride..(pos + 1) * stride].copy_from_slice(&rows[i * stride..(i + 1) * stride]);
         *outstanding -= 1;
+        if *outstanding == 0 {
+            freed.push(gi);
+        }
     }
     queue.advance(take);
+    freed
 }
 
 /// Roll back an aborted window: a failed collect (callback error, cancellation) leaves its
