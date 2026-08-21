@@ -1880,7 +1880,10 @@ where
     G: Game + Sync,
     G::State: Send,
     P: Policy + Sync,
-    L: Learner<P::Evaluation>,
+    P::Evaluation: Send,
+    P::PolicyState: Send,
+    L: Learner<P::Evaluation> + Sync,
+    L::Record: Send,
 {
     let (callbacks, mode) = engine_callbacks(infer, num_agents)?;
     let mut callback_err: Option<PyErr> = None;

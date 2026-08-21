@@ -123,14 +123,18 @@ fn callbacks_fire_at_the_threshold_with_short_drains() {
     });
     assert!(records.len() >= 8);
     let sizes = sizes.lock().unwrap();
+    // The final call is the fragment cut's gathered tail flush (batched by design,
+    // pool-sized); every search-round call obeys the threshold.
+    let (tail_flush, rounds) = sizes.split_last().unwrap();
     assert!(
-        sizes.iter().all(|&n| n <= 2),
-        "no call may exceed batch_size: {sizes:?}"
+        rounds.iter().all(|&n| n <= 2),
+        "no round call may exceed batch_size: {sizes:?}"
     );
     assert!(
-        sizes.iter().filter(|&&n| n == 2).count() >= 2,
+        rounds.iter().filter(|&&n| n == 2).count() >= 2,
         "threshold batches must dominate: {sizes:?}"
     );
+    assert_eq!(*tail_flush, 4, "the fragment cut gathers every game's tail");
 }
 
 #[test]
