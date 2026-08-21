@@ -24,14 +24,17 @@ def main() -> None:
 
     env = gym.make("CarRacing-v3", continuous=False, render_mode="rgb_array")
     obs, _ = env.reset(seed=args.seed)
+    executed = 0
     for _ in range(args.ticks):
         obs, _, terminated, truncated, _ = env.step(3)
+        executed += 1
         if terminated or truncated:
             break
 
     inner = env.unwrapped
     fixture = {
-        "tick": args.ticks,
+        "tick": executed,
+        "tile_visited_count": inner.tile_visited_count,
         "track": [[beta, x, y] for (_alpha, beta, x, y) in inner.track],
         "hull": {
             "pos": list(inner.car.hull.position),

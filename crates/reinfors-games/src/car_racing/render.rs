@@ -32,7 +32,9 @@ struct Camera {
 
 impl Camera {
     fn new(live: &LiveState) -> Camera {
-        let t = f64::from(live.tick) / super::track::FPS;
+        // Gym's reset performs one implicit step before its first observation, so its
+        // camera clock reads (tick + 1)/FPS relative to our tick counter.
+        let t = f64::from(live.tick + 1) / super::track::FPS;
         let zoom = 0.1 * SCALE * (1.0 - t).max(0.0) + ZOOM * SCALE * t.min(1.0);
         let angle = -live.car.hull_angle();
         let (px, py) = live.car.hull_pos();
@@ -68,14 +70,14 @@ fn window([x, y]: [f64; 2]) -> [f32; 2] {
     ]
 }
 
-/// Gym's f"{reward:04.0f}": zero decimals, zero-padded to width 4 (negatives "-012").
+/// Gym's f"{reward:04.0f}": ties-to-even, minimum width 4 with sign-aware zero padding
+/// ("-012", "-1000", "12345"), and Python's negative-zero quirk ("-000").
 pub(crate) fn score_text(score: f64) -> String {
-    let rounded = libm::round(score) as i64;
-    if rounded < 0 {
-        format!("-{:03}", rounded.unsigned_abs().min(999))
-    } else {
-        format!("{:04}", rounded.min(9999))
+    let rounded = score.round_ties_even();
+    if rounded == 0.0 && rounded.is_sign_negative() {
+        return "-000".to_string();
     }
+    format!("{:04}", rounded as i64)
 }
 
 pub(crate) struct CarRacingRenderer;
@@ -393,6 +395,12 @@ mod tests {
         assert_eq!(score_text(926.4), "0926");
         assert_eq!(score_text(-12.3), "-012");
         assert_eq!(score_text(7.9), "0008");
+        assert_eq!(score_text(2.5), "0002", "ties to even");
+        assert_eq!(score_text(3.5), "0004", "ties to even");
+        assert_eq!(score_text(-12.5), "-012");
+        assert_eq!(score_text(-1000.0), "-1000", "width 4 is a minimum");
+        assert_eq!(score_text(12345.6), "12346");
+        assert_eq!(score_text(-0.4), "-000", "python negative-zero quirk");
     }
 
     #[test]
@@ -465,18 +473,32 @@ mod fixture_tests {
             .collect();
         let track = std::sync::Arc::new(Track::from_points(points, false));
         let p0 = track.points[0];
+        let n_tiles = track.tiles.len();
+        let visited_count = fixture["tile_visited_count"].as_u64().unwrap() as u32;
+        let mut visited = vec![0u64; n_tiles.div_ceil(64)];
+        for id in 0..visited_count as usize {
+            visited[id / 64] |= 1 << (id % 64);
+        }
         let mut live = super::super::LiveState {
             seed: 0,
             track,
             car: super::super::dynamics::CarWorld::new(p0.beta, p0.x, p0.y),
             tick: fixture["tick"].as_u64().unwrap() as u32,
-            visited: Vec::new(),
-            visited_count: 0,
+            visited,
+            visited_count,
             wheel_tiles: Default::default(),
             new_lap: false,
             done: false,
         };
-        live.visited = vec![0u64; live.track.tiles.len().div_ceil(64)];
+        // The HUD score derives from visited_count and tick; cross-check against the
+        // exported gym reward so a reconstruction mismatch is loud.
+        let our_score = 1000.0 * f64::from(visited_count) / n_tiles as f64
+            - 0.1 * fixture["tick"].as_f64().unwrap();
+        let gym_reward = fixture["reward"].as_f64().unwrap();
+        assert!(
+            (our_score - gym_reward).abs() < 1.0,
+            "reconstructed score {our_score} vs gym reward {gym_reward}"
+        );
 
         use rapier2d::prelude::*;
         let set_pose = |body: &mut RigidBody, pos: &serde_json::Value, angle: f64| {
@@ -518,8 +540,62 @@ mod fixture_tests {
         let state = CarRacingState::Live(Box::new(live));
         let mut hwc = vec![0u8; FRAME * FRAME * 3];
         CarRacingRenderer.render(&state, &mut hwc);
-        let out = dir.join("rust_frame.png");
-        crate::render::write_png(&out, &hwc, FRAME as u32, FRAME as u32).unwrap();
-        println!("wrote {} (compare with gym_frame.png)", out.display());
+        crate::render::write_png(
+            &dir.join("rust_frame.png"),
+            &hwc,
+            FRAME as u32,
+            FRAME as u32,
+        )
+        .unwrap();
+
+        let gym = tiny_skia::Pixmap::load_png(dir.join("gym_frame.png")).unwrap();
+        assert_eq!((gym.width(), gym.height()), (FRAME as u32, FRAME as u32));
+        let gd = gym.data();
+        let mut total_abs = 0u64;
+        let mut gross = 0usize;
+        let mut side = vec![0u8; FRAME * (FRAME * 3) * 3];
+        for y in 0..FRAME {
+            for x in 0..FRAME {
+                let (gi, ri) = ((y * FRAME + x) * 4, (y * FRAME + x) * 3);
+                let mut px_diff = 0u32;
+                for c in 0..3 {
+                    let d = i32::from(gd[gi + c]).abs_diff(i32::from(hwc[ri + c]));
+                    total_abs += u64::from(d);
+                    px_diff = px_diff.max(d);
+                }
+                let row = y * FRAME * 3 * 3;
+                for c in 0..3 {
+                    side[row + x * 3 + c] = gd[gi + c];
+                    side[row + (FRAME + x) * 3 + c] = hwc[ri + c];
+                    side[row + (2 * FRAME + x) * 3 + c] = px_diff.min(255) as u8;
+                }
+                if px_diff > 32 {
+                    gross += 1;
+                }
+            }
+        }
+        crate::render::write_png(
+            &dir.join("side_by_side.png"),
+            &side,
+            (FRAME * 3) as u32,
+            FRAME as u32,
+        )
+        .unwrap();
+        let mean = total_abs as f64 / (FRAME * FRAME * 3) as f64;
+        let gross_frac = gross as f64 / (FRAME * FRAME) as f64;
+        println!(
+            "mean abs diff {mean:.1}, gross(>32) pixel fraction {gross_frac:.3}; \
+             wrote side_by_side.png (gym | rust | diff)"
+        );
+        // Tolerances are deliberately loose: renderers differ in AA, font glyphs, and
+        // physics-trajectory drift; they bound "same scene", not pixel parity.
+        assert!(
+            mean < 30.0,
+            "mean abs diff {mean:.1} exceeds the scene tolerance"
+        );
+        assert!(
+            gross_frac < 0.25,
+            "gross-diff fraction {gross_frac:.3} exceeds the scene tolerance"
+        );
     }
 }
