@@ -18,7 +18,7 @@ def test_collect_is_deterministic_per_seed() -> None:
 
 
 def test_fanned_collect_matches_single_threaded_exactly() -> None:
-    a = connect4_az_engine(seed=5).collect(40, _uniform)
+    a = connect4_az_engine(seed=5, n_threads=1).collect(40, _uniform)
     b = connect4_az_engine(seed=5, n_threads=4).collect(40, _uniform)
     assert np.array_equal(a.obs, b.obs)
     assert np.array_equal(a.policy_targets, b.policy_targets)

@@ -264,7 +264,7 @@ fn fanned_rounds_match_sequential_collection_exactly() {
         let mut infer = |_obs: Vec<f32>, n: usize| vec![0.25; n * 3];
         engine.collect(24, &mut infer)
     };
-    let (a, _) = run(None);
+    let (a, _) = run(Some(1));
     let (b, _) = run(Some(4));
     assert_eq!(a.len(), b.len(), "fan must not change collection size");
     for (x, y) in a.iter().zip(&b) {

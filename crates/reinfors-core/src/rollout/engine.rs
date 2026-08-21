@@ -42,7 +42,7 @@ pub struct EngineParams {
     pub pad: bool,
     /// Scheduler firing threshold in rows (None = max(1, n_games / 2)).
     pub batch_size: Option<usize>,
-    /// CPU fan-out width for per-game work (None = 1 for now; threads land with the fan).
+    /// CPU fan-out width for search rounds (None = available cores).
     pub n_threads: Option<usize>,
 }
 
@@ -65,7 +65,6 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     policy: P,
     learner: L,
     episodes: Vec<Episode<G>>,
-    search_rng: SplitMix64,
     start_dist: Box<dyn StartDistribution<G::State>>,
     // Slot 0 is shared; slots 1..=N isolate per-player networks.
     infer_caches: Option<Vec<InferCache>>,
@@ -103,9 +102,7 @@ where
             .map(|i| {
                 Episode::new(
                     &game,
-                    params
-                        .seed
-                        .wrapping_add((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
+                    SplitMix64::keyed(params.seed, crate::rng::stream::GAME, i as u64),
                 )
             })
             .collect();
@@ -133,8 +130,7 @@ where
         let traj = (0..params.n_games)
             .map(|_| (0..num_agents).map(|_| Vec::new()).collect())
             .collect();
-        let search_rng = SplitMix64::new(params.seed ^ 0xD1B5_4A32_D192_ED03);
-        let buffer_rng = SplitMix64::new(params.seed ^ 0x2545_F491_4F6C_DD1D);
+        let buffer_rng = SplitMix64::keyed(params.seed, crate::rng::stream::BUFFER, 0);
         let seeded = vec![false; params.n_games];
         let perms = crate::encoder::PermTable::build(&*encoder, game.action_count(), num_agents);
         Engine {
@@ -144,7 +140,6 @@ where
             policy,
             learner,
             episodes,
-            search_rng,
             start_dist: Box::new(AlwaysInitialState),
             infer_caches: None,
             learn_mask: vec![true; num_agents],
@@ -161,12 +156,16 @@ where
                 .batch_size
                 .unwrap_or_else(|| (params.n_games / 2).max(1)),
             sweep_cursor: 0,
-            thread_pool: params.n_threads.filter(|&n| n > 1).map(|n| {
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(n)
-                    .build()
-                    .expect("engine thread pool")
-            }),
+            thread_pool: params
+                .n_threads
+                .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
+                .filter(|&n| n > 1)
+                .map(|n| {
+                    rayon::ThreadPoolBuilder::new()
+                        .num_threads(n)
+                        .build()
+                        .expect("engine thread pool")
+                }),
         }
     }
 
@@ -739,7 +738,6 @@ where
         let num_agents = self.game.num_agents();
         put_u32(&mut out, n_games as u32);
         put_u32(&mut out, num_agents as u32);
-        put_u64(&mut out, self.search_rng.state());
         put_u64(&mut out, self.buffer_rng.state());
         // The sweep cursor is result-bearing: it sets rotation start, hence window
         // composition; restore-continuation identity needs it.
@@ -793,7 +791,6 @@ where
                 "snapshot shape ({n_games} games, {num_agents} agents) does not match the engine"
             ));
         }
-        let search_rng = r.u64()?;
         let buffer_rng = r.u64()?;
         let sweep_cursor = r.u64()? as usize;
         let (c, h, w) = self.encoder.obs_shape();
@@ -906,7 +903,6 @@ where
             codec.validate_decoded_state(&s, false)?;
             Ok(s)
         })?;
-        self.search_rng = SplitMix64::from_state(search_rng);
         self.buffer_rng = SplitMix64::from_state(buffer_rng);
         self.sweep_cursor = sweep_cursor;
         for (gi, slice) in slices.into_iter().enumerate() {

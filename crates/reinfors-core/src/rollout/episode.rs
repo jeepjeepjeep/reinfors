@@ -10,8 +10,7 @@ pub(crate) struct Episode<G: Game> {
 }
 
 impl<G: Game> Episode<G> {
-    pub(crate) fn new(game: &G, seed: u64) -> Self {
-        let mut rng = SplitMix64::new(seed);
+    pub(crate) fn new(game: &G, mut rng: SplitMix64) -> Self {
         let state = realize_initial_state(game, &mut rng);
         Episode { state, rng }
     }

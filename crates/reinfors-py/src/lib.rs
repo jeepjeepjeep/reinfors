@@ -3815,16 +3815,10 @@ trait ErasedEnv: Send + Sync {
     ) -> PyResult<Vec<usize>>;
 }
 
-// Per-env selection streams derive from (seed, batch index): reproducible for the same
-// ordered batch and seed, per the choose determinism contract.
-const CHOOSE_ENV_MIX: u64 = 0x9E37_79B9_7F4A_7C15;
-const CHOOSE_SELECT_SALT: u64 = 0xC3A5_C85C_97CB_3127;
-const CHOOSE_DRIVE_SALT: u64 = 0xB492_B66F_BE98_F273;
-const CHOOSE_HEAD_SALT: u64 = 0xB492_B66F_BE98_F273;
-
-fn choose_env_rng(seed: u64, index: usize, salt: u64) -> SplitMix64 {
-    SplitMix64::new(seed ^ (index as u64).wrapping_mul(CHOOSE_ENV_MIX) ^ salt)
-}
+// Per-request selection streams derive from (seed, batch index) via the engine's
+// keying scheme: reproducible for the same ordered batch and seed, per the choose
+// determinism contract.
+use reinfors_core::rng::stream as rng_stream;
 
 #[allow(clippy::too_many_arguments)]
 fn run_choose<G, P>(
@@ -3850,7 +3844,7 @@ where
         reinfors_core::encoder::PermTable::build(enc, game.action_count(), game.num_agents());
     let decisions: Vec<(G::State, Vec<usize>)> =
         requests.into_iter().map(|(s, a)| (s, vec![a])).collect();
-    let mut drive_rng = choose_env_rng(seed, 0, CHOOSE_DRIVE_SALT);
+    let mut drive_rng = SplitMix64::keyed(seed, rng_stream::CHOOSE_DRIVE, 0);
     let results = reinfors_core::rollout::driver::drive_to_completion(
         policy,
         game,
@@ -3865,7 +3859,7 @@ where
     let mut out = Vec::with_capacity(results.len());
     for (i, per) in results.iter().enumerate() {
         let (eval, _) = &per[0];
-        let mut rng = choose_env_rng(seed, i, CHOOSE_SELECT_SALT);
+        let mut rng = SplitMix64::keyed(seed, rng_stream::CHOOSE_SELECT, i as u64);
         out.push(policy.select(eval, &mut states[i], &mut rng));
     }
     Ok(out)
@@ -3970,7 +3964,13 @@ where
                     game.num_agents().saturating_sub(1),
                 )?;
                 let states: Vec<usize> = (0..impls.len())
-                    .map(|i| policy.begin_episode(&mut choose_env_rng(seed, i, CHOOSE_HEAD_SALT)))
+                    .map(|i| {
+                        policy.begin_episode(&mut SplitMix64::keyed(
+                            seed,
+                            rng_stream::CHOOSE_DRIVE,
+                            i as u64,
+                        ))
+                    })
                     .collect();
                 run_choose(&policy, game, enc, reward, requests, seed, states, infer)
             }
@@ -3984,7 +3984,13 @@ where
                 let policy = qgreedy_from_spec(n_heads, epsilon)?;
                 check_max_agents(&policy, "EpsilonGreedyQ", game)?;
                 let states: Vec<usize> = (0..impls.len())
-                    .map(|i| policy.begin_episode(&mut choose_env_rng(seed, i, CHOOSE_HEAD_SALT)))
+                    .map(|i| {
+                        policy.begin_episode(&mut SplitMix64::keyed(
+                            seed,
+                            rng_stream::CHOOSE_DRIVE,
+                            i as u64,
+                        ))
+                    })
                     .collect();
                 run_choose(&policy, game, enc, reward, requests, seed, states, infer)
             }

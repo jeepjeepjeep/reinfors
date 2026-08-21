@@ -12,7 +12,7 @@ pub mod learners;
 pub mod policies;
 pub mod policy;
 pub mod reward;
-pub(crate) mod rng;
+pub mod rng;
 pub mod rollout;
 pub mod solvers;
 pub mod space;

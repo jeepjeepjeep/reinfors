@@ -13,6 +13,7 @@ callback rather than corrupting search. Match a traceback fragment here first:
 | `requires an antisymmetric reward` | Minimax's zero-sum negation needs `loss = -win`, `draw = 0` | [Construction is rejected](#construction-is-rejected) |
 | `search tree exceeds` | Full-width search outgrew the node bound at collection time | [Construction is rejected](#construction-is-rejected) |
 | `win_food_lead is a two-snake rule` | `win_food_lead` was combined with `num_snakes != 2` | [Construction is rejected](#construction-is-rejected) |
+| `was removed in 0.3.0` | The config carries pre-0.3 `n_groups`/`pad_rows_to` fields | [Construction is rejected](#construction-is-rejected) |
 | `expected … per-player infer callables` | The callback sequence does not match the player count | [Per-player callback count](#per-player-callback-count) |
 | `must be a float64 or float32 ndarray` | Unsupported callback dtype or non-array output | [Callback dtype or shape errors](#callback-dtype-or-shape-errors) |
 | `must be a 1-d ndarray`, `must be a 2-d ndarray`, or `must be a 3-d ndarray` | Wrong callback rank | [Callback dtype or shape errors](#callback-dtype-or-shape-errors) |
@@ -26,6 +27,11 @@ callback rather than corrupting search. Match a traceback fragment here first:
 
 `unknown reward key` names the rejected key and the valid keys for that game. Choose event names
 from the [game catalogue](../catalogue/games.md); unknown names are never ignored.
+
+`engine config field 'n_groups' was removed in 0.3.0` (likewise `pad_rows_to`): 0.3.0
+replaced grouped collection with the threshold scheduler. Delete the field and tune
+`n_threads`/`batch_size` (or `pad`) instead — see
+[scheduler knobs](../guides/training.md#scheduler-knobs-batch_size-n_threads-pad).
 
 `incompatible policy/learner composition` means the two handles do not share a training contract.
 Use an exact pairing from the [algorithm catalogue](../catalogue/algorithms.md) and confirm the game

@@ -56,7 +56,10 @@ where
 {
     let guidance = Guidance::Puct {
         c: cfg.c_puct,
-        noise: Some((cfg.noise_epsilon, cfg.noise_alpha, seed)),
+        noise: Some(crate::policies::tree::mcts::RootNoise {
+            epsilon: cfg.noise_epsilon,
+            alpha: cfg.noise_alpha,
+        }),
         noise_all: matches!(cfg.noise_scope, NoiseScope::All),
     };
     search_many(
@@ -131,11 +134,10 @@ impl Policy for AlphaZero {
                 .map(|&agent| {
                     let guidance = Guidance::Puct {
                         c: self.cfg.c_puct,
-                        noise: Some((
-                            self.cfg.noise_epsilon,
-                            self.cfg.noise_alpha,
-                            ctx.rng.next_u64(),
-                        )),
+                        noise: Some(crate::policies::tree::mcts::RootNoise {
+                            epsilon: self.cfg.noise_epsilon,
+                            alpha: self.cfg.noise_alpha,
+                        }),
                         noise_all: matches!(self.cfg.noise_scope, NoiseScope::All),
                     };
                     crate::policies::tree::mcts::mcts_stepper_new(
@@ -143,7 +145,6 @@ impl Policy for AlphaZero {
                         ctx.enc,
                         state.clone(),
                         agent,
-                        ctx.rng.next_u64(),
                         guidance,
                         matches!(self.cfg.sequential_backup, SequentialBackup::MaxN),
                     )
@@ -171,6 +172,7 @@ impl Policy for AlphaZero {
             self.cfg.max_depth,
             self.cfg.chance,
             out,
+            ctx.rng,
         )
     }
 

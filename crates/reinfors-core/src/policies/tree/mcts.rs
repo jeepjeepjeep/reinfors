@@ -10,7 +10,7 @@ use crate::policies::tree::expectimax::{decode_search_eval, encode_search_eval, 
 use crate::policies::tree::fold_search_stats;
 use crate::policy::{argmax, ply_from_u64, Policy, MAX_ENUMERATED_OUTCOMES};
 use crate::reward::Reward;
-use crate::rng::{dirichlet, SplitMix64};
+use crate::rng::dirichlet;
 use crate::rollout::engine::CollectStats;
 use crate::rollout::evaluator::Evaluator;
 
@@ -22,7 +22,7 @@ pub(crate) enum Guidance {
     },
     Puct {
         c: f64,
-        noise: Option<(f64, f64, u64)>,
+        noise: Option<RootNoise>,
         noise_all: bool,
     },
 }
@@ -35,6 +35,15 @@ pub enum SequentialBackup {
     #[default]
     Auto,
     MaxN,
+}
+
+/// Root Dirichlet noise: an epsilon-blend of a Dirichlet(alpha) draw into the root
+/// prior. Draws come from the game's stream at row-integration time — noise carries no
+/// seed of its own.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RootNoise {
+    pub epsilon: f64,
+    pub alpha: f64,
 }
 
 /// Root priors that receive noise in simultaneous search.
@@ -226,7 +235,6 @@ struct Tree<S> {
     mode: TreeMode,
     n_agents: usize,
     max_depth_seen: i32,
-    rng: SplitMix64,
     pending: Option<(PendingWork, usize)>,
     terminal_sims: usize,
     depthcap_sims: usize,
@@ -401,7 +409,6 @@ impl<S: Clone> Tree<S> {
         enc: &dyn StateEncoder<State = S>,
         state: S,
         requester: usize,
-        chance_seed: u64,
         force_maxn: bool,
     ) -> Tree<S>
     where
@@ -435,7 +442,6 @@ impl<S: Clone> Tree<S> {
             mode,
             n_agents: n,
             max_depth_seen: 0,
-            rng: SplitMix64::new(chance_seed),
             pending: None,
             terminal_sims: 0,
             depthcap_sims: 0,
@@ -450,6 +456,7 @@ impl<S: Clone> Tree<S> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn select_expand<G>(
         &mut self,
         game: &G,
@@ -458,6 +465,7 @@ impl<S: Clone> Tree<S> {
         max_depth: i32,
         guidance: &Guidance,
         chance: ChanceMode,
+        rng: &mut dyn Rng,
     ) -> Reached
     where
         G: Game<State = S>,
@@ -473,7 +481,7 @@ impl<S: Clone> Tree<S> {
                     "chance-node chain exceeded {} edges — the game cycles through chance states",
                     crate::game::CHANCE_CHAIN_LIMIT
                 );
-                let slot = self.pick_chance_slot(ni, chance);
+                let slot = self.pick_chance_slot(ni, chance, rng);
                 self.path.push((ni, slot));
                 match self.chance_child(ni, slot) {
                     Some(child) => {
@@ -481,7 +489,8 @@ impl<S: Clone> Tree<S> {
                         continue;
                     }
                     None => {
-                        let child = self.materialize_outcome(game, enc, reward, ni, slot, chance);
+                        let child =
+                            self.materialize_outcome(game, enc, reward, rng, ni, slot, chance);
                         if let NodeKind::Chance { .. } = self.arena[child].kind {
                             ni = child;
                             continue;
@@ -516,7 +525,7 @@ impl<S: Clone> Tree<S> {
                 });
                 self.path.push((ni, js));
                 if sim.child[js] < 0 {
-                    match self.expand(game, enc, reward, ni, js, chance) {
+                    match self.expand(game, enc, reward, rng, ni, js, chance) {
                         Expanded::Leaf(child) => {
                             self.leaf = child;
                             return if self.arena[child].terminal {
@@ -552,7 +561,7 @@ impl<S: Clone> Tree<S> {
             let a = select_edge(node, guidance);
             self.path.push((ni, a));
             if node.child[a] < 0 {
-                match self.expand(game, enc, reward, ni, a, chance) {
+                match self.expand(game, enc, reward, rng, ni, a, chance) {
                     Expanded::Leaf(child) => {
                         self.leaf = child;
                         return if self.arena[child].terminal {
@@ -575,8 +584,8 @@ impl<S: Clone> Tree<S> {
         }
     }
 
-    fn pick_chance_slot(&mut self, ni: usize, chance: ChanceMode) -> usize {
-        let Tree { arena, rng, .. } = self;
+    fn pick_chance_slot(&self, ni: usize, chance: ChanceMode, rng: &mut dyn Rng) -> usize {
+        let arena = &self.arena;
         let NodeKind::Chance {
             dist,
             committed,
@@ -613,11 +622,13 @@ impl<S: Clone> Tree<S> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn materialize_outcome<G>(
         &mut self,
         game: &G,
         enc: &dyn StateEncoder<State = S>,
         reward: &dyn Reward<Event = G::Event>,
+        rng: &mut dyn Rng,
         cni: usize,
         slot: usize,
         chance: ChanceMode,
@@ -639,6 +650,7 @@ impl<S: Clone> Tree<S> {
         let mut child = self.child_leaf(
             game,
             enc,
+            rng,
             t.next_state,
             mover,
             self.arena[cni].depth + 1,
@@ -720,6 +732,7 @@ impl<S: Clone> Tree<S> {
         &mut self,
         game: &G,
         enc: &dyn StateEncoder<State = S>,
+        rng: &mut dyn Rng,
         state: S,
         mover: usize,
         depth: i32,
@@ -755,9 +768,9 @@ impl<S: Clone> Tree<S> {
             Actor::Chance => {
                 let dist = game.chance_node(&state);
                 let committed: Vec<usize> = match chance {
-                    ChanceMode::Committed { samples } => (0..samples.max(1))
-                        .map(|_| dist.draw(&mut self.rng))
-                        .collect(),
+                    ChanceMode::Committed { samples } => {
+                        (0..samples.max(1)).map(|_| dist.draw(rng)).collect()
+                    }
                     _ => Vec::new(),
                 };
                 let width = match chance {
@@ -788,11 +801,13 @@ impl<S: Clone> Tree<S> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn expand<G>(
         &mut self,
         game: &G,
         enc: &dyn StateEncoder<State = S>,
         reward: &dyn Reward<Event = G::Event>,
+        rng: &mut dyn Rng,
         ni: usize,
         ai: usize,
         chance: ChanceMode,
@@ -804,14 +819,23 @@ impl<S: Clone> Tree<S> {
         let t = game.step(&self.arena[ni].state, &joint);
         self.record_edge_reward::<G>(reward, ni, ai, &t);
         let depth = self.arena[ni].depth + 1;
-        let child = self.child_leaf(game, enc, t.next_state, mover, depth, t.terminal, chance);
+        let child = self.child_leaf(
+            game,
+            enc,
+            rng,
+            t.next_state,
+            mover,
+            depth,
+            t.terminal,
+            chance,
+        );
         let is_chance = matches!(child.kind, NodeKind::Chance { .. });
         let idx = self.arena.len();
         self.arena.push(child);
         self.set_edge_child(ni, ai, idx);
         if is_chance {
             if let ChanceMode::ExpandAll = chance {
-                self.materialize_explicit_fan(game, enc, reward, idx, chance);
+                self.materialize_explicit_fan(game, enc, reward, rng, idx, chance);
                 return Expanded::Fan(idx);
             }
             return Expanded::Chance(idx);
@@ -824,6 +848,7 @@ impl<S: Clone> Tree<S> {
         game: &G,
         enc: &dyn StateEncoder<State = S>,
         reward: &dyn Reward<Event = G::Event>,
+        rng: &mut dyn Rng,
         cni: usize,
         chance: ChanceMode,
     ) where
@@ -847,6 +872,7 @@ impl<S: Clone> Tree<S> {
             let mut child = self.child_leaf(
                 game,
                 enc,
+                rng,
                 state,
                 mover,
                 self.arena[cni].depth + 1,
@@ -1248,8 +1274,8 @@ fn consume_row<S: Clone>(
     guidance: &Guidance,
     gamma: f64,
     a: usize,
-    ti: usize,
     view: &dyn ActionView,
+    rng: &mut dyn Rng,
 ) {
     // Fresh forwards, cache hits, and within-batch deduplication all terminate here; keeping one
     // ingestion path prevents cache behavior from changing search semantics.
@@ -1288,15 +1314,11 @@ fn consume_row<S: Clone>(
             if noised {
                 // Noise is applied after lookup: the cache must contain raw logits so root hits
                 // reproduce the same per-tree noise as fresh rows.
-                if let Some((eps, alpha, seed)) = noise {
-                    if *eps > 0.0 {
-                        let mut rng = SplitMix64::new(
-                            seed ^ (ti as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                                ^ (slot as u64).wrapping_mul(0xD1B5_4A32_D192_ED03),
-                        );
-                        let noise_draw = dirichlet(&mut rng, *alpha, prior.len());
+                if let Some(RootNoise { epsilon, alpha }) = noise {
+                    if *epsilon > 0.0 {
+                        let noise_draw = dirichlet(rng, *alpha, prior.len());
                         for (p, d) in prior.iter_mut().zip(noise_draw) {
-                            *p = (1.0 - eps) * *p + eps * d;
+                            *p = (1.0 - epsilon) * *p + epsilon * d;
                         }
                     }
                 }
@@ -1425,7 +1447,6 @@ impl Policy for Mcts {
                         ctx.enc,
                         state.clone(),
                         agent,
-                        ctx.rng.next_u64(),
                         Guidance::Uct { c: self.cfg.uct_c },
                         false,
                     )
@@ -1453,6 +1474,7 @@ impl Policy for Mcts {
             self.cfg.max_depth,
             self.cfg.chance,
             out,
+            ctx.rng,
         )
     }
 
@@ -2957,7 +2979,6 @@ pub(crate) fn mcts_stepper_new<G: Game>(
     enc: &dyn StateEncoder<State = G::State>,
     state: G::State,
     agent: usize,
-    chance_seed: u64,
     guidance: Guidance,
     force_maxn: bool,
 ) -> MctsStepper<G::State>
@@ -2974,7 +2995,7 @@ where
          the agents cannot observe; see {}",
         crate::COMPATIBILITY_DOCS
     );
-    let tree = Tree::new(game, enc, state, agent, chance_seed, force_maxn);
+    let tree = Tree::new(game, enc, state, agent, force_maxn);
     assert!(
         // Q-derived UCT leaf values exist only at the evaluated agent's own turns. Sequential MaxN
         // needs every perspective; simultaneous search gives every agent its own table instead.
@@ -3001,6 +3022,7 @@ pub(crate) fn mcts_stepper_round<G: Game>(
     max_depth: i32,
     chance: ChanceMode,
     out: &mut crate::policy::RequestSink,
+    rng: &mut dyn Rng,
 ) -> crate::policy::RoundStatus
 where
     G::State: Clone,
@@ -3016,8 +3038,8 @@ where
                 &st.guidance,
                 gamma,
                 a,
-                0,
                 enc,
+                rng,
             );
         }
         st.waiting.clear();
@@ -3026,7 +3048,7 @@ where
     let tree = &mut st.tree;
     while tree.sims < num_simulations {
         tree.sims += 1;
-        match tree.select_expand(game, enc, reward, max_depth, &st.guidance, chance) {
+        match tree.select_expand(game, enc, reward, max_depth, &st.guidance, chance, rng) {
             Reached::Terminal => {
                 tree.terminal_sims += 1;
                 tree.backup_terminal(gamma);
@@ -3147,6 +3169,7 @@ pub(crate) fn mcts_multi_round<G: Game>(
     max_depth: i32,
     chance: ChanceMode,
     out: &mut crate::policy::RequestSink,
+    rng: &mut dyn Rng,
 ) -> crate::policy::RoundStatus
 where
     G::State: Clone,
@@ -3165,6 +3188,7 @@ where
             max_depth,
             chance,
             out,
+            rng,
         );
         ms.counts.push(out.len() - before);
         if status == crate::policy::RoundStatus::Pending {
@@ -3205,27 +3229,7 @@ where
     let mut steppers: Vec<MctsStepper<G::State>> = requests
         .into_iter()
         .map(|(state, agent)| {
-            let g = match guidance {
-                Guidance::Puct {
-                    c,
-                    noise,
-                    noise_all,
-                } => Guidance::Puct {
-                    c: *c,
-                    noise: noise.map(|(e, al, _)| (e, al, crate::game::Rng::next_u64(&mut root))),
-                    noise_all: *noise_all,
-                },
-                other => other.clone(),
-            };
-            mcts_stepper_new(
-                game,
-                enc,
-                state,
-                agent,
-                crate::game::Rng::next_u64(&mut root),
-                g,
-                force_maxn,
-            )
+            mcts_stepper_new(game, enc, state, agent, guidance.clone(), force_maxn)
         })
         .collect();
     let mut done = vec![false; steppers.len()];
@@ -3247,6 +3251,7 @@ where
                 max_depth,
                 chance,
                 &mut sink,
+                &mut root,
             );
             let count = sink.len() - before;
             if count > 0 {

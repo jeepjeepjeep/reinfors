@@ -17,8 +17,8 @@ disagreement from `EpsilonGreedyQ` as measured agreement.
 | `mean_disagreement` | `float` value units | `SelectiveExpectimax`, `n_heads >= 2` | Mean root action-value disagreement across ensemble heads; reported as `0.0` with one head. |
 | `infer_seconds` | `float` seconds | All engine policies | Wall time observed inside inference callbacks. |
 | `infer_calls` | `int` calls | All engine policies | Pooled callback invocations. |
-| `infer_rows` | `int` rows | All engine policies | Real observation rows evaluated, excluding `pad_rows_to` padding. Mean physical call size is `(infer_rows + padded_rows) / infer_calls`. |
-| `padded_rows` | `int` rows | All engine policies | Zero pad rows forwarded by `pad_rows_to` (0 when disabled). |
+| `infer_rows` | `int` rows | All engine policies | Real observation rows evaluated, excluding `pad` padding. Mean physical call size is `(infer_rows + padded_rows) / infer_calls`. |
+| `padded_rows` | `int` rows | All engine policies | Zero pad rows forwarded by `pad` (0 when disabled). |
 | `cache_lookups` | `int` rows | Any policy with `infer_cache` enabled | Persistent evaluation-cache lookups. |
 | `cache_hits` | `int` rows | Any policy with `infer_cache` enabled | Successful persistent evaluation-cache lookups. |
 | `terminal_sims` | `int` simulations | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Simulations ending at a terminal state. |

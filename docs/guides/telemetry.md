@@ -60,7 +60,7 @@ The complete runnable version is
 
 ## Useful derived measurements
 
-- `infer_rows / infer_calls`: mean useful (real) rows per callback; with `pad_rows_to`, the
+- `infer_rows / infer_calls`: mean useful (real) rows per callback; with `pad`, the
   physical batch size is `(infer_rows + padded_rows) / infer_calls`;
 - `infer_rows / infer_seconds`: callback row throughput (includes the callback as observed by
   Rust, not training time);

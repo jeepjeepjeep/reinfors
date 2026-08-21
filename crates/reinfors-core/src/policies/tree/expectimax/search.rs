@@ -4,7 +4,6 @@ use crate::encoder::{ActionView, StateEncoder};
 use crate::game::{Actor, Game, Rng};
 use crate::policy::{ChanceMode, MAX_ENUMERATED_OUTCOMES, MAX_JOINT_SLOTS};
 use crate::reward::Reward;
-use crate::rng::SplitMix64;
 
 /// Belief model for each co-mover's action.
 #[derive(Clone, Copy)]
@@ -127,11 +126,10 @@ struct Search<S> {
     // Each routed row must retain the mover whose action frame encoded it.
     opp_legal: Vec<(usize, Vec<usize>)>,
     new_leaves: Vec<usize>,
-    rng: SplitMix64,
 }
 
 impl<S> Search<S> {
-    fn new(state: S, agent: usize, seed: u64) -> Search<S> {
+    fn new(state: S, agent: usize) -> Search<S> {
         let root = Node {
             state,
             obs: Vec::new(),
@@ -157,7 +155,6 @@ impl<S> Search<S> {
             opp_obs: Vec::new(),
             opp_legal: Vec::new(),
             new_leaves: Vec::new(),
-            rng: SplitMix64::new(seed),
         }
     }
 
@@ -175,6 +172,7 @@ fn expand_round<G: Game>(
     reward: &dyn Reward<Event = G::Event>,
     cfg: &SearchConfig,
     first: bool,
+    rng: &mut dyn Rng,
 ) {
     if !first {
         sort_frontier(&s.arena, &mut s.frontier, cfg);
@@ -200,7 +198,7 @@ fn expand_round<G: Game>(
             &mut s.opp_obs,
             &mut s.opp_legal,
             &mut s.new_leaves,
-            &mut s.rng,
+            rng,
         );
         s.stats.expansions += 1;
         s.stats.max_depth = s.stats.max_depth.max(s.arena[ni].depth + 1);
@@ -1700,9 +1698,9 @@ pub struct Stepper<S> {
 }
 
 impl<S> Stepper<S> {
-    pub(crate) fn new(state: S, agent: usize, seed: u64) -> Self {
+    pub(crate) fn new(state: S, agent: usize) -> Self {
         Stepper {
-            s: Search::new(state, agent, seed),
+            s: Search::new(state, agent),
             first: true,
             pending: None,
         }
@@ -1772,6 +1770,7 @@ pub(crate) fn stepper_round<G: Game + Sync>(
     reward: &dyn Reward<Event = G::Event>,
     cfg: &SearchConfig,
     out: &mut crate::policy::RequestSink,
+    rng: &mut dyn Rng,
 ) -> crate::policy::RoundStatus
 where
     G::State: Send,
@@ -1780,7 +1779,7 @@ where
     if !st.s.active(cfg.expansion_budget) {
         return crate::policy::RoundStatus::Done;
     }
-    expand_round(&mut st.s, game, enc, reward, cfg, st.first);
+    expand_round(&mut st.s, game, enc, reward, cfg, st.first, rng);
     st.first = false;
     for k in 0..st.s.new_leaves.len() {
         let li = st.s.new_leaves[k];
@@ -1870,6 +1869,7 @@ pub(crate) fn multi_round<G: Game + Sync>(
     reward: &dyn Reward<Event = G::Event>,
     cfg: &SearchConfig,
     out: &mut crate::policy::RequestSink,
+    rng: &mut dyn Rng,
 ) -> crate::policy::RoundStatus
 where
     G::State: Send,
@@ -1878,7 +1878,7 @@ where
     let mut all_done = true;
     for st in &mut ms.steppers {
         let before = out.len();
-        let status = stepper_round(st, game, enc, reward, cfg, out);
+        let status = stepper_round(st, game, enc, reward, cfg, out, rng);
         ms.counts.push(out.len() - before);
         if status == crate::policy::RoundStatus::Pending {
             all_done = false;
@@ -1912,7 +1912,7 @@ where
     let mut root = crate::rng::SplitMix64::new(seed);
     let mut steppers: Vec<Stepper<G::State>> = requests
         .into_iter()
-        .map(|(state, agent)| Stepper::new(state, agent, crate::game::Rng::next_u64(&mut root)))
+        .map(|(state, agent)| Stepper::new(state, agent))
         .collect();
     let mut done = vec![false; steppers.len()];
     loop {
@@ -1923,7 +1923,7 @@ where
                 continue;
             }
             let before = sink.len();
-            let status = stepper_round(st, game, enc, reward, cfg, &mut sink);
+            let status = stepper_round(st, game, enc, reward, cfg, &mut sink, &mut root);
             let count = sink.len() - before;
             if count > 0 {
                 spans.push((i, before, count));
