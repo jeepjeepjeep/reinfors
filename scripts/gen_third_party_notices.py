@@ -29,6 +29,9 @@ OVERRIDES = {
     # crates.io archives omit the workspace-level LICENSE for these
     "cozy-chess": REPO / "scripts" / "license-overrides" / "cozy-chess.LICENSE",
     "cozy-chess-types": REPO / "scripts" / "license-overrides" / "cozy-chess.LICENSE",
+    "parry2d": REPO / "scripts" / "license-overrides" / "parry2d.LICENSE",
+    "profiling": REPO / "scripts" / "license-overrides" / "profiling.LICENSE",
+    "rapier2d": REPO / "scripts" / "license-overrides" / "rapier2d.LICENSE",
 }
 
 
