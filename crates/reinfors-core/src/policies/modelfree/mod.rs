@@ -4,25 +4,25 @@ pub mod epsilon_greedy_q;
 pub mod ppo;
 
 use crate::game::Game;
-use crate::policy::{RequestSink, RoundStatus, RowsView, SearchCtx};
+use crate::policy::{RequestSink, RoundStatus, SearchCtx};
 
 /// The degenerate one-round search machine shared by model-free policies: encode each
-/// perspective's observation at begin, emit them all in one round, buffer the rows.
-pub struct OneShot<S> {
+/// perspective's observation at begin, emit them all in one round, integrate the rows
+/// into finished evaluations at absorb (no row buffering).
+pub struct OneShot<S, E> {
     pub(crate) agents: Vec<usize>,
     pub(crate) legal: Vec<Vec<usize>>,
     obs: Vec<Vec<f32>>,
-    pub(crate) rows: Vec<f64>,
-    pub(crate) stride: usize,
+    pub(crate) results: Vec<E>,
     emitted: bool,
     _state: core::marker::PhantomData<S>,
 }
 
-pub(crate) fn one_shot_begin<G: Game + Sync>(
+pub(crate) fn one_shot_begin<G: Game + Sync, E>(
     ctx: &SearchCtx<'_, G>,
     state: &G::State,
     perspectives: &[usize],
-) -> OneShot<G::State>
+) -> OneShot<G::State, E>
 where
     G::State: Send,
 {
@@ -37,14 +37,16 @@ where
             .map(|&a| ctx.enc.encode(state, a))
             .collect(),
         emitted: false,
-        rows: Vec::new(),
-        stride: 0,
+        results: Vec::new(),
         _state: core::marker::PhantomData,
     }
 }
 
-pub(crate) fn one_shot_round<S>(search: &mut OneShot<S>, out: &mut RequestSink) -> RoundStatus {
-    if search.emitted {
+pub(crate) fn one_shot_round<S, E>(
+    search: &mut OneShot<S, E>,
+    out: &mut RequestSink,
+) -> RoundStatus {
+    if search.emitted || search.agents.is_empty() {
         return RoundStatus::Done;
     }
     for (agent, obs) in search.agents.iter().zip(&search.obs) {
@@ -52,11 +54,4 @@ pub(crate) fn one_shot_round<S>(search: &mut OneShot<S>, out: &mut RequestSink) 
     }
     search.emitted = true;
     RoundStatus::Pending
-}
-
-pub(crate) fn one_shot_absorb<S>(search: &mut OneShot<S>, rows: RowsView<'_>) {
-    search.stride = rows.stride();
-    search.rows = (0..rows.len())
-        .flat_map(|i| rows.row(i).iter().copied())
-        .collect();
 }
