@@ -116,12 +116,13 @@ fn ppo_engine(
 fn callbacks_fire_at_the_threshold_with_short_drains() {
     let sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
     let s = sizes.clone();
+    // Floor 4 cuts after one decision per game: every game still holds a fragment.
     let mut engine = ppo_engine(4, 2, 1);
-    let (records, _) = engine.collect(8, move |_obs: Vec<f32>, n: usize| {
+    let (records, _) = engine.collect(4, move |_obs: Vec<f32>, n: usize| {
         s.lock().unwrap().push(n);
         vec![0.0; n * 3]
     });
-    assert!(records.len() >= 8);
+    assert!(records.len() >= 4);
     let sizes = sizes.lock().unwrap();
     // The final call is the fragment cut's gathered tail flush (batched by design,
     // pool-sized); every search-round call obeys the threshold.
