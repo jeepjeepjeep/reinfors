@@ -70,6 +70,12 @@ fn poly_collider(points: &[[f64; 2]]) -> Collider {
         .build()
 }
 
+thread_local! {
+    // Solver scratch only (rapier serde-skips it); reuse avoids per-step allocation.
+    static PIPELINE: std::cell::RefCell<PhysicsPipeline> =
+        std::cell::RefCell::new(PhysicsPipeline::new());
+}
+
 /// Task-constant solver configuration; snapshots never override it.
 pub(crate) fn canonical_params() -> IntegrationParameters {
     IntegrationParameters {
@@ -232,21 +238,22 @@ impl CarWorld {
             self.bodies[self.wheels[i]].add_force(Vector::new(fx, fy), true);
         }
 
-        let mut pipeline = PhysicsPipeline::new();
-        pipeline.step(
-            Vector::ZERO,
-            &self.params,
-            &mut self.islands,
-            &mut self.broad_phase,
-            &mut self.narrow_phase,
-            &mut self.bodies,
-            &mut self.colliders,
-            &mut self.impulse_joints,
-            &mut self.multibody_joints,
-            &mut self.ccd,
-            &(),
-            &(),
-        );
+        PIPELINE.with_borrow_mut(|pipeline| {
+            pipeline.step(
+                Vector::ZERO,
+                &self.params,
+                &mut self.islands,
+                &mut self.broad_phase,
+                &mut self.narrow_phase,
+                &mut self.bodies,
+                &mut self.colliders,
+                &mut self.impulse_joints,
+                &mut self.multibody_joints,
+                &mut self.ccd,
+                &(),
+                &(),
+            );
+        });
         for i in 0..4 {
             self.bodies[self.wheels[i]].reset_forces(true);
         }

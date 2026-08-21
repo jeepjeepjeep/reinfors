@@ -34,7 +34,9 @@ pub struct Track {
     pub points: Vec<TrackPoint>,
     pub tiles: Vec<Tile>,
     pub fallback: bool,
-    grid: Vec<Vec<u32>>,
+    // CSR cell index: tile ids for cell c live in grid_data[grid_offsets[c]..grid_offsets[c+1]].
+    grid_offsets: Vec<u32>,
+    grid_data: Vec<u32>,
 }
 
 fn uniform(rng: &mut SplitMix64, lo: f64, hi: f64) -> f64 {
@@ -76,7 +78,7 @@ impl Track {
         let tiles: Vec<Tile> = (0..n)
             .map(|i| tile_quad(&points[i], &points[if i == 0 { n - 1 } else { i - 1 }]))
             .collect();
-        let mut grid = vec![Vec::new(); GRID_DIM * GRID_DIM];
+        let mut cells: Vec<(u32, u32)> = Vec::new();
         for (id, t) in tiles.iter().enumerate() {
             let xs = t.quad.iter().map(|p| p[0]);
             let ys = t.quad.iter().map(|p| p[1]);
@@ -90,21 +92,32 @@ impl Track {
             );
             for cy in cell_of(y0)..=cell_of(y1) {
                 for cx in cell_of(x0)..=cell_of(x1) {
-                    grid[cy * GRID_DIM + cx].push(id as u32);
+                    cells.push(((cy * GRID_DIM + cx) as u32, id as u32));
                 }
             }
         }
+        cells.sort_unstable();
+        let mut grid_offsets = vec![0u32; GRID_DIM * GRID_DIM + 1];
+        for &(c, _) in &cells {
+            grid_offsets[c as usize + 1] += 1;
+        }
+        for i in 1..grid_offsets.len() {
+            grid_offsets[i] += grid_offsets[i - 1];
+        }
+        let grid_data: Vec<u32> = cells.into_iter().map(|(_, id)| id).collect();
         Track {
             points,
             tiles,
             fallback,
-            grid,
+            grid_offsets,
+            grid_data,
         }
     }
 
     /// Tile ids whose AABB-covered cells contain `(x, y)`.
     pub fn candidate_tiles(&self, x: f64, y: f64) -> &[u32] {
-        &self.grid[cell_of(y) * GRID_DIM + cell_of(x)]
+        let c = cell_of(y) * GRID_DIM + cell_of(x);
+        &self.grid_data[self.grid_offsets[c] as usize..self.grid_offsets[c + 1] as usize]
     }
 }
 
