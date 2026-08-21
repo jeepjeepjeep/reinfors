@@ -3264,7 +3264,7 @@ where
                 &mut sink,
             );
             let count = sink.len() - before;
-            debug_assert!(
+            assert!(
                 (count > 0) == (status == crate::policy::RoundStatus::Pending),
                 "round contract: Pending emits at least one request, Done emits none"
             );
