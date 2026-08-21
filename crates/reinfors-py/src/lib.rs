@@ -788,7 +788,7 @@ struct PyEngine {
 #[pymethods]
 impl PyEngine {
     #[new]
-    #[pyo3(signature = (game, reward, policy, learner, n_games, seed=0, start_buffer=false, start_buffer_capacity=1000, p_fresh=0.05, infer_cache=0, learn_players=None, n_groups=1, pad_rows_to=0))]
+    #[pyo3(signature = (game, reward, policy, learner, n_games, seed=0, start_buffer=false, start_buffer_capacity=1000, p_fresh=0.05, infer_cache=0, learn_players=None, n_groups=1, pad_rows_to=0, batch_size=0, n_threads=0))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         game: GameHandle,
@@ -804,6 +804,8 @@ impl PyEngine {
         learn_players: Option<Vec<usize>>,
         n_groups: usize,
         pad_rows_to: usize,
+        batch_size: usize,
+        n_threads: usize,
     ) -> PyResult<Self> {
         if n_games < 1 {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -887,6 +889,8 @@ impl PyEngine {
             seed,
             n_groups,
             pad_rows_to: (pad_rows_to > 0).then_some(pad_rows_to),
+            batch_size: (batch_size > 0).then_some(batch_size),
+            n_threads: (n_threads > 0).then_some(n_threads),
         };
         let num_agents = game.spec.num_agents();
         // Slot 0 serves a shared callback; slots 1..=N serve per-player callbacks.

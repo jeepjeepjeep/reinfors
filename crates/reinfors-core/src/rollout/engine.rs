@@ -64,6 +64,10 @@ pub struct EngineParams {
     pub n_groups: usize,
     /// Fixed call shape in rows (None = off); see the inference contract.
     pub pad_rows_to: Option<usize>,
+    /// Scheduler firing threshold in rows (None = max(1, n_games / 2)).
+    pub batch_size: Option<usize>,
+    /// CPU fan-out width for per-game work (None = 1 for now; threads land with the fan).
+    pub n_threads: Option<usize>,
 }
 
 impl Default for EngineParams {
@@ -73,6 +77,8 @@ impl Default for EngineParams {
             seed: 0,
             n_groups: 1,
             pad_rows_to: None,
+            batch_size: None,
+            n_threads: None,
         }
     }
 }
@@ -102,6 +108,8 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     ticks: Vec<usize>,
     traj: Vec<Vec<Vec<Step<P::Evaluation>>>>,
     perms: crate::encoder::PermTable,
+    batch_size: usize,
+    sweep_cursor: usize,
 }
 
 impl<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> Engine<G, P, L>
@@ -201,6 +209,10 @@ where
             ticks,
             traj,
             perms,
+            batch_size: params
+                .batch_size
+                .unwrap_or_else(|| (params.n_games / 2).max(1)),
+            sweep_cursor: 0,
         }
     }
 
@@ -307,58 +319,209 @@ where
         if fragments {
             discard_fragments(&mut self.traj);
         }
-        loop {
-            let collected = if fragments {
-                fragment_potential(out.len(), &self.traj, &self.learn_mask)
-            } else {
-                out.len()
-            };
-            if collected >= n_records {
-                break;
+        // Threshold scheduler: per-slot decision phases, one queue, fire at batch_size or on
+        // drain; games progress unevenly (the documented scheduler contract). Episode tails
+        // and the fragment flush ride the same evaluator directly for now — every call still
+        // shares its padding and cache — and become queue jobs when the flush unifies.
+        {
+            enum Phase<SE> {
+                Idle,
+                Deciding {
+                    search: SE,
+                    perspectives: Vec<usize>,
+                    outstanding: usize,
+                    rows: Vec<f64>,
+                    stride: usize,
+                },
             }
-            let (groups, meta) = gather_decisions(&self.game, &self.episodes, num_agents);
-            if groups.is_empty() {
-                break;
+            let n_games = self.episodes.len();
+            let batch_size = self.batch_size;
+            let base_cursor = self.sweep_cursor % n_games.max(1);
+            let mut phases: Vec<Phase<P::Search<G::State>>> =
+                (0..n_games).map(|_| Phase::Idle).collect();
+            let mut q_players: Vec<usize> = Vec::new();
+            let mut q_obs: Vec<f32> = Vec::new();
+            let mut q_dest: Vec<usize> = Vec::new();
+            let obs_dim = q_obs.len().max(0); // per-row dim derived at fire time
+            let _ = obs_dim;
+            let mut cutting = false;
+            loop {
+                let collected = if fragments {
+                    fragment_potential(out.len(), &self.traj, &self.learn_mask)
+                } else {
+                    out.len()
+                };
+                if collected >= n_records {
+                    cutting = true;
+                }
+                let mut progressed = false;
+                for k in 0..n_games {
+                    let gi = (base_cursor + k) % n_games;
+                    if matches!(phases[gi], Phase::Idle) && !cutting {
+                        let perspectives: Vec<usize> = (0..num_agents)
+                            .filter(|&si| self.episodes[gi].agent_active(&self.game, si))
+                            .collect();
+                        if !perspectives.is_empty() {
+                            let ep = &mut self.episodes[gi];
+                            let ctx = crate::policy::SearchCtx {
+                                game: &self.game,
+                                enc: &*self.encoder,
+                                reward: &*self.reward,
+                                rng: &mut ep.rng,
+                                perms: &self.perms,
+                                collect_interior,
+                            };
+                            let search = self.policy.begin_search(ctx, &ep.state, &perspectives);
+                            phases[gi] = Phase::Deciding {
+                                search,
+                                perspectives,
+                                outstanding: 0,
+                                rows: Vec::new(),
+                                stride: 0,
+                            };
+                            progressed = true;
+                        }
+                    }
+                    if let Phase::Deciding {
+                        search,
+                        perspectives: _,
+                        outstanding,
+                        rows,
+                        stride,
+                    } = &mut phases[gi]
+                    {
+                        if *outstanding == 0 {
+                            if !rows.is_empty() {
+                                let view = crate::policy::RowsView::from_slice(rows, *stride);
+                                self.policy.absorb(search, view, &mut self.episodes[gi].rng);
+                                rows.clear();
+                            }
+                            let before = q_players.len();
+                            let ep = &mut self.episodes[gi];
+                            let ctx = crate::policy::SearchCtx {
+                                game: &self.game,
+                                enc: &*self.encoder,
+                                reward: &*self.reward,
+                                rng: &mut ep.rng,
+                                perms: &self.perms,
+                                collect_interior,
+                            };
+                            let mut sink = crate::policy::RequestSink::default();
+                            let status = self.policy.round(ctx, search, &mut sink);
+                            let emitted = sink.len();
+                            let (players, obs) = sink.into_parts();
+                            q_players.extend(players);
+                            q_obs.extend(obs);
+                            q_dest.extend(std::iter::repeat_n(gi, emitted));
+                            let _ = before;
+                            if emitted > 0 {
+                                *outstanding = emitted;
+                                progressed = true;
+                            } else if status == crate::policy::RoundStatus::Done {
+                                let taken = std::mem::replace(&mut phases[gi], Phase::Idle);
+                                let Phase::Deciding {
+                                    search,
+                                    perspectives,
+                                    ..
+                                } = taken
+                                else {
+                                    unreachable!()
+                                };
+                                let ep = &mut self.episodes[gi];
+                                let ctx = crate::policy::SearchCtx {
+                                    game: &self.game,
+                                    enc: &*self.encoder,
+                                    reward: &*self.reward,
+                                    rng: &mut ep.rng,
+                                    perms: &self.perms,
+                                    collect_interior,
+                                };
+                                let results = self.policy.finish(ctx, search);
+                                let meta: Vec<(usize, usize)> =
+                                    perspectives.iter().map(|&si| (gi, si)).collect();
+                                let finished = {
+                                    let mut start = StartAccess::Exclusive(StartParts {
+                                        dist: &mut *self.start_dist,
+                                        rng: &mut self.buffer_rng,
+                                    });
+                                    process_tick(
+                                        &self.game,
+                                        &*self.encoder,
+                                        &*self.reward,
+                                        &self.policy,
+                                        &self.learner,
+                                        &self.learn_mask,
+                                        self.sequential,
+                                        gi..gi + 1,
+                                        results,
+                                        &meta,
+                                        &mut self.episodes,
+                                        &mut self.traj,
+                                        &mut self.ticks,
+                                        &mut self.policy_states,
+                                        &mut self.episode_returns,
+                                        &mut start,
+                                        &mut out,
+                                        &mut stats,
+                                    )
+                                };
+                                self.flush_finished(
+                                    &finished,
+                                    &mut out,
+                                    &mut stats,
+                                    &mut evaluator,
+                                );
+                                progressed = true;
+                            }
+                        }
+                    }
+                    while q_players.len() >= batch_size {
+                        fire_batch(
+                            &mut q_players,
+                            &mut q_obs,
+                            &mut q_dest,
+                            batch_size,
+                            &mut phases,
+                            &mut evaluator,
+                            |ph| match ph {
+                                Phase::Deciding {
+                                    outstanding,
+                                    rows,
+                                    stride,
+                                    ..
+                                } => (outstanding, rows, stride),
+                                Phase::Idle => unreachable!("row routed to an idle slot"),
+                            },
+                        );
+                        progressed = true;
+                    }
+                }
+                if !progressed {
+                    if !q_players.is_empty() {
+                        let n = q_players.len();
+                        fire_batch(
+                            &mut q_players,
+                            &mut q_obs,
+                            &mut q_dest,
+                            n,
+                            &mut phases,
+                            &mut evaluator,
+                            |ph| match ph {
+                                Phase::Deciding {
+                                    outstanding,
+                                    rows,
+                                    stride,
+                                    ..
+                                } => (outstanding, rows, stride),
+                                Phase::Idle => unreachable!("row routed to an idle slot"),
+                            },
+                        );
+                    } else if phases.iter().all(|p| matches!(p, Phase::Idle)) {
+                        break;
+                    }
+                }
             }
-            let evals = drive_decisions(
-                &self.policy,
-                &self.game,
-                &*self.encoder,
-                &*self.reward,
-                &self.perms,
-                collect_interior,
-                &groups,
-                &mut self.episodes,
-                &mut evaluator,
-            );
-
-            let finished = {
-                let mut start = StartAccess::Exclusive(StartParts {
-                    dist: &mut *self.start_dist,
-                    rng: &mut self.buffer_rng,
-                });
-                process_tick(
-                    &self.game,
-                    &*self.encoder,
-                    &*self.reward,
-                    &self.policy,
-                    &self.learner,
-                    &self.learn_mask,
-                    self.sequential,
-                    0..self.episodes.len(),
-                    evals,
-                    &meta,
-                    &mut self.episodes,
-                    &mut self.traj,
-                    &mut self.ticks,
-                    &mut self.policy_states,
-                    &mut self.episode_returns,
-                    &mut start,
-                    &mut out,
-                    &mut stats,
-                )
-            };
-            self.flush_finished(&finished, &mut out, &mut stats, &mut evaluator);
+            self.sweep_cursor = (base_cursor + 1) % n_games.max(1);
         }
         if fragments {
             flush_fragments_parts(
@@ -675,13 +838,16 @@ where
         codec: &dyn StateCodec<State = G::State>,
     ) -> Result<Vec<u8>, String> {
         use crate::codec::bytes::*;
-        let mut out = vec![3u8];
+        let mut out = vec![4u8];
         let n_games = self.episodes.len();
         let num_agents = self.game.num_agents();
         put_u32(&mut out, n_games as u32);
         put_u32(&mut out, num_agents as u32);
         put_u64(&mut out, self.search_rng.state());
         put_u64(&mut out, self.buffer_rng.state());
+        // The sweep cursor is result-bearing: it sets rotation start, hence window
+        // composition; restore-continuation identity needs it.
+        put_u64(&mut out, self.sweep_cursor as u64);
         put_u32(&mut out, self.group_rngs.len() as u32);
         for rng in &self.group_rngs {
             put_u64(&mut out, rng.state());
@@ -725,15 +891,8 @@ where
         use crate::codec::bytes::*;
         let mut r = Reader::new(bytes);
         let version = r.u8()?;
-        if !matches!(version, 2 | 3) {
+        if version != 4 {
             return Err("unsupported engine snapshot layout version".into());
-        }
-        if version == 2 && self.n_groups > 1 {
-            return Err(
-                "version-2 snapshot predates per-group rng streams; restore it into an \
-                 n_groups=1 engine"
-                    .into(),
-            );
         }
         let n_games = r.u32()? as usize;
         let num_agents = r.u32()? as usize;
@@ -744,6 +903,7 @@ where
         }
         let search_rng = r.u64()?;
         let buffer_rng = r.u64()?;
+        let sweep_cursor = r.u64()? as usize;
         let mut group_rng_states: Vec<u64> = Vec::new();
         if version >= 3 {
             let n = r.u32()? as usize;
@@ -869,6 +1029,7 @@ where
         })?;
         self.search_rng = SplitMix64::from_state(search_rng);
         self.buffer_rng = SplitMix64::from_state(buffer_rng);
+        self.sweep_cursor = sweep_cursor;
         // Version-2 snapshots predate group streams; construction defaults stay in place.
         for (rng, state) in self.group_rngs.iter_mut().zip(&group_rng_states) {
             *rng = SplitMix64::from_state(*state);
@@ -1226,6 +1387,37 @@ where
         out.extend(policy.finish(ctx, search));
     }
     out
+}
+
+/// Forward the first `take` queued rows in one evaluator call and route the results to the
+/// destination slots' row buffers, decrementing their outstanding counts.
+fn fire_batch<SE, F>(
+    q_players: &mut Vec<usize>,
+    q_obs: &mut Vec<f32>,
+    q_dest: &mut Vec<usize>,
+    take: usize,
+    phases: &mut [SE],
+    evaluator: &mut Evaluator<'_, F>,
+    mut route: impl FnMut(&mut SE) -> (&mut usize, &mut Vec<f64>, &mut usize),
+) where
+    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+{
+    let dim = if q_players.is_empty() {
+        0
+    } else {
+        q_obs.len() / q_players.len()
+    };
+    let players: Vec<usize> = q_players.drain(..take).collect();
+    let obs: Vec<f32> = q_obs.drain(..take * dim).collect();
+    let dests: Vec<usize> = q_dest.drain(..take).collect();
+    let rows = evaluator.forward(&players, obs, take);
+    let stride = rows.len() / take;
+    for (i, &gi) in dests.iter().enumerate() {
+        let (outstanding, buf, st) = route(&mut phases[gi]);
+        *st = stride;
+        buf.extend_from_slice(&rows[i * stride..(i + 1) * stride]);
+        *outstanding -= 1;
+    }
 }
 
 /// Roll back an aborted window: a failed collect (callback error, cancellation) leaves its
@@ -1654,29 +1846,6 @@ mod tests {
                 ..Default::default()
             },
         )
-    }
-
-    fn downgrade_to_v2(mut bytes: Vec<u8>) -> Vec<u8> {
-        bytes[0] = 2;
-        let off = 1 + 4 + 4 + 8 + 8;
-        let count = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
-        bytes.drain(off..off + 4 + 8 * count);
-        bytes
-    }
-
-    #[test]
-    fn v2_snapshot_rejected_for_grouped_engine() {
-        let mut eng = engine(2);
-        let v2 = downgrade_to_v2(eng.snapshot_bytes(&Codec).unwrap());
-        let err = eng.restore_bytes(&Codec, &v2).unwrap_err();
-        assert!(err.contains("n_groups=1"), "{err}");
-    }
-
-    #[test]
-    fn v2_snapshot_accepted_for_ungrouped_engine() {
-        let mut eng = engine(1);
-        let v2 = downgrade_to_v2(eng.snapshot_bytes(&Codec).unwrap());
-        eng.restore_bytes(&Codec, &v2).unwrap();
     }
 
     #[test]
