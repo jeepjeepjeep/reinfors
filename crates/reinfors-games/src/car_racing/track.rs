@@ -106,30 +106,6 @@ impl Track {
     pub fn candidate_tiles(&self, x: f64, y: f64) -> &[u32] {
         &self.grid[cell_of(y) * GRID_DIM + cell_of(x)]
     }
-
-    /// Exact convex-quad containment test for one wheel-center point.
-    pub fn tile_contains(&self, id: u32, x: f64, y: f64) -> bool {
-        let q = &self.tiles[id as usize].quad;
-        let mut sign = 0i8;
-        for i in 0..4 {
-            let [ax, ay] = q[i];
-            let [bx, by] = q[(i + 1) % 4];
-            let cross = (bx - ax) * (y - ay) - (by - ay) * (x - ax);
-            let s = if cross > 0.0 {
-                1
-            } else if cross < 0.0 {
-                -1
-            } else {
-                continue;
-            };
-            if sign == 0 {
-                sign = s;
-            } else if sign != s {
-                return false;
-            }
-        }
-        true
-    }
 }
 
 fn cell_of(v: f64) -> usize {
@@ -142,7 +118,7 @@ fn ring_points() -> Vec<TrackPoint> {
         .map(|i| {
             let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
             TrackPoint {
-                beta: a + std::f64::consts::FRAC_PI_2,
+                beta: a,
                 x: TRACK_RAD * libm::cos(a),
                 y: TRACK_RAD * libm::sin(a),
             }
