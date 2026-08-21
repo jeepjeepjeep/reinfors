@@ -443,9 +443,7 @@ where
 
             let mut phases: Vec<SlotPhase<P::Search<G::State>>> =
                 (0..n_games).map(|_| SlotPhase::Idle).collect();
-            let mut q_players: Vec<usize> = Vec::new();
-            let mut q_obs: Vec<f32> = Vec::new();
-            let mut q_dest: Vec<usize> = Vec::new();
+            let mut queue = RequestQueue::default();
             let mut in_flight = 0usize;
             let mut cutting = if fragments {
                 fragment_potential(out.len(), &self.traj, &self.learn_mask)
@@ -481,15 +479,9 @@ where
                     }
 
                     // Fire every full batch, then hand freed slots back to the pool.
-                    while q_players.len() >= batch_size {
-                        fire_batch(
-                            &mut q_players,
-                            &mut q_obs,
-                            &mut q_dest,
-                            batch_size,
-                            &mut phases,
-                            &mut evaluator,
-                            |ph| match ph {
+                    while queue.pending() >= batch_size {
+                        fire_batch(&mut queue, batch_size, &mut phases, &mut evaluator, |ph| {
+                            match ph {
                                 SlotPhase::Blocked {
                                     outstanding,
                                     rows,
@@ -497,8 +489,8 @@ where
                                     ..
                                 } => (outstanding, rows, stride),
                                 _ => unreachable!("row routed to a slot with no outstanding round"),
-                            },
-                        );
+                            }
+                        });
                         for gi in 0..n_games {
                             if matches!(phases[gi], SlotPhase::Blocked { outstanding: 0, .. }) {
                                 let taken = std::mem::replace(&mut phases[gi], SlotPhase::Idle);
@@ -528,28 +520,18 @@ where
                     }
 
                     if in_flight == 0 {
-                        if !q_players.is_empty() {
+                        if queue.pending() > 0 {
                             // Drain: no round can progress without these rows.
-                            let n = q_players.len();
-                            fire_batch(
-                                &mut q_players,
-                                &mut q_obs,
-                                &mut q_dest,
-                                n,
-                                &mut phases,
-                                &mut evaluator,
-                                |ph| match ph {
-                                    SlotPhase::Blocked {
-                                        outstanding,
-                                        rows,
-                                        stride,
-                                        ..
-                                    } => (outstanding, rows, stride),
-                                    _ => unreachable!(
-                                        "row routed to a slot with no outstanding round"
-                                    ),
-                                },
-                            );
+                            let n = queue.pending();
+                            fire_batch(&mut queue, n, &mut phases, &mut evaluator, |ph| match ph {
+                                SlotPhase::Blocked {
+                                    outstanding,
+                                    rows,
+                                    stride,
+                                    ..
+                                } => (outstanding, rows, stride),
+                                _ => unreachable!("row routed to a slot with no outstanding round"),
+                            });
                             for gi in 0..n_games {
                                 if matches!(phases[gi], SlotPhase::Blocked { outstanding: 0, .. }) {
                                     let taken = std::mem::replace(&mut phases[gi], SlotPhase::Idle);
@@ -587,9 +569,7 @@ where
                         TaskOut::Panicked(payload) => std::panic::resume_unwind(payload),
                         TaskOut::Skip => phases[msg.gi] = SlotPhase::Parked,
                         TaskOut::Emitted { players, obs, n } => {
-                            q_players.extend(players);
-                            q_obs.extend(obs);
-                            q_dest.extend(std::iter::repeat_n(msg.gi, n));
+                            queue.push(players, obs, msg.gi, n);
                             let (search, perspectives) = msg.search.expect("emitting slot");
                             phases[msg.gi] = SlotPhase::Blocked {
                                 search,
@@ -1381,10 +1361,35 @@ struct Msg<SE> {
 
 /// Forward the first `take` queued rows in one evaluator call and route the results to the
 /// destination slots' row buffers, decrementing their outstanding counts.
+/// FIFO request queue with an amortized-O(1) head: fires consume from `head`, appends
+/// push to the back, and the storage resets once fully drained — no per-fire shifting.
+#[derive(Default)]
+struct RequestQueue {
+    players: Vec<usize>,
+    obs: Vec<f32>,
+    dest: Vec<usize>,
+    head: usize,
+    dim: usize,
+}
+
+impl RequestQueue {
+    fn pending(&self) -> usize {
+        self.players.len() - self.head
+    }
+
+    fn push(&mut self, players: Vec<usize>, obs: Vec<f32>, gi: usize, n: usize) {
+        debug_assert_eq!(players.len(), n);
+        if n > 0 {
+            self.dim = obs.len() / n;
+        }
+        self.players.extend(players);
+        self.obs.extend(obs);
+        self.dest.extend(std::iter::repeat_n(gi, n));
+    }
+}
+
 fn fire_batch<SE, F>(
-    q_players: &mut Vec<usize>,
-    q_obs: &mut Vec<f32>,
-    q_dest: &mut Vec<usize>,
+    queue: &mut RequestQueue,
     take: usize,
     phases: &mut [SE],
     evaluator: &mut Evaluator<'_, F>,
@@ -1392,21 +1397,23 @@ fn fire_batch<SE, F>(
 ) where
     F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
 {
-    let dim = if q_players.is_empty() {
-        0
-    } else {
-        q_obs.len() / q_players.len()
-    };
-    let players: Vec<usize> = q_players.drain(..take).collect();
-    let obs: Vec<f32> = q_obs.drain(..take * dim).collect();
-    let dests: Vec<usize> = q_dest.drain(..take).collect();
-    let rows = evaluator.forward(&players, obs, take);
+    let (start, dim) = (queue.head, queue.dim);
+    let players = &queue.players[start..start + take];
+    let obs = queue.obs[start * dim..(start + take) * dim].to_vec();
+    let rows = evaluator.forward(players, obs, take);
     let stride = rows.len() / take;
-    for (i, &gi) in dests.iter().enumerate() {
+    for (i, &gi) in queue.dest[start..start + take].iter().enumerate() {
         let (outstanding, buf, st) = route(&mut phases[gi]);
         *st = stride;
         buf.extend_from_slice(&rows[i * stride..(i + 1) * stride]);
         *outstanding -= 1;
+    }
+    queue.head += take;
+    if queue.head == queue.players.len() {
+        queue.players.clear();
+        queue.obs.clear();
+        queue.dest.clear();
+        queue.head = 0;
     }
 }
 
