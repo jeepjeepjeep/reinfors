@@ -487,9 +487,9 @@ class Engine:
         # fires the callback once this many rows are queued, or earlier on drain. Tuning knob;
         # excluded from the fingerprint (does not change the collected records).
         batch_size: int = ...,
-        # Threads fanning search rounds (0 = default of 1): rounds run on an engine-owned
-        # thread pool with slot-order merges, record-identical to the sequential schedule.
-        # Excluded from the fingerprint.
+        # Worker threads running search rounds (0 = default of 1), overlapping tree work
+        # with inference. Reproducible at n_threads=1; above that, completion order varies
+        # and window composition may differ between runs. Excluded from the fingerprint.
         n_threads: int = ...,
     ) -> None: ...
     # Tell the engine the net's weights changed (call after every weight sync — e.g. right after
