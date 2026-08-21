@@ -1192,6 +1192,10 @@ where
             };
             let status = policy.round(ctx, search, &mut sink);
             let count = sink.len() - start;
+            debug_assert!(
+                (count > 0) == (status == RoundStatus::Pending),
+                "round contract: Pending emits at least one request, Done emits none"
+            );
             if count > 0 {
                 spans.push((i, start, count));
             } else if status == RoundStatus::Done {

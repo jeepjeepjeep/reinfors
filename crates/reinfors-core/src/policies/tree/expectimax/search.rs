@@ -960,6 +960,80 @@ mod tests {
         }
     }
 
+    struct Cliff;
+    impl Game for Cliff {
+        type State = i32;
+        type Event = f64;
+        fn num_agents(&self) -> usize {
+            1
+        }
+        fn action_count(&self) -> usize {
+            2
+        }
+        fn actor(&self, _: &i32) -> Actor {
+            Actor::Agent(0)
+        }
+        fn legal_actions(&self, _: &i32, agent: usize) -> Vec<usize> {
+            if agent == 0 {
+                vec![0, 1]
+            } else {
+                Vec::new()
+            }
+        }
+        fn step(&self, s: &i32, actions: &[usize]) -> Transition<i32, f64> {
+            let a = actions[0] as i32;
+            match s {
+                // root: two evaluable children
+                0 => Transition {
+                    next_state: 1 + a,
+                    events: vec![Some(0.0)],
+                    terminal: false,
+                },
+                // both frontier nodes expand entirely to terminal children
+                1 | 2 => Transition {
+                    next_state: 10 * s + a,
+                    events: vec![Some(1.0)],
+                    terminal: true,
+                },
+                _ => unreachable!("terminal states are never stepped"),
+            }
+        }
+        fn initial_state(&self) -> i32 {
+            0
+        }
+    }
+
+    #[test]
+    fn cpu_only_expansions_continue_toward_the_budget() {
+        // top_k=1: the first frontier pick expands entirely to terminal children and
+        // emits no inference rows. The search must keep expanding the remaining
+        // frontier node rather than finishing on the empty round.
+        let cfg = SearchConfig {
+            gamma: 0.9,
+            beta: 1.0,
+            expansion_budget: 8,
+            top_k: 1,
+            max_depth: 4,
+            chance: ChanceMode::Committed { samples: 1 },
+            opponent: Opponent::Uniform,
+        };
+        let results = search_many(
+            &Cliff,
+            &LineEnc,
+            &LineReward,
+            &cfg,
+            vec![(0, 0)],
+            false,
+            0,
+            |_players: &[usize], _obs: Vec<f32>, n: usize| vec![0.5; n * 2],
+        );
+        let (_, _, stats) = &results[0];
+        assert_eq!(
+            stats.expansions, 3,
+            "the root and both terminal-fanning frontier nodes expand"
+        );
+    }
+
     fn cfg(expansion_budget: usize) -> SearchConfig {
         SearchConfig {
             gamma: 0.9,
@@ -1777,28 +1851,34 @@ where
     G::State: Send,
 {
     stepper_integrate(st, game, enc, cfg);
-    if !st.s.active(cfg.expansion_budget) {
-        return crate::policy::RoundStatus::Done;
-    }
-    expand_round(&mut st.s, game, enc, reward, cfg, st.first);
-    st.first = false;
-    for k in 0..st.s.new_leaves.len() {
-        let li = st.s.new_leaves[k];
-        if st.s.arena[li].depth < cfg.max_depth {
-            st.s.frontier.push(li);
+    // A CPU-only expansion (every child terminal) emits no rows; keep expanding toward
+    // the budget instead of reporting an empty Pending round — the round contract is
+    // Pending ⇒ at least one request, Done ⇒ none.
+    loop {
+        if !st.s.active(cfg.expansion_budget) {
+            return crate::policy::RoundStatus::Done;
         }
-    }
-    let before = out.len();
-    for (o, (mover, _)) in st.s.opp_obs.iter().zip(&st.s.opp_legal) {
-        out.push(*mover, o);
-    }
-    for &li in &st.s.new_leaves {
-        out.push(st.s.arena[li].eval_agent, &st.s.arena[li].obs);
-    }
-    if out.len() == before {
+        expand_round(&mut st.s, game, enc, reward, cfg, st.first);
+        st.first = false;
+        for k in 0..st.s.new_leaves.len() {
+            let li = st.s.new_leaves[k];
+            if st.s.arena[li].depth < cfg.max_depth {
+                st.s.frontier.push(li);
+            }
+        }
+        let before = out.len();
+        for (o, (mover, _)) in st.s.opp_obs.iter().zip(&st.s.opp_legal) {
+            out.push(*mover, o);
+        }
+        for &li in &st.s.new_leaves {
+            out.push(st.s.arena[li].eval_agent, &st.s.arena[li].obs);
+        }
+        if out.len() > before {
+            return crate::policy::RoundStatus::Pending;
+        }
         st.pending = Some((Vec::new(), 0));
+        stepper_integrate(st, game, enc, cfg);
     }
-    crate::policy::RoundStatus::Pending
 }
 
 pub(crate) fn stepper_finish<G: Game + Sync>(
@@ -1925,6 +2005,10 @@ where
             let before = sink.len();
             let status = stepper_round(st, game, enc, reward, cfg, &mut sink);
             let count = sink.len() - before;
+            debug_assert!(
+                (count > 0) == (status == crate::policy::RoundStatus::Pending),
+                "round contract: Pending emits at least one request, Done emits none"
+            );
             if count > 0 {
                 spans.push((i, before, count));
             } else if status == crate::policy::RoundStatus::Done {
