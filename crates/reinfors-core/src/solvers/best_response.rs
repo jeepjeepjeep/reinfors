@@ -66,13 +66,19 @@ fn build_arena<G: Game>(
             let node = match self.game.actor(state) {
                 Actor::Chance => {
                     let dist = self.game.chance_node(state);
-                    if dist.count() > MAX_ENUMERATED_OUTCOMES {
+                    let Some(count) = dist.enumerable_count() else {
+                        return Err(EnumerationCapExceeded(
+                            "chance is sample-only; best response requires enumerable chance"
+                                .to_string(),
+                        ));
+                    };
+                    if count > MAX_ENUMERATED_OUTCOMES {
                         return Err(EnumerationCapExceeded(format!(
-                            "chance fan {} exceeds the enumeration cap",
-                            dist.count()
+                            "chance fan {count} exceeds the enumeration cap"
                         )));
                     }
-                    let probs: Vec<f64> = dist.iter_probs().collect();
+                    let probs: Vec<f64> =
+                        dist.iter_probs().expect("enumerable checked above").collect();
                     let mut outcomes = Vec::with_capacity(probs.len());
                     for (i, p) in probs.into_iter().enumerate() {
                         let t = self.game.apply_chance_node(state, i);
@@ -287,7 +293,13 @@ pub fn enumerate_infosets<G: Game>(
             match self.game.actor(state) {
                 Actor::Chance => {
                     let dist = self.game.chance_node(state);
-                    for outcome in 0..dist.count() {
+                    let Some(count) = dist.enumerable_count() else {
+                        return Err(EnumerationCapExceeded(
+                            "chance is sample-only; best response requires enumerable chance"
+                                .to_string(),
+                        ));
+                    };
+                    for outcome in 0..count {
                         let t = self.game.apply_chance_node(state, outcome);
                         if t.terminal {
                             self.charge()?;

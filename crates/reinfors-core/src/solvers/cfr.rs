@@ -100,6 +100,11 @@ impl<G: Game> CfrSolver<G> {
             game.information_states(),
             "CFR requires information-state keys (Game::information_states)"
         );
+        assert!(
+            game.chance_enumerable(),
+            "CFR requires enumerable chance (Game::chance_enumerable); sample-only chance \
+             cannot be solved exactly nor evaluated for exploitability"
+        );
         // A chance root does not reveal the game's decision dynamics.
         let realized = crate::game::realize_initial_state(&game, &mut SplitMix64::new(0x0517_B0BE));
         assert!(
@@ -292,12 +297,15 @@ impl<G: Game> CfrSolver<G> {
         match self.game.actor(state) {
             Actor::Chance => {
                 let dist = self.game.chance_node(state);
+                let count = dist
+                    .enumerable_count()
+                    .expect("CfrSolver::new requires Game::chance_enumerable");
                 assert!(
-                    dist.count() <= MAX_ENUMERATED_OUTCOMES,
-                    "chance fan {} exceeds the enumeration cap; use CfrVariant::ExternalMccfr",
-                    dist.count()
+                    count <= MAX_ENUMERATED_OUTCOMES,
+                    "chance fan {count} exceeds the enumeration cap; use CfrVariant::ExternalMccfr"
                 );
-                let probs: Vec<f64> = dist.iter_probs().collect();
+                let probs: Vec<f64> =
+                    dist.iter_probs().expect("enumerable checked above").collect();
                 let mut v = [0.0; MAX_CFR_PLAYERS];
                 for (i, p) in probs.into_iter().enumerate() {
                     let t = self.game.apply_chance_node(state, i);
@@ -463,7 +471,10 @@ impl<G: Game> CfrSolver<G> {
         match self.game.actor(state) {
             Actor::Chance => {
                 let dist = self.game.chance_node(state);
-                let probs: Vec<f64> = dist.iter_probs().collect();
+                let probs: Vec<f64> = dist
+                    .iter_probs()
+                    .expect("CfrSolver::new requires Game::chance_enumerable")
+                    .collect();
                 let mut v = [0.0; MAX_CFR_PLAYERS];
                 for (i, p) in probs.into_iter().enumerate() {
                     let t = self.game.apply_chance_node(state, i);

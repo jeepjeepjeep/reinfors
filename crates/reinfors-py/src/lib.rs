@@ -2753,6 +2753,23 @@ where
     e
 }
 
+fn check_chance_composition<G: Game>(game: &G, policy: &PolicySpec) -> PyResult<()> {
+    let mode = match policy {
+        PolicySpec::SelectiveExpectimax { chance, .. }
+        | PolicySpec::Minimax { chance, .. }
+        | PolicySpec::Mcts { chance, .. }
+        | PolicySpec::AlphaZero { chance, .. } => *chance,
+        PolicySpec::EpsilonGreedyQ { .. } | PolicySpec::Ppo => return Ok(()),
+    };
+    if matches!(mode, ChanceMode::ExpandAll) && !game.chance_enumerable() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "this game's chance is sample-only and cannot be enumerated; ExpandAll is \
+             unavailable — use a sampling chance mode (AlwaysResample or Committed)",
+        ));
+    }
+    Ok(())
+}
+
 fn check_search_budgets(policy: &PolicySpec) -> PyResult<()> {
     const MAX: u64 = 1 << 20;
     // n_heads multiplies per-node search memory (heads x actions per node), so its
@@ -2891,6 +2908,7 @@ where
         _ => 1,
     };
     check_search_budgets(&policy)?;
+    check_chance_composition(&game, &policy)?;
     check_call_buffers(
         "n_games",
         engine_params.n_games,

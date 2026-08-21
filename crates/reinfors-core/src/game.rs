@@ -41,27 +41,50 @@ impl<S, E> Transition<S, E> {
 pub enum ChanceDist {
     Weighted(Vec<f64>),
     Uniform(usize),
+    /// Uniform over `[0, n)` supporting only `draw`; enumeration is rejected by type so no
+    /// consumer can materialize the range.
+    SampleOnlyUniform(std::num::NonZeroU32),
 }
 
+/// Enumeration was requested on a `ChanceDist::SampleOnlyUniform` distribution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NonEnumerableChance;
+
+impl std::fmt::Display for NonEnumerableChance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "chance distribution is sample-only and cannot be enumerated"
+        )
+    }
+}
+
+impl std::error::Error for NonEnumerableChance {}
+
 impl ChanceDist {
-    pub fn count(&self) -> usize {
+    /// Outcome count for enumerable distributions; `None` for sample-only ones.
+    pub fn enumerable_count(&self) -> Option<usize> {
         match self {
-            ChanceDist::Weighted(p) => p.len(),
-            ChanceDist::Uniform(n) => *n,
+            ChanceDist::Weighted(p) => Some(p.len()),
+            ChanceDist::Uniform(n) => Some(*n),
+            ChanceDist::SampleOnlyUniform(_) => None,
         }
     }
 
     /// Normalized probabilities in outcome order. Normalization is computed once for the whole
     /// iterator; a `prob(i)` accessor would make callers accidentally build O(N^2) fans.
-    pub fn iter_probs(&self) -> impl Iterator<Item = f64> + '_ {
+    pub fn iter_probs(&self) -> Result<impl Iterator<Item = f64> + '_, NonEnumerableChance> {
         let (total, uniform) = match self {
             ChanceDist::Weighted(p) => (Self::checked_total(p), 0.0),
             ChanceDist::Uniform(n) => (1.0, 1.0 / *n as f64),
+            ChanceDist::SampleOnlyUniform(_) => return Err(NonEnumerableChance),
         };
-        (0..self.count()).map(move |i| match self {
+        let count = self.enumerable_count().expect("sample-only handled above");
+        Ok((0..count).map(move |i| match self {
             ChanceDist::Weighted(p) => p[i] / total,
             ChanceDist::Uniform(_) => uniform,
-        })
+            ChanceDist::SampleOnlyUniform(_) => unreachable!("returned Err above"),
+        }))
     }
 
     fn checked_total(p: &[f64]) -> f64 {
@@ -83,6 +106,11 @@ impl ChanceDist {
             ChanceDist::Uniform(n) => {
                 let u = rng.unit();
                 (((*n as f64) * u) as usize).min(n.saturating_sub(1))
+            }
+            ChanceDist::SampleOnlyUniform(n) => {
+                let n = n.get() as usize;
+                let u = rng.unit();
+                (((n as f64) * u) as usize).min(n - 1)
             }
         }
     }
@@ -114,6 +142,12 @@ pub trait Game {
     /// Whether the game provides information-state keys.
     fn information_states(&self) -> bool {
         false
+    }
+
+    /// Whether every chance node this game emits is enumerable. Declare `false` when any
+    /// node is `SampleOnlyUniform`; enumeration-requiring consumers gate on this claim.
+    fn chance_enumerable(&self) -> bool {
+        true
     }
 
     /// Canonical perfect-recall information-set key for `agent` at a realized state.
@@ -630,7 +664,7 @@ mod chance_dist_tests {
     #[should_panic(expected = "finite positive weight total")]
     fn infinite_weight_totals_panic_instead_of_degenerating() {
         let d = ChanceDist::Weighted(vec![f64::MAX, f64::MAX]);
-        let _ = d.iter_probs().count();
+        let _ = d.iter_probs().unwrap().count();
     }
 
     #[test]
@@ -652,11 +686,31 @@ mod chance_dist_tests {
     #[test]
     fn iter_probs_normalizes_once_and_matches_both_arms() {
         let w = ChanceDist::Weighted(vec![1.0, 3.0]);
-        let probs: Vec<f64> = w.iter_probs().collect();
+        let probs: Vec<f64> = w.iter_probs().unwrap().collect();
         assert_eq!(probs, vec![0.25, 0.75]);
         let u = ChanceDist::Uniform(4);
-        let probs: Vec<f64> = u.iter_probs().collect();
+        let probs: Vec<f64> = u.iter_probs().unwrap().collect();
         assert_eq!(probs, vec![0.25; 4]);
-        assert_eq!(u.count(), 4);
+        assert_eq!(u.enumerable_count(), Some(4));
+    }
+
+    #[test]
+    fn sample_only_uniform_draws_but_never_enumerates() {
+        struct R(f64);
+        impl Rng for R {
+            fn below(&mut self, _n: usize) -> usize {
+                0
+            }
+            fn unit(&mut self) -> f64 {
+                self.0
+            }
+        }
+        let n = std::num::NonZeroU32::new(1 << 20).unwrap();
+        let d = ChanceDist::SampleOnlyUniform(n);
+        assert_eq!(d.enumerable_count(), None);
+        assert_eq!(d.iter_probs().err(), Some(NonEnumerableChance));
+        assert_eq!(d.draw(&mut R(0.0)), 0);
+        assert_eq!(d.draw(&mut R(0.5)), 1 << 19);
+        assert_eq!(d.draw(&mut R(1.0)), (1 << 20) - 1);
     }
 }

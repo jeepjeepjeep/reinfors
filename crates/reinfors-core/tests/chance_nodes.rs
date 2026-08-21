@@ -738,3 +738,168 @@ fn a_cycling_chain_panics_in_expectimax() {
         |_p: &[usize], _obs: Vec<f32>, n: usize| vec![0.0; n],
     );
 }
+
+/// A root chance over a seed space too large to enumerate; outcome parity pays 10 or 20.
+struct SampleOnlySeed;
+impl Game for SampleOnlySeed {
+    type State = St;
+    type Event = f64;
+    fn num_agents(&self) -> usize {
+        1
+    }
+    fn action_count(&self) -> usize {
+        1
+    }
+    fn actor(&self, s: &St) -> Actor {
+        if s.tick == 1 {
+            Actor::Chance
+        } else {
+            Actor::Agent(0)
+        }
+    }
+    fn legal_actions(&self, s: &St, _agent: usize) -> Vec<usize> {
+        if s.tick == 0 {
+            vec![0]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, f64> {
+        assert_eq!(s.tick, 0);
+        Transition {
+            next_state: St { tick: 1 },
+            events: vec![None],
+            terminal: false,
+        }
+    }
+    fn chance_enumerable(&self) -> bool {
+        false
+    }
+    fn chance_node(&self, _s: &St) -> ChanceDist {
+        ChanceDist::SampleOnlyUniform(std::num::NonZeroU32::new(1 << 20).unwrap())
+    }
+    fn apply_chance_node(&self, _s: &St, outcome: usize) -> Transition<St, f64> {
+        Transition {
+            next_state: St { tick: 2 },
+            events: vec![Some(10.0 + 10.0 * (outcome % 2) as f64)],
+            terminal: true,
+        }
+    }
+    fn initial_state(&self) -> St {
+        St { tick: 0 }
+    }
+}
+
+#[test]
+fn sample_only_resampling_converges() {
+    let cfg = mcts_cfg(4000, 8, 0.5, ChanceMode::AlwaysResample);
+    let e = run_mcts(&SampleOnlySeed, fan_chance, &cfg, vec![(St { tick: 0 }, 0)]);
+    assert!(
+        (e[0].values[0][0] - 15.0).abs() < 0.5,
+        "{}",
+        e[0].values[0][0]
+    );
+}
+
+#[test]
+fn sample_only_committed_is_seed_deterministic() {
+    let cfg = mcts_cfg(64, 8, 0.5, ChanceMode::Committed { samples: 3 });
+    let a = run_mcts(&SampleOnlySeed, fan_chance, &cfg, vec![(St { tick: 0 }, 0)]);
+    let b = run_mcts(&SampleOnlySeed, fan_chance, &cfg, vec![(St { tick: 0 }, 0)]);
+    assert_eq!(a[0].values, b[0].values);
+}
+
+#[test]
+#[should_panic(expected = "sample-only")]
+fn sample_only_expand_all_panics_in_mcts() {
+    let cfg = mcts_cfg(1, 8, 0.5, ChanceMode::ExpandAll);
+    let _ = run_mcts(&SampleOnlySeed, fan_chance, &cfg, vec![(St { tick: 0 }, 0)]);
+}
+
+#[test]
+#[should_panic(expected = "sample-only")]
+fn sample_only_expand_all_panics_in_expectimax() {
+    let _ = search_many(
+        &SampleOnlySeed,
+        &GuardEnc(fan_chance),
+        &Pass,
+        &xmax_cfg(0.5, ChanceMode::ExpandAll),
+        vec![(St { tick: 0 }, 0)],
+        false,
+        0,
+        |_p: &[usize], _obs: Vec<f32>, n: usize| vec![0.0; n],
+    );
+}
+
+#[test]
+fn sample_only_engine_collection_draws_outcomes() {
+    let mut engine = Engine::new(
+        SampleOnlySeed,
+        Box::new(GuardEnc(fan_chance)),
+        Box::new(Pass),
+        Mcts::new(
+            mcts_cfg(8, 8, 1.0, ChanceMode::Committed { samples: 1 }),
+            ActBy::Value,
+        ),
+        TreeStrap::new(1.0, 0.3, 1.0, false),
+        EngineParams {
+            n_games: 2,
+            seed: 3,
+            n_groups: 1,
+            ..Default::default()
+        },
+    );
+    let (records, stats) = engine.collect(4, |_obs: Vec<f32>, n: usize| vec![0.0; n]);
+    assert!(records.len() >= 4);
+    assert!(stats.decisions > 0);
+}
+
+#[derive(Clone)]
+struct TwoSt(u8);
+struct SampleOnlyDuel;
+impl Game for SampleOnlyDuel {
+    type State = TwoSt;
+    type Event = f64;
+    fn num_agents(&self) -> usize {
+        2
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn actor(&self, s: &TwoSt) -> Actor {
+        Actor::Agent((s.0 % 2) as usize)
+    }
+    fn legal_actions(&self, _s: &TwoSt, _agent: usize) -> Vec<usize> {
+        vec![0, 1]
+    }
+    fn step(&self, s: &TwoSt, _actions: &[usize]) -> Transition<TwoSt, f64> {
+        Transition {
+            next_state: TwoSt(s.0 + 1),
+            events: vec![None, None],
+            terminal: s.0 >= 2,
+        }
+    }
+    fn information_states(&self) -> bool {
+        true
+    }
+    fn information_state_key(&self, s: &TwoSt, agent: usize) -> Vec<u8> {
+        vec![s.0, agent as u8]
+    }
+    fn chance_enumerable(&self) -> bool {
+        false
+    }
+    fn initial_state(&self) -> TwoSt {
+        TwoSt(0)
+    }
+}
+
+#[test]
+#[should_panic(expected = "requires enumerable chance")]
+fn cfr_rejects_sample_only_chance_at_construction() {
+    let _ = reinfors_core::CfrSolver::new(
+        SampleOnlyDuel,
+        Box::new(Pass),
+        reinfors_core::CfrVariant::Vanilla,
+        7,
+    );
+}
