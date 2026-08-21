@@ -46,8 +46,10 @@ pub mod stream {
     pub const BUFFER: u64 = 0x2545_F491_4F6C_DD1D;
     /// Engine-less `choose` action selection (keyed by request index).
     pub const CHOOSE_SELECT: u64 = 0xC3A5_C85C_97CB_3127;
-    /// Engine-less `choose` decision driving and per-request policy heads.
-    pub const CHOOSE_DRIVE: u64 = 0xB492_B66F_BE98_F273;
+    /// Engine-less `choose` decision driving.
+    pub const CHOOSE_DRIVE: u64 = 0x5851_F42D_4C95_7F2D;
+    /// Per-request policy-head initialization (keyed by request index).
+    pub const CHOOSE_HEAD: u64 = 0xB492_B66F_BE98_F273;
 }
 
 /// Draw an index proportional to `probs`.

@@ -566,6 +566,11 @@ where
                                 collect_interior,
                             };
                             let results = self.policy.finish(ctx, search);
+                            assert_eq!(
+                                results.len(),
+                                perspectives.len(),
+                                "finish must return one evaluation per perspective"
+                            );
                             let meta: Vec<(usize, usize)> =
                                 perspectives.iter().map(|&si| (gi, si)).collect();
                             let finished = {

@@ -275,3 +275,105 @@ fn fanned_rounds_match_sequential_collection_exactly() {
         );
     }
 }
+
+/// A deliberately malformed policy: one Pending round, then `finish` returns TWO
+/// evaluations for however many perspectives it was given.
+struct DoubleFinish;
+impl Policy for DoubleFinish {
+    type Evaluation = ();
+    type PolicyState = ();
+    type Search<S: Send> = bool;
+    fn begin_search<G: Game + Sync>(
+        &self,
+        _ctx: reinfors_core::policy::SearchCtx<'_, G>,
+        _state: &G::State,
+        _perspectives: &[usize],
+    ) -> Self::Search<G::State>
+    where
+        G::State: Send,
+    {
+        false
+    }
+    fn round<G: Game + Sync>(
+        &self,
+        _ctx: reinfors_core::policy::SearchCtx<'_, G>,
+        emitted: &mut Self::Search<G::State>,
+        out: &mut reinfors_core::policy::RequestSink,
+    ) -> reinfors_core::policy::RoundStatus
+    where
+        G::State: Send,
+    {
+        if *emitted {
+            return reinfors_core::policy::RoundStatus::Done;
+        }
+        *emitted = true;
+        out.push(0, &[0.0, 0.0]);
+        reinfors_core::policy::RoundStatus::Pending
+    }
+    fn absorb<G: Game + Sync>(
+        &self,
+        _ctx: reinfors_core::policy::SearchCtx<'_, G>,
+        _search: &mut Self::Search<G::State>,
+        _rows: reinfors_core::policy::RowsView<'_>,
+    ) where
+        G::State: Send,
+    {
+    }
+    fn finish<G: Game + Sync>(
+        &self,
+        _ctx: reinfors_core::policy::SearchCtx<'_, G>,
+        _search: Self::Search<G::State>,
+    ) -> Vec<((), Vec<reinfors_core::learner::InteriorTarget>)>
+    where
+        G::State: Send,
+    {
+        vec![((), Vec::new()), ((), Vec::new())]
+    }
+    fn max_agents(&self, _sequential: bool) -> Option<usize> {
+        None
+    }
+    fn supports_imperfect_information(&self) -> bool {
+        true
+    }
+    fn begin_episode(&self, _rng: &mut dyn reinfors_core::Rng) {}
+    fn encode_eval(&self, _eval: &(), _out: &mut Vec<u8>) {}
+    fn decode_eval(
+        &self,
+        _r: &mut reinfors_core::codec::bytes::Reader,
+        _action_count: usize,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    fn policy_state_to_u64(&self, _s: &()) -> u64 {
+        0
+    }
+    fn policy_state_from_u64(&self, _v: u64) -> Result<(), String> {
+        Ok(())
+    }
+    fn select(&self, _eval: &(), _state: &mut (), _rng: &mut dyn reinfors_core::Rng) -> usize {
+        0
+    }
+    fn fold_telemetry(&self, _eval: &(), _stats: &mut reinfors_core::CollectStats) {}
+}
+
+#[test]
+#[should_panic(expected = "one evaluation per perspective")]
+fn finish_cardinality_is_checked_per_search() {
+    // A policy over- or under-producing evaluations must fail loudly at ITS search, not
+    // silently shift every later game's evaluations (the global-total trap).
+    let perms = PermTable::build(&Enc, 3, 2);
+    let mut f = infer(3);
+    let mut e = Evaluator::new(&mut f, InferMode::Shared, None);
+    let mut rng = reinfors_core::SplitMix64::new(0);
+    let _ = drive_to_completion(
+        &DoubleFinish,
+        &RR,
+        &Enc,
+        &Zero,
+        &perms,
+        false,
+        &decisions(),
+        &mut rng,
+        &mut e,
+    );
+}

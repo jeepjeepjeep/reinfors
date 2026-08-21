@@ -3965,7 +3965,7 @@ where
                     .map(|i| {
                         policy.begin_episode(&mut SplitMix64::keyed(
                             seed,
-                            rng_stream::CHOOSE_DRIVE,
+                            rng_stream::CHOOSE_HEAD,
                             i as u64,
                         ))
                     })
@@ -3985,7 +3985,7 @@ where
                     .map(|i| {
                         policy.begin_episode(&mut SplitMix64::keyed(
                             seed,
-                            rng_stream::CHOOSE_DRIVE,
+                            rng_stream::CHOOSE_HEAD,
                             i as u64,
                         ))
                     })
