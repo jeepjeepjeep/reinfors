@@ -89,6 +89,37 @@ fn opposed_nets(player: usize, _obs: Vec<f32>, n: usize) -> Vec<f64> {
 }
 
 #[test]
+fn threshold_batches_keep_per_player_routing_pure() {
+    // Real threshold firing (no drain-only override): each callback invocation must
+    // still carry a single player's rows, and routing must survive rows of one round
+    // landing in different batches.
+    let mut e = Engine::new(
+        Alt,
+        Box::new(Enc),
+        Box::new(Zero),
+        EpsilonGreedyQ::new(1, 0.0),
+        Dqn::new(1, 1.0, 1, 0.99),
+        EngineParams {
+            n_games: 4,
+            seed: 3,
+            batch_size: Some(2),
+            ..Default::default()
+        },
+    );
+    let (records, _) = e.collect_routed(24, InferMode::PerPlayer, |player, _obs, n| {
+        let row = if player == 0 { [1.0, 0.0] } else { [0.0, 1.0] };
+        (0..n).flat_map(|_| row).collect()
+    });
+    assert!(records.len() >= 24);
+    for r in &records {
+        assert_eq!(
+            r.action, r.player,
+            "threshold batches must not cross players' networks"
+        );
+    }
+}
+
+#[test]
 fn per_player_routing_serves_each_players_network() {
     let mut e = engine();
     let (records, _) = e.collect_routed(24, InferMode::PerPlayer, opposed_nets);
