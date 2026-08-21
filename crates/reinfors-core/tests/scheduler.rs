@@ -338,3 +338,22 @@ fn rounds_execute_while_the_callback_runs() {
         "search rounds must keep executing while the callback runs"
     );
 }
+
+#[test]
+fn identical_engines_collect_identically_across_many_repetitions() {
+    // The n_threads=1 contract, stress-tested: single runs miss rare interleavings.
+    let reference: Option<Vec<(usize, f64)>> = None;
+    let mut reference = reference;
+    for _ in 0..16 {
+        let mut engine = ppo_engine(4, 2, 1);
+        let (records, _) = engine.collect(16, |_obs: Vec<f32>, n: usize| vec![0.0; n * 3]);
+        let sig: Vec<(usize, f64)> = records.iter().map(|r| (r.action, r.ret)).collect();
+        match &reference {
+            None => reference = Some(sig),
+            Some(expected) => assert_eq!(
+                &sig, expected,
+                "identical seeds must produce identical collections at n_threads=1"
+            ),
+        }
+    }
+}

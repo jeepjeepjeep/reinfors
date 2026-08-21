@@ -1422,7 +1422,7 @@ fn ppo_windows_meet_the_floor_and_stay_single_version() {
         let (records, _stats) = engine.collect(window, constant(v));
         assert!(
             records.len() >= window && records.len() < window + 3,
-            "floor within one 3-game round at v={v}, got {}",
+            "overshoot must stay within the pool's in-flight decisions at v={v}, got {}",
             records.len()
         );
         for r in &records {

@@ -26,22 +26,32 @@ pub(crate) struct StartParts<'a, S> {
 }
 
 pub(crate) enum StartAccess<'a, 'b, S> {
+    Exclusive(StartParts<'a, S>),
+    #[allow(dead_code)]
     Shared(&'b std::sync::Mutex<StartParts<'a, S>>),
 }
 
 impl<S> StartAccess<'_, '_, S> {
     fn observe(&mut self, state: &S) {
-        let StartAccess::Shared(shared) = self;
-        let mut parts = shared.lock().expect("start access poisoned");
-        let StartParts { dist, rng } = &mut *parts;
-        dist.observe(state, &mut **rng);
+        match self {
+            StartAccess::Exclusive(parts) => parts.dist.observe(state, &mut *parts.rng),
+            StartAccess::Shared(shared) => {
+                let mut parts = shared.lock().expect("start access poisoned");
+                let StartParts { dist, rng } = &mut *parts;
+                dist.observe(state, &mut **rng);
+            }
+        }
     }
 
     fn choose(&mut self) -> Start<S> {
-        let StartAccess::Shared(shared) = self;
-        let mut parts = shared.lock().expect("start access poisoned");
-        let StartParts { dist, rng } = &mut *parts;
-        dist.choose(&mut **rng)
+        match self {
+            StartAccess::Exclusive(parts) => parts.dist.choose(&mut *parts.rng),
+            StartAccess::Shared(shared) => {
+                let mut parts = shared.lock().expect("start access poisoned");
+                let StartParts { dist, rng } = &mut *parts;
+                dist.choose(&mut **rng)
+            }
+        }
     }
 }
 
@@ -172,7 +182,11 @@ where
                 .batch_size
                 .unwrap_or_else(|| (params.n_games / 2).max(1)),
             sweep_cursor: 0,
-            n_workers: params.n_threads.unwrap_or(1).max(1),
+            n_workers: params
+                .n_threads
+                .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
+                .unwrap_or(1)
+                .max(1),
         }
     }
 
@@ -301,7 +315,7 @@ where
                     })
                 })
                 .collect();
-            let start_parts = std::sync::Mutex::new(StartParts {
+            let mut start = StartAccess::Exclusive(StartParts {
                 dist: &mut *self.start_dist,
                 rng: &mut self.buffer_rng,
             });
@@ -396,9 +410,13 @@ where
                         perspectives.len(),
                         "finish must return one evaluation per perspective"
                     );
+                    // The completion computes effects only: records, stats, and the
+                    // buffered-step delta ride the message; every shared-state effect
+                    // (reservoir draws, respawns, floor) is applied by the scheduler in
+                    // message order — the determinism contract at one worker.
+                    let before = buffered_learn_steps(slot, learn_mask);
                     let mut records: Vec<L::Record> = Vec::new();
                     let mut tstats = CollectStats::default();
-                    let mut start = StartAccess::Shared(&start_parts);
                     let finished = process_game_tick(
                         game,
                         encoder,
@@ -410,32 +428,27 @@ where
                         results,
                         &perspectives,
                         slot,
-                        &mut start,
                         &mut records,
                         &mut tstats,
                     );
-                    let pending_tail = match finished {
-                        Some(true) => {
-                            flush_finished_game(
-                                &HashMap::new(),
-                                game,
-                                policy,
-                                learner,
-                                encoder,
-                                slot,
-                                &mut start,
-                                &mut records,
-                                &mut tstats,
-                            );
-                            false
-                        }
-                        Some(false) => true,
-                        None => false,
-                    };
+                    if finished == Some(true) {
+                        flush_records_game(
+                            &HashMap::new(),
+                            game,
+                            learner,
+                            encoder,
+                            slot,
+                            &mut records,
+                            &mut tstats,
+                        );
+                    }
+                    let steps_delta =
+                        buffered_learn_steps(slot, learn_mask) as isize - before as isize;
                     TaskOut::Completed {
                         records,
                         stats: tstats,
-                        pending_tail,
+                        steps_delta,
+                        finished,
                     }
                 }));
                 let out = match run {
@@ -455,22 +468,15 @@ where
             let mut queues: Vec<RequestQueue> =
                 (0..n_queues).map(|_| RequestQueue::default()).collect();
             let mut in_flight = 0usize;
-            let fragment_backlog = |slots: &[std::sync::Mutex<SlotCtx<'_, G, P>>]| {
-                slots
-                    .iter()
-                    .map(|m| {
-                        let slot = m.lock().expect("slot lock");
-                        slot.traj
-                            .iter()
-                            .enumerate()
-                            .filter(|&(si, _)| learn_mask[si])
-                            .map(|(_, steps)| steps.len())
-                            .sum::<usize>()
-                    })
-                    .sum::<usize>()
-            };
+            // The floor counts buffered learning steps through a scheduler-owned
+            // counter fed by message deltas: recounting live trajectories would race
+            // in-flight completions.
+            let mut backlog: isize = slots
+                .iter()
+                .map(|m| buffered_learn_steps(&m.lock().expect("slot lock"), learn_mask) as isize)
+                .sum();
             let mut cutting = if fragments {
-                out.len() + fragment_backlog(&slots)
+                out.len().saturating_add_signed(backlog)
             } else {
                 out.len()
             } >= n_records;
@@ -498,10 +504,6 @@ where
                     work.push(gi, work_item);
                 };
                 // Fire `take` rows from one queue and hand freed slots back to the pool.
-                // Fire `take` rows from one queue and settle the slots they freed:
-                // rounds respawn onto the pool, completed tail jobs flush. On a callback
-                // panic, pending episode-boundary tails resolve empty first —
-                // AwaitingTail never survives a collect.
                 macro_rules! fire_settled {
                     ($qi:expr, $take:expr) => {{
                         let fired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -527,75 +529,73 @@ where
                                 }
                             })
                         }));
-                        if let Err(payload) = fired {
-                            // Drain in-flight tasks first: a completion that truncated
-                            // its episode may not have reported yet, and its tail must
-                            // resolve empty like the parked ones.
-                            while in_flight > 0 {
-                                let msg = rx.recv().expect("scheduler channel closed");
-                                in_flight -= 1;
-                                if let TaskOut::Completed {
-                                    pending_tail: true, ..
-                                } = msg.out
-                                {
-                                    let mut guard = slots[msg.gi].lock().expect("slot lock");
+                        let freed = match fired {
+                            Ok(freed) => freed,
+                            Err(payload) => {
+                                // Drain in-flight completions before surfacing: an episode
+                                // that just finished must respawn, never strand over-horizon.
+                                while in_flight > 0 {
+                                    let msg = rx.recv().expect("scheduler channel closed");
+                                    in_flight -= 1;
+                                    if let TaskOut::Completed {
+                                        finished: Some(terminal),
+                                        ..
+                                    } = msg.out
+                                    {
+                                        let mut guard = slots[msg.gi].lock().expect("slot lock");
+                                        let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                                        if !terminal {
+                                            flush_records_game(
+                                                &HashMap::new(),
+                                                game,
+                                                learner,
+                                                encoder,
+                                                slot,
+                                                &mut out,
+                                                &mut stats,
+                                            );
+                                        }
+                                        respawn_game(game, policy, slot, &mut start);
+                                    }
+                                }
+                                // Parked tails resolve empty too: AwaitingTail never
+                                // survives a collect.
+                                for gi in 0..n_games {
+                                    if !matches!(
+                                        phases[gi],
+                                        SlotPhase::AwaitingTail {
+                                            fragment: false,
+                                            ..
+                                        }
+                                    ) {
+                                        continue;
+                                    }
+                                    phases[gi] = SlotPhase::Idle;
+                                    let mut guard = slots[gi].lock().expect("slot lock");
                                     let slot: &mut SlotCtx<'_, G, P> = &mut guard;
-                                    let mut start = StartAccess::Shared(&start_parts);
-                                    flush_finished_game(
+                                    flush_records_game(
                                         &HashMap::new(),
                                         game,
-                                        policy,
                                         learner,
                                         encoder,
                                         slot,
-                                        &mut start,
                                         &mut out,
                                         &mut stats,
                                     );
+                                    respawn_game(game, policy, slot, &mut start);
                                 }
+                                std::panic::resume_unwind(payload);
                             }
-                            for gi in 0..n_games {
-                                if !matches!(
-                                    phases[gi],
-                                    SlotPhase::AwaitingTail {
-                                        fragment: false,
-                                        ..
-                                    }
-                                ) {
-                                    continue;
-                                }
-                                phases[gi] = SlotPhase::Idle;
-                                let mut guard = slots[gi].lock().expect("slot lock");
-                                let slot: &mut SlotCtx<'_, G, P> = &mut guard;
-                                let mut start = StartAccess::Shared(&start_parts);
-                                flush_finished_game(
-                                    &HashMap::new(),
-                                    game,
-                                    policy,
-                                    learner,
-                                    encoder,
-                                    slot,
-                                    &mut start,
-                                    &mut out,
-                                    &mut stats,
-                                );
-                            }
-                            std::panic::resume_unwind(payload);
-                        }
-                        for gi in 0..n_games {
-                            if matches!(phases[gi], SlotPhase::Blocked { outstanding: 0, .. }) {
-                                let taken = std::mem::replace(&mut phases[gi], SlotPhase::Idle);
-                                let SlotPhase::Blocked {
+                        };
+                        for gi in freed {
+                            match std::mem::replace(&mut phases[gi], SlotPhase::Idle) {
+                                SlotPhase::Blocked {
                                     search,
                                     perspectives,
                                     rows,
                                     stride,
                                     ..
-                                } = taken
-                                else {
-                                    unreachable!()
-                                };
-                                spawn(
+                                } => spawn(
                                     gi,
                                     Work::Resume {
                                         search,
@@ -605,52 +605,46 @@ where
                                     },
                                     &mut phases,
                                     &mut in_flight,
-                                );
-                            } else if matches!(
-                                phases[gi],
-                                SlotPhase::AwaitingTail { outstanding: 0, .. }
-                            ) {
-                                let taken = std::mem::replace(&mut phases[gi], SlotPhase::Idle);
-                                let SlotPhase::AwaitingTail {
+                                ),
+                                SlotPhase::AwaitingTail {
                                     fragment,
                                     meta,
                                     rows,
                                     stride,
                                     ..
-                                } = taken
-                                else {
-                                    unreachable!()
-                                };
-                                {
+                                } => {
                                     let mut guard = slots[gi].lock().expect("slot lock");
                                     let slot: &mut SlotCtx<'_, G, P> = &mut guard;
                                     let tails = tails_from_rows(
                                         &meta, &rows, stride, game, learner, encoder, slot,
                                     );
+                                    backlog -= buffered_learn_steps(slot, learn_mask) as isize;
                                     if fragment {
                                         flush_fragment_slot(
                                             &tails, game, learner, encoder, learn_mask, slot,
                                             &mut out,
                                         );
                                     } else {
-                                        let mut start = StartAccess::Shared(&start_parts);
-                                        flush_finished_game(
-                                            &tails, game, policy, learner, encoder, slot,
-                                            &mut start, &mut out, &mut stats,
+                                        flush_records_game(
+                                            &tails, game, learner, encoder, slot, &mut out,
+                                            &mut stats,
                                         );
+                                        respawn_game(game, policy, slot, &mut start);
+                                    }
+                                    drop(guard);
+                                    let collected = if fragments {
+                                        out.len().saturating_add_signed(backlog)
+                                    } else {
+                                        out.len()
+                                    };
+                                    if collected >= n_records {
+                                        cutting = true;
+                                    }
+                                    if !cutting && matches!(phases[gi], SlotPhase::Idle) {
+                                        spawn(gi, Work::Begin, &mut phases, &mut in_flight);
                                     }
                                 }
-                                let collected = if fragments {
-                                    out.len() + fragment_backlog(&slots)
-                                } else {
-                                    out.len()
-                                };
-                                if collected >= n_records {
-                                    cutting = true;
-                                }
-                                if !cutting {
-                                    spawn(gi, Work::Begin, &mut phases, &mut in_flight);
-                                }
+                                _ => unreachable!("a freed slot must hold outstanding rows"),
                             }
                         }
                     }};
@@ -722,14 +716,14 @@ where
                             let mut queued_any = false;
                             for gi in 0..n_games {
                                 let mut guard = slots[gi].lock().expect("slot lock");
-                                if !guard.traj.iter().any(|steps| !steps.is_empty()) {
+                                let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                                if !slot.traj.iter().any(|steps| !steps.is_empty()) {
                                     continue;
                                 }
-                                let reqs = tail_requests(
-                                    game, policy, learner, encoder, sequential, &guard,
-                                );
+                                let reqs =
+                                    tail_requests(game, policy, learner, encoder, sequential, slot);
                                 if reqs.is_empty() {
-                                    let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                                    backlog -= buffered_learn_steps(slot, learn_mask) as isize;
                                     flush_fragment_slot(
                                         &HashMap::new(),
                                         game,
@@ -765,9 +759,7 @@ where
                             n,
                         } => {
                             match mode {
-                                InferMode::Shared => {
-                                    queues[0].push(players.clone(), obs, msg.gi, n)
-                                }
+                                InferMode::Shared => queues[0].push(players, obs, msg.gi, n),
                                 InferMode::PerPlayer => {
                                     let dim = obs.len() / n;
                                     for (pos, &p) in players.iter().enumerate() {
@@ -792,41 +784,57 @@ where
                         TaskOut::Completed {
                             records,
                             stats: tstats,
-                            pending_tail,
+                            steps_delta,
+                            finished,
                         } => {
                             let gi = msg.gi;
                             phases[gi] = SlotPhase::Idle;
                             out.extend(records);
                             stats = fold_stats(std::mem::take(&mut stats), tstats);
-                            if pending_tail {
-                                // Tail bootstraps are queue jobs: the queue is the only
-                                // inference pathway.
-                                let guard = slots[gi].lock().expect("slot lock");
-                                let reqs = tail_requests(
-                                    game, policy, learner, encoder, sequential, &guard,
-                                );
-                                drop(guard);
-                                if reqs.is_empty() {
-                                    let mut guard = slots[gi].lock().expect("slot lock");
-                                    let slot: &mut SlotCtx<'_, G, P> = &mut guard;
-                                    let mut start = StartAccess::Shared(&start_parts);
-                                    flush_finished_game(
-                                        &HashMap::new(),
-                                        game,
-                                        policy,
-                                        learner,
-                                        encoder,
-                                        slot,
-                                        &mut start,
-                                        &mut out,
-                                        &mut stats,
+                            backlog += steps_delta;
+                            let mut guard = slots[gi].lock().expect("slot lock");
+                            let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                            if finished != Some(true) {
+                                start.observe(&slot.ep.state);
+                            }
+                            let mut tail_reqs = None;
+                            match finished {
+                                None => {}
+                                Some(true) => respawn_game(game, policy, slot, &mut start),
+                                Some(false) => {
+                                    // Tail bootstraps are queue jobs: the queue is the
+                                    // only inference pathway.
+                                    let reqs = tail_requests(
+                                        game, policy, learner, encoder, sequential, slot,
                                     );
-                                } else {
-                                    enqueue_tails!(gi, reqs, false);
+                                    if reqs.is_empty() {
+                                        backlog -= buffered_learn_steps(slot, learn_mask) as isize;
+                                        flush_records_game(
+                                            &HashMap::new(),
+                                            game,
+                                            learner,
+                                            encoder,
+                                            slot,
+                                            &mut out,
+                                            &mut stats,
+                                        );
+                                        respawn_game(game, policy, slot, &mut start);
+                                    } else {
+                                        tail_reqs = Some(reqs);
+                                    }
                                 }
                             }
+                            drop(guard);
+                            if let Some(reqs) = tail_reqs {
+                                enqueue_tails!(gi, reqs, false);
+                            }
+                            // The floor counts only scheduler-ordered effects: records
+                            // still riding unprocessed messages surface as the documented
+                            // admitted-at-cut overshoot (bounded by in-flight decisions).
+                            // Counting them earlier would need racy reads and break the
+                            // n_threads=1 determinism contract.
                             let collected = if fragments {
-                                out.len() + fragment_backlog(&slots)
+                                out.len().saturating_add_signed(backlog)
                             } else {
                                 out.len()
                             };
@@ -1116,7 +1124,8 @@ enum TaskOut<SE, R> {
     Completed {
         records: Vec<R>,
         stats: CollectStats,
-        pending_tail: bool,
+        steps_delta: isize,
+        finished: Option<bool>,
     },
     Panicked(Box<dyn std::any::Any + Send>),
 }
@@ -1239,13 +1248,16 @@ impl RequestQueue {
     }
 }
 
+/// Returns the slots whose outstanding rows reached zero with this batch (each at most
+/// once, in routing order) so the caller settles only those.
 fn fire_batch<SE, F>(
     queue: &mut RequestQueue,
     take: usize,
     phases: &mut [SE],
     evaluator: &mut Evaluator<'_, F>,
     mut route: impl FnMut(&mut SE) -> (&mut usize, &mut Vec<f64>, &mut usize, usize),
-) where
+) -> Vec<usize>
+where
     F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
 {
     let (start, dim) = (queue.head, queue.dim);
@@ -1253,6 +1265,7 @@ fn fire_batch<SE, F>(
     let obs = queue.obs[start * dim..(start + take) * dim].to_vec();
     let rows = evaluator.forward(players, obs, take);
     let stride = rows.len() / take;
+    let mut freed = Vec::new();
     for (i, (&gi, &pos)) in queue.dest[start..start + take]
         .iter()
         .zip(&queue.pos[start..start + take])
@@ -1270,8 +1283,12 @@ fn fire_batch<SE, F>(
         }
         buf[pos * stride..(pos + 1) * stride].copy_from_slice(&rows[i * stride..(i + 1) * stride]);
         *outstanding -= 1;
+        if *outstanding == 0 {
+            freed.push(gi);
+        }
     }
     queue.advance(take);
+    freed
 }
 
 /// Roll back an aborted window: a failed collect (callback error, cancellation) leaves its
@@ -1317,7 +1334,6 @@ fn process_game_tick<G, P, L>(
     evals: Vec<(P::Evaluation, Vec<crate::learner::InteriorTarget>)>,
     perspectives: &[usize],
     slot: &mut SlotCtx<'_, G, P>,
-    start: &mut StartAccess<'_, '_, G::State>,
     out: &mut Vec<L::Record>,
     stats: &mut CollectStats,
 ) -> Option<bool>
@@ -1421,9 +1437,6 @@ where
             step.terminal |= terminal;
         }
     }
-    if !terminal {
-        start.observe(&slot.ep.state);
-    }
     if terminal || truncated {
         Some(terminal)
     } else {
@@ -1433,14 +1446,14 @@ where
 
 /// Emit one finished game's episode records and respawn it.
 #[allow(clippy::too_many_arguments)]
-fn flush_finished_game<G, P, L>(
+/// The records half of an episode flush: emit every perspective's records and the
+/// episode summary. Pure with respect to shared engine state — safe on a worker.
+fn flush_records_game<G, P, L>(
     tails: &HashMap<usize, Vec<f64>>,
     game: &G,
-    policy: &P,
     learner: &L,
     encoder: &dyn StateEncoder<State = G::State>,
     slot: &mut SlotCtx<'_, G, P>,
-    start: &mut StartAccess<'_, '_, G::State>,
     out: &mut Vec<L::Record>,
     stats: &mut CollectStats,
 ) where
@@ -1465,6 +1478,20 @@ fn flush_finished_game<G, P, L>(
         length: *slot.tick,
         seeded: *slot.seeded,
     });
+}
+
+/// The respawn half: reservoir draw and reset. Scheduler-only — the start
+/// distribution's stream is engine state and its draw order is result-bearing.
+fn respawn_game<G, P>(
+    game: &G,
+    policy: &P,
+    slot: &mut SlotCtx<'_, G, P>,
+    start: &mut StartAccess<'_, '_, G::State>,
+) where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+{
     match start.choose() {
         Start::Restore(state) => {
             Episode::assert_decision_state(game, &state);
@@ -1478,6 +1505,19 @@ fn flush_finished_game<G, P, L>(
     }
     *slot.tick = 0;
     *slot.policy_state = policy.begin_episode(&mut slot.ep.rng);
+}
+
+/// Buffered learning-player steps in one slot — the fragment floor's unit.
+fn buffered_learn_steps<G: Game, P: Policy>(
+    slot: &SlotCtx<'_, G, P>,
+    learn_mask: &[bool],
+) -> usize {
+    slot.traj
+        .iter()
+        .enumerate()
+        .filter(|&(si, _)| learn_mask[si])
+        .map(|(_, steps)| steps.len())
+        .sum()
 }
 
 /// One `(player, obs)` tail-bootstrap request per learning perspective; empty when the
