@@ -328,12 +328,7 @@ where
         if fragments {
             discard_fragments(&mut self.traj);
         }
-        // Threshold scheduler: per-slot decision phases, one queue, fire at batch_size or
-        // on drain; games progress unevenly (the documented scheduler contract). Round
-        // bodies fan across the engine's thread pool at n_threads > 1 with slot-order
-        // merges, so results are schedule-invariant; episode tails and the fragment flush
-        // ride the same evaluator directly for now (padding and cache shared) and become
-        // queue jobs when the flush unifies.
+        // Fire at batch_size or on drain; fanned rounds merge in slot order.
         {
             enum Phase<SE> {
                 Idle,
@@ -369,8 +364,7 @@ where
                     cutting = true;
                 }
 
-                // Phase 1: admission + absorb + round for every runnable slot. Fanned when a
-                // pool exists; per-slot outputs land in slots, merged in rotation order below.
+                // Phase 1: admission + absorb + round for every runnable slot.
                 let game = &self.game;
                 let encoder = &*self.encoder;
                 let reward = &*self.reward;
@@ -470,8 +464,7 @@ where
                         .collect()
                 };
 
-                // Phase 2: merge emissions into the queue in rotation order; run completions
-                // (finish + select + advance + flush) sequentially in the same order.
+                // Phase 2: merge emissions and run completions in rotation order.
                 let mut progressed = false;
                 for k in 0..n_games {
                     let gi = (base_cursor + k) % n_games;
@@ -915,8 +908,7 @@ where
         put_u32(&mut out, num_agents as u32);
         put_u64(&mut out, self.search_rng.state());
         put_u64(&mut out, self.buffer_rng.state());
-        // The sweep cursor is result-bearing: it sets rotation start, hence window
-        // composition; restore-continuation identity needs it.
+        // Result-bearing: restores must resume the rotation, not restart it.
         put_u64(&mut out, self.sweep_cursor as u64);
         put_u32(&mut out, self.group_rngs.len() as u32);
         for rng in &self.group_rngs {
