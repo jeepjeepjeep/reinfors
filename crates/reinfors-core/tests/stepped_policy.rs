@@ -380,3 +380,22 @@ fn finish_cardinality_is_checked_per_search() {
         &mut e,
     );
 }
+
+#[test]
+#[should_panic(expected = "batch_size must be >= 1")]
+fn zero_batch_size_is_rejected_at_construction() {
+    use reinfors_core::rollout::engine::{Engine, EngineParams};
+    let _ = Engine::new(
+        RR,
+        Box::new(Enc),
+        Box::new(Zero),
+        PpoActor::new(),
+        reinfors_core::Ppo::new(1.0, 0.95),
+        EngineParams {
+            n_games: 2,
+            seed: 0,
+            batch_size: Some(0),
+            ..Default::default()
+        },
+    );
+}

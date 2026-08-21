@@ -159,10 +159,12 @@ the moment `batch_size` rows are queued (default `max(1, n_games/2)`) — or ear
 no search can progress without results — so tree work overlaps inference. Raise
 `batch_size` toward your accelerator's sweet spot for larger, fewer calls at the cost of
 some latency; `telemetry["infer_rows"] / telemetry["infer_calls"]` reports the realized
-mean. `n_threads` sets the worker count. Both are tuning knobs excluded from
-`config_fingerprint()`. Collection is exactly reproducible at `n_threads=1` with a
-deterministic callback; at `n_threads>1`, task completion order varies between runs, so
-the returned window's composition may differ — a valid collection either way.
+mean. `n_threads` sets the worker count. Both are part of the resolved configuration and
+`config_fingerprint()` — changing them changes which games advance before the floor and
+therefore the returned window's composition — but they are excluded from the snapshot
+compatibility fingerprint, so checkpoints restore across different values. Collection is
+exactly reproducible at `n_threads=1` with a deterministic callback; at `n_threads>1`,
+task completion order varies between runs — a valid collection either way.
 
 ## Overlapping search and inference (`n_groups`)
 

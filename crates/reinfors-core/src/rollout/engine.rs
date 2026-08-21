@@ -131,6 +131,10 @@ where
             assert!(pad >= 1, "pad_rows_to must be >= 1");
         }
         assert!(
+            params.batch_size.is_none_or(|b| b >= 1),
+            "batch_size must be >= 1"
+        );
+        assert!(
             matches!(params.n_groups, 1 | 2),
             "n_groups must be 1 or 2 (got {})",
             params.n_groups
@@ -443,7 +447,12 @@ where
             let mut q_obs: Vec<f32> = Vec::new();
             let mut q_dest: Vec<usize> = Vec::new();
             let mut in_flight = 0usize;
-            let mut cutting = out.len() >= n_records && !fragments;
+            let mut cutting = if fragments {
+                fragment_potential(out.len(), &self.traj, &self.learn_mask)
+            } else {
+                out.len()
+            } >= n_records;
+            let admitted = !cutting;
 
             self.thread_pool.in_place_scope(|s| {
                 let spawn = |gi: usize,
@@ -692,7 +701,10 @@ where
                     }
                 }
             });
-            self.sweep_cursor = (base_cursor + 1) % n_games.max(1);
+            // A no-op collect (floor already met) must not mutate engine state.
+            if admitted {
+                self.sweep_cursor = (base_cursor + 1) % n_games.max(1);
+            }
         }
         if fragments {
             flush_fragments_parts(

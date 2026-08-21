@@ -893,6 +893,8 @@ impl PyEngine {
                 "infer_cache": infer_cache,
                 "learn_players": learn_players,
                 "pad_rows_to": pad_rows_to,
+                "batch_size": (batch_size > 0).then_some(batch_size),
+                "n_threads": (n_threads > 0).then_some(n_threads),
             },
         });
         let engine_params = EngineParams {
@@ -934,10 +936,14 @@ impl PyEngine {
         });
         let snapshot_fp = {
             let mut stripped = config.clone();
-            stripped
-                .as_object_mut()
-                .expect("config is an object")
-                .remove("reinfors_version");
+            let obj = stripped.as_object_mut().expect("config is an object");
+            obj.remove("reinfors_version");
+            // Scheduler knobs are configuration but not composition: snapshots restore
+            // across different batch_size/n_threads settings.
+            if let Some(engine) = obj.get_mut("engine").and_then(|e| e.as_object_mut()) {
+                engine.remove("batch_size");
+                engine.remove("n_threads");
+            }
             fingerprint_hex(&canonical_config_bytes(&stripped))
         };
         Ok(PyEngine {

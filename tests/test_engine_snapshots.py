@@ -220,3 +220,32 @@ def test_engine_envelope_booleans_are_strict() -> None:
     blob[4 + 1 + 4 + 64 + 8] = 2  # policy_version presence byte
     with pytest.raises(ValueError, match="not a bool"):
         rf.EngineSnapshot.from_bytes(bytes(blob))
+
+
+def test_zero_floor_collect_leaves_the_snapshot_unchanged() -> None:
+    engine, infer = _mk("az")
+    before = engine.snapshot().to_bytes()
+    batch = engine.collect(0, infer)
+    assert len(batch.obs) == 0
+    assert engine.snapshot().to_bytes() == before
+
+
+def test_snapshots_restore_across_scheduler_knobs() -> None:
+    # batch_size/n_threads are configuration, not composition: a snapshot taken under one
+    # setting restores under another and the collection continues validly.
+    a, infer = _mk("az")
+    a.collect(8, infer)
+    snap = a.snapshot()
+    b = rf.Engine(
+        rf.games.Chess(max_ticks=50, encoder=rf.encoders.OpenSpielChess()),
+        None,
+        rf.policies.AlphaZero(num_simulations=6),
+        rf.learners.AlphaZero(gamma=1.0),
+        n_games=2,
+        seed=5,
+        infer_cache=4096,
+        batch_size=7,
+        n_threads=2,
+    )
+    b.restore(snap)
+    assert b.collect(8, infer).obs.shape[0] >= 8

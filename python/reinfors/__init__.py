@@ -123,6 +123,8 @@ def engine_from_config(config: dict[str, Any]) -> Engine:
     g_name, g_kw = _split(config["game"])
     g_kw = _coerce_handles(g_kw)
     engine_kw = dict(config.get("engine", {}))
+    # Null engine knobs canonicalize a default; strip them so kwargs stay typed.
+    engine_kw = {k: v for k, v in engine_kw.items() if v is not None}
     # start_buffer renders as null (off) or a {capacity, p_fresh} block (on) — unpack it back
     # into the flat constructor kwargs (a plain bool is also accepted, for hand-written configs).
     if "start_buffer" in engine_kw and not isinstance(engine_kw["start_buffer"], bool):
