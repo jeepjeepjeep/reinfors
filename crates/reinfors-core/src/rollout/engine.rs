@@ -737,6 +737,11 @@ where
                                 }
                             }
                             drop(guard);
+                            // The floor counts only scheduler-ordered effects: records
+                            // still riding unprocessed messages surface as the documented
+                            // admitted-at-cut overshoot (bounded by in-flight decisions).
+                            // Counting them earlier would need racy reads and break the
+                            // n_threads=1 determinism contract.
                             let collected = if fragments {
                                 out.len().saturating_add_signed(backlog)
                             } else {
