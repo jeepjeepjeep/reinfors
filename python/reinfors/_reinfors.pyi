@@ -472,12 +472,6 @@ class Engine:
         # Restrict training-record emission to these players (frozen opponents keep acting but
         # leave no records). Default: all players learn; records carry their player either way.
         learn_players: list[int] | None = ...,
-        # Grouped collect (1 = off): 2 overlaps tree work with inference via two fixed game
-        # groups on worker threads. Policy/learner-agnostic; one shared callback required.
-        # Run-to-run nondeterministic while shared state (cache/start buffer/weight
-        # refreshes) is live; exact otherwise. Reproduce with n_groups=1. Fingerprinted.
-        # Guidance: docs/guides/training.md#overlapping-search-and-inference-n_groups.
-        n_groups: int = ...,
         # Fix shared-callback call shapes at exactly N rows (0 = off): short calls are
         # zero-padded (outputs for pad rows discarded), oversized calls split into N-row
         # chunks. For compiled/graph-captured callbacks. Fingerprinted.
