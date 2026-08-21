@@ -504,14 +504,12 @@ where
                                 perspectives.len(),
                                 "finish must return one evaluation per perspective"
                             );
-                            let meta: Vec<(usize, usize)> =
-                                perspectives.iter().map(|&si| (gi, si)).collect();
                             let finished = {
                                 let mut start = StartAccess::Exclusive(StartParts {
                                     dist: &mut *self.start_dist,
                                     rng: &mut self.buffer_rng,
                                 });
-                                process_tick(
+                                process_game_tick(
                                     &self.game,
                                     &*self.encoder,
                                     &*self.reward,
@@ -519,10 +517,10 @@ where
                                     &self.learner,
                                     &self.learn_mask,
                                     self.sequential,
-                                    gi..gi + 1,
+                                    gi,
                                     results,
-                                    &meta,
-                                    &mut self.episodes,
+                                    &perspectives,
+                                    &mut self.episodes[gi],
                                     &mut self.traj,
                                     &mut self.ticks,
                                     &mut self.policy_states,
@@ -532,7 +530,44 @@ where
                                     &mut stats,
                                 )
                             };
-                            self.flush_finished(&finished, &mut out, &mut stats, &mut evaluator);
+                            if let Some(terminal) = finished {
+                                let tails = if terminal {
+                                    HashMap::new()
+                                } else {
+                                    tail_values_game(
+                                        gi,
+                                        &self.game,
+                                        &self.policy,
+                                        &self.learner,
+                                        &*self.encoder,
+                                        self.sequential,
+                                        &mut self.episodes[gi],
+                                        &self.traj,
+                                        &mut evaluator,
+                                    )
+                                };
+                                let mut start = StartAccess::Exclusive(StartParts {
+                                    dist: &mut *self.start_dist,
+                                    rng: &mut self.buffer_rng,
+                                });
+                                flush_finished_game(
+                                    gi,
+                                    &tails,
+                                    &self.game,
+                                    &self.policy,
+                                    &self.learner,
+                                    &*self.encoder,
+                                    &mut self.episodes[gi],
+                                    &mut self.traj,
+                                    &mut self.ticks,
+                                    &mut self.policy_states,
+                                    &mut self.episode_returns,
+                                    &mut self.seeded,
+                                    &mut start,
+                                    &mut out,
+                                    &mut stats,
+                                );
+                            }
                             progressed = true;
                         }
                     }
@@ -835,60 +870,6 @@ where
         }
         (out, stats)
     }
-
-    fn flush_finished<F>(
-        &mut self,
-        finished: &[(usize, bool)],
-        out: &mut Vec<L::Record>,
-        stats: &mut CollectStats,
-        evaluator: &mut Evaluator<'_, F>,
-    ) where
-        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
-    {
-        let tails = self.tail_values(finished, evaluator);
-        let mut start = StartAccess::Exclusive(StartParts {
-            dist: &mut *self.start_dist,
-            rng: &mut self.buffer_rng,
-        });
-        flush_finished_parts(
-            finished,
-            &tails,
-            &self.game,
-            &self.policy,
-            &self.learner,
-            &*self.encoder,
-            &mut self.episodes,
-            &mut self.traj,
-            &mut self.ticks,
-            &mut self.policy_states,
-            &mut self.episode_returns,
-            &mut self.seeded,
-            &mut start,
-            out,
-            stats,
-        );
-    }
-
-    fn tail_values<F>(
-        &mut self,
-        finished: &[(usize, bool)],
-        evaluator: &mut Evaluator<'_, F>,
-    ) -> HashMap<(usize, usize), Vec<f64>>
-    where
-        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
-    {
-        tail_values_parts(
-            finished,
-            &self.game,
-            &self.policy,
-            &self.learner,
-            &*self.encoder,
-            self.sequential,
-            &mut self.episodes,
-            &self.traj,
-            evaluator,
-        )
-    }
 }
 
 /// Snapshot and restore mutable collection state.
@@ -1117,205 +1098,6 @@ where
             }
         }
         Ok(())
-    }
-}
-
-/// One decision tick for `games`: record emission, action selection, stepping, and
-/// reward attribution. Field-split from `Engine` so group workers can run it.
-#[allow(clippy::too_many_arguments)]
-fn process_tick<G, P, L>(
-    game: &G,
-    encoder: &dyn StateEncoder<State = G::State>,
-    reward: &dyn Reward<Event = G::Event>,
-    policy: &P,
-    learner: &L,
-    learn_mask: &[bool],
-    sequential: bool,
-    games: std::ops::Range<usize>,
-    evals: Vec<(P::Evaluation, Vec<crate::learner::InteriorTarget>)>,
-    meta: &[(usize, usize)],
-    episodes: &mut [Episode<G>],
-    traj: &mut [Vec<Vec<Step<P::Evaluation>>>],
-    ticks: &mut [usize],
-    policy_states: &mut [P::PolicyState],
-    episode_returns: &mut [Vec<f64>],
-    start: &mut StartAccess<'_, '_, G::State>,
-    out: &mut Vec<L::Record>,
-    stats: &mut CollectStats,
-) -> Vec<(usize, bool)>
-where
-    G: Game + Sync,
-    G::State: Send,
-    P: Policy,
-    L: Learner<P::Evaluation>,
-{
-    let num_agents = game.num_agents();
-    assert_eq!(
-        evals.len(),
-        meta.len(),
-        "policy returned {} evaluations for {} requests — one per request, in order",
-        evals.len(),
-        meta.len()
-    );
-    let mut acted: Vec<Vec<Option<usize>>> = vec![vec![None; num_agents]; episodes.len()];
-    for ((eval, targets), &(gi, si)) in evals.into_iter().zip(meta.iter()) {
-        stats.decisions += 1;
-        policy.fold_telemetry(&eval, stats);
-        if !learn_mask[si] {
-            let rel = policy.select(&eval, &mut policy_states[gi], &mut episodes[gi].rng);
-            acted[gi][si] = Some(rel);
-            continue;
-        }
-        out.extend(learner.eval_records(&eval, targets, encoder, si, &mut episodes[gi].rng));
-        let rel = policy.select(&eval, &mut policy_states[gi], &mut episodes[gi].rng);
-        acted[gi][si] = Some(rel);
-        traj[gi][si].push(Step {
-            obs: episodes[gi].observe(encoder, si),
-            evaluation: eval,
-            action: rel,
-            reward: 0.0,
-            next_obs: Vec::new(),
-            next_legal: Vec::new(),
-            terminal: false,
-        });
-    }
-
-    // MaxN consumers require value supervision for non-mover perspectives too.
-    if policy.evaluates_all_perspectives(sequential, num_agents) {
-        let action_count = game.action_count();
-        for (gi, agents) in acted.iter().enumerate() {
-            if agents.iter().all(|s| s.is_none()) {
-                continue;
-            }
-            for (si, slot) in agents.iter().enumerate() {
-                if slot.is_none() && learn_mask[si] {
-                    if let Some(evaluation) = learner.value_only_evaluation(action_count) {
-                        traj[gi][si].push(Step {
-                            obs: episodes[gi].observe(encoder, si),
-                            evaluation,
-                            action: 0,
-                            reward: 0.0,
-                            next_obs: Vec::new(),
-                            next_legal: Vec::new(),
-                            terminal: false,
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    let horizon = game.truncation_horizon();
-    let mut finished: Vec<(usize, bool)> = Vec::new();
-    for gi in games.clone() {
-        let agents = std::mem::take(&mut acted[gi]);
-        let joint: Vec<usize> = agents.iter().map(|a| a.unwrap_or(0)).collect();
-        let (mut trace, terminal) = episodes[gi].advance(game, &joint);
-        ticks[gi] += 1;
-        let truncated = horizon.is_some_and(|h| ticks[gi] >= h) && !terminal;
-        if truncated {
-            game.mark_truncation(&episodes[gi].state, &mut trace);
-            assert!(
-                trace.iter().all(|(agent, _)| *agent < num_agents),
-                "mark_truncation pushed an event for an out-of-range agent"
-            );
-        }
-        let mut tick_rewards = vec![0.0; num_agents];
-        for (agent, e) in &trace {
-            tick_rewards[*agent] += reward.step_reward(e, *agent);
-        }
-        let needs_next_obs = learner.needs_next_obs();
-        for (si, action) in agents.iter().enumerate() {
-            let reward = tick_rewards[si];
-            episode_returns[gi][si] += reward;
-            if action.is_some() {
-                let (next_obs, next_legal) = if needs_next_obs {
-                    (
-                        episodes[gi].observe(encoder, si),
-                        game.legal_actions(&episodes[gi].state, si),
-                    )
-                } else {
-                    (Vec::new(), Vec::new())
-                };
-                if let Some(step) = traj[gi][si].last_mut() {
-                    step.reward = reward;
-                    step.next_obs = next_obs;
-                    step.next_legal = next_legal;
-                    step.terminal = terminal;
-                }
-            } else if let Some(step) = traj[gi][si].last_mut() {
-                // Sequential terminal events may reward an agent that did not act this tick.
-                step.reward += reward;
-                step.terminal |= terminal;
-            }
-        }
-        if !terminal {
-            start.observe(&episodes[gi].state);
-        }
-        if terminal || truncated {
-            finished.push((gi, terminal));
-        }
-    }
-
-    finished
-}
-
-/// Emit episode records and respawn finished games. Field-split like [`process_tick`].
-#[allow(clippy::too_many_arguments)]
-fn flush_finished_parts<G, P, L>(
-    finished: &[(usize, bool)],
-    tails: &HashMap<(usize, usize), Vec<f64>>,
-    game: &G,
-    policy: &P,
-    learner: &L,
-    encoder: &dyn StateEncoder<State = G::State>,
-    episodes: &mut [Episode<G>],
-    traj: &mut [Vec<Vec<Step<P::Evaluation>>>],
-    ticks: &mut [usize],
-    policy_states: &mut [P::PolicyState],
-    episode_returns: &mut [Vec<f64>],
-    seeded: &mut [bool],
-    start: &mut StartAccess<'_, '_, G::State>,
-    out: &mut Vec<L::Record>,
-    stats: &mut CollectStats,
-) where
-    G: Game + Sync,
-    G::State: Send,
-    P: Policy,
-    L: Learner<P::Evaluation>,
-{
-    let num_agents = game.num_agents();
-
-    for &(gi, _) in finished {
-        let mut ep_reward = vec![0.0; num_agents];
-        for (si, ep_slot) in ep_reward.iter_mut().enumerate() {
-            let steps = std::mem::take(&mut traj[gi][si]);
-            *ep_slot = std::mem::take(&mut episode_returns[gi][si]);
-            if steps.is_empty() {
-                continue;
-            }
-            let tail = tails.get(&(gi, si)).cloned().unwrap_or_default();
-            out.extend(learner.episode_records(&steps, &tail, encoder, si, &mut episodes[gi].rng));
-        }
-        stats.episodes.push(EpisodeSummary {
-            reward: ep_reward,
-            length: ticks[gi],
-            seeded: seeded[gi],
-        });
-        let choice = start.choose();
-        match choice {
-            Start::Restore(state) => {
-                Episode::assert_decision_state(game, &state);
-                episodes[gi].state = state;
-                seeded[gi] = true;
-            }
-            Start::Fresh => {
-                episodes[gi].reset(game);
-                seeded[gi] = false;
-            }
-        }
-        ticks[gi] = 0;
-        policy_states[gi] = policy.begin_episode(&mut episodes[gi].rng);
     }
 }
 
@@ -1558,75 +1340,6 @@ fn flush_fragments_parts<G, P, L, F>(
             out.extend(learner.episode_records(&steps, &tail, encoder, si, &mut episodes[gi].rng));
         }
     }
-}
-
-/// Truncation-tail bootstrapping, field-split like [`process_tick`].
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::needless_range_loop)]
-fn tail_values_parts<G, P, L, F>(
-    finished: &[(usize, bool)],
-    game: &G,
-    policy: &P,
-    learner: &L,
-    encoder: &dyn StateEncoder<State = G::State>,
-    sequential: bool,
-    episodes: &mut [Episode<G>],
-    traj: &[Vec<Vec<Step<P::Evaluation>>>],
-    evaluator: &mut Evaluator<'_, F>,
-) -> HashMap<(usize, usize), Vec<f64>>
-where
-    G: Game + Sync,
-    G::State: Send,
-    P: Policy,
-    L: Learner<P::Evaluation>,
-    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
-{
-    let mut tails: HashMap<(usize, usize), Vec<f64>> = HashMap::new();
-    if !learner.uses_episode_tail() {
-        return tails;
-    }
-    let a = game.action_count();
-    let num_agents = game.num_agents();
-    let all_perspectives = (policy.evaluates_all_perspectives(sequential, num_agents)
-        && learner.value_only_evaluation(a).is_some())
-        || learner.tails_all_trajectories();
-    let mut obs_flat: Vec<f32> = Vec::new();
-    let mut meta: Vec<(usize, usize)> = Vec::new();
-    for &(gi, terminal) in finished {
-        if terminal {
-            continue;
-        }
-        for si in 0..num_agents {
-            if (all_perspectives || episodes[gi].agent_active(game, si)) && !traj[gi][si].is_empty()
-            {
-                obs_flat.extend(episodes[gi].observe(encoder, si));
-                meta.push((gi, si));
-            }
-        }
-    }
-    if !meta.is_empty() {
-        let players: Vec<usize> = meta.iter().map(|&(_, si)| si).collect();
-        let q = evaluator.forward(&players, obs_flat, meta.len());
-        let stride = q.len() / meta.len();
-        // Cancellation yields zero-width rows; empty tails degrade to the terminal path and
-        // the aborted collect's records are discarded by the caller.
-        if stride == 0 {
-            return tails;
-        }
-        for (i, &(gi, si)) in meta.iter().enumerate() {
-            let row = &q[i * stride..(i + 1) * stride];
-            let state = &episodes[gi].state;
-            // Sequential non-mover rows still bootstrap over the mover's available actions;
-            // using `si` here would turn a valid sparse-action tail into an empty one.
-            let legal = match game.actor(state) {
-                Actor::Agent(mover) => game.legal_actions(state, mover),
-                Actor::Simultaneous => game.legal_actions(state, si),
-                Actor::Chance => unreachable!("chance actors are not searched"),
-            };
-            tails.insert((gi, si), learner.tail_from_row(row, a, &legal, encoder, si));
-        }
-    }
-    tails
 }
 
 fn fold_stats(mut a: CollectStats, b: CollectStats) -> CollectStats {
@@ -1964,5 +1677,413 @@ mod tests {
         assert_eq!(slot.len(), 1);
         eng.restore_bytes(&Codec, &snap).unwrap();
         assert_eq!(eng.sharded_caches.as_ref().unwrap()[0].len(), 0);
+    }
+}
+
+/// One game's decision tick: record emission, action selection, stepping. Returns
+/// `Some(terminal)` when the episode ended (terminal or truncated) this tick.
+#[allow(clippy::too_many_arguments)]
+fn process_game_tick<G, P, L>(
+    game: &G,
+    encoder: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
+    policy: &P,
+    learner: &L,
+    learn_mask: &[bool],
+    sequential: bool,
+    gi: usize,
+    evals: Vec<(P::Evaluation, Vec<crate::learner::InteriorTarget>)>,
+    perspectives: &[usize],
+    ep: &mut Episode<G>,
+    traj: &mut [Vec<Vec<Step<P::Evaluation>>>],
+    ticks: &mut [usize],
+    policy_states: &mut [P::PolicyState],
+    episode_returns: &mut [Vec<f64>],
+    start: &mut StartAccess<'_, '_, G::State>,
+    out: &mut Vec<L::Record>,
+    stats: &mut CollectStats,
+) -> Option<bool>
+where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
+{
+    let num_agents = game.num_agents();
+    assert_eq!(
+        evals.len(),
+        perspectives.len(),
+        "policy returned {} evaluations for {} requests — one per request, in order",
+        evals.len(),
+        perspectives.len()
+    );
+    let mut acted: Vec<Option<usize>> = vec![None; num_agents];
+    for ((eval, targets), &si) in evals.into_iter().zip(perspectives.iter()) {
+        stats.decisions += 1;
+        policy.fold_telemetry(&eval, stats);
+        if !learn_mask[si] {
+            let rel = policy.select(&eval, &mut policy_states[gi], &mut ep.rng);
+            acted[si] = Some(rel);
+            continue;
+        }
+        out.extend(learner.eval_records(&eval, targets, encoder, si, &mut ep.rng));
+        let rel = policy.select(&eval, &mut policy_states[gi], &mut ep.rng);
+        acted[si] = Some(rel);
+        traj[gi][si].push(Step {
+            obs: ep.observe(encoder, si),
+            evaluation: eval,
+            action: rel,
+            reward: 0.0,
+            next_obs: Vec::new(),
+            next_legal: Vec::new(),
+            terminal: false,
+        });
+    }
+
+    // MaxN consumers require value supervision for non-mover perspectives too.
+    if policy.evaluates_all_perspectives(sequential, num_agents)
+        && acted.iter().any(|s| s.is_some())
+    {
+        let action_count = game.action_count();
+        for si in 0..num_agents {
+            if acted[si].is_none() && learn_mask[si] {
+                if let Some(evaluation) = learner.value_only_evaluation(action_count) {
+                    traj[gi][si].push(Step {
+                        obs: ep.observe(encoder, si),
+                        evaluation,
+                        action: 0,
+                        reward: 0.0,
+                        next_obs: Vec::new(),
+                        next_legal: Vec::new(),
+                        terminal: false,
+                    });
+                }
+            }
+        }
+    }
+
+    let horizon = game.truncation_horizon();
+    let joint: Vec<usize> = acted.iter().map(|a| a.unwrap_or(0)).collect();
+    let (mut trace, terminal) = ep.advance(game, &joint);
+    ticks[gi] += 1;
+    let truncated = horizon.is_some_and(|h| ticks[gi] >= h) && !terminal;
+    if truncated {
+        game.mark_truncation(&ep.state, &mut trace);
+        assert!(
+            trace.iter().all(|(agent, _)| *agent < num_agents),
+            "mark_truncation pushed an event for an out-of-range agent"
+        );
+    }
+    let mut tick_rewards = vec![0.0; num_agents];
+    for (agent, e) in &trace {
+        tick_rewards[*agent] += reward.step_reward(e, *agent);
+    }
+    let needs_next_obs = learner.needs_next_obs();
+    for (si, action) in acted.iter().enumerate() {
+        let reward = tick_rewards[si];
+        episode_returns[gi][si] += reward;
+        if action.is_some() {
+            let (next_obs, next_legal) = if needs_next_obs {
+                (ep.observe(encoder, si), game.legal_actions(&ep.state, si))
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            if let Some(step) = traj[gi][si].last_mut() {
+                step.reward = reward;
+                step.next_obs = next_obs;
+                step.next_legal = next_legal;
+                step.terminal = terminal;
+            }
+        } else if let Some(step) = traj[gi][si].last_mut() {
+            // Sequential terminal events may reward an agent that did not act this tick.
+            step.reward += reward;
+            step.terminal |= terminal;
+        }
+    }
+    if !terminal {
+        start.observe(&ep.state);
+    }
+    if terminal || truncated {
+        Some(terminal)
+    } else {
+        None
+    }
+}
+
+/// One decision tick for `games` (grouped path): per-game processing in game order.
+#[allow(clippy::too_many_arguments)]
+fn process_tick<G, P, L>(
+    game: &G,
+    encoder: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
+    policy: &P,
+    learner: &L,
+    learn_mask: &[bool],
+    sequential: bool,
+    games: std::ops::Range<usize>,
+    evals: Vec<(P::Evaluation, Vec<crate::learner::InteriorTarget>)>,
+    meta: &[(usize, usize)],
+    episodes: &mut [Episode<G>],
+    traj: &mut [Vec<Vec<Step<P::Evaluation>>>],
+    ticks: &mut [usize],
+    policy_states: &mut [P::PolicyState],
+    episode_returns: &mut [Vec<f64>],
+    start: &mut StartAccess<'_, '_, G::State>,
+    out: &mut Vec<L::Record>,
+    stats: &mut CollectStats,
+) -> Vec<(usize, bool)>
+where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
+{
+    assert_eq!(
+        evals.len(),
+        meta.len(),
+        "policy returned {} evaluations for {} requests — one per request, in order",
+        evals.len(),
+        meta.len()
+    );
+    let mut finished: Vec<(usize, bool)> = Vec::new();
+    let mut evals = evals.into_iter();
+    let mut idx = 0;
+    for gi in games {
+        let mut perspectives = Vec::new();
+        while idx < meta.len() && meta[idx].0 == gi {
+            perspectives.push(meta[idx].1);
+            idx += 1;
+        }
+        let game_evals: Vec<_> = evals.by_ref().take(perspectives.len()).collect();
+        if let Some(terminal) = process_game_tick(
+            game,
+            encoder,
+            reward,
+            policy,
+            learner,
+            learn_mask,
+            sequential,
+            gi,
+            game_evals,
+            &perspectives,
+            &mut episodes[gi],
+            traj,
+            ticks,
+            policy_states,
+            episode_returns,
+            start,
+            out,
+            stats,
+        ) {
+            finished.push((gi, terminal));
+        }
+    }
+    finished
+}
+
+/// One finished game's truncation-tail bootstraps, keyed by perspective.
+#[allow(clippy::too_many_arguments)]
+fn tail_values_game<G, P, L, F>(
+    gi: usize,
+    game: &G,
+    policy: &P,
+    learner: &L,
+    encoder: &dyn StateEncoder<State = G::State>,
+    sequential: bool,
+    ep: &mut Episode<G>,
+    traj: &[Vec<Vec<Step<P::Evaluation>>>],
+    evaluator: &mut Evaluator<'_, F>,
+) -> HashMap<usize, Vec<f64>>
+where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
+    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+{
+    let mut tails: HashMap<usize, Vec<f64>> = HashMap::new();
+    if !learner.uses_episode_tail() {
+        return tails;
+    }
+    let a = game.action_count();
+    let num_agents = game.num_agents();
+    let all_perspectives = (policy.evaluates_all_perspectives(sequential, num_agents)
+        && learner.value_only_evaluation(a).is_some())
+        || learner.tails_all_trajectories();
+    let mut obs_flat: Vec<f32> = Vec::new();
+    let mut meta: Vec<usize> = Vec::new();
+    for si in 0..num_agents {
+        if (all_perspectives || ep.agent_active(game, si)) && !traj[gi][si].is_empty() {
+            obs_flat.extend(ep.observe(encoder, si));
+            meta.push(si);
+        }
+    }
+    if meta.is_empty() {
+        return tails;
+    }
+    let q = evaluator.forward(&meta, obs_flat, meta.len());
+    let stride = q.len() / meta.len();
+    // Cancellation yields zero-width rows; empty tails degrade to the terminal path.
+    if stride == 0 {
+        return tails;
+    }
+    for (i, &si) in meta.iter().enumerate() {
+        let row = &q[i * stride..(i + 1) * stride];
+        let state = &ep.state;
+        // Sequential non-mover rows still bootstrap over the mover's available actions.
+        let legal = match game.actor(state) {
+            Actor::Agent(mover) => game.legal_actions(state, mover),
+            Actor::Simultaneous => game.legal_actions(state, si),
+            Actor::Chance => unreachable!("chance actors are not searched"),
+        };
+        tails.insert(si, learner.tail_from_row(row, a, &legal, encoder, si));
+    }
+    tails
+}
+
+/// Truncation-tail bootstrapping for `finished` (grouped path): per-game forwards.
+#[allow(clippy::too_many_arguments)]
+fn tail_values_parts<G, P, L, F>(
+    finished: &[(usize, bool)],
+    game: &G,
+    policy: &P,
+    learner: &L,
+    encoder: &dyn StateEncoder<State = G::State>,
+    sequential: bool,
+    episodes: &mut [Episode<G>],
+    traj: &[Vec<Vec<Step<P::Evaluation>>>],
+    evaluator: &mut Evaluator<'_, F>,
+) -> HashMap<(usize, usize), Vec<f64>>
+where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
+    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+{
+    let mut tails = HashMap::new();
+    for &(gi, terminal) in finished {
+        if terminal {
+            continue;
+        }
+        for (si, tail) in tail_values_game(
+            gi,
+            game,
+            policy,
+            learner,
+            encoder,
+            sequential,
+            &mut episodes[gi],
+            traj,
+            evaluator,
+        ) {
+            tails.insert((gi, si), tail);
+        }
+    }
+    tails
+}
+
+/// Emit one finished game's episode records and respawn it.
+#[allow(clippy::too_many_arguments)]
+fn flush_finished_game<G, P, L>(
+    gi: usize,
+    tails: &HashMap<usize, Vec<f64>>,
+    game: &G,
+    policy: &P,
+    learner: &L,
+    encoder: &dyn StateEncoder<State = G::State>,
+    ep: &mut Episode<G>,
+    traj: &mut [Vec<Vec<Step<P::Evaluation>>>],
+    ticks: &mut [usize],
+    policy_states: &mut [P::PolicyState],
+    episode_returns: &mut [Vec<f64>],
+    seeded: &mut [bool],
+    start: &mut StartAccess<'_, '_, G::State>,
+    out: &mut Vec<L::Record>,
+    stats: &mut CollectStats,
+) where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
+{
+    let num_agents = game.num_agents();
+    let mut ep_reward = vec![0.0; num_agents];
+    for (si, ep_slot) in ep_reward.iter_mut().enumerate() {
+        let steps = std::mem::take(&mut traj[gi][si]);
+        *ep_slot = std::mem::take(&mut episode_returns[gi][si]);
+        if steps.is_empty() {
+            continue;
+        }
+        let tail = tails.get(&si).cloned().unwrap_or_default();
+        out.extend(learner.episode_records(&steps, &tail, encoder, si, &mut ep.rng));
+    }
+    stats.episodes.push(EpisodeSummary {
+        reward: ep_reward,
+        length: ticks[gi],
+        seeded: seeded[gi],
+    });
+    match start.choose() {
+        Start::Restore(state) => {
+            Episode::assert_decision_state(game, &state);
+            ep.state = state;
+            seeded[gi] = true;
+        }
+        Start::Fresh => {
+            ep.reset(game);
+            seeded[gi] = false;
+        }
+    }
+    ticks[gi] = 0;
+    policy_states[gi] = policy.begin_episode(&mut ep.rng);
+}
+
+/// Emit records and respawn every game in `finished` (grouped path).
+#[allow(clippy::too_many_arguments)]
+fn flush_finished_parts<G, P, L>(
+    finished: &[(usize, bool)],
+    tails: &HashMap<(usize, usize), Vec<f64>>,
+    game: &G,
+    policy: &P,
+    learner: &L,
+    encoder: &dyn StateEncoder<State = G::State>,
+    episodes: &mut [Episode<G>],
+    traj: &mut [Vec<Vec<Step<P::Evaluation>>>],
+    ticks: &mut [usize],
+    policy_states: &mut [P::PolicyState],
+    episode_returns: &mut [Vec<f64>],
+    seeded: &mut [bool],
+    start: &mut StartAccess<'_, '_, G::State>,
+    out: &mut Vec<L::Record>,
+    stats: &mut CollectStats,
+) where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
+{
+    for &(gi, _) in finished {
+        let game_tails: HashMap<usize, Vec<f64>> = tails
+            .iter()
+            .filter(|((tg, _), _)| *tg == gi)
+            .map(|((_, si), v)| (*si, v.clone()))
+            .collect();
+        flush_finished_game(
+            gi,
+            &game_tails,
+            game,
+            policy,
+            learner,
+            encoder,
+            &mut episodes[gi],
+            traj,
+            ticks,
+            policy_states,
+            episode_returns,
+            seeded,
+            start,
+            out,
+            stats,
+        );
     }
 }
