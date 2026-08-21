@@ -876,6 +876,7 @@ dependencies = [
  "rs_poker",
  "serde",
  "serde_json",
+ "smallvec",
  "tiny-skia",
 ]
 
