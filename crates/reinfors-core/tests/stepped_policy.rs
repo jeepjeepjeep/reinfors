@@ -228,3 +228,51 @@ fn mcts_stepped_is_deterministic_per_seed() {
         a.values == b.values && a.visits == b.visits && a.legal == b.legal
     });
 }
+
+#[test]
+fn fanned_rounds_match_sequential_collection_exactly() {
+    use reinfors_core::policies::tree::mcts::{ActBy, Mcts, MctsConfig};
+    use reinfors_core::rollout::engine::{Engine, EngineParams};
+    use reinfors_core::{ChanceMode, Reward as _};
+    let _ = &Zero.step_reward(&(), 0);
+    let run = |n_threads: Option<usize>| {
+        let mut engine = Engine::new(
+            RR,
+            Box::new(Enc),
+            Box::new(Zero),
+            Mcts::new(
+                MctsConfig {
+                    num_simulations: 6,
+                    uct_c: 1.4,
+                    gamma: 1.0,
+                    max_depth: 16,
+                    temperature: 0.0,
+                    temperature_drop: 0,
+                    chance: ChanceMode::AlwaysResample,
+                },
+                ActBy::Visits,
+            ),
+            reinfors_core::TreeStrap::new(0.99, 0.3, 1.0, false),
+            EngineParams {
+                n_games: 4,
+                seed: 9,
+                n_groups: 1,
+                batch_size: Some(3),
+                n_threads,
+                ..Default::default()
+            },
+        );
+        let mut infer = |_obs: Vec<f32>, n: usize| vec![0.25; n * 3];
+        engine.collect(24, &mut infer)
+    };
+    let (a, _) = run(None);
+    let (b, _) = run(Some(4));
+    assert_eq!(a.len(), b.len(), "fan must not change collection size");
+    for (x, y) in a.iter().zip(&b) {
+        assert_eq!(x.0, y.0, "obs differ between fanned and sequential runs");
+        assert_eq!(
+            x.1, y.1,
+            "targets differ between fanned and sequential runs"
+        );
+    }
+}

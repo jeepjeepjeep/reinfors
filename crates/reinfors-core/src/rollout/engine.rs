@@ -110,6 +110,7 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     perms: crate::encoder::PermTable,
     batch_size: usize,
     sweep_cursor: usize,
+    thread_pool: Option<rayon::ThreadPool>,
 }
 
 impl<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> Engine<G, P, L>
@@ -213,6 +214,12 @@ where
                 .batch_size
                 .unwrap_or_else(|| (params.n_games / 2).max(1)),
             sweep_cursor: 0,
+            thread_pool: params.n_threads.filter(|&n| n > 1).map(|n| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(n)
+                    .build()
+                    .expect("engine thread pool")
+            }),
         }
     }
 
@@ -273,6 +280,7 @@ where
     pub fn collect<F>(&mut self, n_records: usize, mut infer: F) -> (Vec<L::Record>, CollectStats)
     where
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
+        P: Sync,
     {
         self.collect_routed(n_records, InferMode::Shared, move |_player, obs, n| {
             infer(obs, n)
@@ -288,6 +296,7 @@ where
     ) -> (Vec<L::Record>, CollectStats)
     where
         F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+        P: Sync,
     {
         assert_eq!(
             self.n_groups, 1,
@@ -319,10 +328,12 @@ where
         if fragments {
             discard_fragments(&mut self.traj);
         }
-        // Threshold scheduler: per-slot decision phases, one queue, fire at batch_size or on
-        // drain; games progress unevenly (the documented scheduler contract). Episode tails
-        // and the fragment flush ride the same evaluator directly for now — every call still
-        // shares its padding and cache — and become queue jobs when the flush unifies.
+        // Threshold scheduler: per-slot decision phases, one queue, fire at batch_size or
+        // on drain; games progress unevenly (the documented scheduler contract). Round
+        // bodies fan across the engine's thread pool at n_threads > 1 with slot-order
+        // merges, so results are schedule-invariant; episode tails and the fragment flush
+        // ride the same evaluator directly for now (padding and cache shared) and become
+        // queue jobs when the flush unifies.
         {
             enum Phase<SE> {
                 Idle,
@@ -334,6 +345,11 @@ where
                     stride: usize,
                 },
             }
+            enum Outcome {
+                None,
+                Emitted(Vec<usize>, Vec<f32>, usize),
+                Done,
+            }
             let n_games = self.episodes.len();
             let batch_size = self.batch_size;
             let base_cursor = self.sweep_cursor % n_games.max(1);
@@ -342,8 +358,6 @@ where
             let mut q_players: Vec<usize> = Vec::new();
             let mut q_obs: Vec<f32> = Vec::new();
             let mut q_dest: Vec<usize> = Vec::new();
-            let obs_dim = q_obs.len().max(0); // per-row dim derived at fire time
-            let _ = obs_dim;
             let mut cutting = false;
             loop {
                 let collected = if fragments {
@@ -354,49 +368,126 @@ where
                 if collected >= n_records {
                     cutting = true;
                 }
-                let mut progressed = false;
-                for k in 0..n_games {
-                    let gi = (base_cursor + k) % n_games;
-                    if matches!(phases[gi], Phase::Idle) && !cutting {
-                        let perspectives: Vec<usize> = (0..num_agents)
-                            .filter(|&si| self.episodes[gi].agent_active(&self.game, si))
-                            .collect();
-                        if !perspectives.is_empty() {
-                            let ep = &mut self.episodes[gi];
+
+                // Phase 1: admission + absorb + round for every runnable slot. Fanned when a
+                // pool exists; per-slot outputs land in slots, merged in rotation order below.
+                let game = &self.game;
+                let encoder = &*self.encoder;
+                let reward = &*self.reward;
+                let policy = &self.policy;
+                let perms = &self.perms;
+                let run_slot =
+                    |phase: &mut Phase<P::Search<G::State>>, ep: &mut Episode<G>| -> Outcome {
+                        if matches!(phase, Phase::Idle) {
+                            if cutting {
+                                return Outcome::None;
+                            }
+                            let perspectives: Vec<usize> = (0..num_agents)
+                                .filter(|&si| ep.agent_active(game, si))
+                                .collect();
+                            if perspectives.is_empty() {
+                                return Outcome::None;
+                            }
                             let ctx = crate::policy::SearchCtx {
-                                game: &self.game,
-                                enc: &*self.encoder,
-                                reward: &*self.reward,
+                                game,
+                                enc: encoder,
+                                reward,
                                 rng: &mut ep.rng,
-                                perms: &self.perms,
+                                perms,
                                 collect_interior,
                             };
-                            let search = self.policy.begin_search(ctx, &ep.state, &perspectives);
-                            phases[gi] = Phase::Deciding {
+                            let search = policy.begin_search(ctx, &ep.state, &perspectives);
+                            *phase = Phase::Deciding {
                                 search,
                                 perspectives,
                                 outstanding: 0,
                                 rows: Vec::new(),
                                 stride: 0,
                             };
+                        }
+                        let Phase::Deciding {
+                            search,
+                            outstanding,
+                            rows,
+                            stride,
+                            ..
+                        } = phase
+                        else {
+                            return Outcome::None;
+                        };
+                        if *outstanding != 0 {
+                            return Outcome::None;
+                        }
+                        if !rows.is_empty() {
+                            let view = crate::policy::RowsView::from_slice(rows, *stride);
+                            policy.absorb(search, view, &mut ep.rng);
+                            rows.clear();
+                        }
+                        let ctx = crate::policy::SearchCtx {
+                            game,
+                            enc: encoder,
+                            reward,
+                            rng: &mut ep.rng,
+                            perms,
+                            collect_interior,
+                        };
+                        let mut sink = crate::policy::RequestSink::default();
+                        let status = policy.round(ctx, search, &mut sink);
+                        if sink.is_empty() {
+                            if status == crate::policy::RoundStatus::Done {
+                                Outcome::Done
+                            } else {
+                                Outcome::None
+                            }
+                        } else {
+                            let n = sink.len();
+                            let (players, obs) = sink.into_parts();
+                            Outcome::Emitted(players, obs, n)
+                        }
+                    };
+                let mut outcomes: Vec<Outcome> = if let Some(pool) = self.thread_pool.as_ref() {
+                    pool.install(|| {
+                        use rayon::prelude::*;
+                        phases
+                            .par_iter_mut()
+                            .zip(self.episodes.par_iter_mut())
+                            .map(|(phase, ep)| run_slot(phase, ep))
+                            .collect()
+                    })
+                } else {
+                    phases
+                        .iter_mut()
+                        .zip(self.episodes.iter_mut())
+                        .map(|(phase, ep)| run_slot(phase, ep))
+                        .collect()
+                };
+
+                // Phase 2: merge emissions into the queue in rotation order; run completions
+                // (finish + select + advance + flush) sequentially in the same order.
+                let mut progressed = false;
+                for k in 0..n_games {
+                    let gi = (base_cursor + k) % n_games;
+                    match std::mem::replace(&mut outcomes[gi], Outcome::None) {
+                        Outcome::None => {}
+                        Outcome::Emitted(players, obs, n) => {
+                            q_players.extend(players);
+                            q_obs.extend(obs);
+                            q_dest.extend(std::iter::repeat_n(gi, n));
+                            if let Phase::Deciding { outstanding, .. } = &mut phases[gi] {
+                                *outstanding = n;
+                            }
                             progressed = true;
                         }
-                    }
-                    if let Phase::Deciding {
-                        search,
-                        perspectives: _,
-                        outstanding,
-                        rows,
-                        stride,
-                    } = &mut phases[gi]
-                    {
-                        if *outstanding == 0 {
-                            if !rows.is_empty() {
-                                let view = crate::policy::RowsView::from_slice(rows, *stride);
-                                self.policy.absorb(search, view, &mut self.episodes[gi].rng);
-                                rows.clear();
-                            }
-                            let before = q_players.len();
+                        Outcome::Done => {
+                            let taken = std::mem::replace(&mut phases[gi], Phase::Idle);
+                            let Phase::Deciding {
+                                search,
+                                perspectives,
+                                ..
+                            } = taken
+                            else {
+                                unreachable!()
+                            };
                             let ep = &mut self.episodes[gi];
                             let ctx = crate::policy::SearchCtx {
                                 game: &self.game,
@@ -406,95 +497,61 @@ where
                                 perms: &self.perms,
                                 collect_interior,
                             };
-                            let mut sink = crate::policy::RequestSink::default();
-                            let status = self.policy.round(ctx, search, &mut sink);
-                            let emitted = sink.len();
-                            let (players, obs) = sink.into_parts();
-                            q_players.extend(players);
-                            q_obs.extend(obs);
-                            q_dest.extend(std::iter::repeat_n(gi, emitted));
-                            let _ = before;
-                            if emitted > 0 {
-                                *outstanding = emitted;
-                                progressed = true;
-                            } else if status == crate::policy::RoundStatus::Done {
-                                let taken = std::mem::replace(&mut phases[gi], Phase::Idle);
-                                let Phase::Deciding {
-                                    search,
-                                    perspectives,
-                                    ..
-                                } = taken
-                                else {
-                                    unreachable!()
-                                };
-                                let ep = &mut self.episodes[gi];
-                                let ctx = crate::policy::SearchCtx {
-                                    game: &self.game,
-                                    enc: &*self.encoder,
-                                    reward: &*self.reward,
-                                    rng: &mut ep.rng,
-                                    perms: &self.perms,
-                                    collect_interior,
-                                };
-                                let results = self.policy.finish(ctx, search);
-                                let meta: Vec<(usize, usize)> =
-                                    perspectives.iter().map(|&si| (gi, si)).collect();
-                                let finished = {
-                                    let mut start = StartAccess::Exclusive(StartParts {
-                                        dist: &mut *self.start_dist,
-                                        rng: &mut self.buffer_rng,
-                                    });
-                                    process_tick(
-                                        &self.game,
-                                        &*self.encoder,
-                                        &*self.reward,
-                                        &self.policy,
-                                        &self.learner,
-                                        &self.learn_mask,
-                                        self.sequential,
-                                        gi..gi + 1,
-                                        results,
-                                        &meta,
-                                        &mut self.episodes,
-                                        &mut self.traj,
-                                        &mut self.ticks,
-                                        &mut self.policy_states,
-                                        &mut self.episode_returns,
-                                        &mut start,
-                                        &mut out,
-                                        &mut stats,
-                                    )
-                                };
-                                self.flush_finished(
-                                    &finished,
+                            let results = self.policy.finish(ctx, search);
+                            let meta: Vec<(usize, usize)> =
+                                perspectives.iter().map(|&si| (gi, si)).collect();
+                            let finished = {
+                                let mut start = StartAccess::Exclusive(StartParts {
+                                    dist: &mut *self.start_dist,
+                                    rng: &mut self.buffer_rng,
+                                });
+                                process_tick(
+                                    &self.game,
+                                    &*self.encoder,
+                                    &*self.reward,
+                                    &self.policy,
+                                    &self.learner,
+                                    &self.learn_mask,
+                                    self.sequential,
+                                    gi..gi + 1,
+                                    results,
+                                    &meta,
+                                    &mut self.episodes,
+                                    &mut self.traj,
+                                    &mut self.ticks,
+                                    &mut self.policy_states,
+                                    &mut self.episode_returns,
+                                    &mut start,
                                     &mut out,
                                     &mut stats,
-                                    &mut evaluator,
-                                );
-                                progressed = true;
-                            }
+                                )
+                            };
+                            self.flush_finished(&finished, &mut out, &mut stats, &mut evaluator);
+                            progressed = true;
                         }
                     }
-                    while q_players.len() >= batch_size {
-                        fire_batch(
-                            &mut q_players,
-                            &mut q_obs,
-                            &mut q_dest,
-                            batch_size,
-                            &mut phases,
-                            &mut evaluator,
-                            |ph| match ph {
-                                Phase::Deciding {
-                                    outstanding,
-                                    rows,
-                                    stride,
-                                    ..
-                                } => (outstanding, rows, stride),
-                                Phase::Idle => unreachable!("row routed to an idle slot"),
-                            },
-                        );
-                        progressed = true;
-                    }
+                }
+
+                // Phase 3: fire full batches; drain when nothing else can move.
+                while q_players.len() >= batch_size {
+                    fire_batch(
+                        &mut q_players,
+                        &mut q_obs,
+                        &mut q_dest,
+                        batch_size,
+                        &mut phases,
+                        &mut evaluator,
+                        |ph| match ph {
+                            Phase::Deciding {
+                                outstanding,
+                                rows,
+                                stride,
+                                ..
+                            } => (outstanding, rows, stride),
+                            Phase::Idle => unreachable!("row routed to an idle slot"),
+                        },
+                    );
+                    progressed = true;
                 }
                 if !progressed {
                     if !q_players.is_empty() {

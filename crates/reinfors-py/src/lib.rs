@@ -1862,7 +1862,7 @@ fn run_collect<'py, G, P, L>(
 where
     G: Game + Sync,
     G::State: Send,
-    P: Policy,
+    P: Policy + Sync,
     L: Learner<P::Evaluation>,
 {
     let (callbacks, mode) = engine_callbacks(infer, num_agents)?;
@@ -3973,7 +3973,7 @@ fn run_choose<G, P>(
 where
     G: Game + Sync,
     G::State: Send,
-    P: Policy,
+    P: Policy + Sync,
 {
     let mut infer_fn = |p: usize, o: Vec<f32>, n: usize| infer(p, o, n);
     // Within-batch dedup only: no store, nothing survives a round, stochastic
