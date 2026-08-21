@@ -473,6 +473,7 @@ mod fixture_tests {
             visited: Vec::new(),
             visited_count: 0,
             wheel_tiles: Default::default(),
+            new_lap: false,
             done: false,
         };
         live.visited = vec![0u64; live.track.tiles.len().div_ceil(64)];

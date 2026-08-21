@@ -23,6 +23,7 @@ enum Snap {
         seed: u32,
         tick: u32,
         done: bool,
+        new_lap: bool,
         visited: Vec<u64>,
         car: CarWorld,
     },
@@ -173,6 +174,7 @@ impl StateCodec for CarRacingCodec {
                 seed: l.seed,
                 tick: l.tick,
                 done: l.done,
+                new_lap: l.new_lap,
                 visited: l.visited.clone(),
                 car: l.car.clone(),
             },
@@ -192,6 +194,7 @@ impl StateCodec for CarRacingCodec {
             seed,
             tick,
             done,
+            new_lap,
             visited,
             mut car,
         } = snap
@@ -230,6 +233,7 @@ impl StateCodec for CarRacingCodec {
             visited,
             visited_count,
             wheel_tiles: Default::default(),
+            new_lap,
             done,
         };
         self.game.contact_pass_derived(&mut live);

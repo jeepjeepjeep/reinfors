@@ -5,9 +5,9 @@
 //! physics sensors. Trajectories are not Gymnasium-compatible; see the catalogue entry.
 
 pub mod codec;
-pub mod dynamics;
+pub(crate) mod dynamics;
 pub mod render;
-pub mod track;
+pub(crate) mod track;
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -16,20 +16,60 @@ use dynamics::CarWorld;
 use reinfors_core::{ActionView, Actor, ChanceDist, Game, Reward, Space, StateEncoder, Transition};
 use track::{Track, PLAYFIELD, TRACK_RAD};
 
+/// Stack-backed per-wheel tile set: a wheel footprint overlaps a handful of tiles at
+/// most; 16 slots is far past the geometric maximum, extras are dropped.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct TileSet {
+    ids: [u32; 16],
+    len: u8,
+}
+
+// len/clear serve the in-crate tests; the lib-only clippy pass cannot see cfg(test) users.
+#[allow(dead_code)]
+impl TileSet {
+    fn contains(&self, id: u32) -> bool {
+        self.ids[..usize::from(self.len)].contains(&id)
+    }
+
+    fn len(&self) -> usize {
+        usize::from(self.len)
+    }
+
+    fn push(&mut self, id: u32) {
+        if usize::from(self.len) < self.ids.len() {
+            self.ids[usize::from(self.len)] = id;
+            self.len += 1;
+        }
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        self.ids[..usize::from(self.len)].iter().copied()
+    }
+}
+
 pub const N_ACTIONS: usize = 5;
 const SEED_SPACE: u32 = u32::MAX;
 const OBS_DIM: usize = 21;
 
 #[derive(Clone)]
 pub struct LiveState {
-    pub seed: u32,
-    pub track: Arc<Track>,
-    pub car: CarWorld,
-    pub tick: u32,
-    pub visited: Vec<u64>,
-    pub visited_count: u32,
-    pub wheel_tiles: [Vec<u32>; 4],
-    pub done: bool,
+    pub(crate) seed: u32,
+    pub(crate) track: Arc<Track>,
+    pub(crate) car: CarWorld,
+    pub(crate) tick: u32,
+    pub(crate) visited: Vec<u64>,
+    pub(crate) visited_count: u32,
+    pub(crate) wheel_tiles: [TileSet; 4],
+    pub(crate) new_lap: bool,
+    pub(crate) done: bool,
 }
 
 #[derive(Clone, Default)]
@@ -130,11 +170,22 @@ impl CarRacing {
             visited: vec![0u64; n_tiles.div_ceil(64)],
             visited_count: 0,
             wheel_tiles: Default::default(),
+            new_lap: false,
             done: false,
         };
-        // Gym's reset() runs one no-action step, which registers the starting tiles.
-        self.contact_pass(&mut live);
+        // Gym's reset() runs one no-action step: it registers the starting tiles AND can
+        // set the sticky new_lap flag when lap_complete_percent permits.
+        let (_, entered_zero) = self.contact_pass(&mut live);
+        self.update_lap(&mut live, entered_zero);
         live
+    }
+
+    fn update_lap(&self, live: &mut LiveState, entered_zero: bool) {
+        let total = live.track.tiles.len().max(1);
+        if entered_zero && f64::from(live.visited_count) / total as f64 > self.lap_complete_percent
+        {
+            live.new_lap = true;
+        }
     }
 
     /// Rebuild derived wheel-contact state after a snapshot restore, without touching the
@@ -153,7 +204,7 @@ impl CarRacing {
         let mut entered_zero = false;
         for i in 0..4 {
             let quad = live.car.wheel_quad(i);
-            let mut cur: Vec<u32> = Vec::with_capacity(4);
+            let mut cur = TileSet::default();
             let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
             for [x, y] in quad {
                 x0 = x0.min(x);
@@ -163,15 +214,14 @@ impl CarRacing {
             }
             for &(cx, cy) in &[(x0, y0), (x1, y0), (x0, y1), (x1, y1)] {
                 for &id in live.track.candidate_tiles(cx, cy) {
-                    if !cur.contains(&id)
-                        && quad_overlap(&quad, &live.track.tiles[id as usize].quad)
+                    if !cur.contains(id) && quad_overlap(&quad, &live.track.tiles[id as usize].quad)
                     {
                         cur.push(id);
                     }
                 }
             }
-            for &id in &cur {
-                if !live.wheel_tiles[i].contains(&id) {
+            for id in cur.iter() {
+                if !live.wheel_tiles[i].contains(id) {
                     if id == 0 {
                         entered_zero = true;
                     }
@@ -293,14 +343,13 @@ impl Game for CarRacing {
         next.tick += 1;
 
         let (new_tiles, entered_zero) = self.contact_pass(&mut next);
+        self.update_lap(&mut next, entered_zero);
         let total = next.track.tiles.len() as u32;
 
         let all_visited = next.visited_count == total;
-        let lap = entered_zero
-            && f64::from(next.visited_count) / f64::from(total) > self.lap_complete_percent;
         let (hx, hy) = next.car.hull_pos();
         let off = hx.abs() > PLAYFIELD || hy.abs() > PLAYFIELD;
-        let terminal = all_visited || lap || off;
+        let terminal = all_visited || next.new_lap || off;
         next.done = terminal;
 
         let event = CarRacingEvent {
@@ -370,7 +419,11 @@ impl StateEncoder for CarRacingVec {
     }
 
     fn observation_space(&self) -> Space {
-        Space::unit_box(vec![1, 1, OBS_DIM])
+        Space::Box {
+            shape: vec![1, 1, OBS_DIM],
+            low: f32::NEG_INFINITY,
+            high: f32::INFINITY,
+        }
     }
 }
 
@@ -422,8 +475,17 @@ mod tests {
 
     #[test]
     fn different_seeds_usually_differ() {
+        // Compare geometry, not snapshots: snapshots embed the seed, so they differ
+        // even when generation collapses to identical tracks.
+        let geometry = |seed: u32| -> Vec<u64> {
+            track::Track::generate(seed)
+                .points
+                .iter()
+                .flat_map(|p| [p.x.to_bits(), p.y.to_bits(), p.beta.to_bits()])
+                .collect()
+        };
         let differing = (0..8u32)
-            .filter(|&s| fingerprint(&live(s)) != fingerprint(&live(s + 100)))
+            .filter(|&s| geometry(s) != geometry(s + 100))
             .count();
         assert!(differing >= 7, "only {differing}/8 seed pairs differed");
     }
@@ -441,10 +503,19 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_retries_fall_back_to_the_ring() {
+    fn exhausted_retries_fall_back_to_a_drivable_ring() {
         let t = track::Track::generate_with_attempts(0, 0);
         assert!(t.fallback);
         assert_eq!(t.tiles.len(), 100);
+        // Module convention: forward = (-sin b, cos b) must align with travel direction.
+        for i in 0..t.points.len() {
+            let p1 = t.points[i];
+            let p2 = t.points[(i + 1) % t.points.len()];
+            let (dx, dy) = (p2.x - p1.x, p2.y - p1.y);
+            let len = (dx * dx + dy * dy).sqrt();
+            let align = (-libm::sin(p1.beta) * dx + libm::cos(p1.beta) * dy) / len;
+            assert!(align > 0.99, "point {i}: forward/tangent alignment {align}");
+        }
         let g = game();
         let l = g.realize_with_attempts(0, 0);
         assert!(l.track.fallback);
@@ -484,39 +555,90 @@ mod tests {
 
     #[test]
     fn lap_needs_reentry_not_overlap() {
+        // Two unvisited tiles keep all_visited false in every branch, so termination
+        // can only come from the lap rule.
         let g = game();
         let CarRacingState::Live(mut l) = live(3) else {
             unreachable!()
         };
         let n = l.track.tiles.len() as u32;
+        assert!(n > 4);
         for w in l.visited.iter_mut() {
             *w = u64::MAX;
         }
-        l.visited_count = n;
-        for tiles in &mut l.wheel_tiles {
+        // Clear tile zero (under the car) and one far-away tile the car cannot touch
+        // this tick, so all_visited stays false through the entry branch.
+        let far = (n / 2) as usize;
+        l.visited[0] &= !1u64;
+        l.visited[far / 64] &= !(1u64 << (far % 64));
+        l.visited_count = n - 2;
+        l.new_lap = false;
+
+        let mut over = l.clone();
+        for tiles in &mut over.wheel_tiles {
             tiles.push(0);
         }
-        let overlap_step = g.step(&CarRacingState::Live(l.clone()), &[0]);
-        let still_overlapping = l.wheel_tiles.iter().any(|t| t.contains(&0));
-        if still_overlapping {
+        let t = g.step(&CarRacingState::Live(over.clone()), &[0]);
+        let CarRacingState::Live(after) = &t.next_state else {
+            unreachable!()
+        };
+        if after.wheel_tiles.iter().any(|w| w.contains(0)) {
             assert!(
-                overlap_step.terminal,
-                "all tiles visited terminates regardless; guard below is the entry case"
+                !t.terminal,
+                "still overlapping tile zero must not lap (visited {}/{n})",
+                after.visited_count
             );
         }
-        // The entry case: wheel sets say we are NOT on tile zero, so stepping while
-        // physically over it must register an entry.
+
         let mut left = l.clone();
         for tiles in &mut left.wheel_tiles {
             tiles.clear();
         }
-        left.visited_count = n - 1;
-        left.visited[0] &= !1u64;
         let t = g.step(&CarRacingState::Live(left), &[0]);
+        let CarRacingState::Live(after) = &t.next_state else {
+            unreachable!()
+        };
+        assert!(
+            after.visited_count < n,
+            "the lap-entry case must not exit through all_visited"
+        );
         assert!(
             t.terminal,
             "re-entry with lap fraction met must complete the lap"
         );
+    }
+
+    #[test]
+    fn reset_time_lap_terminates_on_first_action() {
+        // Gym's reset contact can arm the sticky new_lap flag immediately when
+        // lap_complete_percent permits; the first real step then terminates.
+        let g = CarRacing {
+            lap_complete_percent: 0.0,
+            max_ticks: Some(1000),
+        };
+        let l = g.realize(3);
+        assert!(
+            l.new_lap,
+            "reset contact with tile zero must arm the lap flag"
+        );
+        assert!(l.visited_count < l.track.tiles.len() as u32);
+        let t = g.step(&CarRacingState::Live(Box::new(l)), &[0]);
+        assert!(
+            t.terminal,
+            "sticky reset-time lap must terminate the first step"
+        );
+    }
+
+    #[test]
+    fn vec_encoder_space_is_unbounded() {
+        use reinfors_core::StateEncoder;
+        let Space::Box { shape, low, high } = CarRacingVec.observation_space() else {
+            panic!("vec obs must be a Box space");
+        };
+        assert_eq!(shape, vec![1, 1, OBS_DIM]);
+        assert!(low.is_infinite() && low < 0.0 && high.is_infinite() && high > 0.0);
+        let row = CarRacingVec.encode(&live(3), 0);
+        assert!(row.iter().all(|v| v.is_finite()));
     }
 
     #[test]
