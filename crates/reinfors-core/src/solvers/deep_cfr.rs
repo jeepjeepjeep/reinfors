@@ -143,11 +143,6 @@ impl<G: Game> DeepCfrSolver<G> {
             game.information_states(),
             "Deep CFR requires information-state keys (Game::information_states)"
         );
-        assert!(
-            game.chance_enumerable(),
-            "Deep CFR requires enumerable chance (Game::chance_enumerable); its exploitability \
-             instrument enumerates chance fans"
-        );
         // A chance root does not reveal the game's decision dynamics.
         let realized = crate::game::realize_initial_state(&game, &mut SplitMix64::new(0x0517_B0BE));
         assert!(

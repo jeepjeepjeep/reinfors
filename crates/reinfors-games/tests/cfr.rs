@@ -19,7 +19,7 @@ fn vanilla_cfr_approaches_the_kuhn_equilibrium() {
     let fine = solver.exploitability().unwrap();
     assert!(fine < coarse, "exploitability falls: {coarse} -> {fine}");
     assert!(fine < 2e-3, "near-Nash after 1000 iterations: {fine}");
-    let v0 = solver.expected_value(0);
+    let v0 = solver.expected_value(0).unwrap();
     assert!((v0 - (-1.0 / 18.0)).abs() < 2e-3, "P0 value {v0} vs -1/18");
     assert_eq!(solver.num_infosets(), 12, "Kuhn has exactly 12 infosets");
 }
@@ -279,5 +279,5 @@ fn expected_value_rejects_an_out_of_range_player() {
     // Fixed-width value storage would otherwise return its untouched 0.0 slot silently.
     let mut solver = kuhn_solver(CfrVariant::Vanilla);
     solver.iterate(1);
-    solver.expected_value(2);
+    solver.expected_value(2).unwrap();
 }
