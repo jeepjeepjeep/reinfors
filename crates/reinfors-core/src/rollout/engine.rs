@@ -354,7 +354,7 @@ where
                  tx: std::sync::mpsc::Sender<Msg<P::Search<G::State>>>| {
                     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let mut guard = eps[gi].lock().expect("slot episode lock");
-                        let ep: &mut Episode<G> = &mut *guard;
+                        let ep: &mut Episode<G> = &mut guard;
                         let (mut search, perspectives) = match work {
                             Work::Begin => {
                                 let perspectives: Vec<usize> = (0..game.num_agents())
@@ -584,7 +584,7 @@ where
                             let (search, perspectives) = msg.search.expect("finished slot");
                             phases[gi] = SlotPhase::Idle;
                             let mut guard = eps[gi].lock().expect("slot episode lock");
-                            let ep: &mut Episode<G> = &mut *guard;
+                            let ep: &mut Episode<G> = &mut guard;
                             let ctx = crate::policy::SearchCtx {
                                 game,
                                 enc: encoder,
@@ -1379,9 +1379,7 @@ impl RequestQueue {
 
     fn push(&mut self, players: Vec<usize>, obs: Vec<f32>, gi: usize, n: usize) {
         debug_assert_eq!(players.len(), n);
-        if n > 0 {
-            self.dim = obs.len() / n;
-        }
+        self.dim = obs.len().checked_div(n).unwrap_or(self.dim);
         self.players.extend(players);
         self.obs.extend(obs);
         self.dest.extend(std::iter::repeat_n(gi, n));
@@ -1665,156 +1663,6 @@ where
     (out, stats)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::policies::tree::alphazero::{AlphaZero, AlphaZeroConfig};
-    use crate::policies::tree::mcts::{NoiseScope, SequentialBackup};
-    use crate::rollout::infer_cache::{InferCache, ShardedInferCache};
-    use crate::{Actor, AlphaZeroLearner, ChanceMode, Space, StateCodec, Transition};
-    use std::sync::atomic::AtomicU64;
-    use std::sync::Arc;
-
-    #[derive(Clone)]
-    struct St {
-        tick: usize,
-    }
-    struct Count;
-    impl Game for Count {
-        type State = St;
-        type Event = ();
-        fn num_agents(&self) -> usize {
-            1
-        }
-        fn action_count(&self) -> usize {
-            2
-        }
-        fn actor(&self, _s: &St) -> Actor {
-            Actor::Agent(0)
-        }
-        fn legal_actions(&self, _s: &St, _agent: usize) -> Vec<usize> {
-            vec![0, 1]
-        }
-        fn step(&self, s: &St, _a: &[usize]) -> Transition<St, ()> {
-            Transition {
-                next_state: St { tick: s.tick + 1 },
-                events: vec![None],
-                terminal: s.tick + 1 >= 3,
-            }
-        }
-        fn initial_state(&self) -> St {
-            St { tick: 0 }
-        }
-    }
-    struct Enc;
-    impl crate::ActionView for Enc {}
-    impl StateEncoder for Enc {
-        type State = St;
-        fn encode(&self, s: &St, _agent: usize) -> Vec<f32> {
-            vec![s.tick as f32, 1.0]
-        }
-        fn obs_shape(&self) -> (usize, usize, usize) {
-            (1, 1, 2)
-        }
-        fn observation_space(&self) -> Space {
-            Space::unit_box(vec![1, 1, 2])
-        }
-    }
-    struct Zero;
-    impl Reward for Zero {
-        type Event = ();
-        fn step_reward(&self, _e: &(), _agent: usize) -> f64 {
-            0.0
-        }
-    }
-    struct Codec;
-    impl StateCodec for Codec {
-        type State = St;
-        fn encode(&self, s: &St) -> Vec<u8> {
-            (s.tick as u64).to_le_bytes().to_vec()
-        }
-        fn decode(&self, b: &[u8]) -> Result<St, String> {
-            let arr: [u8; 8] = b.try_into().map_err(|_| "bad state".to_string())?;
-            Ok(St {
-                tick: u64::from_le_bytes(arr) as usize,
-            })
-        }
-        fn validate_decoded_state(&self, s: &St, _done: bool) -> Result<(), String> {
-            if s.tick <= 3 {
-                Ok(())
-            } else {
-                Err("tick out of range".into())
-            }
-        }
-    }
-
-    fn engine(n_groups: usize) -> Engine<Count, AlphaZero, AlphaZeroLearner> {
-        Engine::new(
-            Count,
-            Box::new(Enc),
-            Box::new(Zero),
-            AlphaZero::new(AlphaZeroConfig {
-                num_simulations: 6,
-                c_puct: 1.5,
-                gamma: 1.0,
-                max_depth: 64,
-                noise_epsilon: 0.25,
-                noise_alpha: 0.5,
-                temperature: 1.0,
-                temperature_drop: 4,
-                chance: ChanceMode::AlwaysResample,
-                noise_scope: NoiseScope::Requester,
-                sequential_backup: SequentialBackup::Auto,
-            }),
-            AlphaZeroLearner::new(1.0),
-            EngineParams {
-                n_games: 4,
-                seed: 5,
-                n_groups,
-                ..Default::default()
-            },
-        )
-    }
-
-    #[test]
-    #[should_panic(expected = "sharded caches require n_groups=2")]
-    fn sharded_caches_rejected_on_ungrouped_engine() {
-        let generation = Arc::new(AtomicU64::new(0));
-        let caches = vec![
-            ShardedInferCache::new(64, 4, generation.clone()),
-            ShardedInferCache::new(64, 4, generation),
-        ];
-        let _ = engine(1).with_sharded_infer_caches(caches);
-    }
-
-    #[test]
-    #[should_panic(expected = "exclusive caches require n_groups=1")]
-    fn exclusive_caches_rejected_on_grouped_engine() {
-        let generation = Arc::new(AtomicU64::new(0));
-        let caches = vec![
-            InferCache::new(64, generation.clone()),
-            InferCache::new(64, generation),
-        ];
-        let _ = engine(2).with_infer_caches(caches);
-    }
-
-    #[test]
-    fn restore_clears_sharded_caches() {
-        let generation = Arc::new(AtomicU64::new(0));
-        let caches = vec![
-            ShardedInferCache::new(64, 4, generation.clone()),
-            ShardedInferCache::new(64, 4, generation),
-        ];
-        let mut eng = engine(2).with_sharded_infer_caches(caches);
-        let snap = eng.snapshot_bytes(&Codec).unwrap();
-        let slot = &eng.sharded_caches.as_ref().unwrap()[0];
-        slot.insert(InferCache::key(&[1.0, 2.0]), &[0.5], 0);
-        assert_eq!(slot.len(), 1);
-        eng.restore_bytes(&Codec, &snap).unwrap();
-        assert_eq!(eng.sharded_caches.as_ref().unwrap()[0].len(), 0);
-    }
-}
-
 /// One game's decision tick: record emission, action selection, stepping. Returns
 /// `Some(terminal)` when the episode ended (terminal or truncated) this tick.
 #[allow(clippy::too_many_arguments)]
@@ -2047,8 +1895,8 @@ where
         || learner.tails_all_trajectories();
     let mut obs_flat: Vec<f32> = Vec::new();
     let mut meta: Vec<usize> = Vec::new();
-    for si in 0..num_agents {
-        if (all_perspectives || ep.agent_active(game, si)) && !traj[gi][si].is_empty() {
+    for (si, steps) in traj[gi].iter().enumerate().take(num_agents) {
+        if (all_perspectives || ep.agent_active(game, si)) && !steps.is_empty() {
             obs_flat.extend(ep.observe(encoder, si));
             meta.push(si);
         }
@@ -2220,5 +2068,155 @@ fn flush_finished_parts<G, P, L>(
             out,
             stats,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policies::tree::alphazero::{AlphaZero, AlphaZeroConfig};
+    use crate::policies::tree::mcts::{NoiseScope, SequentialBackup};
+    use crate::rollout::infer_cache::{InferCache, ShardedInferCache};
+    use crate::{Actor, AlphaZeroLearner, ChanceMode, Space, StateCodec, Transition};
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct St {
+        tick: usize,
+    }
+    struct Count;
+    impl Game for Count {
+        type State = St;
+        type Event = ();
+        fn num_agents(&self) -> usize {
+            1
+        }
+        fn action_count(&self) -> usize {
+            2
+        }
+        fn actor(&self, _s: &St) -> Actor {
+            Actor::Agent(0)
+        }
+        fn legal_actions(&self, _s: &St, _agent: usize) -> Vec<usize> {
+            vec![0, 1]
+        }
+        fn step(&self, s: &St, _a: &[usize]) -> Transition<St, ()> {
+            Transition {
+                next_state: St { tick: s.tick + 1 },
+                events: vec![None],
+                terminal: s.tick + 1 >= 3,
+            }
+        }
+        fn initial_state(&self) -> St {
+            St { tick: 0 }
+        }
+    }
+    struct Enc;
+    impl crate::ActionView for Enc {}
+    impl StateEncoder for Enc {
+        type State = St;
+        fn encode(&self, s: &St, _agent: usize) -> Vec<f32> {
+            vec![s.tick as f32, 1.0]
+        }
+        fn obs_shape(&self) -> (usize, usize, usize) {
+            (1, 1, 2)
+        }
+        fn observation_space(&self) -> Space {
+            Space::unit_box(vec![1, 1, 2])
+        }
+    }
+    struct Zero;
+    impl Reward for Zero {
+        type Event = ();
+        fn step_reward(&self, _e: &(), _agent: usize) -> f64 {
+            0.0
+        }
+    }
+    struct Codec;
+    impl StateCodec for Codec {
+        type State = St;
+        fn encode(&self, s: &St) -> Vec<u8> {
+            (s.tick as u64).to_le_bytes().to_vec()
+        }
+        fn decode(&self, b: &[u8]) -> Result<St, String> {
+            let arr: [u8; 8] = b.try_into().map_err(|_| "bad state".to_string())?;
+            Ok(St {
+                tick: u64::from_le_bytes(arr) as usize,
+            })
+        }
+        fn validate_decoded_state(&self, s: &St, _done: bool) -> Result<(), String> {
+            if s.tick <= 3 {
+                Ok(())
+            } else {
+                Err("tick out of range".into())
+            }
+        }
+    }
+
+    fn engine(n_groups: usize) -> Engine<Count, AlphaZero, AlphaZeroLearner> {
+        Engine::new(
+            Count,
+            Box::new(Enc),
+            Box::new(Zero),
+            AlphaZero::new(AlphaZeroConfig {
+                num_simulations: 6,
+                c_puct: 1.5,
+                gamma: 1.0,
+                max_depth: 64,
+                noise_epsilon: 0.25,
+                noise_alpha: 0.5,
+                temperature: 1.0,
+                temperature_drop: 4,
+                chance: ChanceMode::AlwaysResample,
+                noise_scope: NoiseScope::Requester,
+                sequential_backup: SequentialBackup::Auto,
+            }),
+            AlphaZeroLearner::new(1.0),
+            EngineParams {
+                n_games: 4,
+                seed: 5,
+                n_groups,
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    #[should_panic(expected = "sharded caches require n_groups=2")]
+    fn sharded_caches_rejected_on_ungrouped_engine() {
+        let generation = Arc::new(AtomicU64::new(0));
+        let caches = vec![
+            ShardedInferCache::new(64, 4, generation.clone()),
+            ShardedInferCache::new(64, 4, generation),
+        ];
+        let _ = engine(1).with_sharded_infer_caches(caches);
+    }
+
+    #[test]
+    #[should_panic(expected = "exclusive caches require n_groups=1")]
+    fn exclusive_caches_rejected_on_grouped_engine() {
+        let generation = Arc::new(AtomicU64::new(0));
+        let caches = vec![
+            InferCache::new(64, generation.clone()),
+            InferCache::new(64, generation),
+        ];
+        let _ = engine(2).with_infer_caches(caches);
+    }
+
+    #[test]
+    fn restore_clears_sharded_caches() {
+        let generation = Arc::new(AtomicU64::new(0));
+        let caches = vec![
+            ShardedInferCache::new(64, 4, generation.clone()),
+            ShardedInferCache::new(64, 4, generation),
+        ];
+        let mut eng = engine(2).with_sharded_infer_caches(caches);
+        let snap = eng.snapshot_bytes(&Codec).unwrap();
+        let slot = &eng.sharded_caches.as_ref().unwrap()[0];
+        slot.insert(InferCache::key(&[1.0, 2.0]), &[0.5], 0);
+        assert_eq!(slot.len(), 1);
+        eng.restore_bytes(&Codec, &snap).unwrap();
+        assert_eq!(eng.sharded_caches.as_ref().unwrap()[0].len(), 0);
     }
 }

@@ -113,10 +113,9 @@ def test_complete_rounds_batch_the_full_pool() -> None:
 
     batch = engine.collect(n_records=1, infer=infer)
     assert len(batch.obs) == 4, "the admitted sweep covers the whole 4-game pool"
-    # The scheduler fires at batch_size (n_games/2 by default), so the sweep's search
-    # rows split across threshold batches; the final call is the batched tail bootstrap
-    # for the four unfinished episodes at flush.
-    assert rows_seen == [2, 2, 4]
+    # Search rows fire at batch_size (n_games/2 by default); each admitted game then
+    # flushes its fragment tail with a per-game forward at the cut.
+    assert rows_seen == [2, 2, 1, 1, 1, 1]
 
 
 def test_windows_meet_the_record_floor() -> None:
@@ -155,7 +154,8 @@ def test_windows_are_single_version_across_collects() -> None:
 
     for n, v in ((16, 1.0), (24, 2.0), (8, 3.0)):
         batch = engine.collect(n_records=n, infer=constant(v))
-        assert len(batch.obs) == n
+        # In-flight decisions at the cut complete, bounding overshoot by the pool size.
+        assert n <= len(batch.obs) < n + 4
         assert np.all(batch.values == v), f"stale step leaked into the v={v} window"
 
 
