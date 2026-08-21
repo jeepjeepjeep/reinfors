@@ -825,6 +825,17 @@ impl PyEngine {
                 1 << 16
             )));
         }
+        if n_threads > 512 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "n_threads must be <= 512 (got {n_threads})",
+            )));
+        }
+        if batch_size > 1 << 20 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "batch_size must be <= {} (got {batch_size})",
+                1 << 20
+            )));
+        }
         if !matches!(n_groups, 1 | 2) {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "n_groups must be 1 or 2",
