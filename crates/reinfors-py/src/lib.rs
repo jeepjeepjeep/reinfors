@@ -3948,7 +3948,7 @@ trait ErasedEnv: Send + Sync {
 // ordered batch and seed, per the choose determinism contract.
 const CHOOSE_ENV_MIX: u64 = 0x9E37_79B9_7F4A_7C15;
 const CHOOSE_SELECT_SALT: u64 = 0xC3A5_C85C_97CB_3127;
-const CHOOSE_DRIVE_SALT: u64 = 0xB492_B66F_BE98_F273;
+const CHOOSE_DRIVE_SALT: u64 = 0x5851_F42D_4C95_7F2D;
 const CHOOSE_HEAD_SALT: u64 = 0xB492_B66F_BE98_F273;
 
 fn choose_env_rng(seed: u64, index: usize, salt: u64) -> SplitMix64 {

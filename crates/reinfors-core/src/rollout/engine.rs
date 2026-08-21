@@ -1225,7 +1225,7 @@ where
         }
     }
     let mut out = Vec::new();
-    for (search, (gi, _)) in searches.into_iter().zip(groups) {
+    for (search, (gi, perspectives)) in searches.into_iter().zip(groups) {
         let ep = &mut episodes[*gi];
         let ctx = SearchCtx {
             game,
@@ -1235,7 +1235,13 @@ where
             perms,
             collect_interior,
         };
-        out.extend(policy.finish(ctx, search));
+        let results = policy.finish(ctx, search);
+        assert_eq!(
+            results.len(),
+            perspectives.len(),
+            "finish must return one evaluation per perspective"
+        );
+        out.extend(results);
     }
     out
 }
