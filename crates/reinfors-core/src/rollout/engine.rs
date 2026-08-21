@@ -1924,48 +1924,6 @@ where
     tails
 }
 
-/// Truncation-tail bootstrapping for `finished` (grouped path): per-game forwards.
-#[allow(clippy::too_many_arguments)]
-fn tail_values_parts<G, P, L, F>(
-    finished: &[(usize, bool)],
-    game: &G,
-    policy: &P,
-    learner: &L,
-    encoder: &dyn StateEncoder<State = G::State>,
-    sequential: bool,
-    episodes: &mut [Episode<G>],
-    traj: &[Vec<Vec<Step<P::Evaluation>>>],
-    evaluator: &mut Evaluator<'_, F>,
-) -> HashMap<(usize, usize), Vec<f64>>
-where
-    G: Game + Sync,
-    G::State: Send,
-    P: Policy,
-    L: Learner<P::Evaluation>,
-    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
-{
-    let mut tails = HashMap::new();
-    for &(gi, terminal) in finished {
-        if terminal {
-            continue;
-        }
-        for (si, tail) in tail_values_game(
-            gi,
-            game,
-            policy,
-            learner,
-            encoder,
-            sequential,
-            &mut episodes[gi],
-            traj,
-            evaluator,
-        ) {
-            tails.insert((gi, si), tail);
-        }
-    }
-    tails
-}
-
 /// Emit one finished game's episode records and respawn it.
 #[allow(clippy::too_many_arguments)]
 fn flush_finished_game<G, P, L>(
@@ -2219,4 +2177,71 @@ mod tests {
         eng.restore_bytes(&Codec, &snap).unwrap();
         assert_eq!(eng.sharded_caches.as_ref().unwrap()[0].len(), 0);
     }
+}
+
+/// Truncation-tail bootstraps for every game in `finished`, gathered into ONE forward:
+/// a fragment cut over a large pool must not fire per-game callbacks.
+#[allow(clippy::too_many_arguments)]
+fn tail_values_parts<G, P, L, F>(
+    finished: &[(usize, bool)],
+    game: &G,
+    policy: &P,
+    learner: &L,
+    encoder: &dyn StateEncoder<State = G::State>,
+    sequential: bool,
+    episodes: &mut [Episode<G>],
+    traj: &[Vec<Vec<Step<P::Evaluation>>>],
+    evaluator: &mut Evaluator<'_, F>,
+) -> HashMap<(usize, usize), Vec<f64>>
+where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
+    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+{
+    let mut tails: HashMap<(usize, usize), Vec<f64>> = HashMap::new();
+    if !learner.uses_episode_tail() {
+        return tails;
+    }
+    let a = game.action_count();
+    let num_agents = game.num_agents();
+    let all_perspectives = (policy.evaluates_all_perspectives(sequential, num_agents)
+        && learner.value_only_evaluation(a).is_some())
+        || learner.tails_all_trajectories();
+    let mut obs_flat: Vec<f32> = Vec::new();
+    let mut meta: Vec<(usize, usize)> = Vec::new();
+    for &(gi, terminal) in finished {
+        if terminal {
+            continue;
+        }
+        for (si, steps) in traj[gi].iter().enumerate() {
+            if (all_perspectives || episodes[gi].agent_active(game, si)) && !steps.is_empty() {
+                obs_flat.extend(episodes[gi].observe(encoder, si));
+                meta.push((gi, si));
+            }
+        }
+    }
+    if meta.is_empty() {
+        return tails;
+    }
+    let players: Vec<usize> = meta.iter().map(|&(_, si)| si).collect();
+    let q = evaluator.forward(&players, obs_flat, meta.len());
+    let stride = q.len() / meta.len();
+    // Cancellation yields zero-width rows; empty tails degrade to the terminal path.
+    if stride == 0 {
+        return tails;
+    }
+    for (i, &(gi, si)) in meta.iter().enumerate() {
+        let row = &q[i * stride..(i + 1) * stride];
+        let state = &episodes[gi].state;
+        // Sequential non-mover rows still bootstrap over the mover's available actions.
+        let legal = match game.actor(state) {
+            Actor::Agent(mover) => game.legal_actions(state, mover),
+            Actor::Simultaneous => game.legal_actions(state, si),
+            Actor::Chance => unreachable!("chance actors are not searched"),
+        };
+        tails.insert((gi, si), learner.tail_from_row(row, a, &legal, encoder, si));
+    }
+    tails
 }

@@ -113,9 +113,9 @@ def test_complete_rounds_batch_the_full_pool() -> None:
 
     batch = engine.collect(n_records=1, infer=infer)
     assert len(batch.obs) == 4, "the admitted sweep covers the whole 4-game pool"
-    # Search rows fire at batch_size (n_games/2 by default); each admitted game then
-    # flushes its fragment tail with a per-game forward at the cut.
-    assert rows_seen == [2, 2, 1, 1, 1, 1]
+    # Search rows fire at batch_size (n_games/2 by default); the fragment cut gathers
+    # every live game's tail bootstrap into one batched forward.
+    assert rows_seen == [2, 2, 4]
 
 
 def test_windows_meet_the_record_floor() -> None:
