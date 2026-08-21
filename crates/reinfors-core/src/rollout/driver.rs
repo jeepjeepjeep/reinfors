@@ -95,7 +95,8 @@ where
     }
     searches
         .into_iter()
-        .map(|search| {
+        .zip(decisions)
+        .map(|(search, (_, perspectives))| {
             let ctx = SearchCtx {
                 game,
                 enc,
@@ -104,7 +105,13 @@ where
                 perms,
                 collect_interior,
             };
-            policy.finish(ctx, search)
+            let results = policy.finish(ctx, search);
+            assert_eq!(
+                results.len(),
+                perspectives.len(),
+                "finish must return one evaluation per perspective"
+            );
+            results
         })
         .collect()
 }
