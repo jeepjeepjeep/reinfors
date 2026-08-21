@@ -172,7 +172,8 @@ def test_forged_payload_semantics_are_rejected() -> None:
     # Payload (schema v3): version 1 + n_games 4 + agents 4 + rngs 16 + group-stream count 4
     # + 8 per stream => ticks live inside the per-game section; forge the FIRST game's tick
     # to u64::MAX (version+counts+rngs+groups, then state blob).
-    group_cnt_off = payload_off + 1 + 4 + 4 + 16
+    # rngs (16) + the scheduler's sweep cursor (8) precede the group-stream count.
+    group_cnt_off = payload_off + 1 + 4 + 4 + 16 + 8
     group_count = int.from_bytes(blob[group_cnt_off : group_cnt_off + 4], "little")
     state_len_off = group_cnt_off + 4 + 8 * group_count
     state_len = int.from_bytes(blob[state_len_off : state_len_off + 4], "little")
