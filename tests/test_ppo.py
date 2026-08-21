@@ -155,7 +155,8 @@ def test_windows_are_single_version_across_collects() -> None:
 
     for n, v in ((16, 1.0), (24, 2.0), (8, 3.0)):
         batch = engine.collect(n_records=n, infer=constant(v))
-        assert len(batch.obs) == n
+        # In-flight decisions at the cut complete, bounding overshoot by the pool size.
+        assert n <= len(batch.obs) < n + 4
         assert np.all(batch.values == v), f"stale step leaked into the v={v} window"
 
 

@@ -478,12 +478,14 @@ class Engine:
         # Reference: docs/reference/inference-contract.md#input.
         pad: bool = ...,
         # Inference batching threshold in rows (0 = default of max(1, n_games/2)): the scheduler
-        # fires the callback once this many rows are queued, or earlier on drain. Tuning knob;
-        # excluded from the fingerprint (does not change the collected records).
+        # fires the callback once this many rows are queued, or earlier on drain. Part of the
+        # resolved config and config_fingerprint; snapshots restore across different values,
+        # though window composition may differ.
         batch_size: int = ...,
-        # Threads fanning search rounds (0 = default of available cores): rounds run on an
-        # engine-owned thread pool with slot-order merges, record-identical to the
-        # sequential schedule (n_threads=1). Excluded from the fingerprint.
+        # Worker threads running search rounds (0 = default of available cores), overlapping tree work
+        # with inference. Reproducible at n_threads=1; above that, completion order varies
+        # and window composition may differ between runs. Part of the resolved config and
+        # config_fingerprint; snapshots restore across different values.
         n_threads: int = ...,
     ) -> None: ...
     # Tell the engine the net's weights changed (call after every weight sync — e.g. right after

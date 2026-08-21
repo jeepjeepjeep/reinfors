@@ -42,11 +42,14 @@ def test_batch_size_changes_call_grouping_not_totals() -> None:
     assert max(rows_b) > max(rows_a)
 
 
-def test_scheduler_knobs_are_not_fingerprinted() -> None:
+def test_scheduler_knobs_split_config_but_not_snapshots() -> None:
     base = connect4_az_engine(seed=5)
-    for kwargs in ({"batch_size": 3}, {"n_threads": 4}):
+    for kwargs in ({"batch_size": 3}, {"n_threads": 4}, {"pad": True}):
         other = connect4_az_engine(seed=5, **kwargs)
-        assert other.config_fingerprint() == base.config_fingerprint()
+        # configuration: differently tuned engines are distinguishable
+        assert other.config_fingerprint() != base.config_fingerprint()
+        # composition: checkpoints stay portable across the knobs
+        other.restore(base.snapshot())
 
 
 def test_rejects_absurd_scheduler_knobs() -> None:

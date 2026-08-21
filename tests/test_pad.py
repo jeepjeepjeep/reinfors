@@ -54,11 +54,14 @@ def test_padding_rejects_per_player_callbacks() -> None:
     assert eng.collect(20, _uniform).obs.shape[0] >= 20
 
 
-def test_pad_is_not_fingerprinted() -> None:
+def test_pad_enters_config_but_not_snapshots() -> None:
     a = connect4_az_engine(seed=5)
     b = connect4_az_engine(seed=5, pad=True)
-    assert a.config_fingerprint() == b.config_fingerprint()
+    assert a.resolved_config()["engine"]["pad"] is None, "off canonicalizes to null"
+    assert b.resolved_config()["engine"]["pad"] is True
+    assert a.config_fingerprint() != b.config_fingerprint()
     assert "pad_rows_to" not in a.resolved_config()["engine"]
+    b.restore(a.snapshot())
 
 
 def test_padding_composes_with_the_cache() -> None:

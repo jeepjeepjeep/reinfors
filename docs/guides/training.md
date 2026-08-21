@@ -153,21 +153,24 @@ workflow. If the experiment enables inference caching, follow the
 
 ## Scheduler knobs (`batch_size`, `n_threads`, `pad`)
 
-The collect loop is a threshold scheduler: searches emit inference requests into a shared
-queue, and the callback fires once `batch_size` rows are queued (default `max(1, n_games/2)`)
-or earlier when no search can progress without results. Episode-boundary and fragment-cut
-tail bootstraps ride the same queue, so every row that crosses the callback seam obeys the
-same batching. Raise `batch_size` toward your accelerator's sweet spot for larger, fewer
-calls at the cost of some latency; `telemetry["infer_rows"] / telemetry["infer_calls"]`
-reports the realized mean, and raising `n_games` is the first lever when that mean is
-small. `n_threads` fans search rounds (the CPU-side tree work between callbacks) across an
-engine-owned thread pool (default: available cores); results merge in slot order, so
-collected records are identical to the single-threaded schedule (`n_threads=1`). `pad`
-fixes every call at exactly `batch_size` rows for compiled/graph-captured forwards — see
-the [inference contract](../reference/inference-contract.md#input). All three are tuning
-knobs excluded from `config_fingerprint()`: for a fixed configuration they do not change
-the records collected, though changing `batch_size` between runs regroups rows across
-callback calls, and a checkpoint restores validly across different knob values.
+The collect loop is a threshold scheduler: worker threads run search rounds and feed
+inference requests into a shared queue, and the callback fires on the collecting thread
+the moment `batch_size` rows are queued (default `max(1, n_games/2)`) — or earlier when
+no search can progress without results — so tree work overlaps inference.
+Episode-boundary and fragment-cut tail bootstraps ride the same queue, so every row that
+crosses the callback seam obeys the same batching. Raise `batch_size` toward your
+accelerator's sweet spot for larger, fewer calls at the cost of some latency;
+`telemetry["infer_rows"] / telemetry["infer_calls"]` reports the realized mean, and
+raising `n_games` is the first lever when that mean is small. `n_threads` sets the worker
+count (default: available cores). `pad` fixes every call at exactly `batch_size` rows for
+compiled/graph-captured forwards — see the
+[inference contract](../reference/inference-contract.md#input). All three are part of the
+resolved configuration and `config_fingerprint()` — changing them changes which games
+advance before the floor and therefore the returned window's composition — but they are
+excluded from the snapshot compatibility fingerprint, so checkpoints restore across
+different values. Collection is exactly reproducible at `n_threads=1` with a
+deterministic callback; at `n_threads>1`, task completion order varies between runs — a
+valid collection either way.
 
 Games progress unevenly under the scheduler: a game whose search completes re-enters play
 while slower searches continue, so a window over-represents fast-deciding games for tree

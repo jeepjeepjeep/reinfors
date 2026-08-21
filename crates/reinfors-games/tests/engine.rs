@@ -28,6 +28,9 @@ fn params(n_games: usize, seed: u64) -> EngineParams {
     EngineParams {
         n_games,
         seed,
+        // These tests assert bit-identical reruns: the determinism contract's
+        // precondition (the constructor default is available cores).
+        n_threads: Some(1),
         ..Default::default()
     }
 }
