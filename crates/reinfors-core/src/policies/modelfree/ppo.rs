@@ -98,7 +98,7 @@ impl Policy for PpoActor {
         Ok(())
     }
 
-    type Search<S: Send> = super::OneShot<S>;
+    type Search<S: Send> = super::OneShot<S, PpoEvaluation>;
 
     fn begin_search<G: Game + Sync>(
         &self,
@@ -124,53 +124,57 @@ impl Policy for PpoActor {
         super::one_shot_round(search, out)
     }
 
-    fn absorb<S: Send>(
-        &self,
-        search: &mut Self::Search<S>,
-        rows: crate::policy::RowsView<'_>,
-        _rng: &mut dyn Rng,
-    ) {
-        super::one_shot_absorb(search, rows);
-    }
-
-    fn finish<G: Game + Sync>(
+    fn absorb<G: Game + Sync>(
         &self,
         ctx: crate::policy::SearchCtx<'_, G>,
-        search: Self::Search<G::State>,
-    ) -> Vec<(PpoEvaluation, Vec<crate::learner::InteriorTarget>)>
-    where
+        search: &mut Self::Search<G::State>,
+        rows: crate::policy::RowsView<'_>,
+    ) where
         G::State: Send,
     {
         let a = ctx.game.action_count();
         debug_assert!(
-            search.agents.is_empty() || search.stride == a + 1,
+            rows.is_empty() || rows.stride() == a + 1,
             "PolicyValue row width {} != {}",
-            search.stride,
+            rows.stride(),
             a + 1
         );
-        search
+        let legal_all = std::mem::take(&mut search.legal);
+        search.results = search
             .agents
             .iter()
-            .zip(search.legal)
+            .zip(legal_all)
             .enumerate()
             .map(|(i, (&agent, legal))| {
                 let (perm, identity) = ctx.perms.get(agent);
-                let row = &search.rows[i * search.stride..(i + 1) * search.stride];
+                let row = rows.row(i);
                 let log_probs = if identity {
                     masked_log_probs(&row[..a], &legal)
                 } else {
                     let head_legal: Vec<usize> = legal.iter().map(|&g| perm[g]).collect();
                     masked_log_probs(&row[..a], &head_legal)
                 };
-                (
-                    PpoEvaluation {
-                        log_probs,
-                        value: row[a],
-                        legal,
-                    },
-                    Vec::new(),
-                )
+                PpoEvaluation {
+                    log_probs,
+                    value: row[a],
+                    legal,
+                }
             })
+            .collect();
+    }
+
+    fn finish<G: Game + Sync>(
+        &self,
+        _ctx: crate::policy::SearchCtx<'_, G>,
+        search: Self::Search<G::State>,
+    ) -> Vec<(PpoEvaluation, Vec<crate::learner::InteriorTarget>)>
+    where
+        G::State: Send,
+    {
+        search
+            .results
+            .into_iter()
+            .map(|e| (e, Vec::new()))
             .collect()
     }
 

@@ -73,6 +73,11 @@ impl<'a> RowsView<'a> {
         self.stride
     }
 
+    /// The rows as one contiguous row-major slice.
+    pub fn flat(&self) -> &'a [f64] {
+        self.data
+    }
+
     pub fn len(&self) -> usize {
         self.data.len().checked_div(self.stride).unwrap_or(0)
     }
@@ -149,8 +154,15 @@ pub trait Policy {
         G::State: Send;
 
     /// Consume the complete rows for this search's last round, in emission order — called
-    /// once per round, only when every request is answered.
-    fn absorb<S: Send>(&self, search: &mut Self::Search<S>, rows: RowsView<'_>, rng: &mut dyn Rng);
+    /// once per round, only when every request is answered. `rows` borrows the caller's
+    /// assembly buffer: integrate them here instead of re-buffering a copy.
+    fn absorb<G: Game + Sync>(
+        &self,
+        ctx: SearchCtx<'_, G>,
+        search: &mut Self::Search<G::State>,
+        rows: RowsView<'_>,
+    ) where
+        G::State: Send;
 
     /// One `(evaluation, its interior targets)` per perspective, in `perspectives` order.
     fn finish<G: Game + Sync>(

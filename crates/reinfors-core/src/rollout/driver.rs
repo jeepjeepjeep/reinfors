@@ -82,7 +82,15 @@ where
                 data: &rows[start * stride..(start + count) * stride],
                 stride,
             };
-            policy.absorb(&mut searches[i], view, rng);
+            let ctx = SearchCtx {
+                game,
+                enc,
+                reward,
+                rng,
+                perms,
+                collect_interior,
+            };
+            policy.absorb(ctx, &mut searches[i], view);
         }
     }
     searches

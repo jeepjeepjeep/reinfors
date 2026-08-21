@@ -1213,7 +1213,15 @@ where
                 data: &rows[start * stride..(start + count) * stride],
                 stride,
             };
-            policy.absorb(&mut searches[i], view, &mut episodes[groups[i].0].rng);
+            let ctx = SearchCtx {
+                game,
+                enc,
+                reward,
+                rng: &mut episodes[groups[i].0].rng,
+                perms,
+                collect_interior,
+            };
+            policy.absorb(ctx, &mut searches[i], view);
         }
     }
     let mut out = Vec::new();

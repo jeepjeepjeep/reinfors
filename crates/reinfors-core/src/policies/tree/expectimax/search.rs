@@ -1770,7 +1770,6 @@ mod joint_fan_bound_tests {
 pub struct Stepper<S> {
     s: Search<S>,
     first: bool,
-    pending: Option<(Vec<f64>, usize)>,
 }
 
 impl<S> Stepper<S> {
@@ -1778,7 +1777,6 @@ impl<S> Stepper<S> {
         Stepper {
             s: Search::new(state, agent, seed),
             first: true,
-            pending: None,
         }
     }
 
@@ -1789,26 +1787,19 @@ impl<S> Stepper<S> {
     pub(crate) fn root_state(&self) -> &S {
         &self.s.arena[0].state
     }
-
-    pub(crate) fn absorb(&mut self, rows: crate::policy::RowsView<'_>) {
-        let flat: Vec<f64> = (0..rows.len())
-            .flat_map(|i| rows.row(i).iter().copied())
-            .collect();
-        self.pending = Some((flat, rows.stride()));
-    }
 }
 
-fn stepper_integrate<G: Game>(
+/// Integrate a round's rows straight from the borrowed slice (absorb, or an empty
+/// slice for a CPU-only expansion round).
+pub(crate) fn stepper_absorb<G: Game>(
     st: &mut Stepper<G::State>,
     game: &G,
     enc: &dyn StateEncoder<State = G::State>,
     cfg: &SearchConfig,
+    q: &[f64],
+    stride: usize,
 ) {
     let a = game.action_count();
-    let (q, stride) = match st.pending.take() {
-        Some(p) => p,
-        None => return,
-    };
     let n_opp = st.s.opp_legal.len();
     let n_heads = if stride > 0 {
         stride / a
@@ -1830,7 +1821,7 @@ fn stepper_integrate<G: Game>(
         enc,
         agent,
         &legal_of,
-        &q,
+        q,
         n_opp,
         n_heads,
         a,
@@ -1850,7 +1841,6 @@ pub(crate) fn stepper_round<G: Game + Sync>(
 where
     G::State: Send,
 {
-    stepper_integrate(st, game, enc, cfg);
     // A CPU-only expansion (every child terminal) emits no rows; keep expanding toward
     // the budget instead of reporting an empty Pending round — the round contract is
     // Pending ⇒ at least one request, Done ⇒ none.
@@ -1876,22 +1866,20 @@ where
         if out.len() > before {
             return crate::policy::RoundStatus::Pending;
         }
-        st.pending = Some((Vec::new(), 0));
-        stepper_integrate(st, game, enc, cfg);
+        stepper_absorb(st, game, enc, cfg, &[], 0);
     }
 }
 
 pub(crate) fn stepper_finish<G: Game + Sync>(
-    mut st: Stepper<G::State>,
+    st: Stepper<G::State>,
     game: &G,
-    enc: &dyn StateEncoder<State = G::State>,
+    _enc: &dyn StateEncoder<State = G::State>,
     cfg: &SearchConfig,
     collect_interior: bool,
 ) -> SearchResult
 where
     G::State: Send,
 {
-    stepper_integrate(&mut st, game, enc, cfg);
     let a = game.action_count();
     let mut s = st.s;
     resolve(&mut s.arena, 0, cfg.gamma, s.n_heads);
@@ -1931,14 +1919,22 @@ impl<S> MultiStepper<S> {
             counts: Vec::new(),
         }
     }
+}
 
-    pub(crate) fn absorb(&mut self, rows: crate::policy::RowsView<'_>) {
-        let mut offset = 0;
-        for (st, &count) in self.steppers.iter_mut().zip(&self.counts) {
-            if count > 0 {
-                st.absorb(rows.slice(offset, count));
-                offset += count;
-            }
+/// Route the shared view's spans to each stepper and integrate them in place.
+pub(crate) fn multi_absorb<G: Game>(
+    ms: &mut MultiStepper<G::State>,
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    cfg: &SearchConfig,
+    rows: crate::policy::RowsView<'_>,
+) {
+    let mut offset = 0;
+    for (st, &count) in ms.steppers.iter_mut().zip(&ms.counts) {
+        if count > 0 {
+            let span = rows.slice(offset, count);
+            stepper_absorb(st, game, enc, cfg, span.flat(), span.stride());
+            offset += count;
         }
     }
 }
@@ -2023,10 +2019,14 @@ where
         let rows = infer(&players, obs, n);
         let stride = rows.len() / n;
         for &(i, start, count) in &spans {
-            steppers[i].absorb(crate::policy::RowsView::from_slice(
+            stepper_absorb(
+                &mut steppers[i],
+                game,
+                enc,
+                cfg,
                 &rows[start * stride..(start + count) * stride],
                 stride,
-            ));
+            );
         }
     }
     steppers
