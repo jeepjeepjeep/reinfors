@@ -1,5 +1,6 @@
-//! Stage A equivalence: the stepped machine driven in lockstep must reproduce
-//! `Policy::evaluate` exactly for the migrated policies.
+//! Stepped-machine verification. Equivalence against `Policy::evaluate` was proven before
+//! its deletion (commits bfa00b90/b426beba/15a791ad); these tests keep the properties alive:
+//! hand-computed outputs through a permuting encoder, and drive-twice determinism.
 
 use reinfors_core::encoder::PermTable;
 use reinfors_core::rollout::driver::drive_to_completion;
@@ -49,7 +50,6 @@ impl Game for RR {
 struct Enc;
 impl reinfors_core::ActionView for Enc {
     fn head_index(&self, action: usize, agent: usize) -> usize {
-        // A real permuting encoder so the PermTable path is exercised.
         if agent == 1 {
             2 - action
         } else {
@@ -85,8 +85,8 @@ impl Reward for Zero {
     }
 }
 
-fn requests() -> Vec<(St, usize)> {
-    (0..5).map(|t| (St { tick: t }, t % 2)).collect()
+fn decisions() -> Vec<(St, Vec<usize>)> {
+    (0..5).map(|t| (St { tick: t }, vec![t % 2])).collect()
 }
 
 fn infer(width: usize) -> impl FnMut(usize, Vec<f32>, usize) -> Vec<f64> {
@@ -102,87 +102,116 @@ fn infer(width: usize) -> impl FnMut(usize, Vec<f32>, usize) -> Vec<f64> {
 }
 
 #[test]
-fn epsilon_greedy_stepped_matches_evaluate() {
+fn epsilon_greedy_stepped_produces_hand_computed_permuted_values() {
     let policy = EpsilonGreedyQ::new(2, 0.1);
     let perms = PermTable::build(&Enc, 3, 2);
-    let mut f1 = infer(6);
-    let mut e1 = Evaluator::new(&mut f1, InferMode::Shared, None);
-    let old = policy.evaluate(&RR, &Enc, &Zero, requests(), 7, false, &mut e1);
-    let decisions: Vec<(St, Vec<usize>)> =
-        requests().into_iter().map(|(s, a)| (s, vec![a])).collect();
-    let mut f2 = infer(6);
-    let mut e2 = Evaluator::new(&mut f2, InferMode::Shared, None);
+    let mut f = infer(6);
+    let mut e = Evaluator::new(&mut f, InferMode::Shared, None);
     let mut rng = reinfors_core::SplitMix64::new(0);
-    let new = drive_to_completion(
-        &policy, &RR, &Enc, &Zero, &perms, false, &decisions, &mut rng, &mut e2,
+    let out = drive_to_completion(
+        &policy,
+        &RR,
+        &Enc,
+        &Zero,
+        &perms,
+        false,
+        &decisions(),
+        &mut rng,
+        &mut e,
     );
-    assert_eq!(old.len(), new.len());
-    for (o, n) in old.iter().zip(&new) {
-        let (eval, targets) = &n[0];
-        assert!(targets.is_empty());
-        assert_eq!(o.values, eval.values);
-        assert_eq!(o.legal, eval.legal);
-    }
+    // Decision 0 (tick 0, agent 0, identity frame): head row is direct.
+    let (eval0, targets0) = &out[0][0];
+    assert!(targets0.is_empty());
+    assert_eq!(eval0.values[0], vec![0.0, 0.1, 0.2]);
+    assert_eq!(eval0.values[1], vec![3.0 * 0.1, 4.0 * 0.1, 5.0 * 0.1]);
+    // Decision 1 (tick 1, agent 1, mirrored frame): game action g reads head column 2-g.
+    // InferMode::Shared routes every row through the shared callback as player 0.
+    let (eval1, _) = &out[1][0];
+    let head0: Vec<f64> = vec![10.0, 10.1, 10.2];
+    let expect: Vec<f64> = (0..3).map(|g| head0[2 - g]).collect();
+    assert_eq!(eval1.values[0], expect);
+    assert_eq!(eval1.legal, vec![0, 1, 2]);
 }
 
 #[test]
-fn ppo_stepped_matches_evaluate() {
+fn ppo_stepped_log_probs_are_the_masked_softmax_of_permuted_logits() {
+    use reinfors_core::policies::modelfree::ppo::masked_log_probs;
     let policy = PpoActor::new();
     let perms = PermTable::build(&Enc, 3, 2);
-    let mut f1 = infer(4);
-    let mut e1 = Evaluator::new(&mut f1, InferMode::Shared, None);
-    let old = policy.evaluate(&RR, &Enc, &Zero, requests(), 7, false, &mut e1);
-    let decisions: Vec<(St, Vec<usize>)> =
-        requests().into_iter().map(|(s, a)| (s, vec![a])).collect();
-    let mut f2 = infer(4);
-    let mut e2 = Evaluator::new(&mut f2, InferMode::Shared, None);
+    let mut f = infer(4);
+    let mut e = Evaluator::new(&mut f, InferMode::Shared, None);
     let mut rng = reinfors_core::SplitMix64::new(0);
-    let new = drive_to_completion(
-        &policy, &RR, &Enc, &Zero, &perms, false, &decisions, &mut rng, &mut e2,
+    let out = drive_to_completion(
+        &policy,
+        &RR,
+        &Enc,
+        &Zero,
+        &perms,
+        false,
+        &decisions(),
+        &mut rng,
+        &mut e,
     );
-    for (o, n) in old.iter().zip(&new) {
-        let (eval, _) = &n[0];
-        assert_eq!(o.log_probs, eval.log_probs);
-        assert_eq!(o.value, eval.value);
-        assert_eq!(o.legal, eval.legal);
-    }
+    let (eval0, _) = &out[0][0];
+    let row: Vec<f64> = vec![0.0, 0.1, 0.2];
+    assert_eq!(eval0.log_probs, masked_log_probs(&row, &[0, 1, 2]));
+    assert_eq!(eval0.value, 3.0 * 0.1);
+    // Mirrored agent: legality maps into the head frame before the softmax; Shared mode
+    // routes rows as player 0.
+    let (eval1, _) = &out[1][0];
+    let head_row: Vec<f64> = vec![10.0, 10.1, 10.2];
+    assert_eq!(eval1.log_probs, masked_log_probs(&head_row, &[2, 1, 0]));
+    assert_eq!(eval1.value, 10.3);
 }
 
-#[test]
-fn minimax_stepped_matches_evaluate_on_a_chance_free_game() {
-    use reinfors_core::{ChanceMode, Minimax};
-    // Chance-free game + Committed{1}: the search consumes no randomness, so the stepped
-    // machine must reproduce `evaluate` byte-for-byte through the shared engine.
-    let policy = Minimax::new(2, None, ChanceMode::Committed { samples: 1 }, 1.0);
+fn drive_twice_identical<P>(
+    policy: &P,
+    width: usize,
+    collect_interior: bool,
+    eq: impl Fn(&P::Evaluation, &P::Evaluation) -> bool,
+) where
+    P: Policy,
+{
     let perms = PermTable::build(&Enc, 3, 2);
-    let mut f1 = infer(3);
-    let mut e1 = Evaluator::new(&mut f1, InferMode::Shared, None);
-    let old = policy.evaluate(&RR, &Enc, &Zero, requests(), 7, true, &mut e1);
-    let decisions: Vec<(St, Vec<usize>)> =
-        requests().into_iter().map(|(s, a)| (s, vec![a])).collect();
-    let mut f2 = infer(3);
-    let mut e2 = Evaluator::new(&mut f2, InferMode::Shared, None);
-    let mut rng = reinfors_core::SplitMix64::new(0);
-    let new = drive_to_completion(
-        &policy, &RR, &Enc, &Zero, &perms, true, &decisions, &mut rng, &mut e2,
-    );
-    for (o, n) in old.iter().zip(&new) {
-        let (eval, targets) = &n[0];
-        assert_eq!(o.values, eval.values);
-        assert_eq!(o.legal, eval.legal);
-        assert_eq!(
-            o.interior, *targets,
-            "interior targets move to the paired return"
-        );
+    let run = |seed: u64| {
+        let mut f = infer(width);
+        let mut e = Evaluator::new(&mut f, InferMode::Shared, None);
+        let mut rng = reinfors_core::SplitMix64::new(seed);
+        drive_to_completion(
+            policy,
+            &RR,
+            &Enc,
+            &Zero,
+            &perms,
+            collect_interior,
+            &decisions(),
+            &mut rng,
+            &mut e,
+        )
+    };
+    let a = run(3);
+    let b = run(3);
+    for (x, y) in a.iter().zip(&b) {
+        for ((ex, tx), (ey, ty)) in x.iter().zip(y) {
+            assert!(eq(ex, ey));
+            assert_eq!(tx, ty);
+        }
     }
 }
 
 #[test]
-fn mcts_stepped_matches_evaluate_on_a_deterministic_config() {
+fn minimax_stepped_is_deterministic_per_seed_with_interior_targets() {
+    use reinfors_core::{ChanceMode, Minimax};
+    let policy = Minimax::new(2, None, ChanceMode::Committed { samples: 1 }, 1.0);
+    drive_twice_identical(&policy, 3, true, |a, b| {
+        a.values == b.values && a.visits == b.visits && a.legal == b.legal
+    });
+}
+
+#[test]
+fn mcts_stepped_is_deterministic_per_seed() {
     use reinfors_core::policies::tree::mcts::{ActBy, Mcts, MctsConfig};
     use reinfors_core::ChanceMode;
-    // Chance-free game + UCT: search results must match `evaluate` exactly; telemetry
-    // counters (rounds, hit/shared rows) legitimately differ under per-eval suspension.
     let policy = Mcts::new(
         MctsConfig {
             num_simulations: 8,
@@ -195,23 +224,7 @@ fn mcts_stepped_matches_evaluate_on_a_deterministic_config() {
         },
         ActBy::Visits,
     );
-    let perms = PermTable::build(&Enc, 3, 2);
-    let mut f1 = infer(3);
-    let mut e1 = Evaluator::new(&mut f1, InferMode::Shared, None);
-    let old = policy.evaluate(&RR, &Enc, &Zero, requests(), 7, false, &mut e1);
-    let decisions: Vec<(St, Vec<usize>)> =
-        requests().into_iter().map(|(s, a)| (s, vec![a])).collect();
-    let mut f2 = infer(3);
-    let mut e2 = Evaluator::new(&mut f2, InferMode::Shared, None);
-    let mut rng = reinfors_core::SplitMix64::new(0);
-    let new = drive_to_completion(
-        &policy, &RR, &Enc, &Zero, &perms, false, &decisions, &mut rng, &mut e2,
-    );
-    for (o, n) in old.iter().zip(&new) {
-        let (eval, targets) = &n[0];
-        assert!(targets.is_empty());
-        assert_eq!(o.values, eval.values);
-        assert_eq!(o.visits, eval.visits);
-        assert_eq!(o.legal, eval.legal);
-    }
+    drive_twice_identical(&policy, 3, false, |a, b| {
+        a.values == b.values && a.visits == b.visits && a.legal == b.legal
+    });
 }

@@ -12,7 +12,7 @@ use crate::policy::{argmax, ply_from_u64, Policy, MAX_ENUMERATED_OUTCOMES};
 use crate::reward::Reward;
 use crate::rng::{dirichlet, SplitMix64};
 use crate::rollout::engine::CollectStats;
-use crate::rollout::evaluator::{CommittedRows, EvalBatch, Evaluator, Resolve};
+use crate::rollout::evaluator::Evaluator;
 
 /// Search guidance and leaf-output contract.
 #[derive(Clone)]
@@ -1136,7 +1136,6 @@ impl<S: Clone> Tree<S> {
         SearchEvaluation {
             values: vec![values],
             visits,
-            interior: Vec::new(),
             legal,
             stats,
         }
@@ -1238,321 +1237,6 @@ where
         eval,
         false,
     )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn search_many<G, F>(
-    game: &G,
-    enc: &dyn StateEncoder<State = G::State>,
-    reward: &dyn Reward<Event = G::Event>,
-    num_simulations: usize,
-    gamma: f64,
-    max_depth: i32,
-    guidance: &Guidance,
-    chance: ChanceMode,
-    seed: u64,
-    requests: Vec<(G::State, usize)>,
-    eval: &mut Evaluator<'_, F>,
-    force_maxn: bool,
-) -> Vec<SearchEvaluation>
-where
-    G: Game + Sync,
-    G::State: Send,
-    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
-{
-    let mut pool = PooledSearch::new(
-        game,
-        enc,
-        reward,
-        num_simulations,
-        gamma,
-        max_depth,
-        guidance.clone(),
-        chance,
-        seed,
-        requests,
-        force_maxn,
-    );
-    while !pool.finished() {
-        let mut batch = eval.batch();
-        pool.stage_round(&mut batch);
-        let rows = batch.commit();
-        pool.apply_rows(&rows);
-    }
-    pool.into_evaluations()
-}
-
-/// A pooled search whose round loop is owned by the caller: `stage_round` drives every tree
-/// until it stages rows (or finishes), the caller commits the batch however it likes, and
-/// `apply_rows` distributes the results. Schedulers can interleave rounds of several pools.
-struct PooledSearch<'c, G: Game> {
-    game: &'c G,
-    enc: &'c dyn StateEncoder<State = G::State>,
-    reward: &'c dyn Reward<Event = G::Event>,
-    num_simulations: usize,
-    gamma: f64,
-    max_depth: i32,
-    guidance: Guidance,
-    chance: ChanceMode,
-    a: usize,
-    trees: Vec<Tree<G::State>>,
-    consumers: Vec<Vec<(usize, usize, usize)>>,
-    awaiting: bool,
-}
-
-impl<'c, G: Game> PooledSearch<'c, G> {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        game: &'c G,
-        enc: &'c dyn StateEncoder<State = G::State>,
-        reward: &'c dyn Reward<Event = G::Event>,
-        num_simulations: usize,
-        gamma: f64,
-        max_depth: i32,
-        guidance: Guidance,
-        chance: ChanceMode,
-        seed: u64,
-        requests: Vec<(G::State, usize)>,
-        force_maxn: bool,
-    ) -> Self {
-        assert!(
-            game.num_agents() >= 1,
-            "a game must have at least one agent"
-        );
-        assert!(
-            game.perfect_information(),
-            "tree search on a hidden-information game is clairvoyant: its values condition on state \
-             the agents cannot observe; see {}",
-            crate::COMPATIBILITY_DOCS
-        );
-        let a = game.action_count();
-        let trees: Vec<Tree<G::State>> = requests
-            .into_iter()
-            .enumerate()
-            .map(|(ti, (state, agent))| {
-                let chance_seed =
-                    seed ^ 0x53A3_C5A9_1D87_2F6B ^ (ti as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                Tree::new(game, enc, state, agent, chance_seed, force_maxn)
-            })
-            .collect();
-        assert!(
-            // Q-derived UCT leaf values exist only at the evaluated agent's own turns. Sequential MaxN
-            // needs every perspective; simultaneous search gives every agent its own table instead.
-            !(matches!(&guidance, Guidance::Uct { .. })
-                && trees.iter().any(|t| t.mode == TreeMode::SeqMaxN)),
-            "UCT does not support this sequential player count; see {}",
-            crate::COMPATIBILITY_DOCS
-        );
-        PooledSearch {
-            game,
-            enc,
-            reward,
-            num_simulations,
-            gamma,
-            max_depth,
-            guidance,
-            chance,
-            a,
-            trees,
-            consumers: Vec::new(),
-            awaiting: false,
-        }
-    }
-
-    pub(crate) fn finished(&self) -> bool {
-        !self.awaiting && !self.trees.iter().any(|t| t.sims < self.num_simulations)
-    }
-
-    /// Drive every unfinished tree until it stages rows into `batch` or completes its budget.
-    /// Rounds alternate strictly: every `stage_round` must be answered by `apply_rows` before
-    /// the next, and the batch must be fresh — ticket ids index the consumer table directly.
-    pub(crate) fn stage_round<F>(&mut self, batch: &mut EvalBatch<'_, '_, F>)
-    where
-        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
-    {
-        assert!(
-            !self.awaiting,
-            "stage_round with a round outstanding: apply_rows must consume it first"
-        );
-        assert!(
-            batch.is_empty(),
-            "stage_round requires a fresh batch: ticket ids index the consumer table"
-        );
-        let (game, enc, reward) = (self.game, self.enc, self.reward);
-        let (num_simulations, gamma, max_depth, chance, a) = (
-            self.num_simulations,
-            self.gamma,
-            self.max_depth,
-            self.chance,
-            self.a,
-        );
-        let guidance = &self.guidance;
-
-        for (ti, tree) in self.trees.iter_mut().enumerate() {
-            while tree.sims < num_simulations {
-                tree.sims += 1;
-                match tree.select_expand(game, enc, reward, max_depth, guidance, chance) {
-                    Reached::Terminal => {
-                        tree.terminal_sims += 1;
-                        tree.backup_terminal(gamma);
-                    }
-                    Reached::DepthCapped => {
-                        tree.depthcap_sims += 1;
-                        tree.backup_leaf_values(gamma);
-                    }
-                    Reached::Eval => {
-                        let leaf = tree.leaf;
-                        let multi_row = matches!(tree.arena[leaf].kind, NodeKind::Simultaneous(_))
-                            || tree.mode == TreeMode::SeqMaxN;
-                        if multi_row {
-                            let n = tree.n_agents;
-                            tree.extra_eval_rows += n - 1;
-                            // Set the full count before cache hits can consume rows.
-                            tree.pending = Some((PendingWork::NodeEval(leaf), n));
-                            for ag in 0..n {
-                                let obs = match &mut tree.arena[leaf].kind {
-                                    NodeKind::Simultaneous(sim) => {
-                                        std::mem::take(&mut sim.tables[ag].obs)
-                                    }
-                                    _ => std::mem::take(&mut tree.arena[leaf].obs_all[ag]),
-                                };
-                                match batch.resolve_or_stage(ag, &obs) {
-                                    Resolve::Resolved(row) => {
-                                        tree.hit_rows += 1;
-                                        consume_row(
-                                            tree, leaf, ag, &row, guidance, gamma, a, ti, enc,
-                                        );
-                                    }
-                                    Resolve::Staged(ticket) => {
-                                        stage(tree, ti, leaf, ag, ticket, &mut self.consumers);
-                                    }
-                                }
-                            }
-                            if tree.pending.is_some() {
-                                break;
-                            }
-                        } else {
-                            match batch
-                                .resolve_or_stage(tree.arena[leaf].actor, &tree.arena[leaf].obs)
-                            {
-                                Resolve::Resolved(row) => {
-                                    tree.hit_rows += 1;
-                                    consume_row(tree, leaf, 0, &row, guidance, gamma, a, ti, enc);
-                                }
-                                Resolve::Staged(ticket) => {
-                                    stage(tree, ti, leaf, 0, ticket, &mut self.consumers);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Reached::Fan => {
-                        let cni = tree.leaf;
-                        let kids: Vec<usize> = tree.arena[cni]
-                            .child
-                            .iter()
-                            .map(|&c| c as usize)
-                            .filter(|&c| !tree.arena[c].terminal)
-                            .collect();
-                        let rows_per_child = match tree.mode {
-                            TreeMode::SeqNegamax => 1,
-                            _ => tree.n_agents,
-                        };
-                        let total_rows = kids.len() * rows_per_child;
-                        if total_rows == 0 {
-                            tree.terminal_sims += 1;
-                            tree.fan_backprop(gamma);
-                            continue;
-                        }
-                        tree.extra_eval_rows += total_rows.saturating_sub(1);
-                        // Set the full count before cache hits can consume rows.
-                        tree.pending = Some((PendingWork::Fan, total_rows));
-                        for child in kids {
-                            for ag in 0..rows_per_child {
-                                let obs = match &mut tree.arena[child].kind {
-                                    NodeKind::Simultaneous(sim) => {
-                                        std::mem::take(&mut sim.tables[ag].obs)
-                                    }
-                                    _ if tree.mode == TreeMode::SeqMaxN => {
-                                        std::mem::take(&mut tree.arena[child].obs_all[ag])
-                                    }
-                                    _ => std::mem::take(&mut tree.arena[child].obs),
-                                };
-                                let row_player = if rows_per_child == 1 {
-                                    tree.arena[child].actor
-                                } else {
-                                    ag
-                                };
-                                match batch.resolve_or_stage(row_player, &obs) {
-                                    Resolve::Resolved(row) => {
-                                        tree.hit_rows += 1;
-                                        consume_row(
-                                            tree, child, ag, &row, guidance, gamma, a, ti, enc,
-                                        );
-                                    }
-                                    Resolve::Staged(ticket) => {
-                                        stage(tree, ti, child, ag, ticket, &mut self.consumers);
-                                    }
-                                }
-                            }
-                        }
-                        if tree.pending.is_some() {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        self.awaiting = true;
-    }
-
-    /// Distribute one committed round to every tree that staged rows in it.
-    pub(crate) fn apply_rows(&mut self, rows: &CommittedRows) {
-        assert!(self.awaiting, "apply_rows without a staged round");
-        self.awaiting = false;
-        let consumers = std::mem::take(&mut self.consumers);
-        for (ticket, waiting) in consumers.iter().enumerate() {
-            for &(ti, node, slot) in waiting {
-                consume_row(
-                    &mut self.trees[ti],
-                    node,
-                    slot,
-                    rows.row(ticket),
-                    &self.guidance,
-                    self.gamma,
-                    self.a,
-                    ti,
-                    self.enc,
-                );
-            }
-        }
-    }
-
-    pub(crate) fn into_evaluations(self) -> Vec<SearchEvaluation> {
-        assert!(
-            self.finished(),
-            "into_evaluations on an unfinished pool: outstanding rows or unspent budget"
-        );
-        let a = self.a;
-        self.trees.into_iter().map(|t| t.evaluation(a)).collect()
-    }
-}
-
-fn stage<S>(
-    tree: &mut Tree<S>,
-    ti: usize,
-    node: usize,
-    slot: usize,
-    ticket: usize,
-    consumers: &mut Vec<Vec<(usize, usize, usize)>>,
-) {
-    if ticket < consumers.len() {
-        tree.shared_rows += 1;
-        consumers[ticket].push((ti, node, slot));
-    } else {
-        tree.fresh_rows += 1;
-        consumers.push(vec![(ti, node, slot)]);
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1797,24 +1481,6 @@ impl Policy for Mcts {
             .collect()
     }
 
-    fn evaluate<G, F>(
-        &self,
-        game: &G,
-        enc: &dyn StateEncoder<State = G::State>,
-        reward: &dyn Reward<Event = G::Event>,
-        requests: Vec<(G::State, usize)>,
-        seed: u64,
-        _collect_interior: bool,
-        eval: &mut Evaluator<'_, F>,
-    ) -> Vec<SearchEvaluation>
-    where
-        G: Game + Sync,
-        G::State: Send,
-        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
-    {
-        mcts_many(game, enc, reward, &self.cfg, requests, seed, eval)
-    }
-
     fn select(&self, eval: &SearchEvaluation, state: &mut u32, rng: &mut dyn Rng) -> usize {
         let move_idx = *state;
         *state += 1;
@@ -1858,7 +1524,6 @@ mod tests {
         SearchEvaluation {
             values: vec![values],
             visits,
-            interior: Vec::new(),
             legal: (0..2).collect(),
 
             stats: SearchStats {
@@ -3267,203 +2932,6 @@ mod forced_maxn_tests {
     }
 }
 
-#[cfg(test)]
-mod pooled_lifecycle_tests {
-    use super::*;
-    use crate::encoder::StateEncoder;
-    use crate::game::{Actor, Game, Transition};
-    use crate::reward::Reward;
-    use crate::rollout::evaluator::{Evaluator, InferMode};
-
-    #[derive(Clone)]
-    struct St {
-        tick: usize,
-    }
-    struct SimPair;
-    impl Game for SimPair {
-        type State = St;
-        type Event = ();
-        fn num_agents(&self) -> usize {
-            2
-        }
-        fn action_count(&self) -> usize {
-            2
-        }
-        fn actor(&self, _s: &St) -> Actor {
-            Actor::Simultaneous
-        }
-        fn legal_actions(&self, _s: &St, _agent: usize) -> Vec<usize> {
-            vec![0, 1]
-        }
-        fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, ()> {
-            Transition {
-                next_state: St { tick: s.tick + 1 },
-                events: vec![None; 2],
-                terminal: s.tick + 1 >= 4,
-            }
-        }
-        fn initial_state(&self) -> St {
-            St { tick: 0 }
-        }
-    }
-    struct Enc;
-    impl crate::encoder::ActionView for Enc {}
-    impl StateEncoder for Enc {
-        type State = St;
-        fn encode(&self, s: &St, agent: usize) -> Vec<f32> {
-            vec![s.tick as f32, agent as f32]
-        }
-        fn obs_shape(&self) -> (usize, usize, usize) {
-            (1, 1, 2)
-        }
-    }
-    struct Zero;
-    impl Reward for Zero {
-        type Event = ();
-        fn step_reward(&self, _e: &(), _agent: usize) -> f64 {
-            0.0
-        }
-    }
-
-    fn infer(_player: usize, obs: Vec<f32>, n: usize) -> Vec<f64> {
-        assert_eq!(obs.len(), n * 2);
-        vec![0.25; n * 2]
-    }
-
-    fn new_pool<'c>(
-        game: &'c SimPair,
-        enc: &'c Enc,
-        reward: &'c Zero,
-        sims: usize,
-    ) -> PooledSearch<'c, SimPair> {
-        PooledSearch::new(
-            game,
-            enc,
-            reward,
-            sims,
-            1.0,
-            64,
-            Guidance::Uct { c: 1.0 },
-            ChanceMode::AlwaysResample,
-            7,
-            vec![(St { tick: 0 }, 0)],
-            false,
-        )
-    }
-
-    #[test]
-    fn final_round_is_outstanding_until_applied() {
-        let (game, enc, reward) = (SimPair, Enc, Zero);
-        let mut f = infer;
-        let mut eval: Evaluator<'_, _> = Evaluator::new(&mut f, InferMode::Shared, None);
-        let mut p = new_pool(&game, &enc, &reward, 1);
-        let mut batch = eval.batch();
-        p.stage_round(&mut batch);
-        // The single simulation is spent, but its (multi-row: simultaneous) evaluation is in
-        // flight — the pool must not present as finished.
-        assert!(!p.finished());
-        let rows = batch.commit();
-        p.apply_rows(&rows);
-        assert!(p.finished());
-        let evals = p.into_evaluations();
-        assert_eq!(evals.len(), 1);
-    }
-
-    #[test]
-    #[should_panic(expected = "round outstanding")]
-    fn double_stage_panics() {
-        let (game, enc, reward) = (SimPair, Enc, Zero);
-        let mut f = infer;
-        let mut eval: Evaluator<'_, _> = Evaluator::new(&mut f, InferMode::Shared, None);
-        let mut p = new_pool(&game, &enc, &reward, 2);
-        let mut batch = eval.batch();
-        p.stage_round(&mut batch);
-        drop(batch);
-        let mut batch2 = eval.batch();
-        p.stage_round(&mut batch2);
-    }
-
-    #[test]
-    #[should_panic(expected = "without a staged round")]
-    fn apply_without_stage_panics() {
-        let (game, enc, reward) = (SimPair, Enc, Zero);
-        let mut f = infer;
-        let mut eval: Evaluator<'_, _> = Evaluator::new(&mut f, InferMode::Shared, None);
-        let empty = eval.batch().commit();
-        let mut p = new_pool(&game, &enc, &reward, 1);
-        p.apply_rows(&empty);
-    }
-
-    #[test]
-    #[should_panic(expected = "unfinished pool")]
-    fn into_evaluations_while_awaiting_panics() {
-        let (game, enc, reward) = (SimPair, Enc, Zero);
-        let mut f = infer;
-        let mut eval: Evaluator<'_, _> = Evaluator::new(&mut f, InferMode::Shared, None);
-        let mut p = new_pool(&game, &enc, &reward, 1);
-        let mut batch = eval.batch();
-        p.stage_round(&mut batch);
-        drop(batch);
-        let _ = p.into_evaluations();
-    }
-
-    #[test]
-    #[should_panic(expected = "fresh batch")]
-    fn nonempty_batch_panics() {
-        let (game, enc, reward) = (SimPair, Enc, Zero);
-        let mut f = infer;
-        let mut eval: Evaluator<'_, _> = Evaluator::new(&mut f, InferMode::Shared, None);
-        let mut p = new_pool(&game, &enc, &reward, 1);
-        let mut batch = eval.batch();
-        let _ = batch.resolve_or_stage(0, &[9.0, 9.0]);
-        p.stage_round(&mut batch);
-    }
-
-    #[test]
-    fn alternated_pools_match_search_many() {
-        let (game, enc, reward) = (SimPair, Enc, Zero);
-        let sims = 6;
-        let mut f = infer;
-        let mut eval: Evaluator<'_, _> = Evaluator::new(&mut f, InferMode::Shared, None);
-        let guidance = Guidance::Uct { c: 1.0 };
-        let reference = search_many(
-            &game,
-            &enc,
-            &reward,
-            sims,
-            1.0,
-            64,
-            &guidance,
-            ChanceMode::AlwaysResample,
-            7,
-            vec![(St { tick: 0 }, 0)],
-            &mut eval,
-            false,
-        );
-
-        let mut f2 = infer;
-        let mut eval2: Evaluator<'_, _> = Evaluator::new(&mut f2, InferMode::Shared, None);
-        let mut a = new_pool(&game, &enc, &reward, sims);
-        let mut b = new_pool(&game, &enc, &reward, sims);
-        while !a.finished() || !b.finished() {
-            for p in [&mut a, &mut b] {
-                if p.finished() {
-                    continue;
-                }
-                let mut batch = eval2.batch();
-                p.stage_round(&mut batch);
-                let rows = batch.commit();
-                p.apply_rows(&rows);
-            }
-        }
-        for evals in [a.into_evaluations(), b.into_evaluations()] {
-            assert_eq!(evals.len(), 1);
-            assert_eq!(evals[0].visits, reference[0].visits);
-            assert_eq!(evals[0].values, reference[0].values);
-        }
-    }
-}
-
 /// Single-tree stepped search. Every eval row is emitted as a request (the scheduler's
 /// evaluator dedups; there is no inline cache resolution, so hit/shared telemetry counters
 /// differ from the pooled path while search results are identical — rows are pure).
@@ -3496,8 +2964,26 @@ pub(crate) fn mcts_stepper_new<G: Game>(
 where
     G::State: Clone,
 {
+    assert!(
+        game.num_agents() >= 1,
+        "a game must have at least one agent"
+    );
+    assert!(
+        game.perfect_information(),
+        "tree search on a hidden-information game is clairvoyant: its values condition on state \
+         the agents cannot observe; see {}",
+        crate::COMPATIBILITY_DOCS
+    );
+    let tree = Tree::new(game, enc, state, agent, chance_seed, force_maxn);
+    assert!(
+        // Q-derived UCT leaf values exist only at the evaluated agent's own turns. Sequential MaxN
+        // needs every perspective; simultaneous search gives every agent its own table instead.
+        !(matches!(&guidance, Guidance::Uct { .. }) && tree.mode == TreeMode::SeqMaxN),
+        "UCT does not support this sequential player count; see {}",
+        crate::COMPATIBILITY_DOCS
+    );
     MctsStepper {
-        tree: Tree::new(game, enc, state, agent, chance_seed, force_maxn),
+        tree,
         guidance,
         waiting: Vec::new(),
         pending_rows: None,
@@ -3690,4 +3176,101 @@ where
     } else {
         crate::policy::RoundStatus::Pending
     }
+}
+
+/// Lockstep search over `(state, agent)` requests — the pre-scheduler public entry, now a
+/// thin wrapper over the single-tree steppers (one pooled infer call per barrier round).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn search_many<G, F>(
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
+    num_simulations: usize,
+    gamma: f64,
+    max_depth: i32,
+    guidance: &Guidance,
+    chance: ChanceMode,
+    seed: u64,
+    requests: Vec<(G::State, usize)>,
+    eval: &mut Evaluator<'_, F>,
+    force_maxn: bool,
+) -> Vec<SearchEvaluation>
+where
+    G: Game + Sync,
+    G::State: Send,
+    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+{
+    let a = game.action_count();
+    let mut root = crate::rng::SplitMix64::new(seed);
+    let mut steppers: Vec<MctsStepper<G::State>> = requests
+        .into_iter()
+        .map(|(state, agent)| {
+            let g = match guidance {
+                Guidance::Puct {
+                    c,
+                    noise,
+                    noise_all,
+                } => Guidance::Puct {
+                    c: *c,
+                    noise: noise.map(|(e, al, _)| (e, al, crate::game::Rng::next_u64(&mut root))),
+                    noise_all: *noise_all,
+                },
+                other => other.clone(),
+            };
+            mcts_stepper_new(
+                game,
+                enc,
+                state,
+                agent,
+                crate::game::Rng::next_u64(&mut root),
+                g,
+                force_maxn,
+            )
+        })
+        .collect();
+    let mut done = vec![false; steppers.len()];
+    loop {
+        let mut sink = crate::policy::RequestSink::default();
+        let mut spans: Vec<(usize, usize, usize)> = Vec::new();
+        for (i, st) in steppers.iter_mut().enumerate() {
+            if done[i] {
+                continue;
+            }
+            let before = sink.len();
+            let status = mcts_stepper_round(
+                st,
+                game,
+                enc,
+                reward,
+                num_simulations,
+                gamma,
+                max_depth,
+                chance,
+                &mut sink,
+            );
+            let count = sink.len() - before;
+            if count > 0 {
+                spans.push((i, before, count));
+            } else if status == crate::policy::RoundStatus::Done {
+                done[i] = true;
+            }
+        }
+        if spans.is_empty() {
+            break;
+        }
+        let n = sink.len();
+        let (players, obs) = sink.into_parts();
+        let rows = eval.forward(&players, obs, n);
+        let stride = rows.len() / n;
+        for &(i, start, count) in &spans {
+            steppers[i].absorb(crate::policy::RowsView::from_slice(
+                &rows[start * stride..(start + count) * stride],
+                stride,
+            ));
+        }
+    }
+    steppers
+        .into_iter()
+        .map(|st| mcts_stepper_finish(st, a))
+        .collect()
 }

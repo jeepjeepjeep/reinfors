@@ -89,7 +89,7 @@ def test_collect_stream_accepts_f32() -> None:
     engine = _az_engine()
     with engine.collect_stream(16, _az_infer(np.float32)) as stream:
         batch = stream.next()
-    assert batch.obs.shape[0] == 16
+    assert batch.obs.shape[0] >= 16  # record floor, not an exact size
 
 
 def test_wrong_dtype_names_the_accepted_ones() -> None:

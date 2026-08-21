@@ -4,7 +4,6 @@ use crate::codec::bytes::Reader;
 use crate::encoder::StateEncoder;
 use crate::game::{Game, Rng};
 use crate::reward::Reward;
-use crate::rollout::evaluator::Evaluator;
 use crate::stats::CollectStats;
 
 /// Maximum simultaneous joint-action fan. Bindings reject statically oversized compositions;
@@ -53,6 +52,10 @@ impl RequestSink {
     pub fn is_empty(&self) -> bool {
         self.players.is_empty()
     }
+
+    pub fn into_parts(self) -> (Vec<usize>, Vec<f32>) {
+        (self.players, self.obs)
+    }
 }
 
 /// The complete rows answering one search round, in emission order.
@@ -80,6 +83,10 @@ impl<'a> RowsView<'a> {
 
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
+    }
+
+    pub fn from_slice(data: &'a [f64], stride: usize) -> RowsView<'a> {
+        RowsView { data, stride }
     }
 
     /// Sub-view over `count` rows starting at `start`.
@@ -120,22 +127,6 @@ pub trait Policy {
 
     fn policy_state_to_u64(&self, s: &Self::PolicyState) -> u64;
     fn policy_state_from_u64(&self, v: u64) -> Result<Self::PolicyState, String>;
-
-    #[allow(clippy::too_many_arguments)]
-    fn evaluate<G, F>(
-        &self,
-        game: &G,
-        enc: &dyn StateEncoder<State = G::State>,
-        reward: &dyn Reward<Event = G::Event>,
-        requests: Vec<(G::State, usize)>,
-        seed: u64,
-        collect_interior: bool,
-        eval: &mut Evaluator<'_, F>,
-    ) -> Vec<Self::Evaluation>
-    where
-        G: Game + Sync,
-        G::State: Send,
-        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>;
 
     /// Per-decision search state (GAT over the STATE type): stored by the engine between
     /// rounds, so it owns what persists and borrows nothing. Never outlives a collect call.

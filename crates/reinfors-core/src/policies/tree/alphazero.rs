@@ -204,24 +204,6 @@ impl Policy for AlphaZero {
             .collect()
     }
 
-    fn evaluate<G, F>(
-        &self,
-        game: &G,
-        enc: &dyn StateEncoder<State = G::State>,
-        reward: &dyn Reward<Event = G::Event>,
-        requests: Vec<(G::State, usize)>,
-        seed: u64,
-        _collect_interior: bool,
-        eval: &mut Evaluator<'_, F>,
-    ) -> Vec<SearchEvaluation>
-    where
-        G: Game + Sync,
-        G::State: Send,
-        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
-    {
-        alphazero_many(game, enc, reward, &self.cfg, requests, seed, eval)
-    }
-
     fn select(&self, eval: &SearchEvaluation, state: &mut u32, rng: &mut dyn Rng) -> usize {
         let ply = *state;
         *state += 1;

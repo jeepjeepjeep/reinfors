@@ -50,7 +50,6 @@ impl Learner<SearchEvaluation> for AlphaZeroLearner {
         Some(SearchEvaluation {
             values: vec![vec![0.0; action_count]],
             visits: vec![0.0; action_count],
-            interior: Vec::new(),
             legal: Vec::new(),
             stats: Default::default(),
         })
@@ -121,7 +120,6 @@ pub(crate) mod tests {
         SearchEvaluation {
             values: vec![vec![0.0; n]],
             visits,
-            interior: Vec::new(),
             legal: (0..n).collect(),
             stats: SearchStats::default(),
         }

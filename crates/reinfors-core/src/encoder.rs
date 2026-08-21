@@ -233,7 +233,6 @@ mod dispatch_tests {
     use super::*;
     use crate::game::{Actor, Game, Transition};
     use crate::policies::modelfree::epsilon_greedy_q::EpsilonGreedyQ;
-    use crate::policy::Policy;
     use crate::reward::Reward;
     use crate::rollout::evaluator::Evaluator;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -344,9 +343,27 @@ mod dispatch_tests {
             crate::rollout::evaluator::InferMode::Shared,
             None,
         );
-        let requests = vec![(St, 0), (St, 0), (St, 0), (St, 0)];
-        let evals = policy.evaluate(&SparseShot, &enc, &NoReward, requests, 0, false, &mut eval);
+        // The table is built once for the engine's lifetime, not per decision or per scalar.
+        let perms = PermTable::build(&enc, 3, 1);
+        let built = enc.0.load(Ordering::Relaxed);
+        let decisions = vec![(St, vec![0]), (St, vec![0]), (St, vec![0]), (St, vec![0])];
+        let mut rng = crate::rng::SplitMix64::new(0);
+        let evals = crate::rollout::driver::drive_to_completion(
+            &policy,
+            &SparseShot,
+            &enc,
+            &NoReward,
+            &perms,
+            false,
+            &decisions,
+            &mut rng,
+            &mut eval,
+        );
         assert_eq!(evals.len(), 4);
-        assert_eq!(enc.0.load(Ordering::Relaxed), 3);
+        assert_eq!(
+            enc.0.load(Ordering::Relaxed),
+            built,
+            "no rebuilds after construction"
+        );
     }
 }

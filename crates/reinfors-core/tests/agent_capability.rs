@@ -214,23 +214,6 @@ impl Policy for CappedStub {
     fn policy_state_from_u64(&self, _v: u64) -> Result<(), String> {
         Ok(())
     }
-    fn evaluate<G, F>(
-        &self,
-        _game: &G,
-        _enc: &dyn StateEncoder<State = G::State>,
-        _reward: &dyn reinfors_core::Reward<Event = G::Event>,
-        _requests: Vec<(G::State, usize)>,
-        _seed: u64,
-        _collect_interior: bool,
-        _eval: &mut Evaluator<'_, F>,
-    ) -> Vec<()>
-    where
-        G: Game + Sync,
-        G::State: Send,
-        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
-    {
-        unimplemented!("construction panics before any evaluation")
-    }
     fn select(&self, _eval: &(), _state: &mut (), _rng: &mut dyn Rng) -> usize {
         unimplemented!()
     }

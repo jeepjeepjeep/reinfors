@@ -3948,6 +3948,7 @@ trait ErasedEnv: Send + Sync {
 // ordered batch and seed, per the choose determinism contract.
 const CHOOSE_ENV_MIX: u64 = 0x9E37_79B9_7F4A_7C15;
 const CHOOSE_SELECT_SALT: u64 = 0xC3A5_C85C_97CB_3127;
+const CHOOSE_DRIVE_SALT: u64 = 0xB492_B66F_BE98_F273;
 const CHOOSE_HEAD_SALT: u64 = 0xB492_B66F_BE98_F273;
 
 fn choose_env_rng(seed: u64, index: usize, salt: u64) -> SplitMix64 {
@@ -3974,9 +3975,25 @@ where
     // Within-batch dedup only: no store, nothing survives a round, stochastic
     // inference is never frozen across rounds.
     let mut evaluator = Evaluator::with_batch_dedup(&mut infer_fn, InferMode::Shared);
-    let evals = policy.evaluate(game, enc, reward, requests, seed, false, &mut evaluator);
-    let mut out = Vec::with_capacity(evals.len());
-    for (i, eval) in evals.iter().enumerate() {
+    let perms =
+        reinfors_core::encoder::PermTable::build(enc, game.action_count(), game.num_agents());
+    let decisions: Vec<(G::State, Vec<usize>)> =
+        requests.into_iter().map(|(s, a)| (s, vec![a])).collect();
+    let mut drive_rng = choose_env_rng(seed, 0, CHOOSE_DRIVE_SALT);
+    let results = reinfors_core::rollout::driver::drive_to_completion(
+        policy,
+        game,
+        enc,
+        reward,
+        &perms,
+        false,
+        &decisions,
+        &mut drive_rng,
+        &mut evaluator,
+    );
+    let mut out = Vec::with_capacity(results.len());
+    for (i, per) in results.iter().enumerate() {
+        let (eval, _) = &per[0];
         let mut rng = choose_env_rng(seed, i, CHOOSE_SELECT_SALT);
         out.push(policy.select(eval, &mut states[i], &mut rng));
     }

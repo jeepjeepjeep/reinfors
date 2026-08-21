@@ -1,13 +1,8 @@
 //! Stochastic actor over policy logits and a state value.
 
-use std::collections::HashMap;
-
 use crate::codec::bytes::Reader;
-use crate::encoder::{head_permutation, StateEncoder};
 use crate::game::{Game, Rng};
 use crate::policy::Policy;
-use crate::reward::Reward;
-use crate::rollout::evaluator::Evaluator;
 
 /// Masked-softmax log-probabilities parallel to `legal`, the critic's state value, and the
 /// game-frame legal action ids for one decision.
@@ -175,61 +170,6 @@ impl Policy for PpoActor {
                     },
                     Vec::new(),
                 )
-            })
-            .collect()
-    }
-
-    fn evaluate<G, F>(
-        &self,
-        game: &G,
-        enc: &dyn StateEncoder<State = G::State>,
-        _reward: &dyn Reward<Event = G::Event>,
-        requests: Vec<(G::State, usize)>,
-        _seed: u64,
-        _collect_interior: bool,
-        eval: &mut Evaluator<'_, F>,
-    ) -> Vec<PpoEvaluation>
-    where
-        G: Game + Sync,
-        G::State: Send,
-        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
-    {
-        let n = requests.len();
-        if n == 0 {
-            return Vec::new();
-        }
-        let a = game.action_count();
-        let mut obs_flat: Vec<f32> = Vec::new();
-        for (state, agent) in &requests {
-            obs_flat.extend(enc.encode(state, *agent));
-        }
-        let players: Vec<usize> = requests.iter().map(|(_, agent)| *agent).collect();
-        // PolicyValue rows: `a` head-frame logits then the state value.
-        let rows = eval.forward(&players, obs_flat, n);
-        let width = rows.len() / n;
-        debug_assert!(width == a + 1, "PolicyValue row width {width} != {}", a + 1);
-        let mut perms: HashMap<usize, (Vec<usize>, bool)> = HashMap::new();
-        requests
-            .iter()
-            .enumerate()
-            .map(|(i, (state, agent))| {
-                let (perm, identity) = perms
-                    .entry(*agent)
-                    .or_insert_with(|| head_permutation(enc, a, *agent));
-                let row = &rows[i * width..(i + 1) * width];
-                let legal = game.legal_actions(state, *agent);
-                // Same softmax either frame: index head logits directly.
-                let log_probs = if *identity {
-                    masked_log_probs(&row[..a], &legal)
-                } else {
-                    let head_legal: Vec<usize> = legal.iter().map(|&g| perm[g]).collect();
-                    masked_log_probs(&row[..a], &head_legal)
-                };
-                PpoEvaluation {
-                    log_probs,
-                    value: row[a],
-                    legal,
-                }
             })
             .collect()
     }

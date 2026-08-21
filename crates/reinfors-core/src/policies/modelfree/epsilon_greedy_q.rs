@@ -1,13 +1,8 @@
 //! Epsilon-greedy acting on ensemble Q-values.
 
-use std::collections::HashMap;
-
 use crate::codec::bytes::Reader;
-use crate::encoder::{head_permutation, StateEncoder};
 use crate::game::{Game, Rng};
 use crate::policy::{thompson_head_from_u64, Policy};
-use crate::reward::Reward;
-use crate::rollout::evaluator::Evaluator;
 
 /// Per-head Q-values and legal actions for one decision.
 pub struct QEvaluation {
@@ -157,60 +152,6 @@ impl Policy for EpsilonGreedyQ {
                     })
                     .collect();
                 (QEvaluation { values, legal }, Vec::new())
-            })
-            .collect()
-    }
-
-    fn evaluate<G, F>(
-        &self,
-        game: &G,
-        enc: &dyn StateEncoder<State = G::State>,
-        _reward: &dyn Reward<Event = G::Event>,
-        requests: Vec<(G::State, usize)>,
-        _seed: u64,
-        _collect_interior: bool,
-        eval: &mut Evaluator<'_, F>,
-    ) -> Vec<QEvaluation>
-    where
-        G: Game + Sync,
-        G::State: Send,
-        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
-    {
-        let n = requests.len();
-        if n == 0 {
-            return Vec::new();
-        }
-        let a = game.action_count();
-        let mut obs_flat: Vec<f32> = Vec::new();
-        for (state, agent) in &requests {
-            obs_flat.extend(enc.encode(state, *agent));
-        }
-        let players: Vec<usize> = requests.iter().map(|(_, agent)| *agent).collect();
-        let q = eval.forward(&players, obs_flat, n);
-        let k = q.len() / (n * a);
-        // Build each action-frame permutation once rather than dispatching per Q-value.
-        let mut perms: HashMap<usize, (Vec<usize>, bool)> = HashMap::new();
-        requests
-            .iter()
-            .enumerate()
-            .map(|(i, (state, agent))| {
-                let (perm, identity) = perms
-                    .entry(*agent)
-                    .or_insert_with(|| head_permutation(enc, a, *agent));
-                let values = (0..k)
-                    .map(|h| {
-                        let start = (i * k + h) * a;
-                        if *identity {
-                            q[start..start + a].to_vec()
-                        } else {
-                            perm.iter().map(|&p| q[start + p]).collect()
-                        }
-                    })
-                    .collect();
-                QEvaluation {
-                    values,
-                    legal: game.legal_actions(state, *agent),
-                }
             })
             .collect()
     }

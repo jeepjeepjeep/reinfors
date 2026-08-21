@@ -3,20 +3,16 @@
 pub mod search;
 
 use crate::codec::bytes::Reader;
-use crate::encoder::StateEncoder;
 use crate::game::{Game, Rng};
 use crate::policies::tree::fold_search_stats;
 use crate::policy::{thompson_head_from_u64, ChanceMode, Policy};
-use crate::reward::Reward;
 use crate::rollout::engine::CollectStats;
-use crate::rollout::evaluator::Evaluator;
-use search::{search_many, InteriorTarget, SearchConfig, SearchStats};
+use search::{SearchConfig, SearchStats};
 
 /// Per-decision values, visits, auxiliary targets, legality, and telemetry.
 pub struct SearchEvaluation {
     pub values: Vec<Vec<f64>>,
     pub visits: Vec<f64>,
-    pub interior: Vec<InteriorTarget>,
     pub legal: Vec<usize>,
     pub stats: SearchStats,
 }
@@ -89,6 +85,7 @@ impl Policy for SelectiveExpectimax {
     where
         G::State: Send,
     {
+        search::guard_game(ctx.game);
         search::MultiStepper::new(
             perspectives
                 .iter()
@@ -143,7 +140,6 @@ impl Policy for SelectiveExpectimax {
                     SearchEvaluation {
                         values,
                         visits: Vec::new(),
-                        interior: Vec::new(),
                         legal,
                         stats,
                     },
@@ -151,55 +147,6 @@ impl Policy for SelectiveExpectimax {
                 )
             })
             .collect()
-    }
-
-    fn evaluate<G, F>(
-        &self,
-        game: &G,
-        enc: &dyn StateEncoder<State = G::State>,
-        reward: &dyn Reward<Event = G::Event>,
-        requests: Vec<(G::State, usize)>,
-        seed: u64,
-        collect_interior: bool,
-        eval: &mut Evaluator<'_, F>,
-    ) -> Vec<SearchEvaluation>
-    where
-        G: Game + Sync,
-        G::State: Send,
-        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
-    {
-        let legal: Vec<Vec<usize>> = requests
-            .iter()
-            .map(|(state, agent)| game.legal_actions(state, *agent))
-            .collect();
-        search_many(
-            game,
-            enc,
-            reward,
-            &self.cfg,
-            requests,
-            collect_interior,
-            seed,
-            &mut |players: &[usize], obs, n| eval.forward(players, obs, n),
-        )
-        .into_iter()
-        .zip(legal)
-        .map(|((values, interior, stats), legal)| {
-            // All-terminal roots have no network row from which to infer the head count.
-            let values = if values.len() < self.n_heads {
-                vec![values[0].clone(); self.n_heads]
-            } else {
-                values
-            };
-            SearchEvaluation {
-                values,
-                visits: Vec::new(),
-                interior,
-                legal,
-                stats,
-            }
-        })
-        .collect()
     }
 
     fn select(&self, eval: &SearchEvaluation, head: &mut usize, rng: &mut dyn Rng) -> usize {
@@ -288,7 +235,6 @@ mod select_masking_tests {
         let eval = SearchEvaluation {
             values: vec![vec![0.0, -0.6, -0.9]],
             visits: Vec::new(),
-            interior: Vec::new(),
             legal: vec![1, 2],
             stats: SearchStats::default(),
         };
@@ -304,10 +250,6 @@ mod select_masking_tests {
 /// Serialize a buffered evaluation after immediate interior targets have been drained.
 pub(crate) fn encode_search_eval(e: &SearchEvaluation, out: &mut Vec<u8>) {
     use crate::codec::bytes::*;
-    debug_assert!(
-        e.interior.is_empty(),
-        "interior is drained before buffering"
-    );
     put_u32(out, e.values.len() as u32);
     for row in &e.values {
         put_f64s(out, row);
@@ -396,7 +338,6 @@ pub(crate) fn decode_search_eval(
     Ok(SearchEvaluation {
         values,
         visits,
-        interior: Vec::new(),
         legal,
         stats,
     })
@@ -415,7 +356,6 @@ mod eval_codec_tests {
             } else {
                 Vec::new()
             },
-            interior: Vec::new(),
             legal: vec![0, 1],
             stats: Default::default(),
         };
