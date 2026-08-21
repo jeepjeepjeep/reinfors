@@ -73,7 +73,7 @@ def test_collect_with_cache_is_sane() -> None:
     batch = eng.collect(60, _uniform)
     t = batch.telemetry
     assert t["cache_lookups"] > 0
-    assert t["fresh_rows"] >= t["infer_rows"]
+    assert t["requested_rows"] >= t["infer_rows"]
 
 
 def test_stream_first_batch_matches_direct_collect() -> None:

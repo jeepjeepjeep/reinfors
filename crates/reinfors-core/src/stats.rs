@@ -28,8 +28,6 @@ pub struct CollectStats {
     pub cache_hits: usize,
     pub sum_terminal_sims: usize,
     pub sum_depthcap_sims: usize,
-    pub sum_shared_rows: usize,
-    pub sum_fresh_rows: usize,
-    pub sum_hit_rows: usize,
+    pub sum_requested_rows: usize,
     pub sum_extra_eval_rows: usize,
 }

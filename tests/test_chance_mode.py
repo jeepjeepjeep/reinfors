@@ -63,9 +63,7 @@ def test_identity_includes_fan_term() -> None:
     t = _collect(rf.policies.AlphaZero(num_simulations=8)).telemetry
     lhs = t["decisions"] * 8
     rhs = (
-        t["fresh_rows"]
-        + t["hit_rows"]
-        + t["shared_rows"]
+        t["requested_rows"]
         + t["terminal_sims"]
         + t["depthcap_sims"]
         - t["extra_eval_rows"]

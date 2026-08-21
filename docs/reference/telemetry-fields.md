@@ -23,9 +23,7 @@ disagreement from `EpsilonGreedyQ` as measured agreement.
 | `cache_hits` | `int` rows | Any policy with `infer_cache` enabled | Successful persistent evaluation-cache lookups. |
 | `terminal_sims` | `int` simulations | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Simulations ending at a terminal state. |
 | `depthcap_sims` | `int` simulations | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Simulations ending at the configured depth cap. |
-| `shared_rows` | `int` rows | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Always `0` under the stepped machine: within-batch sharing is an Evaluator fact (see the dedup savings, `fresh_rows - infer_rows`). |
-| `fresh_rows` | `int` rows | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Evaluation rows requested by searches; dedup and cache savings appear as the gap to `infer_rows`. |
-| `hit_rows` | `int` rows | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Always `0` under the stepped machine: cache hits are counted in `cache_hits`. |
+| `requested_rows` | `int` rows | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Evaluation rows requested by searches (pre-dedup, pre-cache); dedup and cache savings are the gap to `infer_rows`. Replaces 0.2.x's `fresh_rows`/`hit_rows`/`shared_rows` split — row provenance is an Evaluator fact. |
 | `extra_eval_rows` | `int` rows | `Mcts`, `AlphaZero` | Rows beyond one per simulation, from multi-perspective leaf evaluation or an `ExpandAll` chance fan. |
 
 The preceding Engine cache counters apply only when the engine was constructed with `infer_cache`;

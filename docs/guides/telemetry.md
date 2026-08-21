@@ -66,7 +66,7 @@ The complete runnable version is
   Rust, not training time);
 - `cache_hits / cache_lookups`: evaluation-cache hit rate;
 - episode return and length distributions from `episodes`;
-- `fresh_rows`, `hit_rows`, and `shared_rows`: where evaluated rows came from;
+- `requested_rows - infer_rows`: rows saved by in-batch dedup and the evaluation cache;
 - `terminal_sims / (terminal_sims + depthcap_sims)`: how searches ended, when applicable.
 
 Do not compare search configurations on a single throughput number alone. Record resolved

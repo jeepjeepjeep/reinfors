@@ -63,10 +63,10 @@ def test_weights_updated_is_safe_without_cache_and_during_stream() -> None:
 def _identity(t: dict[str, int], sims: int) -> tuple[int, int]:
     # Search-local and exact on any workload: every simulation lands in exactly one bucket,
     # counted by the trees themselves — no global counter (and so no truncation caveat) involved.
-    # Under the stepped machine, searches emit every row as a request (`fresh_rows`); hit/shared
-    # provenance lives in the Evaluator (dedup + cache), so those search buckets are zero.
+    # Searches emit every row as a request (`requested_rows`); hit/shared provenance lives
+    # in the Evaluator (dedup + cache) as the gap to `infer_rows`.
     lhs = t["decisions"] * sims
-    rhs = t["fresh_rows"] + t["hit_rows"] + t["shared_rows"] + t["terminal_sims"] + t["depthcap_sims"]
+    rhs = t["requested_rows"] + t["terminal_sims"] + t["depthcap_sims"]
     return lhs, rhs
 
 
@@ -76,7 +76,7 @@ def test_sim_fate_identity_holds_without_truncation() -> None:
     t = _engine(1 << 16).collect(120, _infer).telemetry
     lhs, rhs = _identity(t, 16)
     assert lhs == rhs
-    savings = t["fresh_rows"] - t["infer_rows"]
+    savings = t["requested_rows"] - t["infer_rows"]
     assert savings >= t["cache_hits"] > 0, "cache hits are part of the requested-vs-forwarded gap"
 
 

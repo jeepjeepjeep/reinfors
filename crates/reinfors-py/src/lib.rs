@@ -1884,9 +1884,7 @@ fn build_telemetry<'py>(
     // + depthcap - extra_eval_rows; the subtraction removes auxiliary perspective/fan rows.
     telemetry.set_item("terminal_sims", stats.sum_terminal_sims)?;
     telemetry.set_item("depthcap_sims", stats.sum_depthcap_sims)?;
-    telemetry.set_item("shared_rows", stats.sum_shared_rows)?;
-    telemetry.set_item("fresh_rows", stats.sum_fresh_rows)?;
-    telemetry.set_item("hit_rows", stats.sum_hit_rows)?;
+    telemetry.set_item("requested_rows", stats.sum_requested_rows)?;
     telemetry.set_item("extra_eval_rows", stats.sum_extra_eval_rows)?;
     Ok(telemetry)
 }
