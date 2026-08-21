@@ -611,6 +611,60 @@ mod tests {
     }
 
     #[test]
+    fn wheel_anchors_coincide_before_the_first_step() {
+        for angle in [0.0f64, 1.2, 3.0, -2.5] {
+            let car = dynamics::CarWorld::new(angle, 40.0, -25.0);
+            let hull = &car.bodies[car.hull];
+            let (hc, hs) = (
+                f64::from(hull.rotation().cos()),
+                f64::from(hull.rotation().sin()),
+            );
+            let ht = hull.translation();
+            for (i, [wx, wy]) in dynamics::WHEELPOS.iter().enumerate() {
+                let (lx, ly) = (wx * dynamics::SIZE, wy * dynamics::SIZE);
+                let ax = f64::from(ht.x) + hc * lx - hs * ly;
+                let ay = f64::from(ht.y) + hs * lx + hc * ly;
+                let wt = car.bodies[car.wheels[i]].translation();
+                let err = ((f64::from(wt.x) - ax).powi(2) + (f64::from(wt.y) - ay).powi(2)).sqrt();
+                assert!(err < 1e-5, "angle {angle}, wheel {i}: anchor error {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn steering_survives_the_rotation_wrap_boundary() {
+        use rapier2d::prelude::*;
+        // Hull at +(pi-0.01), wheels at -(pi+0.01): identical orientations modulo 2*pi,
+        // so with a zero steer target the motor must stay idle. A naive angle
+        // subtraction sees -2*pi and slams the motor at 3 rad/s.
+        let mut car = dynamics::CarWorld::new(0.0, 0.0, 0.0);
+        let near_pi = std::f64::consts::PI - 0.01;
+        let hull = car.hull;
+        car.bodies[hull].set_rotation(Rotation::from_angle(near_pi as Real), true);
+        for i in 0..4 {
+            let w = car.wheels[i];
+            car.bodies[w].set_rotation(Rotation::from_angle((-near_pi - 0.02) as Real), true);
+        }
+        let rel_before = wrap_safe_rel(&car, 0);
+        assert!(rel_before.abs() < 0.05, "setup: rel {rel_before}");
+        car.step(1.0 / track::FPS);
+        let rel_after = wrap_safe_rel(&car, 0);
+        assert!(
+            (rel_after - rel_before).abs() < 0.01,
+            "idle steering moved the wheel by {} across the wrap boundary",
+            rel_after - rel_before
+        );
+    }
+
+    fn wrap_safe_rel(car: &dynamics::CarWorld, i: usize) -> f64 {
+        let h = car.bodies[car.hull].rotation();
+        let w = car.bodies[car.wheels[i]].rotation();
+        let (hc, hs) = (f64::from(h.cos()), f64::from(h.sin()));
+        let (wc, ws) = (f64::from(w.cos()), f64::from(w.sin()));
+        libm::atan2(hc * ws - hs * wc, hc * wc + hs * ws)
+    }
+
+    #[test]
     #[ignore = "benchmark quartet; run explicitly with -- --ignored --nocapture"]
     fn benchmark_quartet() {
         let codec = CarRacingCodec { game: game() };
