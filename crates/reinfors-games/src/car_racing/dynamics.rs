@@ -72,6 +72,14 @@ fn poly_collider(points: &[[f64; 2]]) -> Collider {
         .build()
 }
 
+/// Task-constant solver configuration; snapshots never override it.
+pub(crate) fn canonical_params() -> IntegrationParameters {
+    IntegrationParameters {
+        dt: (1.0 / super::track::FPS) as Real,
+        ..IntegrationParameters::default()
+    }
+}
+
 impl CarWorld {
     pub fn new(init_angle: f64, init_x: f64, init_y: f64) -> CarWorld {
         let mut bodies = RigidBodySet::new();
@@ -102,13 +110,14 @@ impl CarWorld {
         ];
         let mut wheels = Vec::with_capacity(4);
         let mut joints = Vec::with_capacity(4);
+        let (ia_c, ia_s) = (libm::cos(init_angle), libm::sin(init_angle));
         for [wx, wy] in WHEELPOS {
+            // World-space anchor: the hull is rotated, so the local offset must be too.
+            let ox = ia_c * wx * SIZE - ia_s * wy * SIZE;
+            let oy = ia_s * wx * SIZE + ia_c * wy * SIZE;
             let w = bodies.insert(
                 RigidBodyBuilder::dynamic()
-                    .translation(Vector::new(
-                        (init_x + wx * SIZE) as Real,
-                        (init_y + wy * SIZE) as Real,
-                    ))
+                    .translation(Vector::new((init_x + ox) as Real, (init_y + oy) as Real))
                     .rotation(init_angle as Real)
                     .can_sleep(false)
                     .build(),
@@ -127,10 +136,7 @@ impl CarWorld {
             wheels.push(w);
         }
 
-        let params = IntegrationParameters {
-            dt: (1.0 / super::track::FPS) as Real,
-            ..IntegrationParameters::default()
-        };
+        let params = canonical_params();
         CarWorld {
             bodies,
             colliders,
@@ -248,10 +254,13 @@ impl CarWorld {
         }
     }
 
+    /// Relative hull->wheel rotation, wrap-safe across the +-pi boundary.
     pub(crate) fn joint_angle(&self, i: usize) -> Real {
-        let hull_rot = self.bodies[self.hull].rotation().angle();
-        let wheel_rot = self.bodies[self.wheels[i]].rotation().angle();
-        wheel_rot - hull_rot
+        let h = self.bodies[self.hull].rotation();
+        let w = self.bodies[self.wheels[i]].rotation();
+        let (hc, hs) = (f64::from(h.cos()), f64::from(h.sin()));
+        let (wc, ws) = (f64::from(w.cos()), f64::from(w.sin()));
+        libm::atan2(hc * ws - hs * wc, hc * wc + hs * ws) as Real
     }
 
     pub fn hull_pos(&self) -> (f64, f64) {
