@@ -216,3 +216,16 @@ def test_zero_opp_temperature_is_rejected_and_positive_collects() -> None:
     )
     batch = engine.collect(8, lambda obs: np.full((obs.shape[0], 1, 3), 0.5))
     assert batch.obs.shape[0] >= 8
+
+
+def test_pre_030_engine_fields_are_rejected_with_guidance() -> None:
+    base = {
+        "game": {"name": "connect4"},
+        "reward": {"win": 1.0, "loss": -1.0},
+        "policy": {"name": "alphazero", "num_simulations": 4},
+        "learner": {"name": "alphazero"},
+    }
+    for gone in ("n_groups", "pad_rows_to"):
+        cfg = {**base, "engine": {"n_games": 2, gone: 2}}
+        with pytest.raises(ValueError, match=f"'{gone}' was removed in 0.3.0"):
+            rf.engine_from_config(cfg)
