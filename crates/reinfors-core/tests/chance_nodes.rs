@@ -934,7 +934,7 @@ fn mccfr_trains_on_sample_only_chance_but_exact_surfaces_refuse() {
 }
 
 /// Root-only sample chance: the initial state is the chance node, play is chance-free —
-/// the CarRacing shape. `chance_enumerable` stays `true` (post-realization scope).
+/// the CarRacing shape and claim pair (whole-game false, post-realization true).
 struct RootOnlyRace;
 impl Game for RootOnlyRace {
     type State = St;
@@ -966,6 +966,12 @@ impl Game for RootOnlyRace {
             terminal: true,
         }
     }
+    fn chance_enumerable(&self) -> bool {
+        false
+    }
+    fn searchable_chance_enumerable(&self) -> bool {
+        true
+    }
     fn chance_node(&self, s: &St) -> ChanceDist {
         assert_eq!(s.tick, 0, "the only chance node is the root");
         ChanceDist::SampleOnlyUniform(std::num::NonZeroU32::new(1 << 20).unwrap())
@@ -987,9 +993,10 @@ impl Game for RootOnlyRace {
 #[test]
 fn root_only_sample_chance_realizes_and_varies() {
     let g = RootOnlyRace;
+    assert!(!g.chance_enumerable(), "the raw root is sample-only");
     assert!(
-        g.chance_enumerable(),
-        "root-only games keep the default claim"
+        g.searchable_chance_enumerable(),
+        "post-realization play is chance-free"
     );
     let mut rng = reinfors_core::SplitMix64::new(3);
     let ticks: Vec<usize> = (0..8)
