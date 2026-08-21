@@ -21,6 +21,7 @@ def _az_chess() -> rf.Engine:
         n_games=2,
         seed=3,
         infer_cache=1024,
+        n_threads=1,
     )
 
 
@@ -107,6 +108,7 @@ def test_round_trip_reconstructs_a_record_identical_engine(family: str) -> None:
                 rf.learners.Dqn(bootstrap_p=0.5),
                 n_games=2,
                 seed=7,
+                n_threads=1,
             )
         return rf.Engine(
             rf.games.Snake(grid_size=6, initial_length=2, food=2, max_ticks=30),
@@ -118,6 +120,7 @@ def test_round_trip_reconstructs_a_record_identical_engine(family: str) -> None:
             start_buffer=True,
             start_buffer_capacity=50,
             p_fresh=0.2,
+            n_threads=1,
         )
 
     original = build()

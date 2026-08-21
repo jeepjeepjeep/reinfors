@@ -37,6 +37,7 @@ def kuhn_engine(**kwargs: Any) -> rf.Engine:
         rf.learners.Dqn(),
         n_games=4,
         seed=5,
+        n_threads=1,
         **kwargs,
     )
 

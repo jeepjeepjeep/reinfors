@@ -23,6 +23,7 @@ def connect4_engine(seed: int = 0, **learner_kwargs: float) -> rf.Engine:
         rf.learners.Ppo(**learner_kwargs),
         n_games=4,
         seed=seed,
+        n_threads=1,
     )
 
 

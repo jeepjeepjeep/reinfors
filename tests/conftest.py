@@ -15,6 +15,8 @@ def az_zeros_infer(n_actions: int):
 def connect4_az_engine(*, num_simulations: int = 12, **kwargs) -> rf.Engine:
     kwargs.setdefault("n_games", 4)
     kwargs.setdefault("seed", 5)
+    # Reruns in tests must be bit-identical; the constructor default is available cores.
+    kwargs.setdefault("n_threads", 1)
     return rf.Engine(
         rf.games.Connect4(),
         rf.Reward(win=1.0, loss=-1.0),

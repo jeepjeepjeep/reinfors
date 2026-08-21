@@ -21,6 +21,7 @@ def _mk(family: str) -> tuple[rf.Engine, Any]:
             n_games=2,
             seed=5,
             infer_cache=4096,
+            n_threads=1,
         )
         return e, lambda obs: (np.zeros((obs.shape[0], 4672)), np.zeros(obs.shape[0]))
     if family == "dqn":
@@ -31,6 +32,7 @@ def _mk(family: str) -> tuple[rf.Engine, Any]:
             rf.learners.Dqn(bootstrap_p=0.7),
             n_games=2,
             seed=9,
+            n_threads=1,
         )
         return e, lambda obs: np.full((obs.shape[0], 2, 1352), 0.1)
     e = rf.Engine(
@@ -43,6 +45,7 @@ def _mk(family: str) -> tuple[rf.Engine, Any]:
         start_buffer=True,
         start_buffer_capacity=20,
         p_fresh=0.3,
+        n_threads=1,
     )
     return e, lambda obs: np.full((obs.shape[0], 2, 3), 0.25)
 
@@ -139,6 +142,7 @@ def test_restore_clears_a_warm_cache_from_other_weights() -> None:
             n_games=1,
             seed=0,
             infer_cache=4096,
+            n_threads=1,
         )
 
     def net(best: int) -> Any:
