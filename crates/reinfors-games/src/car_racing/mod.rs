@@ -6,6 +6,7 @@
 
 pub mod codec;
 pub mod dynamics;
+pub mod render;
 pub mod track;
 
 use std::num::NonZeroU32;
