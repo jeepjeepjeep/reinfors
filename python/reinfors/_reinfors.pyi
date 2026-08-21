@@ -483,6 +483,14 @@ class Engine:
         # chunks. For compiled/graph-captured callbacks. Fingerprinted.
         # Reference: docs/reference/inference-contract.md#input.
         pad_rows_to: int = ...,
+        # Inference batching threshold in rows (0 = default of max(1, n_games/2)): the scheduler
+        # fires the callback once this many rows are queued, or earlier on drain. Tuning knob;
+        # excluded from the fingerprint (does not change the collected records).
+        batch_size: int = ...,
+        # Threads fanning search rounds (0 = default of 1): rounds run on an engine-owned
+        # thread pool with slot-order merges, record-identical to the sequential schedule.
+        # Excluded from the fingerprint.
+        n_threads: int = ...,
     ) -> None: ...
     # Tell the engine the net's weights changed (call after every weight sync — e.g. right after
     # load_state_dict onto the collector net). Clears the infer cache at the next round boundary;
