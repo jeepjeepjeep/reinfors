@@ -2001,7 +2001,7 @@ where
             let before = sink.len();
             let status = stepper_round(st, game, enc, reward, cfg, &mut sink, &mut root);
             let count = sink.len() - before;
-            debug_assert!(
+            assert!(
                 (count > 0) == (status == crate::policy::RoundStatus::Pending),
                 "round contract: Pending emits at least one request, Done emits none"
             );

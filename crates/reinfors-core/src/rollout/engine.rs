@@ -250,13 +250,8 @@ where
         if fragments {
             discard_fragments(&mut self.traj);
         }
-        // Threshold scheduler: per-slot decision phases, one queue, fire at batch_size or
-        // on drain; games progress unevenly (the documented scheduler contract). Round
-        // bodies fan across the engine's thread pool at n_threads > 1 with slot-order
-        // merges, so results are schedule-invariant. Tail bootstraps are queue jobs like
-        // decision requests (the queue is the only inference pathway): a finished episode
-        // sits in AwaitingTail for one round-trip, then flushes and respawns; the fragment
-        // flush rides the same mechanism after every slot settles.
+        // Fire at batch_size or on drain; fanned rounds merge in slot order; tail
+        // bootstraps ride the same queue.
         {
             enum Phase<SE> {
                 Idle,
@@ -290,10 +285,8 @@ where
             let mut q_dest: Vec<usize> = Vec::new();
             let mut cutting = false;
             let mut frag_stage = false;
-            // A callback panic cancels the scheduler: searches and queued requests drop,
-            // but games already awaiting an episode-boundary tail resolve with EMPTY
-            // tails and flush/respawn before the panic surfaces — AwaitingTail never
-            // survives a collect call, so the pool holds no over-horizon state.
+            // On callback panic, pending tails resolve empty and flush/respawn before
+            // the panic surfaces: AwaitingTail never survives a collect.
             macro_rules! fire_or_abort {
                 ($take:expr) => {{
                     let fired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -370,8 +363,7 @@ where
                     cutting = true;
                 }
 
-                // Phase 1: admission + absorb + round for every runnable slot. Fanned when a
-                // pool exists; per-slot outputs land in slots, merged in rotation order below.
+                // Phase 1: admission + absorb + round for every runnable slot.
                 let game = &self.game;
                 let encoder = &*self.encoder;
                 let reward = &*self.reward;
@@ -471,8 +463,7 @@ where
                         .collect()
                 };
 
-                // Phase 2: merge emissions into the queue in rotation order; run completions
-                // (finish + select + advance + flush) sequentially in the same order.
+                // Phase 2: merge emissions and run completions in rotation order.
                 let mut progressed = false;
                 for k in 0..n_games {
                     let gi = (base_cursor + k) % n_games;
@@ -665,9 +656,7 @@ where
                         let n = q_players.len();
                         fire_or_abort!(n);
                     } else if phases.iter().all(|p| matches!(p, Phase::Idle)) {
-                        // Cut step 5: with every slot settled and all episode-boundary
-                        // tails resolved, bootstrap live fragments through the same queue
-                        // (one frozen-weights pass), then return.
+                        // Cut step 5: bootstrap live fragments through the same queue.
                         if fragments && !frag_stage {
                             frag_stage = true;
                             let mut queued_any = false;
@@ -752,8 +741,7 @@ where
         put_u32(&mut out, n_games as u32);
         put_u32(&mut out, num_agents as u32);
         put_u64(&mut out, self.buffer_rng.state());
-        // The sweep cursor is result-bearing: it sets rotation start, hence window
-        // composition; restore-continuation identity needs it.
+        // Result-bearing: restores must resume the rotation, not restart it.
         put_u64(&mut out, self.sweep_cursor as u64);
         for gi in 0..n_games {
             put_blob(&mut out, &codec.encode(&self.episodes[gi].state));
@@ -1194,9 +1182,8 @@ fn discard_fragments<E>(traj: &mut [Vec<Vec<Step<E>>>]) {
     }
 }
 
-/// Tail-bootstrap observation rows for one game's finished (or fragment-cut) episode:
-/// `(player, obs)` per learning perspective, in perspective order. Empty when the learner
-/// takes no tail.
+/// One `(player, obs)` tail-bootstrap request per learning perspective; empty when the
+/// learner takes no tail.
 #[allow(clippy::too_many_arguments)]
 fn tail_requests<G, P, L>(
     gi: usize,
@@ -1231,9 +1218,8 @@ where
     reqs
 }
 
-/// Turn a game's routed tail rows back into per-perspective tail values. Zero-width rows
-/// (cancellation) yield an empty map: tails degrade to the terminal path and the aborted
-/// collect's records are discarded by the caller.
+/// Routed tail rows back to per-perspective tail values; zero-width (cancelled) rows
+/// yield an empty map.
 #[allow(clippy::too_many_arguments)]
 fn tails_from_rows<G, L, E>(
     gi: usize,

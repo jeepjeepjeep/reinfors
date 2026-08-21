@@ -49,8 +49,9 @@ pub(crate) fn one_shot_round<S, E>(
     if search.emitted || search.agents.is_empty() {
         return RoundStatus::Done;
     }
-    for (agent, obs) in search.agents.iter().zip(&search.obs) {
-        out.push(*agent, obs);
+    // Drain: blocked searches must not hold a second copy of every observation.
+    for (agent, obs) in search.agents.iter().zip(search.obs.drain(..)) {
+        out.push(*agent, &obs);
     }
     search.emitted = true;
     RoundStatus::Pending
