@@ -1433,7 +1433,6 @@ fn ppo_windows_meet_the_floor_and_stay_single_version() {
 }
 
 #[test]
-#[ignore = "un-ignore with tails-as-scheduler-jobs: a mid-tail panic must resolve empty tails"]
 fn tail_failure_leaves_the_pool_respawnable() {
     // A callback that dies exactly on truncation-tail inference (obs tick 2 exists only
     // there) must not strand finished episodes: the retry may see no over-horizon state.

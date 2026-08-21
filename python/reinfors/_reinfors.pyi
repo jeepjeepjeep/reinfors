@@ -472,11 +472,11 @@ class Engine:
         # Restrict training-record emission to these players (frozen opponents keep acting but
         # leave no records). Default: all players learn; records carry their player either way.
         learn_players: list[int] | None = ...,
-        # Fix shared-callback call shapes at exactly N rows (0 = off): short calls are
-        # zero-padded (outputs for pad rows discarded), oversized calls split into N-row
-        # chunks. For compiled/graph-captured callbacks. Fingerprinted.
+        # Fix shared-callback call shapes at exactly batch_size rows: drain batches are
+        # zero-padded (outputs for pad rows discarded). For compiled/graph-captured
+        # callbacks. Excluded from the fingerprint.
         # Reference: docs/reference/inference-contract.md#input.
-        pad_rows_to: int = ...,
+        pad: bool = ...,
         # Inference batching threshold in rows (0 = default of max(1, n_games/2)): the scheduler
         # fires the callback once this many rows are queued, or earlier on drain. Tuning knob;
         # excluded from the fingerprint (does not change the collected records).

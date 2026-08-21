@@ -113,10 +113,10 @@ def test_complete_rounds_batch_the_full_pool() -> None:
 
     batch = engine.collect(n_records=1, infer=infer)
     assert len(batch.obs) == 4, "the admitted sweep covers the whole 4-game pool"
-    # The scheduler fires at batch_size (n_games/2 by default), so the sweep's search
-    # rows split across threshold batches; the final call is the batched tail bootstrap
-    # for the four unfinished episodes at flush.
-    assert rows_seen == [2, 2, 4]
+    # The scheduler fires at batch_size (n_games/2 by default); the sweep's search rows
+    # and the fragment-cut tail bootstraps all ride the same queue, so every call is a
+    # threshold batch.
+    assert rows_seen == [2, 2, 2, 2]
 
 
 def test_windows_meet_the_record_floor() -> None:

@@ -123,6 +123,10 @@ def engine_from_config(config: dict[str, Any]) -> Engine:
     g_name, g_kw = _split(config["game"])
     g_kw = _coerce_handles(g_kw)
     engine_kw = dict(config.get("engine", {}))
+    for gone, repl in (("n_groups", "n_threads and batch_size"), ("pad_rows_to", "pad")):
+        if gone in engine_kw:
+            msg = f"engine config field '{gone}' was removed in 0.3.0; tune {repl} instead"
+            raise ValueError(msg)
     # start_buffer renders as null (off) or a {capacity, p_fresh} block (on) — unpack it back
     # into the flat constructor kwargs (a plain bool is also accepted, for hand-written configs).
     if "start_buffer" in engine_kw and not isinstance(engine_kw["start_buffer"], bool):

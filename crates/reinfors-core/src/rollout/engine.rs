@@ -37,8 +37,9 @@ impl<S> StartParts<'_, S> {
 pub struct EngineParams {
     pub n_games: usize,
     pub seed: u64,
-    /// Fixed call shape in rows (None = off); see the inference contract.
-    pub pad_rows_to: Option<usize>,
+    /// Pad drain batches with zero rows to `batch_size`, fixing every callback
+    /// invocation at exactly `batch_size` rows; see the inference contract.
+    pub pad: bool,
     /// Scheduler firing threshold in rows (None = max(1, n_games / 2)).
     pub batch_size: Option<usize>,
     /// CPU fan-out width for per-game work (None = 1 for now; threads land with the fan).
@@ -50,7 +51,7 @@ impl Default for EngineParams {
         EngineParams {
             n_games: 1,
             seed: 0,
-            pad_rows_to: None,
+            pad: false,
             batch_size: None,
             n_threads: None,
         }
@@ -72,7 +73,7 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     // Returns cannot be derived from steps: an agent may be rewarded before ever acting.
     episode_returns: Vec<Vec<f64>>,
     sequential: bool,
-    pad_rows_to: Option<usize>,
+    pad: bool,
     buffer_rng: SplitMix64,
     seeded: Vec<bool>,
     policy_states: Vec<P::PolicyState>,
@@ -98,9 +99,6 @@ where
     ) -> Self {
         let n = game.num_agents();
         assert!(n >= 1, "a game must have at least one agent");
-        if let Some(pad) = params.pad_rows_to {
-            assert!(pad >= 1, "pad_rows_to must be >= 1");
-        }
         let mut episodes: Vec<Episode<G>> = (0..params.n_games)
             .map(|i| {
                 Episode::new(
@@ -152,7 +150,7 @@ where
             learn_mask: vec![true; num_agents],
             episode_returns: vec![vec![0.0; num_agents]; params.n_games],
             sequential,
-            pad_rows_to: params.pad_rows_to,
+            pad: params.pad,
             buffer_rng,
             seeded,
             policy_states,
@@ -243,11 +241,11 @@ where
             InferMode::PerPlayer => &mut c[1..],
         });
         assert!(
-            self.pad_rows_to.is_none() || matches!(mode, InferMode::Shared),
-            "pad_rows_to supports a single shared infer callback"
+            !self.pad || matches!(mode, InferMode::Shared),
+            "pad supports a single shared infer callback"
         );
-        let mut evaluator =
-            Evaluator::new(&mut infer, mode, cache_slice).with_pad_rows_to(self.pad_rows_to);
+        let mut evaluator = Evaluator::new(&mut infer, mode, cache_slice)
+            .with_pad_to(self.pad.then_some(self.batch_size));
 
         let fragments = self.learner.bootstraps_fragments();
         if fragments {
@@ -256,15 +254,23 @@ where
         // Threshold scheduler: per-slot decision phases, one queue, fire at batch_size or
         // on drain; games progress unevenly (the documented scheduler contract). Round
         // bodies fan across the engine's thread pool at n_threads > 1 with slot-order
-        // merges, so results are schedule-invariant; episode tails and the fragment flush
-        // ride the same evaluator directly for now (padding and cache shared) and become
-        // queue jobs when the flush unifies.
+        // merges, so results are schedule-invariant. Tail bootstraps are queue jobs like
+        // decision requests (the queue is the only inference pathway): a finished episode
+        // sits in AwaitingTail for one round-trip, then flushes and respawns; the fragment
+        // flush rides the same mechanism after every slot settles.
         {
             enum Phase<SE> {
                 Idle,
                 Deciding {
                     search: SE,
                     perspectives: Vec<usize>,
+                    outstanding: usize,
+                    rows: Vec<f64>,
+                    stride: usize,
+                },
+                AwaitingTail {
+                    fragment: bool,
+                    meta: Vec<usize>,
                     outstanding: usize,
                     rows: Vec<f64>,
                     stride: usize,
@@ -284,6 +290,77 @@ where
             let mut q_obs: Vec<f32> = Vec::new();
             let mut q_dest: Vec<usize> = Vec::new();
             let mut cutting = false;
+            let mut frag_stage = false;
+            // A callback panic cancels the scheduler: searches and queued requests drop,
+            // but games already awaiting an episode-boundary tail resolve with EMPTY
+            // tails and flush/respawn before the panic surfaces — AwaitingTail never
+            // survives a collect call, so the pool holds no over-horizon state.
+            macro_rules! fire_or_abort {
+                ($take:expr) => {{
+                    let fired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        fire_batch(
+                            &mut q_players,
+                            &mut q_obs,
+                            &mut q_dest,
+                            $take,
+                            &mut phases,
+                            &mut evaluator,
+                            |ph| match ph {
+                                Phase::Deciding {
+                                    outstanding,
+                                    rows,
+                                    stride,
+                                    ..
+                                }
+                                | Phase::AwaitingTail {
+                                    outstanding,
+                                    rows,
+                                    stride,
+                                    ..
+                                } => (outstanding, rows, stride),
+                                Phase::Idle => unreachable!("row routed to an idle slot"),
+                            },
+                        )
+                    }));
+                    if let Err(payload) = fired {
+                        for (gi, ph) in phases.iter_mut().enumerate() {
+                            if !matches!(
+                                ph,
+                                Phase::AwaitingTail {
+                                    fragment: false,
+                                    ..
+                                }
+                            ) {
+                                continue;
+                            }
+                            *ph = Phase::Idle;
+                            let tails = HashMap::new();
+                            let mut start = StartParts {
+                                dist: &mut *self.start_dist,
+                                rng: &mut self.buffer_rng,
+                            };
+                            flush_finished_parts(
+                                &[(gi, false)],
+                                &tails,
+                                &self.game,
+                                &self.policy,
+                                &self.learner,
+                                &*self.encoder,
+                                &mut self.episodes,
+                                &mut self.traj,
+                                &mut self.ticks,
+                                &mut self.policy_states,
+                                &mut self.episode_returns,
+                                &mut self.seeded,
+                                &mut start,
+                                &mut out,
+                                &mut stats,
+                            );
+                        }
+                        std::panic::resume_unwind(payload);
+                    }
+                }};
+            }
             loop {
                 let collected = if fragments {
                     fragment_potential(out.len(), &self.traj, &self.learn_mask)
@@ -392,6 +469,65 @@ where
                 let mut progressed = false;
                 for k in 0..n_games {
                     let gi = (base_cursor + k) % n_games;
+                    if matches!(phases[gi], Phase::AwaitingTail { outstanding: 0, .. }) {
+                        let taken = std::mem::replace(&mut phases[gi], Phase::Idle);
+                        let Phase::AwaitingTail {
+                            fragment,
+                            meta,
+                            rows,
+                            stride,
+                            ..
+                        } = taken
+                        else {
+                            unreachable!()
+                        };
+                        let tails = tails_from_rows(
+                            gi,
+                            &meta,
+                            &rows,
+                            stride,
+                            &self.game,
+                            &self.learner,
+                            &*self.encoder,
+                            &self.episodes,
+                        );
+                        if fragment {
+                            flush_fragment_slot(
+                                gi,
+                                &tails,
+                                &self.game,
+                                &self.learner,
+                                &*self.encoder,
+                                &self.learn_mask,
+                                &mut self.episodes,
+                                &mut self.traj,
+                                &mut out,
+                            );
+                        } else {
+                            let mut start = StartParts {
+                                dist: &mut *self.start_dist,
+                                rng: &mut self.buffer_rng,
+                            };
+                            flush_finished_parts(
+                                &[(gi, false)],
+                                &tails,
+                                &self.game,
+                                &self.policy,
+                                &self.learner,
+                                &*self.encoder,
+                                &mut self.episodes,
+                                &mut self.traj,
+                                &mut self.ticks,
+                                &mut self.policy_states,
+                                &mut self.episode_returns,
+                                &mut self.seeded,
+                                &mut start,
+                                &mut out,
+                                &mut stats,
+                            );
+                        }
+                        progressed = true;
+                    }
                     match std::mem::replace(&mut outcomes[gi], Outcome::None) {
                         Outcome::None => {}
                         Outcome::Emitted(players, obs, n) => {
@@ -451,7 +587,57 @@ where
                                     &mut stats,
                                 )
                             };
-                            self.flush_finished(&finished, &mut out, &mut stats, &mut evaluator);
+                            for &(fgi, terminal) in &finished {
+                                let reqs = tail_requests(
+                                    fgi,
+                                    &self.game,
+                                    &self.policy,
+                                    &self.learner,
+                                    &*self.encoder,
+                                    self.sequential,
+                                    &self.episodes,
+                                    &self.traj,
+                                );
+                                if terminal || reqs.is_empty() {
+                                    let tails = HashMap::new();
+                                    let mut start = StartParts {
+                                        dist: &mut *self.start_dist,
+                                        rng: &mut self.buffer_rng,
+                                    };
+                                    flush_finished_parts(
+                                        &[(fgi, terminal)],
+                                        &tails,
+                                        &self.game,
+                                        &self.policy,
+                                        &self.learner,
+                                        &*self.encoder,
+                                        &mut self.episodes,
+                                        &mut self.traj,
+                                        &mut self.ticks,
+                                        &mut self.policy_states,
+                                        &mut self.episode_returns,
+                                        &mut self.seeded,
+                                        &mut start,
+                                        &mut out,
+                                        &mut stats,
+                                    );
+                                } else {
+                                    let mut meta = Vec::with_capacity(reqs.len());
+                                    for (si, obs) in reqs {
+                                        q_players.push(si);
+                                        q_obs.extend(obs);
+                                        q_dest.push(fgi);
+                                        meta.push(si);
+                                    }
+                                    phases[fgi] = Phase::AwaitingTail {
+                                        fragment: false,
+                                        outstanding: meta.len(),
+                                        meta,
+                                        rows: Vec::new(),
+                                        stride: 0,
+                                    };
+                                }
+                            }
                             progressed = true;
                         }
                     }
@@ -459,65 +645,74 @@ where
 
                 // Phase 3: fire full batches; drain when nothing else can move.
                 while q_players.len() >= batch_size {
-                    fire_batch(
-                        &mut q_players,
-                        &mut q_obs,
-                        &mut q_dest,
-                        batch_size,
-                        &mut phases,
-                        &mut evaluator,
-                        |ph| match ph {
-                            Phase::Deciding {
-                                outstanding,
-                                rows,
-                                stride,
-                                ..
-                            } => (outstanding, rows, stride),
-                            Phase::Idle => unreachable!("row routed to an idle slot"),
-                        },
-                    );
+                    fire_or_abort!(batch_size);
                     progressed = true;
                 }
                 if !progressed {
                     if !q_players.is_empty() {
                         let n = q_players.len();
-                        fire_batch(
-                            &mut q_players,
-                            &mut q_obs,
-                            &mut q_dest,
-                            n,
-                            &mut phases,
-                            &mut evaluator,
-                            |ph| match ph {
-                                Phase::Deciding {
-                                    outstanding,
-                                    rows,
-                                    stride,
-                                    ..
-                                } => (outstanding, rows, stride),
-                                Phase::Idle => unreachable!("row routed to an idle slot"),
-                            },
-                        );
+                        fire_or_abort!(n);
                     } else if phases.iter().all(|p| matches!(p, Phase::Idle)) {
-                        break;
+                        // Cut step 5: with every slot settled and all episode-boundary
+                        // tails resolved, bootstrap live fragments through the same queue
+                        // (one frozen-weights pass), then return.
+                        if fragments && !frag_stage {
+                            frag_stage = true;
+                            let mut queued_any = false;
+                            for (gi, ph) in phases.iter_mut().enumerate() {
+                                if !self.traj[gi].iter().any(|steps| !steps.is_empty()) {
+                                    continue;
+                                }
+                                let reqs = tail_requests(
+                                    gi,
+                                    &self.game,
+                                    &self.policy,
+                                    &self.learner,
+                                    &*self.encoder,
+                                    self.sequential,
+                                    &self.episodes,
+                                    &self.traj,
+                                );
+                                if reqs.is_empty() {
+                                    flush_fragment_slot(
+                                        gi,
+                                        &HashMap::new(),
+                                        &self.game,
+                                        &self.learner,
+                                        &*self.encoder,
+                                        &self.learn_mask,
+                                        &mut self.episodes,
+                                        &mut self.traj,
+                                        &mut out,
+                                    );
+                                    continue;
+                                }
+                                let mut meta = Vec::with_capacity(reqs.len());
+                                for (si, obs) in reqs {
+                                    q_players.push(si);
+                                    q_obs.extend(obs);
+                                    q_dest.push(gi);
+                                    meta.push(si);
+                                }
+                                *ph = Phase::AwaitingTail {
+                                    fragment: true,
+                                    outstanding: meta.len(),
+                                    meta,
+                                    rows: Vec::new(),
+                                    stride: 0,
+                                };
+                                queued_any = true;
+                            }
+                            if !queued_any {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
                     }
                 }
             }
             self.sweep_cursor = (base_cursor + 1) % n_games.max(1);
-        }
-        if fragments {
-            flush_fragments_parts(
-                &self.game,
-                &self.policy,
-                &self.learner,
-                &*self.encoder,
-                &self.learn_mask,
-                self.sequential,
-                &mut self.episodes,
-                &mut self.traj,
-                &mut evaluator,
-                &mut out,
-            );
         }
         (stats.infer_seconds, stats.infer_calls, stats.infer_rows) =
             (evaluator.seconds, evaluator.calls, evaluator.rows);
@@ -526,60 +721,6 @@ where
             (evaluator.cache_lookups(), evaluator.cache_hits());
         self.infer_caches = caches;
         (out, stats)
-    }
-
-    fn flush_finished<F>(
-        &mut self,
-        finished: &[(usize, bool)],
-        out: &mut Vec<L::Record>,
-        stats: &mut CollectStats,
-        evaluator: &mut Evaluator<'_, F>,
-    ) where
-        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
-    {
-        let tails = self.tail_values(finished, evaluator);
-        let mut start = StartParts {
-            dist: &mut *self.start_dist,
-            rng: &mut self.buffer_rng,
-        };
-        flush_finished_parts(
-            finished,
-            &tails,
-            &self.game,
-            &self.policy,
-            &self.learner,
-            &*self.encoder,
-            &mut self.episodes,
-            &mut self.traj,
-            &mut self.ticks,
-            &mut self.policy_states,
-            &mut self.episode_returns,
-            &mut self.seeded,
-            &mut start,
-            out,
-            stats,
-        );
-    }
-
-    fn tail_values<F>(
-        &mut self,
-        finished: &[(usize, bool)],
-        evaluator: &mut Evaluator<'_, F>,
-    ) -> HashMap<(usize, usize), Vec<f64>>
-    where
-        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
-    {
-        tail_values_parts(
-            finished,
-            &self.game,
-            &self.policy,
-            &self.learner,
-            &*self.encoder,
-            self.sequential,
-            &mut self.episodes,
-            &self.traj,
-            evaluator,
-        )
     }
 }
 
@@ -1044,120 +1185,110 @@ fn discard_fragments<E>(traj: &mut [Vec<Vec<Step<E>>>]) {
     }
 }
 
-/// Cut the window: bootstrap every live learning trajectory from its own tail and emit its
-/// records; episode state, ticks, and telemetry persist into the next window.
+/// Tail-bootstrap observation rows for one game's finished (or fragment-cut) episode:
+/// `(player, obs)` per learning perspective, in perspective order. Empty when the learner
+/// takes no tail.
 #[allow(clippy::too_many_arguments)]
-fn flush_fragments_parts<G, P, L, F>(
-    game: &G,
-    policy: &P,
-    learner: &L,
-    encoder: &dyn StateEncoder<State = G::State>,
-    learn_mask: &[bool],
-    sequential: bool,
-    episodes: &mut [Episode<G>],
-    traj: &mut [Vec<Vec<Step<P::Evaluation>>>],
-    evaluator: &mut Evaluator<'_, F>,
-    out: &mut Vec<L::Record>,
-) where
-    G: Game + Sync,
-    G::State: Send,
-    P: Policy,
-    L: Learner<P::Evaluation>,
-    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
-{
-    let live: Vec<(usize, bool)> = traj
-        .iter()
-        .enumerate()
-        .filter(|(_, g)| g.iter().any(|steps| !steps.is_empty()))
-        .map(|(gi, _)| (gi, false))
-        .collect();
-    if live.is_empty() {
-        return;
-    }
-    let tails = tail_values_parts(
-        &live, game, policy, learner, encoder, sequential, episodes, traj, evaluator,
-    );
-    for &(gi, _) in &live {
-        for si in 0..game.num_agents() {
-            if !learn_mask[si] {
-                traj[gi][si].clear();
-                continue;
-            }
-            let steps = std::mem::take(&mut traj[gi][si]);
-            if steps.is_empty() {
-                continue;
-            }
-            let tail = tails.get(&(gi, si)).cloned().unwrap_or_default();
-            out.extend(learner.episode_records(&steps, &tail, encoder, si, &mut episodes[gi].rng));
-        }
-    }
-}
-
-/// Truncation-tail bootstrapping, field-split like [`process_tick`].
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::needless_range_loop)]
-fn tail_values_parts<G, P, L, F>(
-    finished: &[(usize, bool)],
+fn tail_requests<G, P, L>(
+    gi: usize,
     game: &G,
     policy: &P,
     learner: &L,
     encoder: &dyn StateEncoder<State = G::State>,
     sequential: bool,
-    episodes: &mut [Episode<G>],
+    episodes: &[Episode<G>],
     traj: &[Vec<Vec<Step<P::Evaluation>>>],
-    evaluator: &mut Evaluator<'_, F>,
-) -> HashMap<(usize, usize), Vec<f64>>
+) -> Vec<(usize, Vec<f32>)>
 where
     G: Game + Sync,
     G::State: Send,
     P: Policy,
     L: Learner<P::Evaluation>,
-    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
 {
-    let mut tails: HashMap<(usize, usize), Vec<f64>> = HashMap::new();
     if !learner.uses_episode_tail() {
-        return tails;
+        return Vec::new();
     }
     let a = game.action_count();
     let num_agents = game.num_agents();
     let all_perspectives = (policy.evaluates_all_perspectives(sequential, num_agents)
         && learner.value_only_evaluation(a).is_some())
         || learner.tails_all_trajectories();
-    let mut obs_flat: Vec<f32> = Vec::new();
-    let mut meta: Vec<(usize, usize)> = Vec::new();
-    for &(gi, terminal) in finished {
-        if terminal {
-            continue;
-        }
-        for si in 0..num_agents {
-            if (all_perspectives || episodes[gi].agent_active(game, si)) && !traj[gi][si].is_empty()
-            {
-                obs_flat.extend(episodes[gi].observe(encoder, si));
-                meta.push((gi, si));
-            }
+    let mut reqs = Vec::new();
+    for (si, steps) in traj[gi].iter().enumerate() {
+        if (all_perspectives || episodes[gi].agent_active(game, si)) && !steps.is_empty() {
+            reqs.push((si, episodes[gi].observe(encoder, si)));
         }
     }
-    if !meta.is_empty() {
-        let players: Vec<usize> = meta.iter().map(|&(_, si)| si).collect();
-        let q = evaluator.forward(&players, obs_flat, meta.len());
-        let stride = q.len() / meta.len();
-        // Cancellation yields zero-width rows; empty tails degrade to the terminal path and
-        // the aborted collect's records are discarded by the caller.
-        if stride == 0 {
-            return tails;
-        }
-        for (i, &(gi, si)) in meta.iter().enumerate() {
-            let row = &q[i * stride..(i + 1) * stride];
-            let state = &episodes[gi].state;
-            // Sequential non-mover rows still bootstrap over the mover's available actions;
-            // using `si` here would turn a valid sparse-action tail into an empty one.
-            let legal = match game.actor(state) {
-                Actor::Agent(mover) => game.legal_actions(state, mover),
-                Actor::Simultaneous => game.legal_actions(state, si),
-                Actor::Chance => unreachable!("chance actors are not searched"),
-            };
-            tails.insert((gi, si), learner.tail_from_row(row, a, &legal, encoder, si));
-        }
+    reqs
+}
+
+/// Turn a game's routed tail rows back into per-perspective tail values. Zero-width rows
+/// (cancellation) yield an empty map: tails degrade to the terminal path and the aborted
+/// collect's records are discarded by the caller.
+#[allow(clippy::too_many_arguments)]
+fn tails_from_rows<G, L, E>(
+    gi: usize,
+    meta: &[usize],
+    rows: &[f64],
+    stride: usize,
+    game: &G,
+    learner: &L,
+    encoder: &dyn StateEncoder<State = G::State>,
+    episodes: &[Episode<G>],
+) -> HashMap<(usize, usize), Vec<f64>>
+where
+    G: Game + Sync,
+    G::State: Send,
+    L: Learner<E>,
+{
+    let mut tails = HashMap::new();
+    if stride == 0 {
+        return tails;
+    }
+    let a = game.action_count();
+    let state = &episodes[gi].state;
+    for (i, &si) in meta.iter().enumerate() {
+        let row = &rows[i * stride..(i + 1) * stride];
+        // Sequential non-mover rows still bootstrap over the mover's available actions;
+        // using `si` here would turn a valid sparse-action tail into an empty one.
+        let legal = match game.actor(state) {
+            Actor::Agent(mover) => game.legal_actions(state, mover),
+            Actor::Simultaneous => game.legal_actions(state, si),
+            Actor::Chance => unreachable!("chance actors are not searched"),
+        };
+        tails.insert((gi, si), learner.tail_from_row(row, a, &legal, encoder, si));
     }
     tails
+}
+
+/// Cut one game's live trajectory: bootstrap each learning perspective from its tail and
+/// emit its records; episode state, ticks, and telemetry persist into the next window.
+#[allow(clippy::too_many_arguments)]
+fn flush_fragment_slot<G, L, E>(
+    gi: usize,
+    tails: &HashMap<(usize, usize), Vec<f64>>,
+    game: &G,
+    learner: &L,
+    encoder: &dyn StateEncoder<State = G::State>,
+    learn_mask: &[bool],
+    episodes: &mut [Episode<G>],
+    traj: &mut [Vec<Vec<Step<E>>>],
+    out: &mut Vec<L::Record>,
+) where
+    G: Game + Sync,
+    G::State: Send,
+    L: Learner<E>,
+{
+    for si in 0..game.num_agents() {
+        if !learn_mask[si] {
+            traj[gi][si].clear();
+            continue;
+        }
+        let steps = std::mem::take(&mut traj[gi][si]);
+        if steps.is_empty() {
+            continue;
+        }
+        let tail = tails.get(&(gi, si)).cloned().unwrap_or_default();
+        out.extend(learner.episode_records(&steps, &tail, encoder, si, &mut episodes[gi].rng));
+    }
 }

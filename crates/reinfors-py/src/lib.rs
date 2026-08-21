@@ -788,7 +788,7 @@ struct PyEngine {
 #[pymethods]
 impl PyEngine {
     #[new]
-    #[pyo3(signature = (game, reward, policy, learner, n_games, seed=0, start_buffer=false, start_buffer_capacity=1000, p_fresh=0.05, infer_cache=0, learn_players=None, pad_rows_to=0, batch_size=0, n_threads=0))]
+    #[pyo3(signature = (game, reward, policy, learner, n_games, seed=0, start_buffer=false, start_buffer_capacity=1000, p_fresh=0.05, infer_cache=0, learn_players=None, pad=false, batch_size=0, n_threads=0))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         game: GameHandle,
@@ -802,7 +802,7 @@ impl PyEngine {
         p_fresh: f64,
         infer_cache: usize,
         learn_players: Option<Vec<usize>>,
-        pad_rows_to: usize,
+        pad: bool,
         batch_size: usize,
         n_threads: usize,
     ) -> PyResult<Self> {
@@ -815,12 +815,6 @@ impl PyEngine {
         if n_games > 1 << 16 {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "n_games must be <= {} (got {n_games})",
-                1 << 16
-            )));
-        }
-        if pad_rows_to > 1 << 16 {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "pad_rows_to must be <= {} (got {pad_rows_to})",
                 1 << 16
             )));
         }
@@ -880,13 +874,12 @@ impl PyEngine {
                 })),
                 "infer_cache": infer_cache,
                 "learn_players": learn_players,
-                "pad_rows_to": pad_rows_to,
             },
         });
         let engine_params = EngineParams {
             n_games,
             seed,
-            pad_rows_to: (pad_rows_to > 0).then_some(pad_rows_to),
+            pad,
             batch_size: (batch_size > 0).then_some(batch_size),
             n_threads: (n_threads > 0).then_some(n_threads),
         };
@@ -1050,7 +1043,7 @@ impl PyEngine {
             let engine = borrow.inner.as_ref().ok_or_else(stream_active_err)?;
             let num_agents = engine.routing();
             let pair = Python::with_gil(|py| engine_callbacks(infer.bind(py), num_agents))?;
-            reject_padded_per_player(engine.pad_rows_to(), pair.1)?;
+            reject_padded_per_player(engine.pad(), pair.1)?;
             pair
         };
         let mut engine = slf
@@ -1370,7 +1363,7 @@ trait ErasedEngine: Send + Sync {
 
     fn routing(&self) -> usize;
 
-    fn pad_rows_to(&self) -> Option<usize>;
+    fn pad(&self) -> bool;
 }
 
 trait RecordBatch: Sized {
@@ -1853,10 +1846,10 @@ where
     Ok((records, telemetry))
 }
 
-fn reject_padded_per_player(pad_rows_to: Option<usize>, mode: InferMode) -> PyResult<()> {
-    if pad_rows_to.is_some() && matches!(mode, InferMode::PerPlayer) {
+fn reject_padded_per_player(pad: bool, mode: InferMode) -> PyResult<()> {
+    if pad && matches!(mode, InferMode::PerPlayer) {
         return Err(pyo3::exceptions::PyValueError::new_err(
-            "pad_rows_to supports a single shared infer callback",
+            "pad supports a single shared infer callback",
         ));
     }
     Ok(())
@@ -1906,7 +1899,7 @@ struct EngineImpl<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     n_heads: usize,
     layout: InferLayout,
     num_agents: usize,
-    pad_rows_to: Option<usize>,
+    pad: bool,
 }
 
 impl<G, P, L> ErasedEngine for EngineImpl<G, P, L>
@@ -1944,7 +1937,7 @@ where
         mode: InferMode,
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> PyResult<BatchThunk> {
-        reject_padded_per_player(self.pad_rows_to, mode)?;
+        reject_padded_per_player(self.pad, mode)?;
         let callback_err = std::sync::Arc::new(std::sync::Mutex::new(None));
         let mut infer_fn = infer_closure_gil(
             infer,
@@ -1972,9 +1965,9 @@ where
         n_records: usize,
         infer: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        if self.pad_rows_to.is_some() {
+        if self.pad {
             let (_callbacks, mode) = engine_callbacks(infer, self.num_agents)?;
-            reject_padded_per_player(self.pad_rows_to, mode)?;
+            reject_padded_per_player(self.pad, mode)?;
         }
         let (records, telemetry) = run_collect(
             &mut self.inner,
@@ -1994,8 +1987,8 @@ where
         self.num_agents
     }
 
-    fn pad_rows_to(&self) -> Option<usize> {
-        self.pad_rows_to
+    fn pad(&self) -> bool {
+        self.pad
     }
 }
 
@@ -2780,9 +2773,12 @@ where
         n_heads,
         action_count,
     )?;
-    if let Some(pad) = engine_params.pad_rows_to {
-        // exact callback row count by contract: no agent multiplier
-        check_call_buffers("pad_rows_to", pad, 1, dim, n_heads, action_count)?;
+    if engine_params.pad {
+        // pad fixes every call at exactly batch_size rows: no agent multiplier
+        let rows = engine_params
+            .batch_size
+            .unwrap_or_else(|| (engine_params.n_games / 2).max(1));
+        check_call_buffers("batch_size", rows, 1, dim, n_heads, action_count)?;
     }
     if let Some(lp) = &learn_players {
         if lp.is_empty() {
@@ -2838,7 +2834,7 @@ where
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
-                pad_rows_to: engine_params.pad_rows_to,
+                pad: engine_params.pad,
                 inner: build_inner(
                     game,
                     enc,
@@ -2879,7 +2875,7 @@ where
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
-                pad_rows_to: engine_params.pad_rows_to,
+                pad: engine_params.pad,
                 inner: build_inner(
                     game,
                     enc,
@@ -2933,7 +2929,7 @@ where
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, false);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
-                pad_rows_to: engine_params.pad_rows_to,
+                pad: engine_params.pad,
                 inner: build_inner(
                     game,
                     enc,
@@ -2986,7 +2982,7 @@ where
             let learner = AlphaZeroLearner::new(gamma);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
-                pad_rows_to: engine_params.pad_rows_to,
+                pad: engine_params.pad,
                 inner: build_inner(
                     game,
                     enc,
@@ -3011,7 +3007,7 @@ where
             let learner = reinfors_core::Ppo::new(gamma, lam);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
-                pad_rows_to: engine_params.pad_rows_to,
+                pad: engine_params.pad,
                 inner: build_inner(
                     game,
                     enc,
@@ -3044,7 +3040,7 @@ where
             let learner = Dqn::new(n_heads, bootstrap_p, n_step, gamma);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
-                pad_rows_to: engine_params.pad_rows_to,
+                pad: engine_params.pad,
                 inner: build_inner(
                     game,
                     enc,
