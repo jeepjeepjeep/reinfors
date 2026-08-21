@@ -74,7 +74,6 @@ fn engine() -> Engine<Alt, EpsilonGreedyQ, Dqn> {
         EngineParams {
             n_games: 2,
             seed: 3,
-            n_groups: 1,
             // Drain-only firing: whole rounds per call, so the evaluator's cross-row
             // validations see multi-row per-player batches.
             batch_size: Some(usize::MAX),
@@ -206,7 +205,6 @@ fn per_player_row_widths_must_agree_across_players() {
         EngineParams {
             n_games: 1,
             seed: 3,
-            n_groups: 1,
             batch_size: Some(usize::MAX),
             ..Default::default()
         },

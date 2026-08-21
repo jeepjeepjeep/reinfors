@@ -28,7 +28,6 @@ fn params(n_games: usize, seed: u64) -> EngineParams {
     EngineParams {
         n_games,
         seed,
-        n_groups: 1,
         ..Default::default()
     }
 }

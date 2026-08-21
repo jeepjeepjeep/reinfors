@@ -256,7 +256,6 @@ fn fanned_rounds_match_sequential_collection_exactly() {
             EngineParams {
                 n_games: 4,
                 seed: 9,
-                n_groups: 1,
                 batch_size: Some(3),
                 n_threads,
                 ..Default::default()

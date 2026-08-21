@@ -12,46 +12,24 @@ use crate::rng::SplitMix64;
 use crate::rollout::episode::Episode;
 use crate::rollout::evaluator::{Evaluator, InferMode};
 use crate::rollout::infer_cache::InferCache;
-use crate::rollout::infer_service::ServiceHost;
 use crate::rollout::start::{AlwaysInitialState, Start, StartDistribution};
 
 pub use crate::stats::EpisodeSummary;
 
 pub use crate::stats::CollectStats;
 
-/// Start-distribution access: exclusive on the classic path, mutex-shared across group
-/// workers.
 pub(crate) struct StartParts<'a, S> {
     pub dist: &'a mut dyn StartDistribution<S>,
     pub rng: &'a mut SplitMix64,
 }
 
-pub(crate) enum StartAccess<'a, 'b, S> {
-    Exclusive(StartParts<'a, S>),
-    Shared(&'b std::sync::Mutex<StartParts<'a, S>>),
-}
-
-impl<S> StartAccess<'_, '_, S> {
+impl<S> StartParts<'_, S> {
     fn observe(&mut self, state: &S) {
-        match self {
-            StartAccess::Exclusive(parts) => parts.dist.observe(state, &mut *parts.rng),
-            StartAccess::Shared(shared) => {
-                let mut parts = shared.lock().expect("start access poisoned");
-                let StartParts { dist, rng } = &mut *parts;
-                dist.observe(state, &mut **rng);
-            }
-        }
+        self.dist.observe(state, &mut *self.rng);
     }
 
     fn choose(&mut self) -> Start<S> {
-        match self {
-            StartAccess::Exclusive(parts) => parts.dist.choose(&mut *parts.rng),
-            StartAccess::Shared(shared) => {
-                let mut parts = shared.lock().expect("start access poisoned");
-                let StartParts { dist, rng } = &mut *parts;
-                dist.choose(&mut **rng)
-            }
-        }
+        self.dist.choose(&mut *self.rng)
     }
 }
 
@@ -59,9 +37,6 @@ impl<S> StartAccess<'_, '_, S> {
 pub struct EngineParams {
     pub n_games: usize,
     pub seed: u64,
-    /// 1 = the classic lockstep collect; 2 = grouped collect (two game groups on worker
-    /// threads so search overlaps inference).
-    pub n_groups: usize,
     /// Fixed call shape in rows (None = off); see the inference contract.
     pub pad_rows_to: Option<usize>,
     /// Scheduler firing threshold in rows (None = max(1, n_games / 2)).
@@ -75,7 +50,6 @@ impl Default for EngineParams {
         EngineParams {
             n_games: 1,
             seed: 0,
-            n_groups: 1,
             pad_rows_to: None,
             batch_size: None,
             n_threads: None,
@@ -98,10 +72,7 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     // Returns cannot be derived from steps: an agent may be rewarded before ever acting.
     episode_returns: Vec<Vec<f64>>,
     sequential: bool,
-    n_groups: usize,
     pad_rows_to: Option<usize>,
-    group_rngs: Vec<SplitMix64>,
-    sharded_caches: Option<Vec<crate::rollout::infer_cache::ShardedInferCache>>,
     buffer_rng: SplitMix64,
     seeded: Vec<bool>,
     policy_states: Vec<P::PolicyState>,
@@ -130,15 +101,6 @@ where
         if let Some(pad) = params.pad_rows_to {
             assert!(pad >= 1, "pad_rows_to must be >= 1");
         }
-        assert!(
-            matches!(params.n_groups, 1 | 2),
-            "n_groups must be 1 or 2 (got {})",
-            params.n_groups
-        );
-        assert!(
-            params.n_groups == 1 || params.n_games >= 2,
-            "n_groups=2 needs at least 2 games to split"
-        );
         let mut episodes: Vec<Episode<G>> = (0..params.n_games)
             .map(|i| {
                 Episode::new(
@@ -174,16 +136,6 @@ where
             .map(|_| (0..num_agents).map(|_| Vec::new()).collect())
             .collect();
         let search_rng = SplitMix64::new(params.seed ^ 0xD1B5_4A32_D192_ED03);
-        // Persistent per-group streams: results must not depend on collection chunking.
-        let group_rngs = (0..params.n_groups)
-            .map(|gi| {
-                SplitMix64::new(
-                    params.seed
-                        ^ 0x7F4A_7C15_9E37_79B9_u64.wrapping_mul(gi as u64 + 1)
-                        ^ 0xA076_1D64_78BD_642F,
-                )
-            })
-            .collect();
         let buffer_rng = SplitMix64::new(params.seed ^ 0x2545_F491_4F6C_DD1D);
         let seeded = vec![false; params.n_games];
         let perms = crate::encoder::PermTable::build(&*encoder, game.action_count(), num_agents);
@@ -200,10 +152,7 @@ where
             learn_mask: vec![true; num_agents],
             episode_returns: vec![vec![0.0; num_agents]; params.n_games],
             sequential,
-            n_groups: params.n_groups,
             pad_rows_to: params.pad_rows_to,
-            group_rngs,
-            sharded_caches: None,
             buffer_rng,
             seeded,
             policy_states,
@@ -245,28 +194,8 @@ where
         self
     }
 
-    /// Install shared sharded caches for grouped collection (slot layout as
-    /// [`Self::with_infer_caches`]: shared slot then one per player).
-    pub fn with_sharded_infer_caches(
-        mut self,
-        caches: Vec<crate::rollout::infer_cache::ShardedInferCache>,
-    ) -> Self {
-        assert_eq!(self.n_groups, 2, "sharded caches require n_groups=2");
-        assert_eq!(
-            caches.len(),
-            self.game.num_agents() + 1,
-            "one cache per slot: shared + one per player"
-        );
-        self.sharded_caches = Some(caches);
-        self
-    }
-
     /// Install one shared cache followed by one cache per player.
     pub fn with_infer_caches(mut self, caches: Vec<InferCache>) -> Self {
-        assert_eq!(
-            self.n_groups, 1,
-            "exclusive caches require n_groups=1; grouped engines use sharded caches"
-        );
         assert_eq!(
             caches.len(),
             self.game.num_agents() + 1,
@@ -298,10 +227,6 @@ where
         F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
         P: Sync,
     {
-        assert_eq!(
-            self.n_groups, 1,
-            "n_groups=2 engines collect via collect_grouped_hosted"
-        );
         let mut out: Vec<L::Record> = Vec::new();
         let mut stats = CollectStats::default();
         let num_agents = self.game.num_agents();
@@ -501,10 +426,10 @@ where
                             let meta: Vec<(usize, usize)> =
                                 perspectives.iter().map(|&si| (gi, si)).collect();
                             let finished = {
-                                let mut start = StartAccess::Exclusive(StartParts {
+                                let mut start = StartParts {
                                     dist: &mut *self.start_dist,
                                     rng: &mut self.buffer_rng,
-                                });
+                                };
                                 process_tick(
                                     &self.game,
                                     &*self.encoder,
@@ -603,233 +528,6 @@ where
         (out, stats)
     }
 
-    /// Grouped collect: each group runs the classic collect loop on its own worker
-    /// thread, with inference forwarded to the [`ServiceHost`]'s resident thread —
-    /// every callback invocation across every collect using the same host arrives on
-    /// that one thread. Run-to-run nondeterministic when shared state is live;
-    /// reproduce anomalies with `n_groups=1`.
-    pub fn collect_grouped_hosted(
-        &mut self,
-        n_records: usize,
-        mode: InferMode,
-        host: &ServiceHost,
-    ) -> (Vec<L::Record>, CollectStats)
-    where
-        P: Sync,
-        L: Sync,
-        P::PolicyState: Send,
-        P::Evaluation: Send,
-        L::Record: Send,
-    {
-        use crate::rollout::infer_service::{InferRequest, ServiceState};
-
-        assert_eq!(
-            self.n_groups, 2,
-            "collect_grouped_hosted requires n_groups=2"
-        );
-        assert!(
-            matches!(mode, InferMode::Shared),
-            "collect_grouped_hosted supports a single shared infer callback"
-        );
-        if n_records == 0 {
-            return (Vec::new(), CollectStats::default());
-        }
-        let n_games = self.episodes.len();
-        let half = n_games / 2;
-        // Proportional per-group floors: finish order never changes what is collected.
-        let floor = |size: usize| (n_records * size).div_ceil(n_games);
-        let floors = [floor(half), floor(n_games - half)];
-
-        if let Some(caches) = self.sharded_caches.as_ref() {
-            for cache in caches {
-                cache.begin_collect();
-            }
-        }
-        let collect_interior = self.learner.needs_interior();
-        let pad_rows_to = self.pad_rows_to;
-        let Engine {
-            game,
-            encoder,
-            reward,
-            policy,
-            learner,
-            episodes,
-            start_dist,
-            learn_mask,
-            episode_returns,
-            sequential,
-            buffer_rng,
-            seeded,
-            policy_states,
-            ticks,
-            traj,
-            group_rngs,
-            sharded_caches,
-            perms,
-            ..
-        } = self;
-        let game: &G = game;
-        let encoder: &dyn StateEncoder<State = G::State> = &**encoder;
-        let reward: &dyn Reward<Event = G::Event> = &**reward;
-        let policy: &P = &*policy;
-        let learner: &L = &*learner;
-        let learn_mask: &[bool] = learn_mask;
-        let perms: &crate::encoder::PermTable = perms;
-        let sequential = *sequential;
-        let slots = sharded_caches.as_deref();
-        let start = std::sync::Mutex::new(StartParts {
-            dist: &mut **start_dist,
-            rng: buffer_rng,
-        });
-
-        let (ep_a, ep_b) = episodes.split_at_mut(half);
-        let (tr_a, tr_b) = traj.split_at_mut(half);
-        let (tk_a, tk_b) = ticks.split_at_mut(half);
-        let (ps_a, ps_b) = policy_states.split_at_mut(half);
-        let (er_a, er_b) = episode_returns.split_at_mut(half);
-        let (sd_a, sd_b) = seeded.split_at_mut(half);
-        let (rng_a, rng_b) = group_rngs.split_at_mut(1);
-
-        let service_state = std::sync::Arc::new(ServiceState::new());
-        let (req_tx, req_rx) = std::sync::mpsc::sync_channel::<InferRequest>(2);
-        let tx_a = req_tx.clone();
-        let tx_b = req_tx;
-        host.begin(req_rx, service_state.clone());
-
-        let group_results: [Option<(Vec<L::Record>, CollectStats)>; 2];
-        let first_panic: std::sync::Mutex<Option<Box<dyn std::any::Any + Send>>> =
-            std::sync::Mutex::new(None);
-        {
-            let svc: &ServiceState = &service_state;
-            let start = &start;
-            let panic_slot = &first_panic;
-            let (res_a, res_b) = std::thread::scope(|scope| {
-                let handle_a = scope.spawn(move || {
-                    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        run_group_worker(
-                            game,
-                            encoder,
-                            reward,
-                            policy,
-                            learner,
-                            learn_mask,
-                            perms,
-                            sequential,
-                            collect_interior,
-                            mode,
-                            floors[0],
-                            ep_a,
-                            tr_a,
-                            tk_a,
-                            ps_a,
-                            er_a,
-                            sd_a,
-                            &mut rng_a[0],
-                            slots,
-                            pad_rows_to,
-                            tx_a,
-                            svc,
-                            start,
-                        )
-                    }));
-                    match res {
-                        Ok(v) => Some(v),
-                        Err(payload) => {
-                            // record before cancelling: collateral panics (empty rows
-                            // after cancellation) must not mask the root cause
-                            panic_slot
-                                .lock()
-                                .expect("panic slot poisoned")
-                                .get_or_insert(payload);
-                            svc.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                            None
-                        }
-                    }
-                });
-                let handle_b = scope.spawn(move || {
-                    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        run_group_worker(
-                            game,
-                            encoder,
-                            reward,
-                            policy,
-                            learner,
-                            learn_mask,
-                            perms,
-                            sequential,
-                            collect_interior,
-                            mode,
-                            floors[1],
-                            ep_b,
-                            tr_b,
-                            tk_b,
-                            ps_b,
-                            er_b,
-                            sd_b,
-                            &mut rng_b[0],
-                            slots,
-                            pad_rows_to,
-                            tx_b,
-                            svc,
-                            start,
-                        )
-                    }));
-                    match res {
-                        Ok(v) => Some(v),
-                        Err(payload) => {
-                            // record before cancelling: collateral panics (empty rows
-                            // after cancellation) must not mask the root cause
-                            panic_slot
-                                .lock()
-                                .expect("panic slot poisoned")
-                                .get_or_insert(payload);
-                            svc.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                            None
-                        }
-                    }
-                });
-                (
-                    handle_a.join().unwrap_or(None),
-                    handle_b.join().unwrap_or(None),
-                )
-            });
-            group_results = [res_a, res_b];
-        }
-        // quiesce before reading the service's stats/error writes below
-        host.wait_done();
-
-        if let Some(err) = service_state
-            .error
-            .lock()
-            .expect("service error poisoned")
-            .take()
-        {
-            panic!("grouped collect infer callback failed: {err}");
-        }
-        if let Some(payload) = first_panic.into_inner().expect("panic slot poisoned") {
-            std::panic::resume_unwind(payload);
-        }
-
-        let [a, b] = group_results;
-        let (out_a, stats_a) = a.expect("worker result present");
-        let (out_b, stats_b) = b.expect("worker result present");
-        let mut out = out_a;
-        out.extend(out_b);
-        let mut stats = fold_stats(stats_a, stats_b);
-        {
-            // rows fold from the worker evaluators (real rows only, excluding padding);
-            // wall-clock seconds and call counts are the service's to report
-            let svc_stats = service_state.stats.lock().expect("service stats poisoned");
-            stats.infer_seconds = svc_stats.seconds;
-            stats.infer_calls = svc_stats.calls;
-        }
-        if let Some(caches) = self.sharded_caches.as_ref() {
-            stats.cache_lookups = caches.iter().map(|c| c.lookups()).sum();
-            stats.cache_hits = caches.iter().map(|c| c.hits()).sum();
-        }
-        (out, stats)
-    }
-
     fn flush_finished<F>(
         &mut self,
         finished: &[(usize, bool)],
@@ -840,10 +538,10 @@ where
         F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
         let tails = self.tail_values(finished, evaluator);
-        let mut start = StartAccess::Exclusive(StartParts {
+        let mut start = StartParts {
             dist: &mut *self.start_dist,
             rng: &mut self.buffer_rng,
-        });
+        };
         flush_finished_parts(
             finished,
             &tails,
@@ -905,10 +603,6 @@ where
         // The sweep cursor is result-bearing: it sets rotation start, hence window
         // composition; restore-continuation identity needs it.
         put_u64(&mut out, self.sweep_cursor as u64);
-        put_u32(&mut out, self.group_rngs.len() as u32);
-        for rng in &self.group_rngs {
-            put_u64(&mut out, rng.state());
-        }
         for gi in 0..n_games {
             put_blob(&mut out, &codec.encode(&self.episodes[gi].state));
             put_u64(&mut out, self.episodes[gi].rng.state());
@@ -961,19 +655,6 @@ where
         let search_rng = r.u64()?;
         let buffer_rng = r.u64()?;
         let sweep_cursor = r.u64()? as usize;
-        let mut group_rng_states: Vec<u64> = Vec::new();
-        if version >= 3 {
-            let n = r.u32()? as usize;
-            if n != self.group_rngs.len() {
-                return Err(format!(
-                    "snapshot has {n} group rng streams; the engine has {}",
-                    self.group_rngs.len()
-                ));
-            }
-            for _ in 0..n {
-                group_rng_states.push(r.u64()?);
-            }
-        }
         let (c, h, w) = self.encoder.obs_shape();
         let obs_dim = c * h * w;
         let action_count = self.game.action_count();
@@ -1087,10 +768,6 @@ where
         self.search_rng = SplitMix64::from_state(search_rng);
         self.buffer_rng = SplitMix64::from_state(buffer_rng);
         self.sweep_cursor = sweep_cursor;
-        // Version-2 snapshots predate group streams; construction defaults stay in place.
-        for (rng, state) in self.group_rngs.iter_mut().zip(&group_rng_states) {
-            *rng = SplitMix64::from_state(*state);
-        }
         for (gi, slice) in slices.into_iter().enumerate() {
             self.episodes[gi].state = slice.state;
             self.episodes[gi].rng = SplitMix64::from_state(slice.rng);
@@ -1103,11 +780,6 @@ where
         // Numeric generations do not identify weights across restored processes.
         if let Some(caches) = self.infer_caches.as_mut() {
             for cache in caches.iter_mut() {
-                cache.force_clear();
-            }
-        }
-        if let Some(caches) = self.sharded_caches.as_ref() {
-            for cache in caches {
                 cache.force_clear();
             }
         }
@@ -1134,7 +806,7 @@ fn process_tick<G, P, L>(
     ticks: &mut [usize],
     policy_states: &mut [P::PolicyState],
     episode_returns: &mut [Vec<f64>],
-    start: &mut StartAccess<'_, '_, G::State>,
+    start: &mut StartParts<'_, G::State>,
     out: &mut Vec<L::Record>,
     stats: &mut CollectStats,
 ) -> Vec<(usize, bool)>
@@ -1270,7 +942,7 @@ fn flush_finished_parts<G, P, L>(
     policy_states: &mut [P::PolicyState],
     episode_returns: &mut [Vec<f64>],
     seeded: &mut [bool],
-    start: &mut StartAccess<'_, '_, G::State>,
+    start: &mut StartParts<'_, G::State>,
     out: &mut Vec<L::Record>,
     stats: &mut CollectStats,
 ) where
@@ -1328,122 +1000,6 @@ fn fragment_potential<E>(out_len: usize, traj: &[Vec<Vec<Step<E>>>], learn_mask:
                     .sum::<usize>()
             })
             .sum::<usize>()
-}
-
-type DecisionParts = (Vec<(usize, Vec<usize>)>, Vec<(usize, usize)>);
-
-/// Gather every active game's requests for one round.
-fn gather_decisions<G: Game>(
-    game: &G,
-    episodes: &[Episode<G>],
-    num_agents: usize,
-) -> DecisionParts {
-    let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
-    let mut meta: Vec<(usize, usize)> = Vec::new();
-    for (gi, ep) in episodes.iter().enumerate() {
-        let perspectives: Vec<usize> = (0..num_agents)
-            .filter(|&si| ep.agent_active(game, si))
-            .collect();
-        if !perspectives.is_empty() {
-            for &si in &perspectives {
-                meta.push((gi, si));
-            }
-            groups.push((gi, perspectives));
-        }
-    }
-    (groups, meta)
-}
-
-/// Drive every gathered decision's stepped search to completion, one pooled infer call per
-/// barrier round (the Stage A lockstep driver over engine state — per-game ctx borrows).
-#[allow(clippy::too_many_arguments)]
-fn drive_decisions<G, P, F>(
-    policy: &P,
-    game: &G,
-    enc: &dyn StateEncoder<State = G::State>,
-    reward: &dyn Reward<Event = G::Event>,
-    perms: &crate::encoder::PermTable,
-    collect_interior: bool,
-    groups: &[(usize, Vec<usize>)],
-    episodes: &mut [Episode<G>],
-    eval: &mut Evaluator<'_, F>,
-) -> Vec<(P::Evaluation, Vec<crate::learner::InteriorTarget>)>
-where
-    G: Game + Sync,
-    G::State: Send,
-    P: Policy,
-    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
-{
-    use crate::policy::{RequestSink, RoundStatus, RowsView, SearchCtx};
-    let mut searches: Vec<_> = groups
-        .iter()
-        .map(|(gi, perspectives)| {
-            let ep = &mut episodes[*gi];
-            let ctx = SearchCtx {
-                game,
-                enc,
-                reward,
-                rng: &mut ep.rng,
-                perms,
-                collect_interior,
-            };
-            policy.begin_search(ctx, &ep.state, perspectives)
-        })
-        .collect();
-    let mut done = vec![false; searches.len()];
-    loop {
-        let mut sink = RequestSink::default();
-        let mut spans: Vec<(usize, usize, usize)> = Vec::new();
-        for (i, search) in searches.iter_mut().enumerate() {
-            if done[i] {
-                continue;
-            }
-            let ep = &mut episodes[groups[i].0];
-            let start = sink.len();
-            let ctx = SearchCtx {
-                game,
-                enc,
-                reward,
-                rng: &mut ep.rng,
-                perms,
-                collect_interior,
-            };
-            let status = policy.round(ctx, search, &mut sink);
-            let count = sink.len() - start;
-            if count > 0 {
-                spans.push((i, start, count));
-            } else if status == RoundStatus::Done {
-                done[i] = true;
-            }
-        }
-        if spans.is_empty() {
-            break;
-        }
-        let n = sink.len();
-        let rows = eval.forward(&sink.players, sink.obs, n);
-        let stride = rows.len() / n;
-        for &(i, start, count) in &spans {
-            let view = RowsView {
-                data: &rows[start * stride..(start + count) * stride],
-                stride,
-            };
-            policy.absorb(&mut searches[i], view, &mut episodes[groups[i].0].rng);
-        }
-    }
-    let mut out = Vec::new();
-    for (search, (gi, _)) in searches.into_iter().zip(groups) {
-        let ep = &mut episodes[*gi];
-        let ctx = SearchCtx {
-            game,
-            enc,
-            reward,
-            rng: &mut ep.rng,
-            perms,
-            collect_interior,
-        };
-        out.extend(policy.finish(ctx, search));
-    }
-    out
 }
 
 /// Forward the first `take` queued rows in one evaluator call and route the results to the
@@ -1604,342 +1160,4 @@ where
         }
     }
     tails
-}
-
-fn fold_stats(mut a: CollectStats, b: CollectStats) -> CollectStats {
-    a.decisions += b.decisions;
-    a.max_depth = a.max_depth.max(b.max_depth);
-    a.sum_leaves += b.sum_leaves;
-    a.sum_rounds += b.sum_rounds;
-    a.sum_expansions += b.sum_expansions;
-    a.sum_sigma += b.sum_sigma;
-    a.sum_disagreement += b.sum_disagreement;
-    a.sum_terminal_sims += b.sum_terminal_sims;
-    a.sum_depthcap_sims += b.sum_depthcap_sims;
-    a.sum_shared_rows += b.sum_shared_rows;
-    a.sum_fresh_rows += b.sum_fresh_rows;
-    a.sum_hit_rows += b.sum_hit_rows;
-    a.sum_extra_eval_rows += b.sum_extra_eval_rows;
-    a.infer_rows += b.infer_rows;
-    a.padded_rows += b.padded_rows;
-    a.episodes.extend(b.episodes);
-    a
-}
-
-/// One group's collect loop over its own state slice (local indices). Stops at its
-/// floor, when its games are exhausted, or on cancellation.
-#[allow(clippy::too_many_arguments)]
-fn run_group_worker<G, P, L>(
-    game: &G,
-    encoder: &dyn StateEncoder<State = G::State>,
-    reward: &dyn Reward<Event = G::Event>,
-    policy: &P,
-    learner: &L,
-    learn_mask: &[bool],
-    perms: &crate::encoder::PermTable,
-    sequential: bool,
-    collect_interior: bool,
-    mode: InferMode,
-    floor: usize,
-    episodes: &mut [Episode<G>],
-    traj: &mut [Vec<Vec<Step<P::Evaluation>>>],
-    ticks: &mut [usize],
-    policy_states: &mut [P::PolicyState],
-    episode_returns: &mut [Vec<f64>],
-    seeded: &mut [bool],
-    _rng: &mut SplitMix64,
-    slots: Option<&[crate::rollout::infer_cache::ShardedInferCache]>,
-    pad_rows_to: Option<usize>,
-    req_tx: std::sync::mpsc::SyncSender<crate::rollout::infer_service::InferRequest>,
-    svc: &crate::rollout::infer_service::ServiceState,
-    start: &std::sync::Mutex<StartParts<'_, G::State>>,
-) -> (Vec<L::Record>, CollectStats)
-where
-    G: Game + Sync,
-    G::State: Send,
-    P: Policy,
-    L: Learner<P::Evaluation>,
-{
-    use std::sync::atomic::Ordering;
-    let mut start = StartAccess::Shared(start);
-    let cancel = &svc.cancel;
-    // run_service answers every accepted request exactly once, so one reply channel
-    // serves the worker's lifetime.
-    let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-    let mut service_infer = |player: usize, obs: Vec<f32>, n: usize| -> Vec<f64> {
-        if cancel.load(Ordering::Relaxed) {
-            return Vec::new();
-        }
-        let request = crate::rollout::infer_service::InferRequest {
-            player,
-            obs,
-            n,
-            reply: reply_tx.clone(),
-        };
-        if req_tx.send(request).is_err() {
-            return Vec::new();
-        }
-        match reply_rx.recv() {
-            Ok(Ok(rows)) => rows,
-            _ => Vec::new(),
-        }
-    };
-    let mut evaluator = match slots {
-        Some(slots) => Evaluator::with_shared_cache(&mut service_infer, mode, slots),
-        None => Evaluator::new(&mut service_infer, mode, None),
-    }
-    .with_pad_rows_to(pad_rows_to);
-
-    let mut out: Vec<L::Record> = Vec::new();
-    let mut stats = CollectStats::default();
-    let num_agents = game.num_agents();
-    let fragments = learner.bootstraps_fragments();
-    if fragments {
-        discard_fragments(traj);
-    }
-    while !cancel.load(Ordering::Relaxed) {
-        let collected = if fragments {
-            fragment_potential(out.len(), traj, learn_mask)
-        } else {
-            out.len()
-        };
-        if collected >= floor {
-            break;
-        }
-        let (groups, meta) = gather_decisions(game, episodes, num_agents);
-        if groups.is_empty() {
-            break;
-        }
-        let evals = drive_decisions(
-            policy,
-            game,
-            encoder,
-            reward,
-            perms,
-            collect_interior,
-            &groups,
-            episodes,
-            &mut evaluator,
-        );
-        if cancel.load(Ordering::Relaxed) {
-            break;
-        }
-        let finished = process_tick(
-            game,
-            encoder,
-            reward,
-            policy,
-            learner,
-            learn_mask,
-            sequential,
-            0..episodes.len(),
-            evals,
-            &meta,
-            episodes,
-            traj,
-            ticks,
-            policy_states,
-            episode_returns,
-            &mut start,
-            &mut out,
-            &mut stats,
-        );
-        let tails = tail_values_parts(
-            &finished,
-            game,
-            policy,
-            learner,
-            encoder,
-            sequential,
-            episodes,
-            traj,
-            &mut evaluator,
-        );
-        // Finish the tick even when cancelled: skipping the flush would strand finished
-        // episodes in a terminal or over-horizon state that the next collect would advance.
-        flush_finished_parts(
-            &finished,
-            &tails,
-            game,
-            policy,
-            learner,
-            encoder,
-            episodes,
-            traj,
-            ticks,
-            policy_states,
-            episode_returns,
-            seeded,
-            &mut start,
-            &mut out,
-            &mut stats,
-        );
-    }
-    if fragments && !cancel.load(Ordering::Relaxed) {
-        flush_fragments_parts(
-            game,
-            policy,
-            learner,
-            encoder,
-            learn_mask,
-            sequential,
-            episodes,
-            traj,
-            &mut evaluator,
-            &mut out,
-        );
-    }
-    stats.infer_rows = evaluator.rows;
-    stats.padded_rows = evaluator.padded_rows;
-    (out, stats)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::policies::tree::alphazero::{AlphaZero, AlphaZeroConfig};
-    use crate::policies::tree::mcts::{NoiseScope, SequentialBackup};
-    use crate::rollout::infer_cache::{InferCache, ShardedInferCache};
-    use crate::{Actor, AlphaZeroLearner, ChanceMode, Space, StateCodec, Transition};
-    use std::sync::atomic::AtomicU64;
-    use std::sync::Arc;
-
-    #[derive(Clone)]
-    struct St {
-        tick: usize,
-    }
-    struct Count;
-    impl Game for Count {
-        type State = St;
-        type Event = ();
-        fn num_agents(&self) -> usize {
-            1
-        }
-        fn action_count(&self) -> usize {
-            2
-        }
-        fn actor(&self, _s: &St) -> Actor {
-            Actor::Agent(0)
-        }
-        fn legal_actions(&self, _s: &St, _agent: usize) -> Vec<usize> {
-            vec![0, 1]
-        }
-        fn step(&self, s: &St, _a: &[usize]) -> Transition<St, ()> {
-            Transition {
-                next_state: St { tick: s.tick + 1 },
-                events: vec![None],
-                terminal: s.tick + 1 >= 3,
-            }
-        }
-        fn initial_state(&self) -> St {
-            St { tick: 0 }
-        }
-    }
-    struct Enc;
-    impl crate::ActionView for Enc {}
-    impl StateEncoder for Enc {
-        type State = St;
-        fn encode(&self, s: &St, _agent: usize) -> Vec<f32> {
-            vec![s.tick as f32, 1.0]
-        }
-        fn obs_shape(&self) -> (usize, usize, usize) {
-            (1, 1, 2)
-        }
-        fn observation_space(&self) -> Space {
-            Space::unit_box(vec![1, 1, 2])
-        }
-    }
-    struct Zero;
-    impl Reward for Zero {
-        type Event = ();
-        fn step_reward(&self, _e: &(), _agent: usize) -> f64 {
-            0.0
-        }
-    }
-    struct Codec;
-    impl StateCodec for Codec {
-        type State = St;
-        fn encode(&self, s: &St) -> Vec<u8> {
-            (s.tick as u64).to_le_bytes().to_vec()
-        }
-        fn decode(&self, b: &[u8]) -> Result<St, String> {
-            let arr: [u8; 8] = b.try_into().map_err(|_| "bad state".to_string())?;
-            Ok(St {
-                tick: u64::from_le_bytes(arr) as usize,
-            })
-        }
-        fn validate_decoded_state(&self, s: &St, _done: bool) -> Result<(), String> {
-            if s.tick <= 3 {
-                Ok(())
-            } else {
-                Err("tick out of range".into())
-            }
-        }
-    }
-
-    fn engine(n_groups: usize) -> Engine<Count, AlphaZero, AlphaZeroLearner> {
-        Engine::new(
-            Count,
-            Box::new(Enc),
-            Box::new(Zero),
-            AlphaZero::new(AlphaZeroConfig {
-                num_simulations: 6,
-                c_puct: 1.5,
-                gamma: 1.0,
-                max_depth: 64,
-                noise_epsilon: 0.25,
-                noise_alpha: 0.5,
-                temperature: 1.0,
-                temperature_drop: 4,
-                chance: ChanceMode::AlwaysResample,
-                noise_scope: NoiseScope::Requester,
-                sequential_backup: SequentialBackup::Auto,
-            }),
-            AlphaZeroLearner::new(1.0),
-            EngineParams {
-                n_games: 4,
-                seed: 5,
-                n_groups,
-                ..Default::default()
-            },
-        )
-    }
-
-    #[test]
-    #[should_panic(expected = "sharded caches require n_groups=2")]
-    fn sharded_caches_rejected_on_ungrouped_engine() {
-        let generation = Arc::new(AtomicU64::new(0));
-        let caches = vec![
-            ShardedInferCache::new(64, 4, generation.clone()),
-            ShardedInferCache::new(64, 4, generation),
-        ];
-        let _ = engine(1).with_sharded_infer_caches(caches);
-    }
-
-    #[test]
-    #[should_panic(expected = "exclusive caches require n_groups=1")]
-    fn exclusive_caches_rejected_on_grouped_engine() {
-        let generation = Arc::new(AtomicU64::new(0));
-        let caches = vec![
-            InferCache::new(64, generation.clone()),
-            InferCache::new(64, generation),
-        ];
-        let _ = engine(2).with_infer_caches(caches);
-    }
-
-    #[test]
-    fn restore_clears_sharded_caches() {
-        let generation = Arc::new(AtomicU64::new(0));
-        let caches = vec![
-            ShardedInferCache::new(64, 4, generation.clone()),
-            ShardedInferCache::new(64, 4, generation),
-        ];
-        let mut eng = engine(2).with_sharded_infer_caches(caches);
-        let snap = eng.snapshot_bytes(&Codec).unwrap();
-        let slot = &eng.sharded_caches.as_ref().unwrap()[0];
-        slot.insert(InferCache::key(&[1.0, 2.0]), &[0.5], 0);
-        assert_eq!(slot.len(), 1);
-        eng.restore_bytes(&Codec, &snap).unwrap();
-        assert_eq!(eng.sharded_caches.as_ref().unwrap()[0].len(), 0);
-    }
 }
