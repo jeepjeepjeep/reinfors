@@ -73,7 +73,7 @@ impl Track {
         Track::from_points(ring_points(), true)
     }
 
-    fn from_points(points: Vec<TrackPoint>, fallback: bool) -> Track {
+    pub(crate) fn from_points(points: Vec<TrackPoint>, fallback: bool) -> Track {
         let n = points.len();
         let tiles: Vec<Tile> = (0..n)
             .map(|i| tile_quad(&points[i], &points[if i == 0 { n - 1 } else { i - 1 }]))

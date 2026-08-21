@@ -4,8 +4,10 @@
 //! from the seed; decoded worlds are graph- and bounds-validated, and solver
 //! parameters are replaced with the canonical task constants.
 
-use super::{dynamics::CarWorld, CarRacing, CarRacingState, LiveState};
+use super::dynamics::{canonical_params, CarWorld};
+use super::{CarRacing, CarRacingState, LiveState};
 use crate::codec_util::{serde_decode, serde_encode};
+use rapier2d::prelude::{JointAxis, Rotation, SpatialVector, Vector};
 use reinfors_core::StateCodec;
 use std::sync::Arc;
 
@@ -46,6 +48,41 @@ fn check_bounded(label: &str, values: &[f64], bound: f64) -> Result<(), String> 
         return Err(format!("{label} exceeds the magnitude bound {bound}"));
     }
     Ok(())
+}
+
+/// Serialize the config-bearing sets with every dynamic field zeroed. Byte-comparing
+/// this against a freshly constructed car validates ALL immutable physics configuration
+/// (damping, mass properties, collider data, joint parameters, ...) without enumerating
+/// rapier's fields — any forgery outside the dynamic state changes the fingerprint.
+fn config_fingerprint(car: &CarWorld) -> Vec<u8> {
+    let mut c = car.clone();
+    let handles: Vec<_> = std::iter::once(c.hull)
+        .chain(c.wheels.iter().copied())
+        .collect();
+    for h in handles {
+        let b = &mut c.bodies[h];
+        b.set_translation(Vector::ZERO, false);
+        b.set_rotation(Rotation::IDENTITY, false);
+        b.set_linvel(Vector::ZERO, false);
+        b.set_angvel(0.0, false);
+        b.reset_forces(false);
+        b.reset_torques(false);
+    }
+    for jh in c.joints {
+        if let Some(j) = c.impulse_joints.get_mut(jh, false) {
+            j.impulses = SpatialVector::ZERO;
+            j.data.set_motor_velocity(JointAxis::AngX, 0.0, 0.0);
+        }
+    }
+    c.ctl = Default::default();
+    c.fuel_spent = 0.0;
+    // One canonical step from the zeroed state: identical configurations step to
+    // bit-identical worlds, and it normalizes solver bookkeeping and cached
+    // position/mass fields that setters do not touch.
+    c.params = canonical_params();
+    c.step(f64::from(canonical_params().dt));
+    postcard::to_stdvec(&(&c.bodies, &c.colliders, &c.impulse_joints))
+        .expect("physics sets always serialize")
 }
 
 /// Enforce the exact five-body / eight-collider / four-revolute-joint graph and bound
@@ -96,6 +133,11 @@ fn validate_car(car: &CarWorld) -> Result<(), String> {
             &[f64::from(v.x), f64::from(v.y), f64::from(body.angvel())],
             MAX_COORD,
         )?;
+        // Forces are consumed and reset every step; a legitimate snapshot never
+        // carries one, and the fingerprint zeroes them, so reject rather than trust.
+        if body.user_force() != Vector::ZERO || body.user_torque() != 0.0 {
+            return Err("a stored body carries pending user forces".to_string());
+        }
     }
 
     let mut hull_colliders = 0usize;
@@ -205,7 +247,12 @@ impl StateCodec for CarRacingCodec {
             return Err(format!("tick {tick} exceeds the tick bound"));
         }
         validate_car(&car)?;
-        car.params = super::dynamics::canonical_params();
+        if config_fingerprint(&car) != config_fingerprint(&CarWorld::new(0.0, 0.0, 0.0)) {
+            return Err(
+                "physics configuration differs from the canonical car construction".to_string(),
+            );
+        }
+        car.params = canonical_params();
 
         let track = Arc::new(super::track::Track::generate(seed));
         let n_tiles = track.tiles.len();
@@ -256,6 +303,7 @@ impl StateCodec for CarRacingCodec {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use rapier2d::prelude::*;
 
@@ -331,6 +379,43 @@ mod tests {
     fn oversized_payload_is_rejected() {
         let bytes = vec![CODEC_VERSION; MAX_SNAPSHOT_BYTES + 1];
         assert!(decode_err(&bytes).contains("byte bound"));
+    }
+
+    #[test]
+    fn forged_body_config_is_rejected() {
+        let mut l = live(5);
+        let hull = l.car.hull;
+        l.car.bodies[hull].set_linear_damping(f32::NAN);
+        assert!(decode_err(&encode_live(&l)).contains("canonical car construction"));
+        let mut l = live(5);
+        let hull = l.car.hull;
+        l.car.bodies[hull].set_gravity_scale(3.0, false);
+        assert!(decode_err(&encode_live(&l)).contains("canonical car construction"));
+    }
+
+    #[test]
+    fn forged_collider_config_is_rejected() {
+        let mut l = live(5);
+        let handle = l.car.colliders.iter().next().map(|(h, _)| h).unwrap();
+        l.car.colliders[handle].set_density(9.9);
+        assert!(decode_err(&encode_live(&l)).contains("canonical car construction"));
+    }
+
+    #[test]
+    fn forged_joint_config_is_rejected() {
+        let mut l = live(5);
+        let jh = l.car.joints[0];
+        let j = l.car.impulse_joints.get_mut(jh, false).unwrap();
+        j.data.set_local_anchor1(Vector::new(5.0, 5.0));
+        assert!(decode_err(&encode_live(&l)).contains("canonical car construction"));
+    }
+
+    #[test]
+    fn forged_pending_force_is_rejected() {
+        let mut l = live(5);
+        let hull = l.car.hull;
+        l.car.bodies[hull].add_force(Vector::new(1.0, 0.0), false);
+        assert!(decode_err(&encode_live(&l)).contains("pending user forces"));
     }
 
     #[test]

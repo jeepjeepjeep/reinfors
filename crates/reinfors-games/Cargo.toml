@@ -7,7 +7,7 @@ publish = false
 
 [features]
 default = ["car-racing"]
-car-racing = ["dep:rapier2d", "dep:libm"]
+car-racing = ["dep:rapier2d", "dep:libm", "dep:smallvec"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -17,6 +17,7 @@ reinfors-core = { path = "../reinfors-core" }
 rs_poker = { version = "5", default-features = false }
 rapier2d = { version = "=0.35.2", features = ["serde-serialize", "enhanced-determinism"], optional = true }
 libm = { version = "0.2", optional = true }
+smallvec = { version = "1", optional = true }
 
 [dev-dependencies]
 rayon = "1"

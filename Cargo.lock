@@ -806,6 +806,7 @@ dependencies = [
  "reinfors-core",
  "rs_poker",
  "serde",
+ "smallvec",
 ]
 
 [[package]]

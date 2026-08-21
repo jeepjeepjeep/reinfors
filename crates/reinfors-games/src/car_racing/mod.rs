@@ -15,44 +15,9 @@ use dynamics::CarWorld;
 use reinfors_core::{ActionView, Actor, ChanceDist, Game, Reward, Space, StateEncoder, Transition};
 use track::{Track, PLAYFIELD, TRACK_RAD};
 
-/// Stack-backed per-wheel tile set: a wheel footprint overlaps a handful of tiles at
-/// most; 16 slots is far past the geometric maximum, extras are dropped.
-#[derive(Clone, Copy, Default)]
-pub(crate) struct TileSet {
-    ids: [u32; 16],
-    len: u8,
-}
-
-// len/clear serve the in-crate tests; the lib-only clippy pass cannot see cfg(test) users.
-#[allow(dead_code)]
-impl TileSet {
-    fn contains(&self, id: u32) -> bool {
-        self.ids[..usize::from(self.len)].contains(&id)
-    }
-
-    fn len(&self) -> usize {
-        usize::from(self.len)
-    }
-
-    fn push(&mut self, id: u32) {
-        if usize::from(self.len) < self.ids.len() {
-            self.ids[usize::from(self.len)] = id;
-            self.len += 1;
-        }
-    }
-
-    fn clear(&mut self) {
-        self.len = 0;
-    }
-
-    fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    fn iter(&self) -> impl Iterator<Item = u32> + '_ {
-        self.ids[..usize::from(self.len)].iter().copied()
-    }
-}
+/// Per-wheel tile set: stack-backed for the common few-tile case, spilling to the heap
+/// when degenerate self-intersecting tracks stack more than 16 tiles under one wheel.
+pub(crate) type TileSet = smallvec::SmallVec<[u32; 16]>;
 
 pub const N_ACTIONS: usize = 5;
 const SEED_SPACE: u32 = u32::MAX;
@@ -203,7 +168,7 @@ impl CarRacing {
         let mut entered_zero = false;
         for i in 0..4 {
             let quad = live.car.wheel_quad(i);
-            let mut cur = TileSet::default();
+            let mut cur = TileSet::new();
             let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
             for [x, y] in quad {
                 x0 = x0.min(x);
@@ -213,14 +178,15 @@ impl CarRacing {
             }
             for &(cx, cy) in &[(x0, y0), (x1, y0), (x0, y1), (x1, y1)] {
                 for &id in live.track.candidate_tiles(cx, cy) {
-                    if !cur.contains(id) && quad_overlap(&quad, &live.track.tiles[id as usize].quad)
+                    if !cur.contains(&id)
+                        && quad_overlap(&quad, &live.track.tiles[id as usize].quad)
                     {
                         cur.push(id);
                     }
                 }
             }
-            for id in cur.iter() {
-                if !live.wheel_tiles[i].contains(id) {
+            for &id in cur.iter() {
+                if !live.wheel_tiles[i].contains(&id) {
                     if id == 0 {
                         entered_zero = true;
                     }
@@ -581,7 +547,7 @@ mod tests {
         let CarRacingState::Live(after) = &t.next_state else {
             unreachable!()
         };
-        if after.wheel_tiles.iter().any(|w| w.contains(0)) {
+        if after.wheel_tiles.iter().any(|w| w.contains(&0)) {
             assert!(
                 !t.terminal,
                 "still overlapping tile zero must not lap (visited {}/{n})",
@@ -626,6 +592,44 @@ mod tests {
             t.terminal,
             "sticky reset-time lap must terminate the first step"
         );
+    }
+
+    #[test]
+    fn overlapping_tiles_spill_past_the_stack_capacity() {
+        // 24 near-coincident points centered on wheel 0's spawn position stack 24
+        // tiles under that wheel; every contact must be recorded past the 16-slot
+        // stack segment.
+        let (wx, wy) = (
+            dynamics::WHEELPOS[0][0] * dynamics::SIZE,
+            dynamics::WHEELPOS[0][1] * dynamics::SIZE,
+        );
+        let points: Vec<track::TrackPoint> = (0..24)
+            .map(|i| track::TrackPoint {
+                beta: 0.001 * f64::from(i),
+                x: wx + 1e-4 * f64::from(i),
+                y: wy,
+            })
+            .collect();
+        let n = points.len();
+        let track = std::sync::Arc::new(track::Track::from_points(points, false));
+        let g = game();
+        let mut live = LiveState {
+            seed: 0,
+            track,
+            car: dynamics::CarWorld::new(0.0, 0.0, 0.0),
+            tick: 0,
+            visited: vec![0u64; n.div_ceil(64)],
+            visited_count: 0,
+            wheel_tiles: Default::default(),
+            new_lap: false,
+            done: false,
+        };
+        let (new_tiles, _) = g.contact_pass(&mut live);
+        assert!(
+            new_tiles > 16,
+            "expected >16 stacked contacts, got {new_tiles}"
+        );
+        assert!(live.wheel_tiles.iter().any(|w| w.len() > 16));
     }
 
     #[test]
