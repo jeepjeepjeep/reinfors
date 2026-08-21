@@ -329,43 +329,6 @@ where
         // through a channel; the callback fires on this thread the moment `batch_size`
         // rows are queued, overlapping inference with the remaining rounds.
         {
-            enum SlotPhase<SE> {
-                Idle,
-                Running,
-                Blocked {
-                    search: SE,
-                    perspectives: Vec<usize>,
-                    outstanding: usize,
-                    rows: Vec<f64>,
-                    stride: usize,
-                },
-                Parked,
-            }
-            enum Work<SE> {
-                Begin,
-                Resume {
-                    search: SE,
-                    perspectives: Vec<usize>,
-                    rows: Vec<f64>,
-                    stride: usize,
-                },
-            }
-            enum TaskOut {
-                Skip,
-                Emitted {
-                    players: Vec<usize>,
-                    obs: Vec<f32>,
-                    n: usize,
-                },
-                Done,
-                Panicked(Box<dyn std::any::Any + Send>),
-            }
-            struct Msg<SE> {
-                gi: usize,
-                search: Option<(SE, Vec<usize>)>,
-                out: TaskOut,
-            }
-
             let n_games = self.episodes.len();
             let batch_size = self.batch_size;
             let base_cursor = self.sweep_cursor % n_games.max(1);
@@ -1359,6 +1322,49 @@ where
         out.extend(results);
     }
     out
+}
+
+/// A game slot's scheduler state.
+enum SlotPhase<SE> {
+    Idle,
+    Running,
+    Blocked {
+        search: SE,
+        perspectives: Vec<usize>,
+        outstanding: usize,
+        rows: Vec<f64>,
+        stride: usize,
+    },
+    Parked,
+}
+
+/// Work handed to a slot task: start a fresh search, or absorb routed rows and round.
+enum Work<SE> {
+    Begin,
+    Resume {
+        search: SE,
+        perspectives: Vec<usize>,
+        rows: Vec<f64>,
+        stride: usize,
+    },
+}
+
+/// A slot task's result.
+enum TaskOut {
+    Skip,
+    Emitted {
+        players: Vec<usize>,
+        obs: Vec<f32>,
+        n: usize,
+    },
+    Done,
+    Panicked(Box<dyn std::any::Any + Send>),
+}
+
+struct Msg<SE> {
+    gi: usize,
+    search: Option<(SE, Vec<usize>)>,
+    out: TaskOut,
 }
 
 /// Forward the first `take` queued rows in one evaluator call and route the results to the
