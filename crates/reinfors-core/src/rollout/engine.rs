@@ -1437,6 +1437,26 @@ impl RequestQueue {
         self.dest.push(gi);
         self.pos.push(pos);
     }
+
+    /// Consume `take` rows from the head; compact once the consumed prefix outweighs
+    /// the pending tail, so a long collection never retains fired observations.
+    fn advance(&mut self, take: usize) {
+        self.head += take;
+        if self.head == self.players.len() {
+            self.players.clear();
+            self.obs.clear();
+            self.dest.clear();
+            self.pos.clear();
+            self.head = 0;
+        } else if self.head * 2 >= self.players.len() {
+            let h = self.head;
+            self.players.drain(..h);
+            self.dest.drain(..h);
+            self.pos.drain(..h);
+            self.obs.drain(..h * self.dim);
+            self.head = 0;
+        }
+    }
 }
 
 fn fire_batch<SE, F>(
@@ -1471,14 +1491,7 @@ fn fire_batch<SE, F>(
         buf[pos * stride..(pos + 1) * stride].copy_from_slice(&rows[i * stride..(i + 1) * stride]);
         *outstanding -= 1;
     }
-    queue.head += take;
-    if queue.head == queue.players.len() {
-        queue.players.clear();
-        queue.obs.clear();
-        queue.dest.clear();
-        queue.pos.clear();
-        queue.head = 0;
-    }
+    queue.advance(take);
 }
 
 /// Roll back an aborted window: a failed collect (callback error, cancellation) leaves its
@@ -2161,6 +2174,29 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::RequestQueue;
+
+    #[test]
+    fn the_queue_compacts_its_consumed_prefix() {
+        let mut q = RequestQueue::default();
+        for i in 0..8 {
+            q.push_row(0, &[i as f32, 0.0], i, 0);
+        }
+        q.advance(3);
+        q.advance(3);
+        // 6 of 8 consumed: compaction must have dropped the prefix, keeping the tail.
+        assert!(q.players.len() <= 2, "consumed rows were retained");
+        assert_eq!(q.pending(), 2);
+        assert_eq!(
+            q.obs[q.head * q.dim],
+            6.0,
+            "pending rows survive compaction"
+        );
+        q.advance(2);
+        assert_eq!(q.pending(), 0);
+        assert!(q.players.is_empty(), "a drained queue resets its storage");
+    }
+
     use super::*;
     use crate::policies::tree::alphazero::{AlphaZero, AlphaZeroConfig};
     use crate::policies::tree::mcts::{NoiseScope, SequentialBackup};
