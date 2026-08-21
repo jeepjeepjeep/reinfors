@@ -5,6 +5,9 @@
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
 
 /// A game-state-to-RGB renderer. `dst` is packed HWC u8, `frame_shape` is (h, w, 3).
+// render() feeds the debug/PNG tooling (cfg(test) today); the encoder path uses the
+// direct-CHW downsample instead.
+#[allow(dead_code)]
 pub(crate) trait FrameRenderer<S> {
     fn frame_shape(&self) -> (usize, usize, usize);
     fn render(&self, state: &S, dst: &mut [u8]);
@@ -25,8 +28,27 @@ impl Raster {
         }
     }
 
+    pub fn clear(&mut self) {
+        self.pixmap.fill(tiny_skia::Color::TRANSPARENT);
+    }
+
     pub fn fill_poly(&mut self, pts: &[[f32; 2]], rgb: [u8; 3]) {
+        // Cull paths fully outside the frame before touching the path builder.
+        let (mut lo_x, mut lo_y, mut hi_x, mut hi_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for p in pts {
+            lo_x = lo_x.min(p[0]);
+            lo_y = lo_y.min(p[1]);
+            hi_x = hi_x.max(p[0]);
+            hi_y = hi_y.max(p[1]);
+        }
         let f = self.factor as f32;
+        let (w, h) = (
+            self.pixmap.width() as f32 / f,
+            self.pixmap.height() as f32 / f,
+        );
+        if hi_x < 0.0 || hi_y < 0.0 || lo_x > w || lo_y > h {
+            return;
+        }
         let mut pb = PathBuilder::new();
         pb.move_to(pts[0][0] * f, pts[0][1] * f);
         for p in &pts[1..] {
@@ -44,6 +66,30 @@ impl Raster {
             Transform::identity(),
             None,
         );
+    }
+
+    /// Box-filter straight into a flat channel-major f32 row (raw 0-255 values),
+    /// skipping the intermediate HWC buffer.
+    pub fn downsample_chw_f32(&self, out: &mut Vec<f32>, final_w: usize, final_h: usize) {
+        let f = self.factor as usize;
+        let src = self.pixmap.data();
+        let src_w = final_w * f;
+        let area = (f * f) as u32;
+        out.clear();
+        out.reserve(3 * final_h * final_w);
+        for c in 0..3 {
+            for y in 0..final_h {
+                for x in 0..final_w {
+                    let mut acc = 0u32;
+                    for sy in 0..f {
+                        for sx in 0..f {
+                            acc += u32::from(src[((y * f + sy) * src_w + x * f + sx) * 4 + c]);
+                        }
+                    }
+                    out.push((acc / area) as f32);
+                }
+            }
+        }
     }
 
     /// Box-filter down to the final resolution as packed RGB rows.
@@ -73,6 +119,7 @@ impl Raster {
 }
 
 /// HWC u8 frame to the engine's flat channel-major f32 row (raw 0-255 values).
+#[cfg(test)]
 pub(crate) fn hwc_to_chw_f32(hwc: &[u8], h: usize, w: usize, out: &mut Vec<f32>) {
     out.clear();
     out.reserve(3 * h * w);

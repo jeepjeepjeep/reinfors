@@ -9,7 +9,7 @@ use super::dynamics::{
 };
 use super::track::{Track, PLAYFIELD, SCALE};
 use super::{CarRacingState, LiveState};
-use crate::render::{draw_text, hwc_to_chw_f32, FrameRenderer, Raster};
+use crate::render::{draw_text, FrameRenderer, Raster};
 
 pub(crate) const FRAME: usize = 96;
 const SUPERSAMPLE: u32 = 4;
@@ -84,7 +84,7 @@ pub(crate) struct CarRacingRenderer;
 
 impl CarRacingRenderer {
     fn draw_world_poly(r: &mut Raster, cam: &Camera, pts: &[[f64; 2]], rgb: [u8; 3]) {
-        let mapped: Vec<[f32; 2]> = pts.iter().map(|&p| cam.world(p)).collect();
+        let mapped: smallvec::SmallVec<[[f32; 2]; 8]> = pts.iter().map(|&p| cam.world(p)).collect();
         r.fill_poly(&mapped, rgb);
     }
 
@@ -248,6 +248,21 @@ impl CarRacingRenderer {
     }
 }
 
+thread_local! {
+    // Rasterization scratch (590 KB at 4x supersampling); reused across encodes.
+    static RASTER: std::cell::RefCell<Raster> =
+        std::cell::RefCell::new(Raster::new(FRAME as u32, FRAME as u32, SUPERSAMPLE));
+}
+
+fn rasterize(live: &super::LiveState, r: &mut Raster) {
+    r.clear();
+    let cam = Camera::new(live);
+    CarRacingRenderer::draw_road(r, &cam, &live.track);
+    CarRacingRenderer::draw_car(r, &cam, &live.car);
+    CarRacingRenderer::draw_indicators(r, live);
+    CarRacingRenderer::draw_score(r, live);
+}
+
 impl FrameRenderer<CarRacingState> for CarRacingRenderer {
     fn frame_shape(&self) -> (usize, usize, usize) {
         (FRAME, FRAME, 3)
@@ -257,13 +272,10 @@ impl FrameRenderer<CarRacingState> for CarRacingRenderer {
         let CarRacingState::Live(live) = state else {
             unreachable!("render on a pending CarRacing state (kept out of observations)");
         };
-        let mut r = Raster::new(FRAME as u32, FRAME as u32, SUPERSAMPLE);
-        let cam = Camera::new(live);
-        Self::draw_road(&mut r, &cam, &live.track);
-        Self::draw_car(&mut r, &cam, &live.car);
-        Self::draw_indicators(&mut r, live);
-        Self::draw_score(&mut r, live);
-        r.downsample_into(dst, FRAME, FRAME);
+        RASTER.with_borrow_mut(|r| {
+            rasterize(live, r);
+            r.downsample_into(dst, FRAME, FRAME);
+        });
     }
 }
 
@@ -276,11 +288,14 @@ impl reinfors_core::StateEncoder for CarRacingPixels {
     type State = CarRacingState;
 
     fn encode(&self, state: &CarRacingState, _agent: usize) -> Vec<f32> {
-        let (h, w, c) = CarRacingRenderer.frame_shape();
-        let mut hwc = vec![0u8; h * w * c];
-        CarRacingRenderer.render(state, &mut hwc);
+        let CarRacingState::Live(live) = state else {
+            unreachable!("encode on a pending CarRacing state (kept out of observations)");
+        };
         let mut out = Vec::new();
-        hwc_to_chw_f32(&hwc, h, w, &mut out);
+        RASTER.with_borrow_mut(|r| {
+            rasterize(live, r);
+            r.downsample_chw_f32(&mut out, FRAME, FRAME);
+        });
         out
     }
 
