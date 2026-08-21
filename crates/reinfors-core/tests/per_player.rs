@@ -256,3 +256,42 @@ fn learn_players_validates_indices() {
 fn learn_players_rejects_empty() {
     let _ = engine().with_learn_players(&[]);
 }
+
+#[test]
+fn per_player_queues_fire_at_the_full_batch_size_each() {
+    // The design's per-player batching: one queue per player, batch_size applying to
+    // each queue independently. A two-player simultaneous round contributes one row to
+    // each queue; neither may fire below the threshold (drains excepted).
+    let mut e = Engine::new(
+        Simul,
+        Box::new(Enc),
+        Box::new(Zero),
+        EpsilonGreedyQ::new(1, 0.0),
+        Dqn::new(1, 1.0, 1, 0.99),
+        EngineParams {
+            n_games: 4,
+            seed: 3,
+            batch_size: Some(2),
+            n_threads: Some(1),
+            ..Default::default()
+        },
+    );
+    let sizes = std::sync::Mutex::new(vec![Vec::new(), Vec::new()]);
+    let (records, _) = e.collect_routed(24, InferMode::PerPlayer, |player, _obs, n| {
+        sizes.lock().unwrap()[player].push(n);
+        (0..n).flat_map(|_| [1.0, 0.0]).collect()
+    });
+    assert!(records.len() >= 24);
+    let sizes = sizes.lock().unwrap();
+    for (player, calls) in sizes.iter().enumerate() {
+        assert!(!calls.is_empty(), "player {player} must be served");
+        assert!(
+            calls.iter().all(|&n| n <= 2),
+            "player {player} exceeded its queue's batch_size: {calls:?}"
+        );
+        assert!(
+            calls.iter().filter(|&&n| n == 2).count() * 2 >= calls.len(),
+            "player {player} must mostly see full threshold batches: {calls:?}"
+        );
+    }
+}
