@@ -1478,13 +1478,22 @@ impl Policy for Mcts {
         )
     }
 
-    fn absorb<S: Send>(
+    fn absorb<G: Game + Sync>(
         &self,
-        search: &mut Self::Search<S>,
+        ctx: crate::policy::SearchCtx<'_, G>,
+        search: &mut Self::Search<G::State>,
         rows: crate::policy::RowsView<'_>,
-        _rng: &mut dyn Rng,
-    ) {
-        search.absorb(rows);
+    ) where
+        G::State: Send,
+    {
+        mcts_multi_absorb(
+            search,
+            ctx.game.action_count(),
+            self.cfg.gamma,
+            ctx.enc,
+            rows,
+            ctx.rng,
+        );
     }
 
     fn finish<G: Game + Sync>(
@@ -2961,16 +2970,32 @@ pub struct MctsStepper<S> {
     tree: Tree<S>,
     guidance: Guidance,
     waiting: Vec<(usize, usize)>,
-    pending_rows: Option<(Vec<f64>, usize)>,
 }
 
-impl<S> MctsStepper<S> {
-    pub(crate) fn absorb(&mut self, rows: crate::policy::RowsView<'_>) {
-        let flat: Vec<f64> = (0..rows.len())
-            .flat_map(|i| rows.row(i).iter().copied())
-            .collect();
-        self.pending_rows = Some((flat, rows.stride()));
+/// Integrate the round's routed rows straight from the borrowed view — one
+/// `consume_row` per waiting `(node, slot)`, no re-buffering.
+pub(crate) fn mcts_stepper_absorb<S: Clone>(
+    st: &mut MctsStepper<S>,
+    a: usize,
+    gamma: f64,
+    view: &dyn ActionView,
+    rows: crate::policy::RowsView<'_>,
+    rng: &mut dyn Rng,
+) {
+    for (i, &(node, slot)) in st.waiting.iter().enumerate() {
+        consume_row(
+            &mut st.tree,
+            node,
+            slot,
+            rows.row(i),
+            &st.guidance,
+            gamma,
+            a,
+            view,
+            rng,
+        );
     }
+    st.waiting.clear();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3007,7 +3032,6 @@ where
         tree,
         guidance,
         waiting: Vec::new(),
-        pending_rows: None,
     }
 }
 
@@ -3027,24 +3051,10 @@ pub(crate) fn mcts_stepper_round<G: Game>(
 where
     G::State: Clone,
 {
-    let a = game.action_count();
-    if let Some((rows, stride)) = st.pending_rows.take() {
-        for (i, &(node, slot)) in st.waiting.iter().enumerate() {
-            consume_row(
-                &mut st.tree,
-                node,
-                slot,
-                &rows[i * stride..(i + 1) * stride],
-                &st.guidance,
-                gamma,
-                a,
-                enc,
-                rng,
-            );
-        }
-        st.waiting.clear();
-    }
-    debug_assert!(st.tree.pending.is_none(), "round with work outstanding");
+    debug_assert!(
+        st.tree.pending.is_none() && st.waiting.is_empty(),
+        "round with work outstanding"
+    );
     let tree = &mut st.tree;
     while tree.sims < num_simulations {
         tree.sims += 1;
@@ -3146,14 +3156,22 @@ impl<S> MctsMulti<S> {
             counts: Vec::new(),
         }
     }
+}
 
-    pub(crate) fn absorb(&mut self, rows: crate::policy::RowsView<'_>) {
-        let mut offset = 0;
-        for (st, &count) in self.steppers.iter_mut().zip(&self.counts) {
-            if count > 0 {
-                st.absorb(rows.slice(offset, count));
-                offset += count;
-            }
+/// Route the shared view's spans to each stepper and integrate them in place.
+pub(crate) fn mcts_multi_absorb<S: Clone>(
+    ms: &mut MctsMulti<S>,
+    a: usize,
+    gamma: f64,
+    view: &dyn ActionView,
+    rows: crate::policy::RowsView<'_>,
+    rng: &mut dyn Rng,
+) {
+    let mut offset = 0;
+    for (st, &count) in ms.steppers.iter_mut().zip(&ms.counts) {
+        if count > 0 {
+            mcts_stepper_absorb(st, a, gamma, view, rows.slice(offset, count), rng);
+            offset += count;
         }
     }
 }
@@ -3254,6 +3272,10 @@ where
                 &mut root,
             );
             let count = sink.len() - before;
+            debug_assert!(
+                (count > 0) == (status == crate::policy::RoundStatus::Pending),
+                "round contract: Pending emits at least one request, Done emits none"
+            );
             if count > 0 {
                 spans.push((i, before, count));
             } else if status == crate::policy::RoundStatus::Done {
@@ -3268,10 +3290,17 @@ where
         let rows = eval.forward(&players, obs, n);
         let stride = rows.len() / n;
         for &(i, start, count) in &spans {
-            steppers[i].absorb(crate::policy::RowsView::from_slice(
-                &rows[start * stride..(start + count) * stride],
-                stride,
-            ));
+            mcts_stepper_absorb(
+                &mut steppers[i],
+                a,
+                gamma,
+                enc,
+                crate::policy::RowsView::from_slice(
+                    &rows[start * stride..(start + count) * stride],
+                    stride,
+                ),
+                &mut root,
+            );
         }
     }
     steppers

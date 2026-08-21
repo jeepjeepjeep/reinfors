@@ -85,7 +85,7 @@ impl Policy for EpsilonGreedyQ {
         thompson_head_from_u64(v, self.n_heads)
     }
 
-    type Search<S: Send> = super::OneShot<S>;
+    type Search<S: Send> = super::OneShot<S, QEvaluation>;
 
     fn begin_search<G: Game + Sync>(
         &self,
@@ -111,48 +111,52 @@ impl Policy for EpsilonGreedyQ {
         super::one_shot_round(search, out)
     }
 
-    fn absorb<S: Send>(
+    fn absorb<G: Game + Sync>(
         &self,
-        search: &mut Self::Search<S>,
+        ctx: crate::policy::SearchCtx<'_, G>,
+        search: &mut Self::Search<G::State>,
         rows: crate::policy::RowsView<'_>,
-        _rng: &mut dyn Rng,
-    ) {
-        super::one_shot_absorb(search, rows);
+    ) where
+        G::State: Send,
+    {
+        let a = ctx.game.action_count();
+        let k = rows.stride() / a;
+        let legal_all = std::mem::take(&mut search.legal);
+        search.results = search
+            .agents
+            .iter()
+            .zip(legal_all)
+            .enumerate()
+            .map(|(i, (&agent, legal))| {
+                let (perm, identity) = ctx.perms.get(agent);
+                let row = rows.row(i);
+                let values = (0..k)
+                    .map(|h| {
+                        let head = &row[h * a..(h + 1) * a];
+                        if identity {
+                            head.to_vec()
+                        } else {
+                            perm.iter().map(|&p| head[p]).collect()
+                        }
+                    })
+                    .collect();
+                QEvaluation { values, legal }
+            })
+            .collect();
     }
 
     fn finish<G: Game + Sync>(
         &self,
-        ctx: crate::policy::SearchCtx<'_, G>,
+        _ctx: crate::policy::SearchCtx<'_, G>,
         search: Self::Search<G::State>,
     ) -> Vec<(QEvaluation, Vec<crate::learner::InteriorTarget>)>
     where
         G::State: Send,
     {
-        let a = ctx.game.action_count();
-        let k = if search.agents.is_empty() {
-            0
-        } else {
-            search.stride / a
-        };
         search
-            .agents
-            .iter()
-            .zip(search.legal)
-            .enumerate()
-            .map(|(i, (&agent, legal))| {
-                let (perm, identity) = ctx.perms.get(agent);
-                let values = (0..k)
-                    .map(|h| {
-                        let start = i * search.stride + h * a;
-                        if identity {
-                            search.rows[start..start + a].to_vec()
-                        } else {
-                            perm.iter().map(|&p| search.rows[start + p]).collect()
-                        }
-                    })
-                    .collect();
-                (QEvaluation { values, legal }, Vec::new())
-            })
+            .results
+            .into_iter()
+            .map(|e| (e, Vec::new()))
             .collect()
     }
 

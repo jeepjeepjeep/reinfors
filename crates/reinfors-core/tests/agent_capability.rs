@@ -172,12 +172,14 @@ impl Policy for CappedStub {
     {
         unimplemented!()
     }
-    fn absorb<S: Send>(
+    fn absorb<G: Game + Sync>(
         &self,
-        _search: &mut Self::Search<S>,
+        _ctx: reinfors_core::policy::SearchCtx<'_, G>,
+        _search: &mut Self::Search<G::State>,
         _rows: reinfors_core::policy::RowsView<'_>,
-        _rng: &mut dyn Rng,
-    ) {
+    ) where
+        G::State: Send,
+    {
         unimplemented!()
     }
     fn finish<G: Game + Sync>(

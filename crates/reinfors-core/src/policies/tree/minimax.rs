@@ -120,13 +120,15 @@ impl Policy for Minimax {
         )
     }
 
-    fn absorb<S: Send>(
+    fn absorb<G: Game + Sync>(
         &self,
-        search: &mut Self::Search<S>,
+        ctx: crate::policy::SearchCtx<'_, G>,
+        search: &mut Self::Search<G::State>,
         rows: crate::policy::RowsView<'_>,
-        _rng: &mut dyn Rng,
-    ) {
-        search.absorb(rows);
+    ) where
+        G::State: Send,
+    {
+        super::expectimax::search::multi_absorb(search, ctx.game, ctx.enc, &self.cfg, rows);
     }
 
     fn finish<G: Game + Sync>(

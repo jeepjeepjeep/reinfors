@@ -176,13 +176,22 @@ impl Policy for AlphaZero {
         )
     }
 
-    fn absorb<S: Send>(
+    fn absorb<G: Game + Sync>(
         &self,
-        search: &mut Self::Search<S>,
+        ctx: crate::policy::SearchCtx<'_, G>,
+        search: &mut Self::Search<G::State>,
         rows: crate::policy::RowsView<'_>,
-        _rng: &mut dyn Rng,
-    ) {
-        search.absorb(rows);
+    ) where
+        G::State: Send,
+    {
+        crate::policies::tree::mcts::mcts_multi_absorb(
+            search,
+            ctx.game.action_count(),
+            self.cfg.gamma,
+            ctx.enc,
+            rows,
+            ctx.rng,
+        );
     }
 
     fn finish<G: Game + Sync>(
