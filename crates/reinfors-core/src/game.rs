@@ -144,13 +144,20 @@ pub trait Game {
         false
     }
 
-    /// Whether every chance node reachable from a *realized* state is enumerable. Initial
-    /// realization is exempt: the engine always samples birth chance, so a game whose only
-    /// `SampleOnlyUniform` node is its root (e.g. a generation seed) declares `true`.
-    /// Declare `false` when sample-only chance can occur during play; enumeration-requiring
-    /// consumers (exact CFR, best response, `ChanceMode::ExpandAll`) gate on this claim.
+    /// Whether every chance node in the game — including the raw root — is enumerable.
+    /// Exact solvers (CFR variants that enumerate, exact evaluation) traverse from
+    /// `initial_state()` and gate on this claim; declare `false` whenever any node is
+    /// `SampleOnlyUniform`.
     fn chance_enumerable(&self) -> bool {
         true
+    }
+
+    /// Whether chance reachable from a *realized* state is enumerable. Engine search and
+    /// `choose` gate on this scope: birth chance is exempt because the engine samples it,
+    /// so a game whose only sample-only node is its root overrides this to `true` while
+    /// keeping `chance_enumerable` `false`.
+    fn searchable_chance_enumerable(&self) -> bool {
+        self.chance_enumerable()
     }
 
     /// Canonical perfect-recall information-set key for `agent` at a realized state.

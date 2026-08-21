@@ -2761,7 +2761,7 @@ fn check_chance_composition<G: Game>(game: &G, policy: &PolicySpec) -> PyResult<
         | PolicySpec::AlphaZero { chance, .. } => *chance,
         PolicySpec::EpsilonGreedyQ { .. } | PolicySpec::Ppo => return Ok(()),
     };
-    if matches!(mode, ChanceMode::ExpandAll) && !game.chance_enumerable() {
+    if matches!(mode, ChanceMode::ExpandAll) && !game.searchable_chance_enumerable() {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "this game's chance is sample-only and cannot be enumerated; ExpandAll is \
              unavailable — use a sampling chance mode (AlwaysResample or Committed)",
