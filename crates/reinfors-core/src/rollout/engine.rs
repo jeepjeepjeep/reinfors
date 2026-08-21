@@ -420,7 +420,15 @@ where
                         }
                         if !rows.is_empty() {
                             let view = crate::policy::RowsView::from_slice(rows, *stride);
-                            policy.absorb(search, view, &mut ep.rng);
+                            let ctx = crate::policy::SearchCtx {
+                                game,
+                                enc: encoder,
+                                reward,
+                                rng: &mut ep.rng,
+                                perms,
+                                collect_interior,
+                            };
+                            policy.absorb(ctx, search, view);
                             rows.clear();
                         }
                         let ctx = crate::policy::SearchCtx {
