@@ -4054,6 +4054,7 @@ where
             })?);
         }
         let game = impls[0].inner.game();
+        check_chance_composition(game, spec)?;
         let enc = impls[0].inner.encoder();
         let reward = impls[0].reward.as_deref().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(
@@ -4839,7 +4840,7 @@ trait ErasedCfr: Send + Sync {
     fn nash_conv(&self) -> Result<f64, reinfors_core::EnumerationCapExceeded>;
     fn best_response_values(&self) -> Result<Vec<f64>, reinfors_core::EnumerationCapExceeded>;
     fn num_players(&self) -> usize;
-    fn expected_value(&self, player: usize) -> f64;
+    fn expected_value(&self, player: usize) -> Result<f64, reinfors_core::EnumerationCapExceeded>;
     fn average_strategy(&self, key: &[u8]) -> Option<(Vec<usize>, Vec<f64>)>;
     fn save(&self) -> Vec<u8>;
     fn load(&mut self, bytes: &[u8]) -> Result<(), String>;
@@ -4867,7 +4868,7 @@ impl<G: Game + Send + Sync> ErasedCfr for reinfors_core::CfrSolver<G> {
     fn num_players(&self) -> usize {
         reinfors_core::CfrSolver::num_players(self)
     }
-    fn expected_value(&self, player: usize) -> f64 {
+    fn expected_value(&self, player: usize) -> Result<f64, reinfors_core::EnumerationCapExceeded> {
         reinfors_core::CfrSolver::expected_value(self, player)
     }
     fn average_strategy(&self, key: &[u8]) -> Option<(Vec<usize>, Vec<f64>)> {
@@ -5005,7 +5006,8 @@ impl PyCfr {
                 self.inner.num_players()
             )));
         }
-        Ok(py.allow_threads(|| self.inner.expected_value(player)))
+        py.allow_threads(|| self.inner.expected_value(player))
+            .map_err(cap_err)
     }
 
     fn average_strategy(&self, key: &[u8]) -> Option<(Vec<usize>, Vec<f64>)> {

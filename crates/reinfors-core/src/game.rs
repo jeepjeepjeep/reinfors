@@ -144,8 +144,11 @@ pub trait Game {
         false
     }
 
-    /// Whether every chance node this game emits is enumerable. Declare `false` when any
-    /// node is `SampleOnlyUniform`; enumeration-requiring consumers gate on this claim.
+    /// Whether every chance node reachable from a *realized* state is enumerable. Initial
+    /// realization is exempt: the engine always samples birth chance, so a game whose only
+    /// `SampleOnlyUniform` node is its root (e.g. a generation seed) declares `true`.
+    /// Declare `false` when sample-only chance can occur during play; enumeration-requiring
+    /// consumers (exact CFR, best response, `ChanceMode::ExpandAll`) gate on this claim.
     fn chance_enumerable(&self) -> bool {
         true
     }
