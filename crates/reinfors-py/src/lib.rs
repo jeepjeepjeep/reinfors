@@ -823,6 +823,13 @@ impl PyEngine {
                 "n_threads must be <= 512 (got {n_threads})",
             )));
         }
+        // Workers beyond the pool size can never run: canonicalize so behaviorally
+        // identical engines share a fingerprint (0 = automatic stays 0).
+        let n_threads = if n_threads == 0 {
+            0
+        } else {
+            n_threads.min(n_games)
+        };
         if batch_size > 1 << 20 {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "batch_size must be <= {} (got {batch_size})",
