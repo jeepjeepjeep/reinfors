@@ -32,6 +32,13 @@ impl Raster {
         self.pixmap.fill(tiny_skia::Color::TRANSPARENT);
     }
 
+    /// Flood the whole frame with an opaque color: identical bytes to path-filling a
+    /// covering polygon (full coverage, opaque src-over), without the path machinery.
+    pub fn fill_solid(&mut self, rgb: [u8; 3]) {
+        self.pixmap
+            .fill(tiny_skia::Color::from_rgba8(rgb[0], rgb[1], rgb[2], 255));
+    }
+
     pub fn fill_poly(&mut self, pts: &[[f32; 2]], rgb: [u8; 3]) {
         // Cull paths fully outside the frame before touching the path builder.
         let (mut lo_x, mut lo_y, mut hi_x, mut hi_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
@@ -75,19 +82,32 @@ impl Raster {
         let src = self.pixmap.data();
         let src_w = final_w * f;
         let area = (f * f) as u32;
+        let plane = final_h * final_w;
         out.clear();
-        out.reserve(3 * final_h * final_w);
-        for c in 0..3 {
-            for y in 0..final_h {
-                for x in 0..final_w {
-                    let mut acc = 0u32;
-                    for sy in 0..f {
-                        for sx in 0..f {
-                            acc += u32::from(src[((y * f + sy) * src_w + x * f + sx) * 4 + c]);
-                        }
+        out.resize(3 * plane, 0.0);
+        let (rp, rest) = out.split_at_mut(plane);
+        let (gp, bp) = rest.split_at_mut(plane);
+        // One linear pass over the source with word loads; per-block sums are
+        // reordered relative to the naive form but integer-exact. Pixels are RGBA
+        // little-endian, so R sits in the low byte of each u32.
+        let mut acc = vec![[0u32; 3]; final_w];
+        for y in 0..final_h {
+            acc.iter_mut().for_each(|a| *a = [0; 3]);
+            for sy in 0..f {
+                let row = &src[(y * f + sy) * src_w * 4..][..src_w * 4];
+                for (a, block) in acc.iter_mut().zip(row.chunks_exact(f * 4)) {
+                    for px in block.as_chunks::<4>().0 {
+                        let v = u32::from_le_bytes(*px);
+                        a[0] += v & 0xFF;
+                        a[1] += (v >> 8) & 0xFF;
+                        a[2] += (v >> 16) & 0xFF;
                     }
-                    out.push((acc / area) as f32);
                 }
+            }
+            for (x, a) in acc.iter().enumerate() {
+                rp[y * final_w + x] = (a[0] / area) as f32;
+                gp[y * final_w + x] = (a[1] / area) as f32;
+                bp[y * final_w + x] = (a[2] / area) as f32;
             }
         }
     }

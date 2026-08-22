@@ -26,7 +26,7 @@ const WHEEL_WHITE: [u8; 3] = [77, 77, 77];
 
 struct Camera {
     zoom: f64,
-    angle: f64,
+    rot: [f64; 2],
     trans: [f64; 2],
 }
 
@@ -42,7 +42,7 @@ impl Camera {
         let (sx, sy) = (-px * zoom, -py * zoom);
         Camera {
             zoom,
-            angle,
+            rot: [ca, sa],
             trans: [
                 ca * sx - sa * sy + WINDOW_W / 2.0,
                 sa * sx + ca * sy + WINDOW_H / 4.0,
@@ -50,9 +50,32 @@ impl Camera {
         }
     }
 
+    /// World-space AABB of the visible frame (inverse-mapped corners, small margin),
+    /// for culling and clipping static geometry before any per-point transform. The
+    /// margin keeps clip edges strictly offscreen so visible pixels are unaffected.
+    fn view_aabb(&self) -> [[f64; 2]; 2] {
+        let [ca, sa] = self.rot;
+        let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+        for corner in [
+            [0.0, 0.0],
+            [WINDOW_W, 0.0],
+            [0.0, WINDOW_H],
+            [WINDOW_W, WINDOW_H],
+        ] {
+            let dx = corner[0] - self.trans[0];
+            let dy = corner[1] - self.trans[1];
+            let x = (ca * dx + sa * dy) / self.zoom;
+            let y = (-sa * dx + ca * dy) / self.zoom;
+            lo = [lo[0].min(x), lo[1].min(y)];
+            hi = [hi[0].max(x), hi[1].max(y)];
+        }
+        let m = 8.0 / self.zoom;
+        [[lo[0] - m, lo[1] - m], [hi[0] + m, hi[1] + m]]
+    }
+
     /// World point to final-frame coordinates (flipped, like pygame's world pass).
     fn world(&self, [x, y]: [f64; 2]) -> [f32; 2] {
-        let (ca, sa) = (libm::cos(self.angle), libm::sin(self.angle));
+        let [ca, sa] = self.rot;
         let wx = (ca * x - sa * y) * self.zoom + self.trans[0];
         let wy = (sa * x + ca * y) * self.zoom + self.trans[1];
         [
@@ -89,26 +112,46 @@ impl CarRacingRenderer {
     }
 
     fn draw_road(r: &mut Raster, cam: &Camera, track: &Track) {
-        let b = PLAYFIELD;
-        Self::draw_world_poly(r, cam, &[[b, b], [b, -b], [-b, -b], [-b, b]], BG_COLOR);
+        let [vlo, vhi] = cam.view_aabb();
+        let visible = |quad: &[[f64; 2]]| {
+            let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+            for p in quad {
+                lo = [lo[0].min(p[0]), lo[1].min(p[1])];
+                hi = [hi[0].max(p[0]), hi[1].max(p[1])];
+            }
+            hi[0] >= vlo[0] && hi[1] >= vlo[1] && lo[0] <= vhi[0] && lo[1] <= vhi[1]
+        };
         let g = PLAYFIELD / 20.0;
         for x in (-20i32..20).step_by(2) {
             for y in (-20i32..20).step_by(2) {
                 let (fx, fy) = (f64::from(x) * g, f64::from(y) * g);
+                if fx + g < vlo[0] || fy + g < vlo[1] || fx > vhi[0] || fy > vhi[1] {
+                    continue;
+                }
+                // Clip to the view in world space: an unclipped square's screen bbox
+                // can span the whole pixmap, and fill cost scales with bbox.
+                let (x0, x1) = (fx.max(vlo[0]), (fx + g).min(vhi[0]));
+                let (y0, y1) = (fy.max(vlo[1]), (fy + g).min(vhi[1]));
                 Self::draw_world_poly(
                     r,
                     cam,
-                    &[[fx + g, fy], [fx, fy], [fx, fy + g], [fx + g, fy + g]],
+                    &[[x1, y0], [x0, y0], [x0, y1], [x1, y1]],
                     GRASS_COLOR,
                 );
             }
         }
         for (i, tile) in track.tiles.iter().enumerate() {
+            if !visible(&tile.quad) {
+                continue;
+            }
             let shade = (0.01 * (i % 3) as f64 * 255.0) as u8;
             let rgb = ROAD_COLOR.map(|c| c.saturating_add(shade));
             Self::draw_world_poly(r, cam, &tile.quad, rgb);
         }
         for border in &track.borders {
+            if !visible(&border.quad) {
+                continue;
+            }
             let rgb = if border.white {
                 [255, 255, 255]
             } else {
@@ -174,7 +217,7 @@ impl CarRacingRenderer {
             &HULL_POLY3[..],
             &HULL_POLY4[..],
         ] {
-            let pts: Vec<[f64; 2]> = poly
+            let pts: smallvec::SmallVec<[[f64; 2]; 8]> = poly
                 .iter()
                 .map(|&[lx, ly]| {
                     let (sx, sy) = (lx * SIZE, ly * SIZE);
@@ -255,8 +298,22 @@ thread_local! {
 }
 
 fn rasterize(live: &super::LiveState, r: &mut Raster) {
-    r.clear();
     let cam = Camera::new(live);
+    let [vlo, vhi] = cam.view_aabb();
+    let b = PLAYFIELD;
+    if vlo[0] >= -b && vlo[1] >= -b && vhi[0] <= b && vhi[1] <= b {
+        // View fully inside the playfield: the background quad covers every pixel,
+        // so one solid flood replaces clear + path-filled quad byte-identically.
+        r.fill_solid(BG_COLOR);
+    } else {
+        r.clear();
+        CarRacingRenderer::draw_world_poly(
+            r,
+            &cam,
+            &[[b, b], [b, -b], [-b, -b], [-b, b]],
+            BG_COLOR,
+        );
+    }
     CarRacingRenderer::draw_road(r, &cam, &live.track);
     CarRacingRenderer::draw_car(r, &cam, &live.car);
     CarRacingRenderer::draw_indicators(r, live);
@@ -315,6 +372,7 @@ impl reinfors_core::StateEncoder for CarRacingPixels {
 
 #[cfg(test)]
 mod tests {
+
     use super::super::{CarRacing, CarRacingState};
     use super::*;
     use reinfors_core::{Game, StateEncoder};
