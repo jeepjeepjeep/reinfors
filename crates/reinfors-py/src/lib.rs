@@ -3472,14 +3472,6 @@ fn build_engine(
             },
             RewardBox::CarRacing(reward),
         ) => {
-            // Searches are excluded by catalogue policy (state clone + render cost),
-            // separately from the mechanical SampleOnlyUniform enumeration block.
-            if !matches!(policy, PolicySpec::EpsilonGreedyQ { .. } | PolicySpec::Ppo) {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "car_racing supports dqn and ppo only; see {}",
-                    reinfors_core::COMPATIBILITY_DOCS
-                )));
-            }
             let game = CarRacing {
                 lap_complete_percent,
                 max_ticks,

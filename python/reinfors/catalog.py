@@ -122,7 +122,7 @@ GAMES: dict[str, GameInfo] = {
         (("tile", 1000.0), ("step", -0.1), ("off_playfield", -100.0)),
         "None (withheld until the HWC adapter presentation lands)",
         False,
-        ("dqn", "ppo"),
+        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero", "ppo"),
         "Faithful reimplementation of Gymnasium's CarRacing-v3 (discrete); physics"
         " trajectories and checkpoints do not transfer to or from Gymnasium.",
     ),

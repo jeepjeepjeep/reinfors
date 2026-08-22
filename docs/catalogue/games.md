@@ -55,6 +55,7 @@ CarRacing ports Gymnasium's `CarRacing-v3` (discrete). Faithful means the action
 - Tile progress counts per-wheel contact-entry events, matching Gym's behavior including its sticky reset-contact lap quirk.
 - Observations are channel-major `(3, 96, 96)` raw 0-255 floats per the framework contract; Gymnasium renders the same content as HWC uint8, so pipelines moving between the two must permute and cast.
 - Snapshot bytes carry only validated dynamic values (poses, velocities, controls, joint warm-start impulses, progress); the physics world is reconstructed canonically at restore, which is what keeps hostile snapshot bytes safe. Restore is exact over those serialized values and always resumes the same trajectory, but that trajectory departs from a never-snapshotted run at float rounding order (solver bookkeeping is rebuilt, not restored), so restored collection is deterministic rather than record-identical to an uninterrupted run.
+- Search-based algorithms (TreeStrap, AlphaZero) are mechanically supported: after the track is realized the game is a deterministic single-agent planning problem. Under the pixels encoder every search node renders a full frame, so search-based training is far more economical with `rf.encoders.CarRacingVec()`.
 - The standard-API adapters withhold `car_racing` until frames can be presented in Gym's native HWC uint8 layout; use `rf.Env` directly.
 
 
