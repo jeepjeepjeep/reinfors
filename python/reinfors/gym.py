@@ -99,6 +99,21 @@ def _missing(pkg: str) -> ImportError:
     return ImportError(f"reinfors.gym needs `{pkg}`; install the adapter backends with `pip install reinfors[gym]`")
 
 
+# car_racing is withheld until the HWC-u8 frame presentation lands: Gymnasium's CarRacing
+# contract is uint8 HWC frames, and silently handing CHW floats to gym-ecosystem pipelines
+# would break them without an error. Track: FrameProvider follow-up.
+_WITHHELD_FROM_ADAPTERS = frozenset({"car_racing"})
+
+
+def _check_adapter_supported(game: Any) -> None:
+    name = game.name
+    if name in _WITHHELD_FROM_ADAPTERS:
+        raise ValueError(
+            f"{name} is not available through the standard-API adapters yet; "
+            "use rf.Env directly (see the catalogue entry for why)"
+        )
+
+
 def _gym_cls() -> Any:
     global _GYM_CLS
     if _GYM_CLS is not None:
@@ -122,6 +137,7 @@ def _gym_cls() -> Any:
             seed: int | None = None,
             render_mode: str | None = None,
         ) -> None:
+            _check_adapter_supported(game)
             self._game = game
             self._reward = _default_reward(reward)
             self._env = _reinfors.Env(game, self._reward, seed=seed or 0)
@@ -183,6 +199,7 @@ def _parallel_cls() -> Any:
             seed: int | None = None,
             render_mode: str | None = None,
         ) -> None:
+            _check_adapter_supported(game)
             self._game = game
             self._reward = _default_reward(reward)
             self._env = _reinfors.Env(game, self._reward, seed=seed or 0)
@@ -282,6 +299,7 @@ def _aec_cls() -> Any:
             render_mode: str | None = None,
         ) -> None:
             super().__init__()
+            _check_adapter_supported(game)
             self._game = game
             self._reward = _default_reward(reward)
             self._env = _reinfors.Env(game, self._reward, seed=seed or 0)

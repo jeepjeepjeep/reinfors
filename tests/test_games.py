@@ -152,6 +152,7 @@ def test_start_buffer_is_off_by_default_snake_only_and_tags_seeded() -> None:
 def test_registries_list_the_built_in_names() -> None:
     assert rf.registered_games() == [
         "backgammon",
+        "car_racing",
         "chess",
         "connect4",
         "gridworld",

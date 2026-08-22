@@ -26,6 +26,8 @@ TexasHoldem = _reinfors.EncoderHandle.TexasHoldem
 KuhnPoker = _reinfors.EncoderHandle.KuhnPoker
 LeducPoker = _reinfors.EncoderHandle.LeducPoker
 GridWorld = _reinfors.EncoderHandle.GridWorld
+CarRacingPixels = _reinfors.EncoderHandle.CarRacingPixels
+CarRacingVec = _reinfors.EncoderHandle.CarRacingVec
 
 _REGISTRY: dict[str, Callable[..., Any]] = {
     "snake": Snake,
@@ -39,6 +41,8 @@ _REGISTRY: dict[str, Callable[..., Any]] = {
     "kuhn_poker": KuhnPoker,
     "leduc_poker": LeducPoker,
     "gridworld": GridWorld,
+    "car_racing_pixels": CarRacingPixels,
+    "car_racing_vec": CarRacingVec,
 }
 assert _REGISTRY.keys() == ENCODERS, "encoder registry and documentation catalogue diverged"
 

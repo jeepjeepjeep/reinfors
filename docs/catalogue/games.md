@@ -10,6 +10,7 @@ Game rules, rewards and encoders are separate components. The table describes th
 | Chess | 2 | Sequential | No | Perfect | AlphaZero 8x8x73 | Selectable fixed CHW encoder | `win`=1, `loss`=-1, `draw`=0 | PettingZoo AEC |
 | Connect 4 | 2 | Sequential | No | Perfect | 7 columns | Fixed CHW tensor | `win`=1, `loss`=-1, `draw`=0 | PettingZoo AEC |
 | GridWorld | 1 | Sequential | No | Perfect | 4 directions | Fixed CHW tensor | `step`=0, `goal`=1 | Gymnasium |
+| CarRacing | 1 | Sequential | Track-generation seed (root only) | Perfect | 5 discrete controls | Rendered CHW pixels (3, 96, 96) | `tile`=1000, `step`=-0.1, `off_playfield`=-100 | None (withheld until the HWC adapter presentation lands) |
 | Kuhn poker | 2-10 | Sequential | Card deal | Imperfect | Pass / bet | Fixed information-state tensor | `scale`=1 | PettingZoo AEC |
 | Leduc poker | 2 | Sequential | Card deal | Imperfect | Fold / call / raise | Fixed information-state tensor | `scale`=1 | PettingZoo AEC |
 | Snake | 2-8 | Simultaneous | Placement and respawn | Perfect | 3 relative moves | Egocentric fixed CHW tensor | `step`=0, `food`=0, `loss`=-1, `draw`=0, `kill`=0, `win`=1, `survival`=0 | PettingZoo Parallel |
@@ -41,7 +42,20 @@ obs_shape = game.observation_space().shape  # (19, 8, 8)
 | KuhnPoker | Kuhn poker | (3 * players, 1, 1); (6, 1, 1) by default | `rf.encoders.KuhnPoker()` | Private card and public betting-history information state. |
 | LeducPoker | Leduc poker | (21, 1, 1) | `rf.encoders.LeducPoker()` | Private/public cards and two-round betting information state. |
 | GridWorld | GridWorld | (2, size, size); (2, 5, 5) by default | `rf.encoders.GridWorld()` | Agent-position and goal planes. |
+| CarRacingPixels | CarRacing | (3, 96, 96) | `rf.encoders.CarRacingPixels()` | Rendered top-down frame, raw 0-255 values, channel-major (gym renders HWC). |
+| CarRacingVec | CarRacing | (1, 1, 21) | `rf.encoders.CarRacingVec()` | Diagnostic pose/velocity/wheel/progress vector; renderer-free training and physics-vs-visual failure isolation. |
 
 Before moving action ids between a network and `Env`, read the [action-frame contract](../reference/glossary.md#action-frames).
+
+## CarRacing notes
+
+CarRacing ports Gymnasium's `CarRacing-v3` (discrete). Faithful means the action contract, observation content, track-generation algorithm, reward and episode rules, and qualitative driving behavior; trajectories, checkpoints, and scores from the Gymnasium build do not transfer (different physics engine and float paths).
+
+- The rendered HUD score is the canonical Gym score (fixed `tile`/`step` constants, off-playfield never shown) regardless of the `rf.Reward` weights you train with.
+- Tile progress counts per-wheel contact-entry events, matching Gym's behavior including its sticky reset-contact lap quirk.
+- Observations are channel-major `(3, 96, 96)` raw 0-255 floats per the framework contract; Gymnasium renders the same content as HWC uint8, so pipelines moving between the two must permute and cast.
+- Snapshots restore the exact saved state and always resume the same trajectory, but that trajectory departs from a never-snapshotted run at float rounding order (the physics solver's contact machinery is rebuilt rather than deserialized, which is what keeps hostile snapshot bytes safe).
+- The standard-API adapters withhold `car_racing` until frames can be presented in Gym's native HWC uint8 layout; use `rf.Env` directly.
+
 
 See [built-in compatibility](compatibility.md) for supported workflows and the [Python API](../reference/python-api.md) for constructor parameters.
