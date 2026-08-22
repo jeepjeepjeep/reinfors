@@ -56,6 +56,9 @@ jobs:
       - name: Test  # both pure-Rust crates; the binding crate is exercised from Python, not cargo test
         run: cargo test -p reinfors-core -p reinfors-games
 
+      - name: Feature boundary  # games build without the default-on car-racing feature
+        run: cargo build -p reinfors-games --no-default-features
+
   python:
     runs-on: ubuntu-latest
     steps:

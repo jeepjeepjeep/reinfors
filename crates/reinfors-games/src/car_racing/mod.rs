@@ -707,7 +707,9 @@ mod tests {
         let plan_b: Vec<usize> = (0..40).map(|i| [3, 2, 0, 1][i % 4]).collect();
         let (mid, _) = drive(&live(5), &plan_a);
 
-        // State-exact: every serialized dynamic value round-trips bit-identically.
+        // State-exact over the DTO's semantic fields: the pre- and post-restore
+        // encodings compare bit-for-bit (poses, velocities, controls, warm-start
+        // impulses, progress — everything the snapshot advertises to carry).
         let bytes = codec.encode(&mid);
         let restored = codec.decode(&bytes).unwrap();
         codec.validate_decoded_state(&restored, false).unwrap();
