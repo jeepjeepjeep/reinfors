@@ -42,25 +42,19 @@ pub struct WheelCtl {
     pub on_road: bool,
 }
 
-/// The contact machinery and solver params never cross the serde boundary: parry's
-/// deserialized BVH indexes unchecked (hostile bytes segfault), none of it matters
-/// without collisions, and params are task constants. Fresh defaults rebuild them.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+// Never derives serde: no rapier structure crosses the byte boundary (deserialized
+// physics objects range from unsound BVH indexing to attacker-set solver work). The
+// codec stores a compact DTO of dynamic values and reconstructs the world canonically.
+#[derive(Clone)]
 pub struct CarWorld {
     pub bodies: RigidBodySet,
     pub colliders: ColliderSet,
     pub impulse_joints: ImpulseJointSet,
-    #[serde(skip, default)]
     pub multibody_joints: MultibodyJointSet,
-    #[serde(skip, default)]
     pub islands: IslandManager,
-    #[serde(skip, default = "BroadPhaseBvh::new")]
     pub broad_phase: BroadPhaseBvh,
-    #[serde(skip, default)]
     pub narrow_phase: NarrowPhase,
-    #[serde(skip, default)]
     pub ccd: CCDSolver,
-    #[serde(skip, default = "canonical_params")]
     pub params: IntegrationParameters,
     pub hull: RigidBodyHandle,
     pub wheels: [RigidBodyHandle; 4],

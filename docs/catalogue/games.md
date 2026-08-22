@@ -54,7 +54,7 @@ CarRacing ports Gymnasium's `CarRacing-v3` (discrete). Faithful means the action
 - The rendered HUD score is the canonical Gym score (fixed `tile`/`step` constants, off-playfield never shown) regardless of the `rf.Reward` weights you train with.
 - Tile progress counts per-wheel contact-entry events, matching Gym's behavior including its sticky reset-contact lap quirk.
 - Observations are channel-major `(3, 96, 96)` raw 0-255 floats per the framework contract; Gymnasium renders the same content as HWC uint8, so pipelines moving between the two must permute and cast.
-- Snapshots restore the exact saved state and always resume the same trajectory, but that trajectory departs from a never-snapshotted run at float rounding order (the physics solver's contact machinery is rebuilt rather than deserialized, which is what keeps hostile snapshot bytes safe).
+- Snapshot bytes carry only validated dynamic values (poses, velocities, controls, joint warm-start impulses, progress); the physics world is reconstructed canonically at restore, which is what keeps hostile snapshot bytes safe. Restore is exact and always resumes the same trajectory, but that trajectory departs from a never-snapshotted run at float rounding order (solver bookkeeping is rebuilt, not restored).
 - The standard-API adapters withhold `car_racing` until frames can be presented in Gym's native HWC uint8 layout; use `rf.Env` directly.
 
 

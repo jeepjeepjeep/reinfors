@@ -707,17 +707,14 @@ mod tests {
         let plan_b: Vec<usize> = (0..40).map(|i| [3, 2, 0, 1][i % 4]).collect();
         let (mid, _) = drive(&live(5), &plan_a);
 
-        // State-exact: one decode reaches the canonical byte form (a fixed point of
-        // encode/decode — live-world bookkeeping ids never survive the first cycle).
+        // State-exact: every serialized dynamic value round-trips bit-identically.
         let bytes = codec.encode(&mid);
         let restored = codec.decode(&bytes).unwrap();
         codec.validate_decoded_state(&restored, false).unwrap();
-        let canonical = codec.encode(&restored);
-        let round2 = codec.decode(&canonical).unwrap();
         assert_eq!(
-            canonical,
-            codec.encode(&round2),
-            "canonical form must be a fixed point"
+            bytes,
+            codec.encode(&restored),
+            "restore must be state-exact"
         );
 
         // Restore-deterministic: two decodes resume identical trajectories.
