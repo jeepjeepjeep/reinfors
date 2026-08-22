@@ -1,6 +1,7 @@
 //! Scheduler-overhead probe (ignored by default): a no-op callback makes every
 //! record/second delta pure scheduling cost. Run with:
-//!   cargo test --release --test overhead_bench -- --ignored --nocapture
+//!   cargo test --release --test overhead_bench -- --ignored --nocapture --test-threads=1
+//! (--test-threads=1 keeps the probes from contending with each other)
 
 use reinfors_core::policies::tree::alphazero::{AlphaZero, AlphaZeroConfig};
 use reinfors_core::rollout::engine::{Engine, EngineParams};

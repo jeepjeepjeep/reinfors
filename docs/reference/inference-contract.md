@@ -107,7 +107,7 @@ the stream itself (e.g. discard the first batch) or construct it lazily inside t
 never invoke it on the caller thread first. One-shot `collect` calls give no cross-call
 thread guarantee.
 Protect mutable model state and use a stable collector copy. A callback can
-perform RPC, but the requesting group's search blocks until it returns.
+perform RPC, but the searches awaiting that batch block until it returns.
 
 ## Cache lifetime
 

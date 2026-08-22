@@ -733,8 +733,9 @@ where
 
                     // Spin before parking: light rounds return in microseconds, so
                     // a spin dodges the park/unpark syscalls that dominate them. The
-                    // budget adapts — hits double it, expiries halve it — so heavy
-                    // rounds decay to parking immediately and give up the core.
+                    // budget adapts on park latency — short parks double it, long
+                    // parks halve it (spin hits leave it unchanged) — so heavy rounds
+                    // decay to parking immediately and give up the core.
                     let mut msg = None;
                     for _ in 0..spin_budget {
                         match rx.try_recv() {
