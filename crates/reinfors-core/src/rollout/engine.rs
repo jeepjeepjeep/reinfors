@@ -25,33 +25,13 @@ pub(crate) struct StartParts<'a, S> {
     pub rng: &'a mut SplitMix64,
 }
 
-pub(crate) enum StartAccess<'a, 'b, S> {
-    Exclusive(StartParts<'a, S>),
-    #[allow(dead_code)]
-    Shared(&'b std::sync::Mutex<StartParts<'a, S>>),
-}
-
-impl<S> StartAccess<'_, '_, S> {
+impl<S> StartParts<'_, S> {
     fn observe(&mut self, state: &S) {
-        match self {
-            StartAccess::Exclusive(parts) => parts.dist.observe(state, &mut *parts.rng),
-            StartAccess::Shared(shared) => {
-                let mut parts = shared.lock().expect("start access poisoned");
-                let StartParts { dist, rng } = &mut *parts;
-                dist.observe(state, &mut **rng);
-            }
-        }
+        self.dist.observe(state, &mut *self.rng);
     }
 
     fn choose(&mut self) -> Start<S> {
-        match self {
-            StartAccess::Exclusive(parts) => parts.dist.choose(&mut *parts.rng),
-            StartAccess::Shared(shared) => {
-                let mut parts = shared.lock().expect("start access poisoned");
-                let StartParts { dist, rng } = &mut *parts;
-                dist.choose(&mut **rng)
-            }
-        }
+        self.dist.choose(&mut *self.rng)
     }
 }
 
@@ -64,7 +44,8 @@ pub struct EngineParams {
     pub pad: bool,
     /// Scheduler firing threshold in rows (None = max(1, n_games / 2)).
     pub batch_size: Option<usize>,
-    /// Worker threads running search rounds (None = 1).
+    /// Worker threads running search rounds (None = available cores; always capped
+    /// at `n_games` — more workers than game slots can never run).
     pub n_threads: Option<usize>,
 }
 
@@ -183,12 +164,13 @@ where
                 .unwrap_or_else(|| (params.n_games / 2).max(1)),
             sweep_cursor: 0,
             thread_pool: rayon::ThreadPoolBuilder::new()
+                // At most one task per game slot can run: workers beyond n_games idle.
                 .num_threads(
                     params
                         .n_threads
                         .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
                         .unwrap_or(1)
-                        .max(1),
+                        .clamp(1, params.n_games.max(1)),
                 )
                 .build()
                 .expect("engine thread pool"),
@@ -320,10 +302,10 @@ where
                     })
                 })
                 .collect();
-            let mut start = StartAccess::Exclusive(StartParts {
+            let mut start = StartParts {
                 dist: &mut *self.start_dist,
                 rng: &mut self.buffer_rng,
-            });
+            };
             let (tx, rx) = std::sync::mpsc::channel::<Msg<P::Search<G::State>, L::Record>>();
 
             let task = |gi: usize,
@@ -672,6 +654,10 @@ where
                             }
                         }
                         let n = meta.len();
+                        // Tail bootstraps are queued requests like any other: the
+                        // documented savings identity (requested_rows - infer_rows)
+                        // must hold for truncating runs too.
+                        stats.sum_requested_rows += n;
                         phases[$gi] = SlotPhase::AwaitingTail {
                             fragment: $fragment,
                             meta,
@@ -1432,7 +1418,7 @@ fn respawn_game<G, P>(
     game: &G,
     policy: &P,
     slot: &mut SlotCtx<'_, G, P>,
-    start: &mut StartAccess<'_, '_, G::State>,
+    start: &mut StartParts<'_, G::State>,
 ) where
     G: Game + Sync,
     G::State: Send,

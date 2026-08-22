@@ -482,10 +482,11 @@ class Engine:
         # resolved config and config_fingerprint; snapshots restore across different values,
         # though window composition may differ.
         batch_size: int = ...,
-        # Worker threads running search rounds (0 = default of available cores), overlapping tree work
-        # with inference. Reproducible at n_threads=1; above that, completion order varies
-        # and window composition may differ between runs. Part of the resolved config and
-        # config_fingerprint; snapshots restore across different values.
+        # Worker threads running search rounds (0 = automatic: available cores, capped at
+        # n_games). The automatic setting stays null in resolved_config — it is an
+        # unresolved, machine-dependent choice, so composition fingerprints stay portable;
+        # window composition may differ across machines. Reproducible at n_threads=1.
+        # Snapshots restore across different values.
         n_threads: int = ...,
     ) -> None: ...
     # Tell the engine the net's weights changed (call after every weight sync — e.g. right after

@@ -44,9 +44,7 @@ pub struct SearchStats {
     pub sigma_sum: f64,
     pub terminal_sims: usize,
     pub depthcap_sims: usize,
-    pub shared_rows: usize,
     pub fresh_rows: usize,
-    pub hit_rows: usize,
     pub extra_eval_rows: usize,
 }
 

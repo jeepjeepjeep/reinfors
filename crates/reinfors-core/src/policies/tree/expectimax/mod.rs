@@ -269,9 +269,7 @@ pub(crate) fn encode_search_eval(e: &SearchEvaluation, out: &mut Vec<u8>) {
     for v in [
         st.terminal_sims,
         st.depthcap_sims,
-        st.shared_rows,
         st.fresh_rows,
-        st.hit_rows,
         st.extra_eval_rows,
     ] {
         put_u64(out, v as u64);
@@ -335,9 +333,7 @@ pub(crate) fn decode_search_eval(
     stats.sigma_sum = r.f64()?;
     stats.terminal_sims = r.u64()? as usize;
     stats.depthcap_sims = r.u64()? as usize;
-    stats.shared_rows = r.u64()? as usize;
     stats.fresh_rows = r.u64()? as usize;
-    stats.hit_rows = r.u64()? as usize;
     stats.extra_eval_rows = r.u64()? as usize;
     Ok(SearchEvaluation {
         values,

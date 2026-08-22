@@ -162,7 +162,8 @@ crosses the callback seam obeys the same batching. Raise `batch_size` toward you
 accelerator's sweet spot for larger, fewer calls at the cost of some latency;
 `telemetry["infer_rows"] / telemetry["infer_calls"]` reports the realized mean, and
 raising `n_games` is the first lever when that mean is small. `n_threads` sets the worker
-count (default: available cores). `pad` fixes every call at exactly `batch_size` rows for
+count (default: automatic — available cores, capped at `n_games`; the automatic setting
+renders as `null` in `resolved_config()` since its resolution is machine-dependent). `pad` fixes every call at exactly `batch_size` rows for
 compiled/graph-captured forwards — see the
 [inference contract](../reference/inference-contract.md#input). All three are part of the
 resolved configuration and `config_fingerprint()` — changing them changes which games

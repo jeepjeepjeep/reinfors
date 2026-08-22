@@ -238,9 +238,7 @@ struct Tree<S> {
     pending: Option<(PendingWork, usize)>,
     terminal_sims: usize,
     depthcap_sims: usize,
-    shared_rows: usize,
     fresh_rows: usize,
-    hit_rows: usize,
     extra_eval_rows: usize,
     // Reused because these backup paths run once per simulation.
     g_buf: Vec<f64>,
@@ -445,9 +443,7 @@ impl<S: Clone> Tree<S> {
             pending: None,
             terminal_sims: 0,
             depthcap_sims: 0,
-            shared_rows: 0,
             fresh_rows: 0,
-            hit_rows: 0,
             extra_eval_rows: 0,
             g_buf: Vec::new(),
             val_buf: Vec::new(),
@@ -1154,9 +1150,7 @@ impl<S: Clone> Tree<S> {
             sigma_sum: 0.0,
             terminal_sims: self.terminal_sims,
             depthcap_sims: self.depthcap_sims,
-            shared_rows: self.shared_rows,
             fresh_rows: self.fresh_rows,
-            hit_rows: self.hit_rows,
             extra_eval_rows: self.extra_eval_rows,
         };
         SearchEvaluation {
@@ -2081,8 +2075,7 @@ mod chance_tests {
         let s = &out.stats;
         assert_eq!(
             2,
-            s.fresh_rows + s.hit_rows + s.shared_rows + s.terminal_sims + s.depthcap_sims
-                - s.extra_eval_rows
+            s.fresh_rows + s.terminal_sims + s.depthcap_sims - s.extra_eval_rows
         );
     }
 
@@ -2325,8 +2318,7 @@ mod duct_tests {
         );
         assert_eq!(
             20,
-            s.fresh_rows + s.hit_rows + s.shared_rows + s.terminal_sims + s.depthcap_sims
-                - s.extra_eval_rows
+            s.fresh_rows + s.terminal_sims + s.depthcap_sims - s.extra_eval_rows
         );
     }
 
