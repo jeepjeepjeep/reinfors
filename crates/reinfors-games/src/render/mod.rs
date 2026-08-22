@@ -87,24 +87,26 @@ impl Raster {
         out.resize(3 * plane, 0.0);
         let (rp, rest) = out.split_at_mut(plane);
         let (gp, bp) = rest.split_at_mut(plane);
-        // One linear pass over the source with word loads; per-block sums are
-        // reordered relative to the naive form but integer-exact. Pixels are RGBA
-        // little-endian, so R sits in the low byte of each u32.
-        let mut acc = vec![[0u32; 3]; final_w];
+        // Two passes per output row, both integer-exact vs the naive form: a
+        // vertical widening sum over the f source rows (byte-linear, autovectorizes)
+        // followed by a small horizontal reduction of each f-pixel group.
+        let mut col = vec![0u16; src_w * 4];
         for y in 0..final_h {
-            acc.iter_mut().for_each(|a| *a = [0; 3]);
+            col.iter_mut().for_each(|v| *v = 0);
             for sy in 0..f {
                 let row = &src[(y * f + sy) * src_w * 4..][..src_w * 4];
-                for (a, block) in acc.iter_mut().zip(row.chunks_exact(f * 4)) {
-                    for px in block.as_chunks::<4>().0 {
-                        let v = u32::from_le_bytes(*px);
-                        a[0] += v & 0xFF;
-                        a[1] += (v >> 8) & 0xFF;
-                        a[2] += (v >> 16) & 0xFF;
-                    }
+                for (a, &b) in col.iter_mut().zip(row) {
+                    *a += u16::from(b);
                 }
             }
-            for (x, a) in acc.iter().enumerate() {
+            for x in 0..final_w {
+                let group = &col[x * f * 4..][..f * 4];
+                let mut a = [0u32; 3];
+                for px in group.as_chunks::<4>().0 {
+                    a[0] += u32::from(px[0]);
+                    a[1] += u32::from(px[1]);
+                    a[2] += u32::from(px[2]);
+                }
                 rp[y * final_w + x] = (a[0] / area) as f32;
                 gp[y * final_w + x] = (a[1] / area) as f32;
                 bp[y * final_w + x] = (a[2] / area) as f32;
@@ -222,31 +224,43 @@ const GLYPHS: [(char, [u8; 7]); 11] = [
     ),
 ];
 
-/// Draw `text` with the top-left corner at `(x, y)` in final-frame units.
+/// Draw `text` with the top-left corner at `(x, y)` in final-frame units. All glyph
+/// cells fill as one compound path: abutting cells fuse seamlessly under the winding
+/// rule instead of double-blending their shared AA edges, and the per-fill setup cost
+/// is paid once per string rather than once per cell.
 pub(crate) fn draw_text(r: &mut Raster, text: &str, x: f32, y: f32, scale: f32, rgb: [u8; 3]) {
+    let f = r.factor as f32;
+    let mut pb = PathBuilder::new();
     let mut cx = x;
     for ch in text.chars() {
         if let Some((_, rows)) = GLYPHS.iter().find(|(g, _)| *g == ch) {
             for (ry, row) in rows.iter().enumerate() {
                 for bx in 0..5 {
                     if row & (1 << (4 - bx)) != 0 {
-                        let px = cx + bx as f32 * scale;
-                        let py = y + ry as f32 * scale;
-                        r.fill_poly(
-                            &[
-                                [px, py],
-                                [px + scale, py],
-                                [px + scale, py + scale],
-                                [px, py + scale],
-                            ],
-                            rgb,
-                        );
+                        let px = (cx + bx as f32 * scale) * f;
+                        let py = (y + ry as f32 * scale) * f;
+                        pb.move_to(px, py);
+                        pb.line_to(px + scale * f, py);
+                        pb.line_to(px + scale * f, py + scale * f);
+                        pb.line_to(px, py + scale * f);
+                        pb.close();
                     }
                 }
             }
         }
         cx += 6.0 * scale;
     }
+    let Some(path) = pb.finish() else { return };
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(rgb[0], rgb[1], rgb[2], 255);
+    paint.anti_alias = true;
+    r.pixmap.fill_path(
+        &path,
+        &paint,
+        FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
 }
 
 /// Debug/eyeball export; not part of any observation path.
