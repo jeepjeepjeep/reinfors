@@ -400,6 +400,17 @@ mod tests {
     }
 
     #[test]
+    fn chw_encode_matches_the_hwc_debug_path() {
+        // The encoder downsamples straight to CHW; the debug/PNG tooling goes through
+        // HWC. Divergence here would invalidate every HWC-based pixel test.
+        let s = live(5, 60);
+        let direct = CarRacingPixels.encode(&s, 0);
+        let mut via_hwc = Vec::new();
+        crate::render::hwc_to_chw_f32(&frame(&s), FRAME, FRAME, &mut via_hwc);
+        assert_eq!(direct, via_hwc);
+    }
+
+    #[test]
     fn zoom_animation_changes_early_frames() {
         assert_ne!(frame(&live(5, 0)), frame(&live(5, 30)));
     }
