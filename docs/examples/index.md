@@ -79,6 +79,19 @@ advantages, and value clipping against the collection-time critic. Install `rein
 python examples/train_ppo_connect4.py
 ```
 
+### PPO CarRacing
+
+`examples/train_ppo_carracing.py` trains [PPO](../catalogue/algorithms.md#ppo) with a small CNN on
+[CarRacing](../catalogue/games.md#carracing-notes)'s pixel observations — the single-agent,
+continuous-state end of the catalogue. Install `reinfors[train]`.
+
+**Runtime:** minutes for the bounded default on a laptop CPU; real driving competence needs far
+longer runs.
+
+```bash
+python examples/train_ppo_carracing.py
+```
+
 ### AlphaZero Connect 4
 
 `examples/train_alphazero_example.py` covers policy/value heads, visit targets, synchronous or

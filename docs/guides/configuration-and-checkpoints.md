@@ -100,8 +100,12 @@ engine.restore(restored, expect_policy_version="checkpoint-0042")
 Save the model and optimizer alongside the snapshot. Set `policy_version` to the identifier of that
 exact model file—such as its checkpoint name, content hash, or artifact version—and pass the same
 identifier as `expect_policy_version` when restoring. The engine compares the strings; it cannot
-inspect caller-owned model weights. Restored collection is record-exact for the same inference
-outputs, although cache exclusion means the callback call pattern may differ.
+inspect caller-owned model weights. For games with bit-transparent state codecs (every built-in
+except CarRacing), restored collection is record-exact for the same inference outputs, although
+cache exclusion means the callback call pattern may differ. CarRacing restores by deterministic
+reconstruction instead — resumed collection is reproducible from the snapshot but not
+record-identical to the uninterrupted run; see the
+[CarRacing notes](../catalogue/games.md#carracing-notes).
 
 For an active stream, use the [lossless pause barrier](streaming.md#checkpointing-without-losing-records)
 before taking the snapshot. `pause()` terminates that stream; after saving or restoring, start a new

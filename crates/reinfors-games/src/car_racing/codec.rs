@@ -1,24 +1,48 @@
-//! Snapshot codec, scheme (c) of the plan's decision ladder: the rapier world is
-//! serialized whole (schemes (a)/(b) — seed + compact dynamic state — do not resume
-//! bit-identically; solver warm-start state matters). The track is still re-derived
-//! from the seed; decoded worlds are graph- and bounds-validated, and solver
-//! parameters are replaced with the canonical task constants.
+//! Snapshot codec with a scoped resume guarantee. The bytes carry a compact DTO of
+//! dynamic values only — body poses/velocities, wheel controls, joint warm-start
+//! impulses, progress. No rapier structure ever crosses the byte boundary (deserialized
+//! physics objects range from unsound BVH indexing to attacker-set solver work);
+//! decode reconstructs the canonical car and copies the bounded values in.
+//!
+//! Guarantee: restore is STATE-exact (the serialized dynamic values round-trip
+//! bit-identically) and RESTORE-deterministic (one snapshot always resumes one
+//! trajectory), but the resumed trajectory departs from the never-snapshotted run at
+//! f32 rounding order — solver bookkeeping is rebuilt, not restored. Games with
+//! pure-data states keep full bit-transparency; this physics game's guarantee is
+//! deliberately narrower.
 
-use super::dynamics::{canonical_params, CarWorld};
+use super::dynamics::{CarWorld, WheelCtl};
 use super::{CarRacing, CarRacingState, LiveState};
 use crate::codec_util::{serde_decode, serde_encode};
-use rapier2d::prelude::{JointAxis, Rotation, SpatialVector, Vector};
+use rapier2d::prelude::{JointAxis, Pose, RigidBodyHandle, Rotation, Vector};
 use reinfors_core::StateCodec;
 use std::sync::Arc;
 
-pub const CODEC_VERSION: u8 = 1;
+pub const CODEC_VERSION: u8 = 2;
 const MAX_TICK: u32 = 1 << 30;
-const MAX_SNAPSHOT_BYTES: usize = 64 * 1024;
+const MAX_SNAPSHOT_BYTES: usize = 4 * 1024;
 const MAX_COORD: f64 = 1e6;
 const MAX_PHASE: f64 = 1e12;
+const ANG_X: usize = JointAxis::AngX as usize;
 
 #[derive(serde::Serialize, serde::Deserialize)]
-#[allow(clippy::large_enum_variant)]
+struct BodyDyn {
+    pos: [f32; 2],
+    /// (cos, sin) raw components, so restore is bit-exact; validated near-unit.
+    rot: [f32; 2],
+    linvel: [f32; 2],
+    angvel: f32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct JointDyn {
+    impulses: [f32; 3],
+    motor_impulse: f32,
+    limit_impulse: f32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[allow(clippy::large_enum_variant)] // transient decode value, never stored
 enum Snap {
     Pending,
     Live {
@@ -27,7 +51,10 @@ enum Snap {
         done: bool,
         new_lap: bool,
         visited: Vec<u64>,
-        car: CarWorld,
+        bodies: [BodyDyn; 5],
+        joints: [JointDyn; 4],
+        ctl: [WheelCtl; 4],
+        fuel_spent: f64,
     },
 }
 
@@ -50,141 +77,68 @@ fn check_bounded(label: &str, values: &[f64], bound: f64) -> Result<(), String> 
     Ok(())
 }
 
-/// Serialize the config-bearing sets with every dynamic field zeroed. Byte-comparing
-/// this against a freshly constructed car validates ALL immutable physics configuration
-/// (damping, mass properties, collider data, joint parameters, ...) without enumerating
-/// rapier's fields — any forgery outside the dynamic state changes the fingerprint.
-fn config_fingerprint(car: &CarWorld) -> Vec<u8> {
-    let mut c = car.clone();
-    let handles: Vec<_> = std::iter::once(c.hull)
-        .chain(c.wheels.iter().copied())
-        .collect();
-    for h in handles {
-        let b = &mut c.bodies[h];
-        b.set_translation(Vector::ZERO, false);
-        b.set_rotation(Rotation::IDENTITY, false);
-        b.set_linvel(Vector::ZERO, false);
-        b.set_angvel(0.0, false);
-        b.reset_forces(false);
-        b.reset_torques(false);
-    }
-    for jh in c.joints {
-        if let Some(j) = c.impulse_joints.get_mut(jh, false) {
-            j.impulses = SpatialVector::ZERO;
-            j.data.set_motor_velocity(JointAxis::AngX, 0.0, 0.0);
-        }
-    }
-    c.ctl = Default::default();
-    c.fuel_spent = 0.0;
-    // One canonical step from the zeroed state: identical configurations step to
-    // bit-identical worlds, and it normalizes solver bookkeeping and cached
-    // position/mass fields that setters do not touch.
-    c.params = canonical_params();
-    c.step(f64::from(canonical_params().dt));
-    postcard::to_stdvec(&(&c.bodies, &c.colliders, &c.impulse_joints))
-        .expect("physics sets always serialize")
+fn body_handles(car: &CarWorld) -> [RigidBodyHandle; 5] {
+    [
+        car.hull,
+        car.wheels[0],
+        car.wheels[1],
+        car.wheels[2],
+        car.wheels[3],
+    ]
 }
 
-/// Enforce the exact five-body / eight-collider / four-revolute-joint graph and bound
-/// every step-relevant numeric field. Solver parameters are not validated here because
-/// `decode` replaces them with the canonical task constants.
-fn validate_car(car: &CarWorld) -> Result<(), String> {
-    if car.bodies.len() != 5 {
-        return Err(format!("expected 5 bodies, got {}", car.bodies.len()));
+fn body_dyn(car: &CarWorld, h: RigidBodyHandle) -> BodyDyn {
+    let body = &car.bodies[h];
+    let t = body.translation();
+    let r = body.rotation();
+    let v = body.linvel();
+    BodyDyn {
+        pos: [t.x, t.y],
+        rot: [r.cos(), r.sin()],
+        linvel: [v.x, v.y],
+        angvel: body.angvel(),
     }
-    if car.colliders.len() != 8 {
-        return Err(format!("expected 8 colliders, got {}", car.colliders.len()));
-    }
-    if car.impulse_joints.len() != 4 {
-        return Err(format!(
-            "expected 4 impulse joints, got {}",
-            car.impulse_joints.len()
-        ));
-    }
-    if car.multibody_joints.iter().next().is_some() {
-        return Err("unexpected multibody joints".to_string());
-    }
+}
 
-    let handles: Vec<_> = std::iter::once(car.hull)
-        .chain(car.wheels.iter().copied())
-        .collect();
-    for (i, a) in handles.iter().enumerate() {
-        if handles[i + 1..].contains(a) {
-            return Err("duplicate body handles in the stored car".to_string());
-        }
+fn joint_dyn(car: &CarWorld, i: usize) -> JointDyn {
+    let joint = car
+        .impulse_joints
+        .get(car.joints[i])
+        .expect("canonical joint handles are always live");
+    JointDyn {
+        impulses: [joint.impulses.x, joint.impulses.y, joint.impulses.z],
+        motor_impulse: joint.data.motors[ANG_X].impulse,
+        limit_impulse: joint.data.limits[ANG_X].impulse,
     }
-    for h in &handles {
-        let Some(body) = car.bodies.get(*h) else {
-            return Err("a stored body handle is not in the body set".to_string());
-        };
-        let t = body.translation();
-        let v = body.linvel();
-        check_bounded(
-            "a body pose",
-            &[
-                f64::from(t.x),
-                f64::from(t.y),
-                f64::from(body.rotation().angle()),
-            ],
-            MAX_COORD,
-        )?;
-        check_bounded(
-            "a body velocity",
-            &[f64::from(v.x), f64::from(v.y), f64::from(body.angvel())],
-            MAX_COORD,
-        )?;
-        // Forces are consumed and reset every step; a legitimate snapshot never
-        // carries one, and the fingerprint zeroes them, so reject rather than trust.
-        if body.user_force() != Vector::ZERO || body.user_torque() != 0.0 {
-            return Err("a stored body carries pending user forces".to_string());
-        }
-    }
+}
 
-    let mut hull_colliders = 0usize;
-    let mut wheel_colliders = [0usize; 4];
-    for (_, collider) in car.colliders.iter() {
-        let Some(parent) = collider.parent() else {
-            return Err("an orphan collider in the stored car".to_string());
-        };
-        if parent == car.hull {
-            hull_colliders += 1;
-        } else if let Some(w) = car.wheels.iter().position(|&h| h == parent) {
-            wheel_colliders[w] += 1;
-        } else {
-            return Err("a collider parented outside the car".to_string());
-        }
+fn validate_body(b: &BodyDyn) -> Result<(), String> {
+    check_bounded(
+        "a body pose",
+        &[f64::from(b.pos[0]), f64::from(b.pos[1])],
+        MAX_COORD,
+    )?;
+    check_finite(
+        "a body rotation",
+        &[f64::from(b.rot[0]), f64::from(b.rot[1])],
+    )?;
+    let norm = f64::from(b.rot[0]).powi(2) + f64::from(b.rot[1]).powi(2);
+    if (norm - 1.0).abs() > 1e-3 {
+        return Err("a body rotation is not a unit rotation".to_string());
     }
-    if hull_colliders != 4 || wheel_colliders != [1; 4] {
-        return Err(format!(
-            "collider graph mismatch: hull {hull_colliders}, wheels {wheel_colliders:?}"
-        ));
-    }
+    check_bounded(
+        "a body velocity",
+        &[
+            f64::from(b.linvel[0]),
+            f64::from(b.linvel[1]),
+            f64::from(b.angvel),
+        ],
+        MAX_COORD,
+    )
+}
 
-    for (i, jh) in car.joints.iter().enumerate() {
-        if car.joints[i + 1..].contains(jh) {
-            return Err("duplicate joint handles in the stored car".to_string());
-        }
-        let Some(joint) = car.impulse_joints.get(*jh) else {
-            return Err("a stored joint handle is not in the joint set".to_string());
-        };
-        if joint.body1() != car.hull || joint.body2() != car.wheels[i] {
-            return Err(format!("joint {i} does not connect the hull to wheel {i}"));
-        }
-        if joint.data.as_revolute().is_none() {
-            return Err(format!("joint {i} is not a revolute joint"));
-        }
-        check_bounded(
-            "a joint impulse",
-            &[
-                f64::from(joint.impulses.x),
-                f64::from(joint.impulses.y),
-                f64::from(joint.impulses.z),
-            ],
-            MAX_PHASE,
-        )?;
-    }
-
-    for c in &car.ctl {
+fn validate_ctl(ctl: &[WheelCtl; 4], fuel_spent: f64) -> Result<(), String> {
+    for c in ctl {
         check_finite(
             "a wheel control",
             &[c.gas, c.brake, c.steer, c.omega, c.phase],
@@ -199,11 +153,42 @@ fn validate_car(car: &CarWorld) -> Result<(), String> {
             return Err("wheel omega/phase exceeds bounds".to_string());
         }
     }
-    check_bounded("fuel_spent", &[car.fuel_spent], MAX_PHASE)?;
-    if car.fuel_spent < 0.0 {
+    check_bounded("fuel_spent", &[fuel_spent], MAX_PHASE)?;
+    if fuel_spent < 0.0 {
         return Err("fuel_spent is negative".to_string());
     }
     Ok(())
+}
+
+/// Build the canonical car and copy the validated dynamic values in. Every
+/// configuration field (masses, shapes, filters, joint definitions, solver params)
+/// comes from `CarWorld::new`; nothing in the snapshot can influence them.
+fn reconstruct_car(bodies: &[BodyDyn; 5], joints: &[JointDyn; 4]) -> CarWorld {
+    let mut car = CarWorld::new(0.0, 0.0, 0.0);
+    for (h, b) in body_handles(&car).into_iter().zip(bodies) {
+        let body = &mut car.bodies[h];
+        body.set_position(
+            Pose {
+                translation: Vector::new(b.pos[0], b.pos[1]),
+                rotation: Rotation::from_cos_sin_unchecked(b.rot[0], b.rot[1]),
+            },
+            true,
+        );
+        body.set_linvel(Vector::new(b.linvel[0], b.linvel[1]), true);
+        body.set_angvel(b.angvel, true);
+    }
+    for (jh, j) in car.joints.into_iter().zip(joints) {
+        let joint = car
+            .impulse_joints
+            .get_mut(jh, false)
+            .expect("just constructed");
+        joint.impulses.x = j.impulses[0];
+        joint.impulses.y = j.impulses[1];
+        joint.impulses.z = j.impulses[2];
+        joint.data.motors[ANG_X].impulse = j.motor_impulse;
+        joint.data.limits[ANG_X].impulse = j.limit_impulse;
+    }
+    car
 }
 
 impl StateCodec for CarRacingCodec {
@@ -218,13 +203,42 @@ impl StateCodec for CarRacingCodec {
                 done: l.done,
                 new_lap: l.new_lap,
                 visited: l.visited.clone(),
-                car: l.car.clone(),
+                bodies: body_handles(&l.car).map(|h| body_dyn(&l.car, h)),
+                joints: [0, 1, 2, 3].map(|i| joint_dyn(&l.car, i)),
+                ctl: l.car.ctl.clone(),
+                fuel_spent: l.car.fuel_spent,
             },
         };
         serde_encode(CODEC_VERSION, &snap)
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<CarRacingState, String> {
+        // Belt-and-braces: the DTO path deserializes only plain numbers, but keep any
+        // unexpected panic contained as a decode error.
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.decode_inner(bytes)));
+        match result {
+            Ok(r) => r,
+            Err(_) => Err("snapshot bytes rejected: decoding panicked".to_string()),
+        }
+    }
+
+    fn validate_decoded_state(&self, state: &CarRacingState, done: bool) -> Result<(), String> {
+        match state {
+            CarRacingState::Pending => {
+                Err("a live restored state cannot be a pending chance sentinel".to_string())
+            }
+            CarRacingState::Live(l) if l.done != done => Err(format!(
+                "snapshot done flag {} disagrees with lifecycle done {done}",
+                l.done
+            )),
+            CarRacingState::Live(_) => Ok(()),
+        }
+    }
+}
+
+impl CarRacingCodec {
+    fn decode_inner(&self, bytes: &[u8]) -> Result<CarRacingState, String> {
         if bytes.len() > MAX_SNAPSHOT_BYTES {
             return Err(format!(
                 "snapshot of {} bytes exceeds the {MAX_SNAPSHOT_BYTES}-byte bound",
@@ -238,7 +252,10 @@ impl StateCodec for CarRacingCodec {
             done,
             new_lap,
             visited,
-            mut car,
+            bodies,
+            joints,
+            ctl,
+            fuel_spent,
         } = snap
         else {
             return Ok(CarRacingState::Pending);
@@ -246,13 +263,23 @@ impl StateCodec for CarRacingCodec {
         if tick > MAX_TICK {
             return Err(format!("tick {tick} exceeds the tick bound"));
         }
-        validate_car(&car)?;
-        if config_fingerprint(&car) != config_fingerprint(&CarWorld::new(0.0, 0.0, 0.0)) {
-            return Err(
-                "physics configuration differs from the canonical car construction".to_string(),
-            );
+        for b in &bodies {
+            validate_body(b)?;
         }
-        car.params = canonical_params();
+        for j in &joints {
+            let vals: Vec<f64> = j
+                .impulses
+                .iter()
+                .chain([&j.motor_impulse, &j.limit_impulse])
+                .map(|&v| f64::from(v))
+                .collect();
+            check_bounded("a joint impulse", &vals, MAX_PHASE)?;
+        }
+        validate_ctl(&ctl, fuel_spent)?;
+
+        let mut car = reconstruct_car(&bodies, &joints);
+        car.ctl = ctl;
+        car.fuel_spent = fuel_spent;
 
         let track = Arc::new(super::track::Track::generate(seed));
         let n_tiles = track.tiles.len();
@@ -286,26 +313,12 @@ impl StateCodec for CarRacingCodec {
         self.game.contact_pass_derived(&mut live);
         Ok(CarRacingState::Live(Box::new(live)))
     }
-
-    fn validate_decoded_state(&self, state: &CarRacingState, done: bool) -> Result<(), String> {
-        match state {
-            CarRacingState::Pending => {
-                Err("a live restored state cannot be a pending chance sentinel".to_string())
-            }
-            CarRacingState::Live(l) if l.done != done => Err(format!(
-                "snapshot done flag {} disagrees with lifecycle done {done}",
-                l.done
-            )),
-            CarRacingState::Live(_) => Ok(()),
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
 
     use super::*;
-    use rapier2d::prelude::*;
 
     fn game() -> CarRacing {
         CarRacing::default()
@@ -331,30 +344,6 @@ mod tests {
     }
 
     #[test]
-    fn forged_duplicate_body_handle_is_rejected() {
-        let mut l = live(5);
-        l.car.wheels[0] = l.car.hull;
-        assert!(decode_err(&encode_live(&l)).contains("duplicate body"));
-    }
-
-    #[test]
-    fn forged_joint_endpoints_are_rejected() {
-        let mut l = live(5);
-        l.car.joints.swap(0, 1);
-        assert!(decode_err(&encode_live(&l)).contains("does not connect"));
-    }
-
-    #[test]
-    fn forged_extra_joint_is_rejected() {
-        let mut l = live(5);
-        let j = RevoluteJointBuilder::new().build();
-        l.car
-            .impulse_joints
-            .insert(l.car.hull, l.car.wheels[0], j, true);
-        assert!(decode_err(&encode_live(&l)).contains("expected 4 impulse joints"));
-    }
-
-    #[test]
     fn forged_out_of_range_controls_are_rejected() {
         let mut l = live(5);
         l.car.ctl[0].gas = 5.0;
@@ -362,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn tampered_solver_params_are_normalized() {
+    fn tampered_solver_params_never_reach_the_bytes() {
         let mut l = live(5);
         l.car.params.dt = 17.0;
         let decoded = codec().decode(&encode_live(&l)).unwrap();
@@ -382,47 +371,49 @@ mod tests {
     }
 
     #[test]
-    fn forged_body_config_is_rejected() {
-        let mut l = live(5);
-        let hull = l.car.hull;
-        l.car.bodies[hull].set_linear_damping(f32::NAN);
-        assert!(decode_err(&encode_live(&l)).contains("canonical car construction"));
-        let mut l = live(5);
-        let hull = l.car.hull;
-        l.car.bodies[hull].set_gravity_scale(3.0, false);
-        assert!(decode_err(&encode_live(&l)).contains("canonical car construction"));
-    }
-
-    #[test]
-    fn forged_collider_config_is_rejected() {
-        let mut l = live(5);
-        let handle = l.car.colliders.iter().next().map(|(h, _)| h).unwrap();
-        l.car.colliders[handle].set_density(9.9);
-        assert!(decode_err(&encode_live(&l)).contains("canonical car construction"));
-    }
-
-    #[test]
-    fn forged_joint_config_is_rejected() {
-        let mut l = live(5);
-        let jh = l.car.joints[0];
-        let j = l.car.impulse_joints.get_mut(jh, false).unwrap();
-        j.data.set_local_anchor1(Vector::new(5.0, 5.0));
-        assert!(decode_err(&encode_live(&l)).contains("canonical car construction"));
-    }
-
-    #[test]
-    fn forged_pending_force_is_rejected() {
-        let mut l = live(5);
-        let hull = l.car.hull;
-        l.car.bodies[hull].add_force(Vector::new(1.0, 0.0), false);
-        assert!(decode_err(&encode_live(&l)).contains("pending user forces"));
-    }
-
-    #[test]
     fn forged_extreme_pose_is_rejected() {
         let mut l = live(5);
         let hull = l.car.hull;
         l.car.bodies[hull].set_translation(Vector::new(1e8, 0.0), true);
         assert!(decode_err(&encode_live(&l)).contains("magnitude bound"));
+    }
+
+    #[test]
+    fn forged_extreme_velocity_is_rejected() {
+        let mut l = live(5);
+        let w = l.car.wheels[2];
+        l.car.bodies[w].set_linvel(Vector::new(0.0, 1e8), true);
+        assert!(decode_err(&encode_live(&l)).contains("magnitude bound"));
+    }
+
+    #[test]
+    fn forged_non_unit_rotation_is_rejected() {
+        let mut l = live(5);
+        let hull = l.car.hull;
+        l.car.bodies[hull].set_rotation(Rotation::from_cos_sin_unchecked(2.0, 0.0), true);
+        assert!(decode_err(&encode_live(&l)).contains("unit rotation"));
+    }
+
+    #[test]
+    fn forged_extreme_joint_impulse_is_rejected() {
+        let mut l = live(5);
+        let jh = l.car.joints[0];
+        l.car.impulse_joints.get_mut(jh, false).unwrap().impulses.x = 1e30;
+        assert!(decode_err(&encode_live(&l)).contains("joint impulse"));
+    }
+
+    #[test]
+    fn forged_configuration_cannot_be_expressed() {
+        // The DTO carries dynamics only; every configuration field comes from the
+        // canonical construction. Tampering with rapier config on a live state must
+        // leave the decoded car canonical rather than smuggle the change through.
+        let mut l = live(5);
+        let hull = l.car.hull;
+        l.car.bodies[hull].set_gravity_scale(3.0, false);
+        let decoded = codec().decode(&encode_live(&l)).unwrap();
+        let CarRacingState::Live(out) = decoded else {
+            panic!("expected live state");
+        };
+        assert_eq!(out.car.bodies[out.car.hull].gravity_scale(), 1.0);
     }
 }

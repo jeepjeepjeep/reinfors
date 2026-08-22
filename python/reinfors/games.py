@@ -21,6 +21,7 @@ Chess = _reinfors.GameHandle.Chess
 Backgammon = _reinfors.GameHandle.Backgammon
 Connect4 = _reinfors.GameHandle.Connect4
 GridWorld = _reinfors.GameHandle.GridWorld
+CarRacing = _reinfors.GameHandle.CarRacing
 
 _REGISTRY: dict[str, Callable[..., Any]] = {
     "snake": Snake,
@@ -31,6 +32,7 @@ _REGISTRY: dict[str, Callable[..., Any]] = {
     "backgammon": Backgammon,
     "connect4": Connect4,
     "gridworld": GridWorld,
+    "car_racing": CarRacing,
 }
 assert _REGISTRY.keys() == GAMES.keys(), "game registry and documentation catalogue diverged"
 

@@ -111,6 +111,21 @@ GAMES: dict[str, GameInfo] = {
         ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero", "ppo"),
         "Small single-agent environment for checking basic training and integration loops.",
     ),
+    "car_racing": GameInfo(
+        "CarRacing",
+        "1",
+        "Sequential",
+        "Track-generation seed (root only)",
+        "Perfect",
+        "5 discrete controls",
+        "Rendered CHW pixels (3, 96, 96)",
+        (("tile", 1000.0), ("step", -0.1), ("off_playfield", -100.0)),
+        "None (withheld until the HWC adapter presentation lands)",
+        False,
+        ("dqn", "ppo"),
+        "Faithful reimplementation of Gymnasium's CarRacing-v3 (discrete); physics"
+        " trajectories and checkpoints do not transfer to or from Gymnasium.",
+    ),
     "kuhn_poker": GameInfo(
         "Kuhn poker",
         "2-10",
@@ -256,6 +271,21 @@ ENCODER_INFO: dict[str, EncoderInfo] = {
         "(2, size, size); (2, 5, 5) by default",
         "rf.encoders.GridWorld()",
         "Agent-position and goal planes.",
+    ),
+    "car_racing_pixels": EncoderInfo(
+        "CarRacingPixels",
+        "CarRacing",
+        "(3, 96, 96)",
+        "rf.encoders.CarRacingPixels()",
+        "Rendered top-down frame, raw 0-255 values, channel-major (gym renders HWC).",
+    ),
+    "car_racing_vec": EncoderInfo(
+        "CarRacingVec",
+        "CarRacing",
+        "(1, 1, 21)",
+        "rf.encoders.CarRacingVec()",
+        "Diagnostic pose/velocity/wheel/progress vector; renderer-free training and"
+        " physics-vs-visual failure isolation.",
     ),
 }
 

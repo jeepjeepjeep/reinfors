@@ -42,7 +42,10 @@ pub struct WheelCtl {
     pub on_road: bool,
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+// Never derives serde: no rapier structure crosses the byte boundary (deserialized
+// physics objects range from unsound BVH indexing to attacker-set solver work). The
+// codec stores a compact DTO of dynamic values and reconstructs the world canonically.
+#[derive(Clone)]
 pub struct CarWorld {
     pub bodies: RigidBodySet,
     pub colliders: ColliderSet,

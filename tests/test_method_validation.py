@@ -107,9 +107,11 @@ def test_env_snapshot_survives_bytewise_corruption(name: str) -> None:
             snap = rf.EnvSnapshot.from_bytes(bs)
             fresh = rf.Env(rf.games.make(name), rf.Reward(), seed=0)
             fresh.restore(snap)
-            # a corrupt-but-decodable state must also survive use, not just decode
+            # a corrupt-but-decodable state must also survive use — encoding AND
+            # advancing (bounded solver work), not just decode
             if not fresh.done():
                 fresh.observe(fresh.active_agents()[0])
+                fresh.step({a: fresh.legal_actions(a)[0] for a in fresh.active_agents()})
 
         _no_panic(attempt)
 
