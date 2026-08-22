@@ -1,5 +1,5 @@
-//! Lockstep driver for the stepped policy machine: Stage A compatibility path and the
-//! engine-less decision driver (choose/Env/arena).
+//! Lockstep driver for the stepped policy machine: the engine-less decision driver
+//! (choose/Env/arena) — one pooled infer call per barrier round.
 
 use crate::encoder::{PermTable, StateEncoder};
 use crate::game::{Game, Rng};

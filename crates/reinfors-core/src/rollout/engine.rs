@@ -18,8 +18,8 @@ pub use crate::stats::EpisodeSummary;
 
 pub use crate::stats::CollectStats;
 
-/// Start-distribution access: exclusive on the classic path, mutex-shared across group
-/// workers.
+/// The start distribution and its reservoir stream — scheduler-owned: draw order is
+/// result-bearing.
 pub(crate) struct StartParts<'a, S> {
     pub dist: &'a mut dyn StartDistribution<S>,
     pub rng: &'a mut SplitMix64,
@@ -1096,9 +1096,9 @@ enum Work<SE> {
     },
 }
 
-/// A slot task's result. `Completed` covers finish/select/advance and (for terminal
-/// episodes) the flush, all run on the worker; a truncated episode leaves
-/// `pending_tail` for the scheduler, which owns the evaluator.
+/// A slot task's result. `Completed` carries the completion's effects — records, stats,
+/// and the buffered-step delta — for the scheduler to apply in message order; `finished`
+/// tells it whether to respawn or resolve a truncation tail.
 enum TaskOut<SE, R> {
     Skip,
     Emitted {

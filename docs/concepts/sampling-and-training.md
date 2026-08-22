@@ -7,9 +7,12 @@ games and, where applicable, many search leaves.
 ## A collection round
 
 1. Rust advances each eligible game or search until network evaluation is needed.
-2. Requests from different games, players, and leaves are pooled into one observation array.
-3. The engine calls your inference function once for that pool.
-4. Rust routes the returned rows back into their searches and continues them.
+2. Requests from different games, players, and leaves accumulate in a shared queue.
+3. The engine calls your inference function the moment `batch_size` rows are queued (or
+   earlier when nothing can progress without results) — batches are decoupled from any one
+   search's round.
+4. Rust routes the returned rows back into their searches and continues them, overlapping
+   further search work with your calls.
 5. The learner emits records until the requested record floor is reached.
 
 The callback overhead is paid per pooled round rather than per environment or tree node.
