@@ -1,13 +1,17 @@
-//! Snapshot codec, scheme (c) of the plan's decision ladder: the rapier world is
-//! serialized whole (schemes (a)/(b) — seed + compact dynamic state — do not resume
-//! bit-identically; solver warm-start state matters). The track is still re-derived
-//! from the seed; decoded worlds are graph- and bounds-validated, and solver
-//! parameters are replaced with the canonical task constants.
+//! Snapshot codec with a scoped resume guarantee. The rapier body/collider/joint sets
+//! are serialized; the contact machinery never crosses the byte boundary (deserialized
+//! broadphase state is memory-unsafe on hostile bytes) and is rebuilt fresh at decode.
+//!
+//! Guarantee: restore is STATE-exact (every serialized field bit-identical) and
+//! RESTORE-deterministic (one snapshot always resumes one trajectory), but the resumed
+//! trajectory departs from the never-snapshotted run at f32 rounding order — the fresh
+//! island manager solves constraints in a different order. Games with pure-data states
+//! keep full bit-transparency; this physics game's guarantee is deliberately narrower.
 
 use super::dynamics::{canonical_params, CarWorld};
 use super::{CarRacing, CarRacingState, LiveState};
 use crate::codec_util::{serde_decode, serde_encode};
-use rapier2d::prelude::{JointAxis, Rotation, SpatialVector, Vector};
+use rapier2d::prelude::{JointAxis, RigidBodyHandle, Vector};
 use reinfors_core::StateCodec;
 use std::sync::Arc;
 
@@ -50,39 +54,102 @@ fn check_bounded(label: &str, values: &[f64], bound: f64) -> Result<(), String> 
     Ok(())
 }
 
-/// Serialize the config-bearing sets with every dynamic field zeroed. Byte-comparing
-/// this against a freshly constructed car validates ALL immutable physics configuration
-/// (damping, mass properties, collider data, joint parameters, ...) without enumerating
-/// rapier's fields — any forgery outside the dynamic state changes the fingerprint.
-fn config_fingerprint(car: &CarWorld) -> Vec<u8> {
-    let mut c = car.clone();
-    let handles: Vec<_> = std::iter::once(c.hull)
-        .chain(c.wheels.iter().copied())
-        .collect();
-    for h in handles {
-        let b = &mut c.bodies[h];
-        b.set_translation(Vector::ZERO, false);
-        b.set_rotation(Rotation::IDENTITY, false);
-        b.set_linvel(Vector::ZERO, false);
-        b.set_angvel(0.0, false);
-        b.reset_forces(false);
-        b.reset_torques(false);
-    }
-    for jh in c.joints {
-        if let Some(j) = c.impulse_joints.get_mut(jh, false) {
-            j.impulses = SpatialVector::ZERO;
-            j.data.set_motor_velocity(JointAxis::AngX, 0.0, 0.0);
+/// Compare every step-relevant configuration field of the stored car against a
+/// freshly constructed one: body mass/damping properties, collider geometry and
+/// filters, and full joint definitions (motor velocity normalized — it is set from
+/// steer state each step). The contact machinery never crosses serde, shapes are
+/// whitelisted, and the rapier version is pinned exactly, so this enumeration is
+/// frozen with the dependency.
+fn validate_config(car: &CarWorld) -> Result<(), String> {
+    let reference = CarWorld::new(0.0, 0.0, 0.0);
+    let handles = |c: &CarWorld| -> Vec<_> {
+        std::iter::once(c.hull)
+            .chain(c.wheels.iter().copied())
+            .collect()
+    };
+    for (i, (&ha, &hb)) in handles(car).iter().zip(&handles(&reference)).enumerate() {
+        let (a, b) = (&car.bodies[ha], &reference.bodies[hb]);
+        let a_cfg = (
+            a.body_type(),
+            a.linear_damping(),
+            a.angular_damping(),
+            a.gravity_scale(),
+            a.dominance_group(),
+            a.is_ccd_enabled(),
+            a.mass(),
+            a.mass_properties().local_mprops.inv_principal_inertia,
+            a.mass_properties().local_mprops.local_com,
+        );
+        let b_cfg = (
+            b.body_type(),
+            b.linear_damping(),
+            b.angular_damping(),
+            b.gravity_scale(),
+            b.dominance_group(),
+            b.is_ccd_enabled(),
+            b.mass(),
+            b.mass_properties().local_mprops.inv_principal_inertia,
+            b.mass_properties().local_mprops.local_com,
+        );
+        if a_cfg != b_cfg {
+            return Err(format!(
+                "body {i} configuration differs from the canonical car"
+            ));
         }
     }
-    c.ctl = Default::default();
-    c.fuel_spent = 0.0;
-    // One canonical step from the zeroed state: identical configurations step to
-    // bit-identical worlds, and it normalizes solver bookkeeping and cached
-    // position/mass fields that setters do not touch.
-    c.params = canonical_params();
-    c.step(f64::from(canonical_params().dt));
-    postcard::to_stdvec(&(&c.bodies, &c.colliders, &c.impulse_joints))
-        .expect("physics sets always serialize")
+
+    let collider_cfg = |c: &CarWorld, h: RigidBodyHandle| -> Vec<Vec<u8>> {
+        let mut out: Vec<Vec<u8>> = c
+            .colliders
+            .iter()
+            .filter(|(_, col)| col.parent() == Some(h))
+            .map(|(_, col)| {
+                let poly = col.shape().as_convex_polygon().expect("whitelisted above");
+                postcard::to_stdvec(&(
+                    poly.points(),
+                    col.density(),
+                    col.is_sensor(),
+                    col.friction(),
+                    col.restitution(),
+                    col.collision_groups(),
+                    col.solver_groups(),
+                    col.position_wrt_parent()
+                        .map(|p| (p.translation, p.rotation.angle())),
+                ))
+                .expect("collider config serializes")
+            })
+            .collect();
+        out.sort_unstable();
+        out
+    };
+    for (i, (&ha, &hb)) in handles(car).iter().zip(&handles(&reference)).enumerate() {
+        if collider_cfg(car, ha) != collider_cfg(&reference, hb) {
+            return Err(format!(
+                "collider configuration on body {i} differs from the canonical car"
+            ));
+        }
+    }
+
+    for (i, (&ja, &jb)) in car.joints.iter().zip(&reference.joints).enumerate() {
+        let normalized = |c: &CarWorld, jh| -> Vec<u8> {
+            let mut data = c.impulse_joints.get(jh).expect("validated above").data;
+            data.set_motor_velocity(JointAxis::AngX, 0.0, 0.0);
+            // Motor and limit impulses are solver state, not configuration.
+            for m in &mut data.motors {
+                m.impulse = 0.0;
+            }
+            for l in &mut data.limits {
+                l.impulse = 0.0;
+            }
+            postcard::to_stdvec(&data).expect("joint config serializes")
+        };
+        if normalized(car, ja) != normalized(&reference, jb) {
+            return Err(format!(
+                "joint {i} configuration differs from the canonical car"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Enforce the exact five-body / eight-collider / four-revolute-joint graph and bound
@@ -143,6 +210,11 @@ fn validate_car(car: &CarWorld) -> Result<(), String> {
     let mut hull_colliders = 0usize;
     let mut wheel_colliders = [0usize; 4];
     for (_, collider) in car.colliders.iter() {
+        // Whitelist the shape before anything (fingerprint included) steps the world:
+        // hostile bytes can smuggle BVH-bearing shapes whose traversal is unsound.
+        if collider.shape().as_convex_polygon().is_none() {
+            return Err("a stored collider is not a convex polygon".to_string());
+        }
         let Some(parent) = collider.parent() else {
             return Err("an orphan collider in the stored car".to_string());
         };
@@ -206,6 +278,54 @@ fn validate_car(car: &CarWorld) -> Result<(), String> {
     Ok(())
 }
 
+/// Reassemble a deserialized world through rapier's insertion path: fresh contact
+/// machinery only learns about bodies via insertion bookkeeping, so a world whose sets
+/// were deserialized directly would never be simulated.
+fn rebuild_world(des: &CarWorld) -> CarWorld {
+    use rapier2d::prelude::*;
+    let mut bodies = RigidBodySet::new();
+    let mut colliders = ColliderSet::new();
+    let mut impulse_joints = ImpulseJointSet::new();
+    let mut map = std::collections::HashMap::new();
+    for (old, body) in des.bodies.iter() {
+        map.insert(old, bodies.insert(body.clone()));
+    }
+    for (_, collider) in des.colliders.iter() {
+        let parent = collider.parent().expect("validated: no orphan colliders");
+        colliders.insert_with_parent(collider.clone(), map[&parent], &mut bodies);
+    }
+    // insert_with_parent added collider masses onto the clone's already-complete
+    // mass properties; recompute from scratch to match the construction path.
+    for &new_handle in map.values() {
+        bodies[new_handle].recompute_mass_properties_from_colliders(&colliders);
+    }
+    let joints = des.joints.map(|jh| {
+        let j = des.impulse_joints.get(jh).expect("validated above");
+        let new = impulse_joints.insert(map[&j.body1()], map[&j.body2()], j.data, true);
+        impulse_joints
+            .get_mut(new, false)
+            .expect("just inserted")
+            .impulses = j.impulses;
+        new
+    });
+    CarWorld {
+        bodies,
+        colliders,
+        impulse_joints,
+        multibody_joints: MultibodyJointSet::new(),
+        islands: IslandManager::default(),
+        broad_phase: BroadPhaseBvh::new(),
+        narrow_phase: NarrowPhase::default(),
+        ccd: CCDSolver::default(),
+        params: super::dynamics::canonical_params(),
+        hull: map[&des.hull],
+        wheels: des.wheels.map(|w| map[&w]),
+        joints,
+        ctl: des.ctl.clone(),
+        fuel_spent: des.fuel_spent,
+    }
+}
+
 impl StateCodec for CarRacingCodec {
     type State = CarRacingState;
 
@@ -225,6 +345,32 @@ impl StateCodec for CarRacingCodec {
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<CarRacingState, String> {
+        // Hostile bytes can trip asserts inside rapier's deserialized structures before
+        // our validation sees them; contain any panic as a decode error.
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.decode_inner(bytes)));
+        match result {
+            Ok(r) => r,
+            Err(_) => Err("snapshot bytes rejected: physics deserialization panicked".to_string()),
+        }
+    }
+
+    fn validate_decoded_state(&self, state: &CarRacingState, done: bool) -> Result<(), String> {
+        match state {
+            CarRacingState::Pending => {
+                Err("a live restored state cannot be a pending chance sentinel".to_string())
+            }
+            CarRacingState::Live(l) if l.done != done => Err(format!(
+                "snapshot done flag {} disagrees with lifecycle done {done}",
+                l.done
+            )),
+            CarRacingState::Live(_) => Ok(()),
+        }
+    }
+}
+
+impl CarRacingCodec {
+    fn decode_inner(&self, bytes: &[u8]) -> Result<CarRacingState, String> {
         if bytes.len() > MAX_SNAPSHOT_BYTES {
             return Err(format!(
                 "snapshot of {} bytes exceeds the {MAX_SNAPSHOT_BYTES}-byte bound",
@@ -238,7 +384,7 @@ impl StateCodec for CarRacingCodec {
             done,
             new_lap,
             visited,
-            mut car,
+            car,
         } = snap
         else {
             return Ok(CarRacingState::Pending);
@@ -247,11 +393,8 @@ impl StateCodec for CarRacingCodec {
             return Err(format!("tick {tick} exceeds the tick bound"));
         }
         validate_car(&car)?;
-        if config_fingerprint(&car) != config_fingerprint(&CarWorld::new(0.0, 0.0, 0.0)) {
-            return Err(
-                "physics configuration differs from the canonical car construction".to_string(),
-            );
-        }
+        validate_config(&car).map_err(|e| format!("{e} construction"))?;
+        let mut car = rebuild_world(&car);
         car.params = canonical_params();
 
         let track = Arc::new(super::track::Track::generate(seed));
@@ -285,19 +428,6 @@ impl StateCodec for CarRacingCodec {
         };
         self.game.contact_pass_derived(&mut live);
         Ok(CarRacingState::Live(Box::new(live)))
-    }
-
-    fn validate_decoded_state(&self, state: &CarRacingState, done: bool) -> Result<(), String> {
-        match state {
-            CarRacingState::Pending => {
-                Err("a live restored state cannot be a pending chance sentinel".to_string())
-            }
-            CarRacingState::Live(l) if l.done != done => Err(format!(
-                "snapshot done flag {} disagrees with lifecycle done {done}",
-                l.done
-            )),
-            CarRacingState::Live(_) => Ok(()),
-        }
     }
 }
 

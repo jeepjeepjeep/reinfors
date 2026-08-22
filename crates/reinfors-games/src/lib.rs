@@ -32,7 +32,7 @@ pub(crate) mod codec_util;
 #[cfg(feature = "car-racing")]
 pub use car_racing::{
     codec::CarRacingCodec, render::CarRacingPixels, CarRacing, CarRacingEvent, CarRacingReward,
-    CarRacingState, CarRacingVec,
+    CarRacingState, CarRacingSummary, CarRacingVec,
 };
 pub use cozy_chess::Board as ChessBoard;
 pub use gridworld::{GridEvent, GridState, GridWorld, GridWorldPlanes, GridWorldReward};

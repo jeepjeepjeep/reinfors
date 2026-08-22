@@ -44,6 +44,42 @@ pub enum CarRacingState {
     Live(Box<LiveState>),
 }
 
+impl CarRacingState {
+    /// Narrow read-only view for state introspection; physics internals stay sealed.
+    pub fn summary(&self) -> Option<CarRacingSummary> {
+        let CarRacingState::Live(l) = self else {
+            return None;
+        };
+        let (x, y) = l.car.hull_pos();
+        Some(CarRacingSummary {
+            seed: l.seed,
+            tick: l.tick,
+            tiles_visited: l.visited_count,
+            total_tiles: l.track.tiles.len() as u32,
+            hull_position: (x, y),
+            hull_angle: l.car.hull_angle(),
+            speed: l.car.hull_speed(),
+            new_lap: l.new_lap,
+            done: l.done,
+            fallback_track: l.track.fallback,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CarRacingSummary {
+    pub seed: u32,
+    pub tick: u32,
+    pub tiles_visited: u32,
+    pub total_tiles: u32,
+    pub hull_position: (f64, f64),
+    pub hull_angle: f64,
+    pub speed: f64,
+    pub new_lap: bool,
+    pub done: bool,
+    pub fallback_track: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CarRacingEvent {
     pub new_tiles: u32,
@@ -662,20 +698,49 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_roundtrip_resumes_bit_identically() {
+    fn snapshot_restore_is_state_exact_and_deterministic() {
+        // The scoped guarantee (option B): state-exact and restore-deterministic, but
+        // NOT bit-transparent to the never-snapshotted run — the rebuilt island
+        // manager orders constraint solves differently (f32-LSB divergence).
         let codec = CarRacingCodec { game: game() };
         let plan_a: Vec<usize> = (0..80).map(|i| [3, 3, 1, 0, 2, 3][i % 6]).collect();
         let plan_b: Vec<usize> = (0..40).map(|i| [3, 2, 0, 1][i % 4]).collect();
         let (mid, _) = drive(&live(5), &plan_a);
-        let restored = codec.decode(&codec.encode(&mid)).unwrap();
+
+        // State-exact: one decode reaches the canonical byte form (a fixed point of
+        // encode/decode — live-world bookkeeping ids never survive the first cycle).
+        let bytes = codec.encode(&mid);
+        let restored = codec.decode(&bytes).unwrap();
         codec.validate_decoded_state(&restored, false).unwrap();
-        let (end_direct, _) = drive(&mid, &plan_b);
-        let (end_restored, _) = drive(&restored, &plan_b);
+        let canonical = codec.encode(&restored);
+        let round2 = codec.decode(&canonical).unwrap();
         assert_eq!(
-            fingerprint(&end_direct),
-            fingerprint(&end_restored),
-            "compact snapshot restore diverged: warm-start state matters; move to scheme (b)/(c)"
+            canonical,
+            codec.encode(&round2),
+            "canonical form must be a fixed point"
         );
+
+        // Restore-deterministic: two decodes resume identical trajectories.
+        let again = codec.decode(&bytes).unwrap();
+        let (end_a, _) = drive(&restored, &plan_b);
+        let (end_b, _) = drive(&again, &plan_b);
+        assert_eq!(fingerprint(&end_a), fingerprint(&end_b));
+
+        // Bounded departure from the direct run over a short horizon: same scene,
+        // different rounding — poses agree to well under a track width.
+        let (end_direct, _) = drive(&mid, &plan_b);
+        let (CarRacingState::Live(d), CarRacingState::Live(r)) = (&end_direct, &end_a) else {
+            unreachable!()
+        };
+        let (dx, dy) = d.car.hull_pos();
+        let (rx, ry) = r.car.hull_pos();
+        let dist = ((dx - rx).powi(2) + (dy - ry).powi(2)).sqrt();
+        assert!(
+            dist < 1.0,
+            "restored trajectory drifted {dist} world units in 40 steps"
+        );
+        assert_eq!(d.tick, r.tick);
+        assert_eq!(d.visited_count, r.visited_count);
     }
 
     #[test]
