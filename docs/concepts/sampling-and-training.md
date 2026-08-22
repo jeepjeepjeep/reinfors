@@ -15,7 +15,7 @@ games and, where applicable, many search leaves.
    further search work with your calls.
 5. The learner emits records until the requested record floor is reached.
 
-The callback overhead is paid per pooled round rather than per environment or tree node.
+The callback overhead is paid per pooled callback batch rather than per environment or tree node.
 Increasing the number of parallel episode slots (`n_games`), search width, or concurrent work can
 therefore increase accelerator utilization, subject to the algorithm and game.
 

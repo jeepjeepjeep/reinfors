@@ -36,9 +36,12 @@ The trait is in `crates/reinfors-core/src/policy.rs`. Its surface, in the order 
   rows, borrowed from the scheduler's buffer, in emission order; `finish(ctx, search)`
   returns **one `(evaluation, interior targets)` pair per perspective, in `perspectives`
   order** — the engine asserts the count. A policy never calls the network directly and
-  never holds an RNG or seed: all randomness comes from `ctx.rng`, all inference rides the
-  scheduler's queue, which is what lets the engine batch rows across games (and decouple
-  callback batches from your rounds — never assume a round's rows share one callback call).
+  never holds an RNG or seed: search randomness comes from `ctx.rng`, while hooks such as
+  `begin_episode` and `select` draw from their explicit RNG arguments. During engine
+  collection, inference rides the scheduler's queue, which is what lets the engine batch
+  rows across games (and decouple callback batches from your rounds — never assume a
+  round's rows share one callback call); `choose` and the Arena drive the same search
+  machine through the lockstep driver.
   Model-free policies can delegate to the shared `OneShot` machine
   (`policies/modelfree/mod.rs`): encode at begin, emit one round, build evaluations at
   absorb.
