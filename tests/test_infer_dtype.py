@@ -45,6 +45,7 @@ def _az_engine(seed: int = 5) -> "rf.Engine":
         rf.learners.AlphaZero(gamma=1.0),
         n_games=2,
         seed=seed,
+        n_threads=1,  # bit-identity is only contracted on the reproducible schedule
     )
 
 
@@ -56,6 +57,7 @@ def _q_engine(seed: int = 5) -> "rf.Engine":
         rf.learners.Dqn(),
         n_games=2,
         seed=seed,
+        n_threads=1,  # bit-identity is only contracted on the reproducible schedule
     )
 
 
