@@ -103,7 +103,7 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     perms: crate::encoder::PermTable,
     batch_size: usize,
     sweep_cursor: usize,
-    n_workers: usize,
+    thread_pool: rayon::ThreadPool,
 }
 
 impl<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> Engine<G, P, L>
@@ -182,11 +182,16 @@ where
                 .batch_size
                 .unwrap_or_else(|| (params.n_games / 2).max(1)),
             sweep_cursor: 0,
-            n_workers: params
-                .n_threads
-                .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
-                .unwrap_or(1)
-                .max(1),
+            thread_pool: rayon::ThreadPoolBuilder::new()
+                .num_threads(
+                    params
+                        .n_threads
+                        .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
+                        .unwrap_or(1)
+                        .max(1),
+                )
+                .build()
+                .expect("engine thread pool"),
         }
     }
 
@@ -483,25 +488,18 @@ where
             let admitted = !cutting;
             let mut frag_stage = false;
 
-            let work = WorkQueue::new();
-            let n_workers = self.n_workers;
-            std::thread::scope(|s| {
-                for _ in 0..n_workers {
-                    let (work, tx) = (&work, tx.clone());
-                    s.spawn(move || {
-                        while let Some((gi, item)) = work.pop() {
-                            task(gi, item, tx.clone());
-                        }
-                    });
-                }
-                let _close = CloseOnDrop(&work);
+            // FIFO spawning on the persistent pool: at one worker, tasks execute in
+            // spawn order — the determinism contract's substrate (per-collect thread
+            // creation measurably taxed small collects).
+            self.thread_pool.in_place_scope_fifo(|s| {
                 let spawn = |gi: usize,
                              work_item: Work<P::Search<G::State>>,
                              phases: &mut Vec<SlotPhase<P::Search<G::State>>>,
                              in_flight: &mut usize| {
                     phases[gi] = SlotPhase::Running;
                     *in_flight += 1;
-                    work.push(gi, work_item);
+                    let txc = tx.clone();
+                    s.spawn_fifo(move |_| task(gi, work_item, txc));
                 };
                 // Fire `take` rows from one queue and hand freed slots back to the pool.
                 macro_rules! fire_settled {
@@ -1136,58 +1134,6 @@ struct Msg<SE, R> {
 }
 
 type MsgSender<SE, R> = std::sync::mpsc::Sender<Msg<SE, R>>;
-
-/// Strict-FIFO work dispatch: task completion order at one worker is exactly push
-/// order, which the determinism contract requires (rayon's stealing runs injected
-/// batches LIFO).
-type WorkItems<SE> = (std::collections::VecDeque<(usize, Work<SE>)>, bool);
-
-struct WorkQueue<SE> {
-    q: std::sync::Mutex<WorkItems<SE>>,
-    cv: std::sync::Condvar,
-}
-
-impl<SE> WorkQueue<SE> {
-    fn new() -> Self {
-        WorkQueue {
-            q: std::sync::Mutex::new((std::collections::VecDeque::new(), false)),
-            cv: std::sync::Condvar::new(),
-        }
-    }
-
-    fn push(&self, gi: usize, work: Work<SE>) {
-        self.q.lock().expect("work queue").0.push_back((gi, work));
-        self.cv.notify_one();
-    }
-
-    fn close(&self) {
-        self.q.lock().expect("work queue").1 = true;
-        self.cv.notify_all();
-    }
-
-    fn pop(&self) -> Option<(usize, Work<SE>)> {
-        let mut guard = self.q.lock().expect("work queue");
-        loop {
-            if let Some(item) = guard.0.pop_front() {
-                return Some(item);
-            }
-            if guard.1 {
-                return None;
-            }
-            guard = self.cv.wait(guard).expect("work queue");
-        }
-    }
-}
-
-/// Closes the work queue on scope exit — including unwinds (a callback panic must not
-/// leave workers parked while `thread::scope` waits to join them).
-struct CloseOnDrop<'a, SE>(&'a WorkQueue<SE>);
-
-impl<SE> Drop for CloseOnDrop<'_, SE> {
-    fn drop(&mut self) {
-        self.0.close();
-    }
-}
 
 /// Forward the first `take` queued rows in one evaluator call and route the results to the
 /// destination slots' row buffers, decrementing their outstanding counts.
