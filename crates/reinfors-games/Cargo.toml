@@ -18,7 +18,7 @@ rs_poker = { version = "5", default-features = false }
 rapier2d = { version = "=0.35.2", features = ["enhanced-determinism"], optional = true }
 libm = { version = "0.2", optional = true }
 smallvec = { version = "1", optional = true }
-tiny-skia = { version = "0.11", optional = true }
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"], optional = true }
 
 [dev-dependencies]
 rayon = "1"
