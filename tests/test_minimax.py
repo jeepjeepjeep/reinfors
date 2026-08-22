@@ -19,6 +19,7 @@ def connect4_engine(seed: int = 0, **policy_kwargs: object) -> rf.Engine:
         rf.learners.TreeStrap(),
         n_games=2,
         seed=seed,
+        n_threads=1,
     )
 
 

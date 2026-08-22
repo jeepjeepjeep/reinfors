@@ -74,7 +74,9 @@ fn engine() -> Engine<Alt, EpsilonGreedyQ, Dqn> {
         EngineParams {
             n_games: 2,
             seed: 3,
-            n_groups: 1,
+            // Drain-only firing: whole rounds per call, so the evaluator's cross-row
+            // validations see multi-row per-player batches.
+            batch_size: Some(usize::MAX),
             ..Default::default()
         },
     )
@@ -83,6 +85,37 @@ fn engine() -> Engine<Alt, EpsilonGreedyQ, Dqn> {
 fn opposed_nets(player: usize, _obs: Vec<f32>, n: usize) -> Vec<f64> {
     let row = if player == 0 { [1.0, 0.0] } else { [0.0, 1.0] };
     (0..n).flat_map(|_| row).collect()
+}
+
+#[test]
+fn threshold_batches_keep_per_player_routing_pure() {
+    // Real threshold firing (no drain-only override): each callback invocation must
+    // still carry a single player's rows, and routing must survive rows of one round
+    // landing in different batches.
+    let mut e = Engine::new(
+        Alt,
+        Box::new(Enc),
+        Box::new(Zero),
+        EpsilonGreedyQ::new(1, 0.0),
+        Dqn::new(1, 1.0, 1, 0.99),
+        EngineParams {
+            n_games: 4,
+            seed: 3,
+            batch_size: Some(2),
+            ..Default::default()
+        },
+    );
+    let (records, _) = e.collect_routed(24, InferMode::PerPlayer, |player, _obs, n| {
+        let row = if player == 0 { [1.0, 0.0] } else { [0.0, 1.0] };
+        (0..n).flat_map(|_| row).collect()
+    });
+    assert!(records.len() >= 24);
+    for r in &records {
+        assert_eq!(
+            r.action, r.player,
+            "threshold batches must not cross players' networks"
+        );
+    }
 }
 
 #[test]
@@ -203,7 +236,7 @@ fn per_player_row_widths_must_agree_across_players() {
         EngineParams {
             n_games: 1,
             seed: 3,
-            n_groups: 1,
+            batch_size: Some(usize::MAX),
             ..Default::default()
         },
     );
@@ -220,4 +253,43 @@ fn learn_players_validates_indices() {
 #[should_panic(expected = "at least one player")]
 fn learn_players_rejects_empty() {
     let _ = engine().with_learn_players(&[]);
+}
+
+#[test]
+fn per_player_queues_fire_at_the_full_batch_size_each() {
+    // The design's per-player batching: one queue per player, batch_size applying to
+    // each queue independently. A two-player simultaneous round contributes one row to
+    // each queue; neither may fire below the threshold (drains excepted).
+    let mut e = Engine::new(
+        Simul,
+        Box::new(Enc),
+        Box::new(Zero),
+        EpsilonGreedyQ::new(1, 0.0),
+        Dqn::new(1, 1.0, 1, 0.99),
+        EngineParams {
+            n_games: 4,
+            seed: 3,
+            batch_size: Some(2),
+            n_threads: Some(1),
+            ..Default::default()
+        },
+    );
+    let sizes = std::sync::Mutex::new(vec![Vec::new(), Vec::new()]);
+    let (records, _) = e.collect_routed(24, InferMode::PerPlayer, |player, _obs, n| {
+        sizes.lock().unwrap()[player].push(n);
+        (0..n).flat_map(|_| [1.0, 0.0]).collect()
+    });
+    assert!(records.len() >= 24);
+    let sizes = sizes.lock().unwrap();
+    for (player, calls) in sizes.iter().enumerate() {
+        assert!(!calls.is_empty(), "player {player} must be served");
+        assert!(
+            calls.iter().all(|&n| n <= 2),
+            "player {player} exceeded its queue's batch_size: {calls:?}"
+        );
+        assert!(
+            calls.iter().filter(|&&n| n == 2).count() * 2 >= calls.len(),
+            "player {player} must mostly see full threshold batches: {calls:?}"
+        );
+    }
 }

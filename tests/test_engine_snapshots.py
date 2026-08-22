@@ -21,6 +21,7 @@ def _mk(family: str) -> tuple[rf.Engine, Any]:
             n_games=2,
             seed=5,
             infer_cache=4096,
+            n_threads=1,
         )
         return e, lambda obs: (np.zeros((obs.shape[0], 4672)), np.zeros(obs.shape[0]))
     if family == "dqn":
@@ -31,6 +32,7 @@ def _mk(family: str) -> tuple[rf.Engine, Any]:
             rf.learners.Dqn(bootstrap_p=0.7),
             n_games=2,
             seed=9,
+            n_threads=1,
         )
         return e, lambda obs: np.full((obs.shape[0], 2, 1352), 0.1)
     e = rf.Engine(
@@ -43,6 +45,7 @@ def _mk(family: str) -> tuple[rf.Engine, Any]:
         start_buffer=True,
         start_buffer_capacity=20,
         p_fresh=0.3,
+        n_threads=1,
     )
     return e, lambda obs: np.full((obs.shape[0], 2, 3), 0.25)
 
@@ -139,6 +142,7 @@ def test_restore_clears_a_warm_cache_from_other_weights() -> None:
             n_games=1,
             seed=0,
             infer_cache=4096,
+            n_threads=1,
         )
 
     def net(best: int) -> Any:
@@ -169,12 +173,9 @@ def test_forged_payload_semantics_are_rejected() -> None:
     blob = bytearray(snap.to_bytes())
     # Envelope header: magic 4 + schema 1 + fp(4+64) + gen 8 + pv(1+4+0) + payload len 4.
     payload_off = 4 + 1 + 4 + 64 + 8 + 1 + 4 + 4
-    # Payload (schema v3): version 1 + n_games 4 + agents 4 + rngs 16 + group-stream count 4
-    # + 8 per stream => ticks live inside the per-game section; forge the FIRST game's tick
-    # to u64::MAX (version+counts+rngs+groups, then state blob).
-    group_cnt_off = payload_off + 1 + 4 + 4 + 16
-    group_count = int.from_bytes(blob[group_cnt_off : group_cnt_off + 4], "little")
-    state_len_off = group_cnt_off + 4 + 8 * group_count
+    # Payload (schema v4): version 1 + n_games 4 + agents 4 + buffer rng 8 + sweep
+    # cursor 8, then the per-game section; forge the FIRST game's tick to u64::MAX.
+    state_len_off = payload_off + 1 + 4 + 4 + 8 + 8
     state_len = int.from_bytes(blob[state_len_off : state_len_off + 4], "little")
     rng_off = state_len_off + 4 + state_len
     tick_off = rng_off + 8
@@ -219,3 +220,32 @@ def test_engine_envelope_booleans_are_strict() -> None:
     blob[4 + 1 + 4 + 64 + 8] = 2  # policy_version presence byte
     with pytest.raises(ValueError, match="not a bool"):
         rf.EngineSnapshot.from_bytes(bytes(blob))
+
+
+def test_zero_floor_collect_leaves_the_snapshot_unchanged() -> None:
+    engine, infer = _mk("az")
+    before = engine.snapshot().to_bytes()
+    batch = engine.collect(0, infer)
+    assert len(batch.obs) == 0
+    assert engine.snapshot().to_bytes() == before
+
+
+def test_snapshots_restore_across_scheduler_knobs() -> None:
+    # batch_size/n_threads are configuration, not composition: a snapshot taken under one
+    # setting restores under another and the collection continues validly.
+    a, infer = _mk("az")
+    a.collect(8, infer)
+    snap = a.snapshot()
+    b = rf.Engine(
+        rf.games.Chess(max_ticks=50, encoder=rf.encoders.OpenSpielChess()),
+        None,
+        rf.policies.AlphaZero(num_simulations=6),
+        rf.learners.AlphaZero(gamma=1.0),
+        n_games=2,
+        seed=5,
+        infer_cache=4096,
+        batch_size=7,
+        n_threads=2,
+    )
+    b.restore(snap)
+    assert b.collect(8, infer).obs.shape[0] >= 8

@@ -472,17 +472,22 @@ class Engine:
         # Restrict training-record emission to these players (frozen opponents keep acting but
         # leave no records). Default: all players learn; records carry their player either way.
         learn_players: list[int] | None = ...,
-        # Grouped collect (1 = off): 2 overlaps tree work with inference via two fixed game
-        # groups on worker threads. Policy/learner-agnostic; one shared callback required.
-        # Run-to-run nondeterministic while shared state (cache/start buffer/weight
-        # refreshes) is live; exact otherwise. Reproduce with n_groups=1. Fingerprinted.
-        # Guidance: docs/guides/training.md#overlapping-search-and-inference-n_groups.
-        n_groups: int = ...,
-        # Fix shared-callback call shapes at exactly N rows (0 = off): short calls are
-        # zero-padded (outputs for pad rows discarded), oversized calls split into N-row
-        # chunks. For compiled/graph-captured callbacks. Fingerprinted.
+        # Fix shared-callback call shapes at exactly batch_size rows: drain batches are
+        # zero-padded (outputs for pad rows discarded). For compiled/graph-captured
+        # callbacks. Excluded from the fingerprint.
         # Reference: docs/reference/inference-contract.md#input.
-        pad_rows_to: int = ...,
+        pad: bool = ...,
+        # Inference batching threshold in rows (0 = default of max(1, n_games/2)): the scheduler
+        # fires the callback once this many rows are queued, or earlier on drain. Part of the
+        # resolved config and config_fingerprint; snapshots restore across different values,
+        # though window composition may differ.
+        batch_size: int = ...,
+        # Worker threads running search rounds (0 = automatic: available cores, capped at
+        # n_games). The automatic setting stays null in resolved_config — it is an
+        # unresolved, machine-dependent choice, so composition fingerprints stay portable;
+        # window composition may differ across machines. Reproducible at n_threads=1.
+        # Snapshots restore across different values.
+        n_threads: int = ...,
     ) -> None: ...
     # Tell the engine the net's weights changed (call after every weight sync — e.g. right after
     # load_state_dict onto the collector net). Clears the infer cache at the next round boundary;

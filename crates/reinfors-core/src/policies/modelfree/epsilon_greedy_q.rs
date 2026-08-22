@@ -1,13 +1,8 @@
 //! Epsilon-greedy acting on ensemble Q-values.
 
-use std::collections::HashMap;
-
 use crate::codec::bytes::Reader;
-use crate::encoder::{head_permutation, StateEncoder};
 use crate::game::{Game, Rng};
 use crate::policy::{thompson_head_from_u64, Policy};
-use crate::reward::Reward;
-use crate::rollout::evaluator::Evaluator;
 
 /// Per-head Q-values and legal actions for one decision.
 pub struct QEvaluation {
@@ -90,57 +85,78 @@ impl Policy for EpsilonGreedyQ {
         thompson_head_from_u64(v, self.n_heads)
     }
 
-    fn evaluate<G, F>(
+    type Search<S: Send> = super::OneShot<S, QEvaluation>;
+
+    fn begin_search<G: Game + Sync>(
         &self,
-        game: &G,
-        enc: &dyn StateEncoder<State = G::State>,
-        _reward: &dyn Reward<Event = G::Event>,
-        requests: Vec<(G::State, usize)>,
-        _seed: u64,
-        _collect_interior: bool,
-        eval: &mut Evaluator<'_, F>,
-    ) -> Vec<QEvaluation>
+        ctx: crate::policy::SearchCtx<'_, G>,
+        state: &G::State,
+        perspectives: &[usize],
+    ) -> Self::Search<G::State>
     where
-        G: Game + Sync,
         G::State: Send,
-        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
-        let n = requests.len();
-        if n == 0 {
-            return Vec::new();
-        }
-        let a = game.action_count();
-        let mut obs_flat: Vec<f32> = Vec::new();
-        for (state, agent) in &requests {
-            obs_flat.extend(enc.encode(state, *agent));
-        }
-        let players: Vec<usize> = requests.iter().map(|(_, agent)| *agent).collect();
-        let q = eval.forward(&players, obs_flat, n);
-        let k = q.len() / (n * a);
-        // Build each action-frame permutation once rather than dispatching per Q-value.
-        let mut perms: HashMap<usize, (Vec<usize>, bool)> = HashMap::new();
-        requests
+        super::one_shot_begin(&ctx, state, perspectives)
+    }
+
+    fn round<G: Game + Sync>(
+        &self,
+        _ctx: crate::policy::SearchCtx<'_, G>,
+        search: &mut Self::Search<G::State>,
+        out: &mut crate::policy::RequestSink,
+    ) -> crate::policy::RoundStatus
+    where
+        G::State: Send,
+    {
+        super::one_shot_round(search, out)
+    }
+
+    fn absorb<G: Game + Sync>(
+        &self,
+        ctx: crate::policy::SearchCtx<'_, G>,
+        search: &mut Self::Search<G::State>,
+        rows: crate::policy::RowsView<'_>,
+    ) where
+        G::State: Send,
+    {
+        let a = ctx.game.action_count();
+        let k = rows.stride() / a;
+        let legal_all = std::mem::take(&mut search.legal);
+        search.results = search
+            .agents
             .iter()
+            .zip(legal_all)
             .enumerate()
-            .map(|(i, (state, agent))| {
-                let (perm, identity) = perms
-                    .entry(*agent)
-                    .or_insert_with(|| head_permutation(enc, a, *agent));
+            .map(|(i, (&agent, legal))| {
+                let (perm, identity) = ctx.perms.get(agent);
+                let row = rows.row(i);
                 let values = (0..k)
                     .map(|h| {
-                        let start = (i * k + h) * a;
-                        if *identity {
-                            q[start..start + a].to_vec()
+                        let head = &row[h * a..(h + 1) * a];
+                        if identity {
+                            head.to_vec()
                         } else {
-                            perm.iter().map(|&p| q[start + p]).collect()
+                            perm.iter().map(|&p| head[p]).collect()
                         }
                     })
                     .collect();
-                QEvaluation {
-                    values,
-                    legal: game.legal_actions(state, *agent),
-                }
+                QEvaluation { values, legal }
             })
+            .collect();
+    }
+
+    fn finish<G: Game + Sync>(
+        &self,
+        _ctx: crate::policy::SearchCtx<'_, G>,
+        search: Self::Search<G::State>,
+    ) -> Vec<(QEvaluation, Vec<crate::learner::InteriorTarget>)>
+    where
+        G::State: Send,
+    {
+        search
+            .results
+            .into_iter()
+            .map(|e| (e, Vec::new()))
             .collect()
     }
 

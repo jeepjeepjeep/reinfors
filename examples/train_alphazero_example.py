@@ -110,7 +110,7 @@ def alphazero_loss(
     return policy_loss, value_loss
 
 
-def build_engine(n_games: int, seed: int, sequential_backup: str = "auto", n_groups: int = 1) -> rf.Engine:
+def build_engine(n_games: int, seed: int, sequential_backup: str = "auto") -> rf.Engine:
     # Handle defaults are the AlphaZero conventions: noise_epsilon 0.25, noise_alpha 0.3,
     # temperature 1.0 for the first 8 plies. gamma=1 + win/loss=±1 gives the paper's z.
     # `sequential_backup="maxn"` forces the Max^N vector backup (per-perspective leaf values +
@@ -122,7 +122,6 @@ def build_engine(n_games: int, seed: int, sequential_backup: str = "auto", n_gro
         rf.learners.AlphaZero(gamma=1.0),
         n_games=n_games,
         seed=seed,
-        n_groups=n_groups,
     )
 
 
@@ -223,14 +222,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--iterations", type=int, default=40, help="collect+train cycles")
     parser.add_argument("--n-games", type=int, default=8, help="parallel self-play games per collect")
-    parser.add_argument(
-        "--n-groups",
-        type=int,
-        default=1,
-        choices=[1, 2],
-        help="2 = double-buffered collect: tree work overlaps inference (size n-games so each "
-        "group stays at your accelerator's batch sweet spot)",
-    )
     parser.add_argument("--collect-size", type=int, default=512, help="record floor per collect")
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--train-passes", type=int, default=1, help="minibatch passes per batch (data reuse)")
@@ -258,11 +249,9 @@ def main() -> None:
     game = rf.games.Connect4()
     net = AlphaZeroNet(game.observation_space().shape, game.action_space().n, args.width).to(args.device)
     optimizer = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
-    engine = build_engine(args.n_games, args.seed, args.sequential_backup, args.n_groups)
+    engine = build_engine(args.n_games, args.seed, args.sequential_backup)
 
     mode = "sync" if args.depth is None else f"depth={args.depth}"
-    if args.n_groups == 2:
-        mode += ", n_groups=2"
     print(
         f"training on {args.device} — connect4, {args.n_games} games/collect, 48 sims/move, width {args.width}, {mode}"
     )

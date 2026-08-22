@@ -814,7 +814,7 @@ cpufeatures 0.3.0 — MIT OR Apache-2.0 — https://github.com/RustCrypto/utils
 [LICENSE-MIT: text identical to cpufeatures 0.2.17/LICENSE-MIT]
 
 ==============================================================================
-crossbeam-deque 0.8.6 — MIT OR Apache-2.0 — https://github.com/crossbeam-rs/crossbeam
+crossbeam-deque 0.8.7 — MIT OR Apache-2.0 — https://github.com/crossbeam-rs/crossbeam
 [LICENSE-APACHE: text identical to cfg-if 1.0.4/LICENSE-APACHE]
 --- LICENSE-MIT ---
 The MIT License (MIT)
@@ -846,14 +846,14 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
-crossbeam-epoch 0.9.18 — MIT OR Apache-2.0 — https://github.com/crossbeam-rs/crossbeam
+crossbeam-epoch 0.9.20 — MIT OR Apache-2.0 — https://github.com/crossbeam-rs/crossbeam
 [LICENSE-APACHE: text identical to cfg-if 1.0.4/LICENSE-APACHE]
-[LICENSE-MIT: text identical to crossbeam-deque 0.8.6/LICENSE-MIT]
+[LICENSE-MIT: text identical to crossbeam-deque 0.8.7/LICENSE-MIT]
 
 ==============================================================================
-crossbeam-utils 0.8.21 — MIT OR Apache-2.0 — https://github.com/crossbeam-rs/crossbeam
+crossbeam-utils 0.8.22 — MIT OR Apache-2.0 — https://github.com/crossbeam-rs/crossbeam
 [LICENSE-APACHE: text identical to cfg-if 1.0.4/LICENSE-APACHE]
-[LICENSE-MIT: text identical to crossbeam-deque 0.8.6/LICENSE-MIT]
+[LICENSE-MIT: text identical to crossbeam-deque 0.8.7/LICENSE-MIT]
 
 ==============================================================================
 crypto-common 0.1.7 — MIT OR Apache-2.0 — https://github.com/RustCrypto/traits
@@ -916,7 +916,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
-either 1.16.0 — MIT OR Apache-2.0 — https://github.com/rayon-rs/either
+either 1.18.0 — MIT OR Apache-2.0 — https://github.com/rayon-rs/either
 [LICENSE-APACHE: text identical to cfg-if 1.0.4/LICENSE-APACHE]
 --- LICENSE-MIT ---
 Copyright (c) 2015
@@ -2362,7 +2362,7 @@ DEALINGS IN THE SOFTWARE.
 ==============================================================================
 rawpointer 0.2.1 — MIT/Apache-2.0 — https://github.com/bluss/rawpointer/
 [LICENSE-APACHE: text identical to cfg-if 1.0.4/LICENSE-APACHE]
-[LICENSE-MIT: text identical to either 1.16.0/LICENSE-MIT]
+[LICENSE-MIT: text identical to either 1.18.0/LICENSE-MIT]
 
 ==============================================================================
 rayon 1.12.0 — MIT OR Apache-2.0 — https://github.com/rayon-rs/rayon

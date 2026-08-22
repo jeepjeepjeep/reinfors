@@ -151,54 +151,33 @@ Use `engine.resolved_config()` alongside checkpoints to record all constructor d
 workflow. If the experiment enables inference caching, follow the
 [cache lifecycle guide](configuration-and-checkpoints.md#inference-cache-lifecycle).
 
-## Overlapping search and inference (`n_groups`)
+## Scheduler knobs (`batch_size`, `n_threads`, `pad`)
 
-By default the engine's collect loop alternates between tree work on the CPU and your `infer`
-callback: while the accelerator runs a batch, the engine waits, and vice versa. With
-`n_groups=2` the games split into two fixed groups, each collecting on its own worker
-thread with inference forwarded to a service thread that owns the callback — one group's
-tree work runs while the other group's batch is inside the callback.
+The collect loop is a threshold scheduler: worker threads run search rounds and feed
+inference requests into a shared queue, and the callback fires on the collecting thread
+the moment `batch_size` rows are queued (default `max(1, n_games/2)`) — or earlier when
+no search can progress without results — so tree work overlaps inference.
+Episode-boundary and fragment-cut tail bootstraps ride the same queue, so every row that
+crosses the callback seam obeys the same batching. Raise `batch_size` toward your
+accelerator's sweet spot for larger, fewer calls at the cost of some latency;
+`telemetry["infer_rows"] / telemetry["infer_calls"]` reports the realized mean, and
+raising `n_games` is the first lever when that mean is small. `n_threads` sets the worker
+count (default: automatic — available cores, capped at `n_games`; the automatic setting
+renders as `null` in `resolved_config()` since its resolution is machine-dependent). `pad` fixes every call at exactly `batch_size` rows for
+compiled/graph-captured forwards — see the
+[inference contract](../reference/inference-contract.md#input). All three are part of the
+resolved configuration and `config_fingerprint()` — changing them changes which games
+advance before the floor and therefore the returned window's composition — but they are
+excluded from the snapshot compatibility fingerprint, so checkpoints restore across
+different values. Collection is exactly reproducible at `n_threads=1` with a
+deterministic callback; at `n_threads>1`, task completion order varies between runs — a
+valid collection either way.
 
-With per-group search time `S` and inference time `I`, steady-state throughput improves from
-one group-round per `S + I` to one per `max(S, I)` — a gain of `(S + I) / max(S, I)`, largest
-when the two stages are *balanced* (up to 2x at `S ≈ I`) and small when either stage
-dominates. Per-game decision latency moves from `S + I` to roughly `2 · max(S, I)`: similar
-when balanced, approaching 2x when one stage dominates. Measure your own split before
-reaching for this knob: `telemetry["infer_seconds"]` against wall time gives `I`'s share.
-
-Sizing: keep each *group's* callback batches near your accelerator's sweet spot, which
-usually means doubling `n_games` rather than splitting it. Note that games-per-group only
-approximates rows-per-callback — simultaneous and MaxN searches evaluate multiple
-perspectives per node, exhaustive chance fans stage every outcome, and cache hits, in-batch
-deduplication, and terminal simulations all remove rows. Check the realized mean with
-`telemetry["infer_rows"] / telemetry["infer_calls"]` rather than assuming it (with
-`pad_rows_to`, add `padded_rows` to the numerator for the physical size); a
-`n_games=128, n_groups=2` starting point for a sequential game at a batch-64 sweet spot is a
-workload-specific example, not a rule. If the callback needs a *constant* row count
-(compiled/graph-captured forwards), `pad_rows_to` in the
-[inference contract](../reference/inference-contract.md#input) fixes every call at exactly
-that row count — zero-padding short calls, chunking oversized ones — at the cost of
-discarded pad-row compute.
-
-Grouped collects are run-to-run nondeterministic while shared state is live — the shared
-inference cache, the start buffer, and weight refreshes — which is the same status real
-accelerator training already has. With deterministic inference and none of those in play
-(e.g. cacheless test configurations) they are exact: per-group record floors and
-persistent per-group rng streams (carried in snapshots) make results independent of
-scheduling. Splitting one collect into several remains observable — record floors reset
-per call. Reproduce anomalies with `n_groups=1`, which stays
-exactly deterministic. Digests differ from `n_groups=1` — it is a different composition,
-and `resolved_config()`/`config_fingerprint()` record it.
-On a weight refresh (`weights_updated()`), rows already in flight finish their round. Once
-a round observes the new generation (each round syncs at its boundary, before any lookup),
-older entries are cleared and no longer served; a refresh landing *mid-round* takes effect
-at the next boundary, so that round's remaining lookups may still see pre-refresh entries —
-the same one-round staleness window the ungrouped collect has.
-
-Grouping is policy- and learner-agnostic: any composition collects grouped, including
-truncation-tail bootstrapping (tail forwards are ordinary inference requests). The one
-remaining restriction — a single shared callback, not per-player routing — is checked when
-a collect or stream begins, since the callback shape is only known then.
+Games progress unevenly under the scheduler: a game whose search completes re-enters play
+while slower searches continue, so a window over-represents fast-deciding games for tree
+policies (the actor-progress skew standard in async RL). Each game's fragment remains a
+faithful on-policy prefix; uniform-cost policies (PPO, DQN) keep progress even to within
+one decision as a consequence of the round-robin sweep.
 
 ## Compiling the inference callback
 
@@ -210,7 +189,7 @@ V1 benchmark favored —
 [+19.6% completed training states/s](https://github.com/jeepjeepjeep/reinfors-benchmarks/blob/main/docs/configuring-the-engines.md#reinfors-throughput-levers)
 at its operating point, measured on one chess ResNet workload on an A10G; measure it on
 your own workload. Graph-capture modes recapture or recompile per batch shape; a
-constant row count avoids that, which is what `pad_rows_to` in the
+constant row count avoids that, which is what `pad` in the
 [inference contract](../reference/inference-contract.md#input) provides. The first
 calls pay compilation latency, so short CPU example runs skip it.
 

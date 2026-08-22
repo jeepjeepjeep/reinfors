@@ -2,7 +2,7 @@
 
 use crate::encoder::{head_permutation, ActionView};
 use crate::game::Rng;
-use crate::learner::{Learner, Step};
+use crate::learner::{InteriorTarget, Learner, Step};
 use crate::policies::tree::expectimax::SearchEvaluation;
 
 /// `(observation, policy target, value target, policy weight, player, legal head-frame actions)`.
@@ -50,7 +50,6 @@ impl Learner<SearchEvaluation> for AlphaZeroLearner {
         Some(SearchEvaluation {
             values: vec![vec![0.0; action_count]],
             visits: vec![0.0; action_count],
-            interior: Vec::new(),
             legal: Vec::new(),
             stats: Default::default(),
         })
@@ -58,7 +57,8 @@ impl Learner<SearchEvaluation> for AlphaZeroLearner {
 
     fn eval_records(
         &self,
-        _evaluation: &mut SearchEvaluation,
+        _evaluation: &SearchEvaluation,
+        _targets: Vec<InteriorTarget>,
         _view: &dyn ActionView,
         _agent: usize,
         _rng: &mut dyn Rng,
@@ -120,7 +120,6 @@ pub(crate) mod tests {
         SearchEvaluation {
             values: vec![vec![0.0; n]],
             visits,
-            interior: Vec::new(),
             legal: (0..n).collect(),
             stats: SearchStats::default(),
         }
@@ -211,9 +210,9 @@ pub(crate) mod tests {
     #[test]
     fn no_immediate_records() {
         let learner = AlphaZeroLearner::new(1.0);
-        let mut e = eval(vec![1.0, 2.0]);
+        let e = eval(vec![1.0, 2.0]);
         assert!(learner
-            .eval_records(&mut e, &IdentityView, 0, &mut SplitMix64::new(0))
+            .eval_records(&e, Vec::new(), &IdentityView, 0, &mut SplitMix64::new(0))
             .is_empty());
     }
 }

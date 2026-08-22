@@ -4,10 +4,11 @@ use crate::codec::bytes::Reader;
 use crate::encoder::StateEncoder;
 use crate::game::{Game, Rng};
 use crate::policies::tree::expectimax::{decode_search_eval, encode_search_eval, SearchEvaluation};
+use crate::policies::tree::fold_search_stats;
 use crate::policies::tree::mcts::{
     sample_visits, search_many, Guidance, NoiseScope, SequentialBackup,
 };
-use crate::policy::{argmax, fold_search_stats, ply_from_u64, ChanceMode, Policy};
+use crate::policy::{argmax, ply_from_u64, ChanceMode, Policy};
 use crate::reward::Reward;
 use crate::rollout::engine::CollectStats;
 use crate::rollout::evaluator::Evaluator;
@@ -55,7 +56,10 @@ where
 {
     let guidance = Guidance::Puct {
         c: cfg.c_puct,
-        noise: Some((cfg.noise_epsilon, cfg.noise_alpha, seed)),
+        noise: Some(crate::policies::tree::mcts::RootNoise {
+            epsilon: cfg.noise_epsilon,
+            alpha: cfg.noise_alpha,
+        }),
         noise_all: matches!(cfg.noise_scope, NoiseScope::All),
     };
     search_many(
@@ -113,22 +117,102 @@ impl Policy for AlphaZero {
         0
     }
 
-    fn evaluate<G, F>(
+    type Search<S: Send> = crate::policies::tree::mcts::MctsMulti<S>;
+
+    fn begin_search<G: Game + Sync>(
         &self,
-        game: &G,
-        enc: &dyn StateEncoder<State = G::State>,
-        reward: &dyn Reward<Event = G::Event>,
-        requests: Vec<(G::State, usize)>,
-        seed: u64,
-        _collect_interior: bool,
-        eval: &mut Evaluator<'_, F>,
-    ) -> Vec<SearchEvaluation>
+        ctx: crate::policy::SearchCtx<'_, G>,
+        state: &G::State,
+        perspectives: &[usize],
+    ) -> Self::Search<G::State>
     where
-        G: Game + Sync,
         G::State: Send,
-        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
-        alphazero_many(game, enc, reward, &self.cfg, requests, seed, eval)
+        crate::policies::tree::mcts::MctsMulti::new(
+            perspectives
+                .iter()
+                .map(|&agent| {
+                    let guidance = Guidance::Puct {
+                        c: self.cfg.c_puct,
+                        noise: Some(crate::policies::tree::mcts::RootNoise {
+                            epsilon: self.cfg.noise_epsilon,
+                            alpha: self.cfg.noise_alpha,
+                        }),
+                        noise_all: matches!(self.cfg.noise_scope, NoiseScope::All),
+                    };
+                    crate::policies::tree::mcts::mcts_stepper_new(
+                        ctx.game,
+                        ctx.enc,
+                        state.clone(),
+                        agent,
+                        guidance,
+                        matches!(self.cfg.sequential_backup, SequentialBackup::MaxN),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn round<G: Game + Sync>(
+        &self,
+        ctx: crate::policy::SearchCtx<'_, G>,
+        search: &mut Self::Search<G::State>,
+        out: &mut crate::policy::RequestSink,
+    ) -> crate::policy::RoundStatus
+    where
+        G::State: Send,
+    {
+        crate::policies::tree::mcts::mcts_multi_round(
+            search,
+            ctx.game,
+            ctx.enc,
+            ctx.reward,
+            self.cfg.num_simulations,
+            self.cfg.gamma,
+            self.cfg.max_depth,
+            self.cfg.chance,
+            out,
+            ctx.rng,
+        )
+    }
+
+    fn absorb<G: Game + Sync>(
+        &self,
+        ctx: crate::policy::SearchCtx<'_, G>,
+        search: &mut Self::Search<G::State>,
+        rows: crate::policy::RowsView<'_>,
+    ) where
+        G::State: Send,
+    {
+        crate::policies::tree::mcts::mcts_multi_absorb(
+            search,
+            ctx.game.action_count(),
+            self.cfg.gamma,
+            ctx.enc,
+            rows,
+            ctx.rng,
+        );
+    }
+
+    fn finish<G: Game + Sync>(
+        &self,
+        ctx: crate::policy::SearchCtx<'_, G>,
+        search: Self::Search<G::State>,
+    ) -> Vec<(SearchEvaluation, Vec<crate::learner::InteriorTarget>)>
+    where
+        G::State: Send,
+    {
+        let a = ctx.game.action_count();
+        search
+            .steppers
+            .into_iter()
+            .map(|st| {
+                (
+                    crate::policies::tree::mcts::mcts_stepper_finish(st, a),
+                    Vec::new(),
+                )
+            })
+            .collect()
     }
 
     fn select(&self, eval: &SearchEvaluation, state: &mut u32, rng: &mut dyn Rng) -> usize {

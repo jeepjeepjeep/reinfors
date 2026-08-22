@@ -2,7 +2,7 @@
 
 use crate::encoder::ActionView;
 use crate::game::Rng;
-use crate::learner::{policy_value_tail, Learner, Step};
+use crate::learner::{policy_value_tail, InteriorTarget, Learner, Step};
 use crate::policies::modelfree::ppo::PpoEvaluation;
 
 pub struct PpoRecord {
@@ -55,7 +55,8 @@ impl Learner<PpoEvaluation> for Ppo {
 
     fn eval_records(
         &self,
-        _evaluation: &mut PpoEvaluation,
+        _evaluation: &PpoEvaluation,
+        _targets: Vec<InteriorTarget>,
         _view: &dyn ActionView,
         _agent: usize,
         _rng: &mut dyn Rng,

@@ -2,7 +2,7 @@
 //! pass through this service; the earlier peer-parameter design let call sites bypass caching and
 //! telemetry accidentally.
 
-use crate::rollout::infer_cache::{InferCache, ShardedInferCache};
+use crate::rollout::infer_cache::InferCache;
 
 /// Whether rows route to one shared network or one network per player.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -11,25 +11,20 @@ pub enum InferMode {
     PerPlayer,
 }
 
-/// How an evaluator reaches its cache: exclusively owned, shared sharded slots, or none.
+/// How an evaluator reaches its cache: exclusively owned, or none.
 pub enum CacheAccess<'a> {
     None,
     /// Within-batch key deduplication with no store: identical rows in one batch resolve
     /// to one inference row, and nothing survives the batch.
     BatchDedup,
     Exclusive(&'a mut [InferCache]),
-    Shared(&'a [ShardedInferCache]),
 }
 
 pub struct Evaluator<'a, F> {
     infer: &'a mut F,
     mode: InferMode,
     cache: CacheAccess<'a>,
-    // The sharded cache's own counters are global across accessors; per-evaluator
-    // telemetry must be local or folding double-counts.
-    shared_lookups: usize,
-    shared_hits: usize,
-    pad_rows_to: Option<usize>,
+    pad_to: Option<usize>,
     pub rows: usize,
     pub padded_rows: usize,
     pub calls: usize,
@@ -50,7 +45,6 @@ pub struct EvalBatch<'e, 'a, F> {
     n: usize,
     dim: usize,
     // per-player slots advance generations independently, so staging generations are per row
-    row_generations: Vec<u64>,
 }
 
 pub struct CommittedRows {
@@ -76,9 +70,7 @@ where
                 Some(c) => CacheAccess::Exclusive(c),
                 None => CacheAccess::None,
             },
-            shared_lookups: 0,
-            shared_hits: 0,
-            pad_rows_to: None,
+            pad_to: None,
             rows: 0,
             padded_rows: 0,
             calls: 0,
@@ -92,29 +84,7 @@ where
             infer,
             mode,
             cache: CacheAccess::BatchDedup,
-            shared_lookups: 0,
-            shared_hits: 0,
-            pad_rows_to: None,
-            rows: 0,
-            padded_rows: 0,
-            calls: 0,
-            seconds: 0.0,
-        }
-    }
-
-    /// Grouped-collection constructor: shared sharded cache slots (one per routing slot).
-    pub fn with_shared_cache(
-        infer: &'a mut F,
-        mode: InferMode,
-        slots: &'a [ShardedInferCache],
-    ) -> Self {
-        Evaluator {
-            infer,
-            mode,
-            cache: CacheAccess::Shared(slots),
-            shared_lookups: 0,
-            shared_hits: 0,
-            pad_rows_to: None,
+            pad_to: None,
             rows: 0,
             padded_rows: 0,
             calls: 0,
@@ -123,17 +93,18 @@ where
     }
 
     /// Fix shared-mode call shapes at exactly `pad` rows: short batches are padded
-    /// with zero rows (outputs discarded), oversized batches split into `pad`-row
-    /// chunks. Assumes row-independent callback outputs (evaluation-mode networks).
-    pub fn with_pad_rows_to(mut self, pad: Option<usize>) -> Self {
+    /// with zero rows (outputs discarded). The caller never stages more than `pad`
+    /// rows per batch. Assumes row-independent callback outputs (evaluation-mode
+    /// networks).
+    pub fn with_pad_to(mut self, pad: Option<usize>) -> Self {
         assert!(
             pad.is_none() || self.mode == InferMode::Shared,
-            "pad_rows_to supports shared-mode inference only"
+            "pad supports shared-mode inference only"
         );
         if let Some(pad) = pad {
-            assert!(pad >= 1, "pad_rows_to must be >= 1");
+            assert!(pad >= 1, "pad target must be >= 1");
         }
-        self.pad_rows_to = pad;
+        self.pad_to = pad;
         self
     }
 
@@ -174,7 +145,6 @@ where
             staged: std::collections::HashMap::new(),
             n: 0,
             dim: 0,
-            row_generations: Vec::new(),
         }
     }
 
@@ -208,7 +178,6 @@ where
     pub fn cache_lookups(&self) -> usize {
         match &self.cache {
             CacheAccess::Exclusive(c) => c.iter().map(|x| x.lookups).sum(),
-            CacheAccess::Shared(_) => self.shared_lookups,
             CacheAccess::None | CacheAccess::BatchDedup => 0,
         }
     }
@@ -216,7 +185,6 @@ where
     pub fn cache_hits(&self) -> usize {
         match &self.cache {
             CacheAccess::Exclusive(c) => c.iter().map(|x| x.hits).sum(),
-            CacheAccess::Shared(_) => self.shared_hits,
             CacheAccess::None | CacheAccess::BatchDedup => 0,
         }
     }
@@ -289,10 +257,10 @@ where
     }
 }
 
-/// Forward `n` staged rows through shared-mode `infer` in calls of EXACTLY `pad` rows:
-/// the final short chunk is zero-padded (pad outputs discarded), earlier chunks are
-/// full. Returns rows in ticket order, the call count, and the pad rows forwarded.
-fn run_infer_fixed_shape<F>(
+/// Forward `n` staged rows through shared-mode `infer` in one call of EXACTLY `pad`
+/// rows: short batches are zero-padded (pad outputs discarded). Returns rows in ticket
+/// order, the call count, and the pad rows forwarded.
+fn run_infer_padded<F>(
     infer: &mut F,
     obs_flat: Vec<f32>,
     n: usize,
@@ -302,31 +270,13 @@ fn run_infer_fixed_shape<F>(
 where
     F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
 {
-    let chunks = n.div_ceil(pad);
-    if chunks == 1 {
-        let mut obs = obs_flat;
-        obs.resize(pad * dim, 0.0);
-        let mut rows = infer(0, obs, pad);
-        let stride = rows.len() / pad;
-        rows.truncate(n * stride);
-        return (rows, 1, pad - n);
-    }
-    let mut out = Vec::new();
-    let mut stride: Option<usize> = None;
-    for c in 0..chunks {
-        let lo = c * pad;
-        let hi = ((c + 1) * pad).min(n);
-        let mut obs = obs_flat[lo * dim..hi * dim].to_vec();
-        obs.resize(pad * dim, 0.0);
-        let rows = infer(0, obs, pad);
-        let s = rows.len() / pad;
-        if let Some(expected) = stride {
-            assert_eq!(s, expected, "padded chunk row width changed between chunks");
-        }
-        stride = Some(s);
-        out.extend_from_slice(&rows[..(hi - lo) * s]);
-    }
-    (out, chunks, chunks * pad - n)
+    assert!(n <= pad, "staged rows exceed the fixed call shape");
+    let mut obs = obs_flat;
+    obs.resize(pad * dim, 0.0);
+    let mut rows = infer(0, obs, pad);
+    let stride = rows.len() / pad;
+    rows.truncate(n * stride);
+    (rows, 1, pad - n)
 }
 
 impl<'e, 'a, F> EvalBatch<'e, 'a, F>
@@ -336,7 +286,6 @@ where
     pub fn resolve_or_stage(&mut self, player: usize, obs: &[f32]) -> Resolve {
         if !matches!(self.eval.cache, CacheAccess::None) {
             let key = self.eval.row_key(player, obs);
-            let mut staging_generation = None;
             let hit = match &mut self.eval.cache {
                 CacheAccess::BatchDedup => None,
                 CacheAccess::Exclusive(_) => self
@@ -344,19 +293,6 @@ where
                     .cache_slot(player)
                     .expect("caches present")
                     .lookup(key),
-                CacheAccess::Shared(slots) => {
-                    let idx = match self.eval.mode {
-                        InferMode::Shared => 0,
-                        InferMode::PerPlayer => player,
-                    };
-                    self.eval.shared_lookups += 1;
-                    let hit = slots[idx].lookup(key);
-                    if hit.is_some() {
-                        self.eval.shared_hits += 1;
-                    }
-                    staging_generation = Some(slots[idx].generation());
-                    hit
-                }
                 CacheAccess::None => unreachable!(),
             };
             if let Some(row) = hit {
@@ -367,13 +303,10 @@ where
             }
             self.staged.insert(key, self.n);
             self.keys.push(key);
-            if let Some(generation) = staging_generation {
-                self.row_generations.push(generation);
-            }
         }
         self.dim = obs.len();
         if self.n == 0 {
-            if let Some(pad) = self.eval.pad_rows_to {
+            if let Some(pad) = self.eval.pad_to {
                 self.obs_flat.reserve(pad * obs.len());
             }
         }
@@ -398,10 +331,8 @@ where
         }
         let t = std::time::Instant::now();
         let n_real = self.n;
-        let (out, calls, padded) = match self.eval.pad_rows_to {
-            Some(pad) => {
-                run_infer_fixed_shape(self.eval.infer, self.obs_flat, n_real, self.dim, pad)
-            }
+        let (out, calls, padded) = match self.eval.pad_to {
+            Some(pad) => run_infer_padded(self.eval.infer, self.obs_flat, n_real, self.dim, pad),
             None => {
                 let (out, calls) = run_infer(
                     self.eval.infer,
@@ -430,20 +361,6 @@ where
                         .insert(key, &row);
                 }
             }
-            CacheAccess::Shared(slots) => {
-                for i in 0..self.keys.len() {
-                    let (key, player) = (self.keys[i], self.players[i]);
-                    let idx = match self.eval.mode {
-                        InferMode::Shared => 0,
-                        InferMode::PerPlayer => player,
-                    };
-                    slots[idx].insert(
-                        key,
-                        &out[i * stride..(i + 1) * stride],
-                        self.row_generations[i],
-                    );
-                }
-            }
             CacheAccess::None | CacheAccess::BatchDedup => {}
         }
         CommittedRows { out, stride }
@@ -470,8 +387,7 @@ mod tests {
             assert_eq!(obs.len(), n * 2);
             (0..n).flat_map(|i| [f64::from(obs[i * 2]), 0.5]).collect()
         };
-        let mut eval =
-            Evaluator::new(&mut infer, InferMode::Shared, None).with_pad_rows_to(Some(8));
+        let mut eval = Evaluator::new(&mut infer, InferMode::Shared, None).with_pad_to(Some(8));
         let mut batch = eval.batch();
         for i in 0..3 {
             batch.resolve_or_stage(0, &[i as f32 + 1.0, 1.0]);
@@ -486,43 +402,17 @@ mod tests {
     }
 
     #[test]
-    fn oversize_batches_chunk_to_the_exact_shape() {
-        let sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let seen = sizes.clone();
-        let mut infer = move |_p: usize, obs: Vec<f32>, n: usize| -> Vec<f64> {
-            seen.lock().unwrap().push(n);
-            (0..n).flat_map(|i| [f64::from(obs[i * 2]), 0.5]).collect()
-        };
-        let mut eval =
-            Evaluator::new(&mut infer, InferMode::Shared, None).with_pad_rows_to(Some(2));
-        let mut batch = eval.batch();
-        for i in 0..5 {
-            batch.resolve_or_stage(0, &[i as f32 + 1.0, 1.0]);
-        }
-        let rows = batch.commit();
-        // 5 rows at pad 2: three calls of exactly 2 rows, one zero pad row in the last
-        assert_eq!(*sizes.lock().unwrap(), vec![2, 2, 2]);
-        assert_eq!(eval.calls, 3);
-        assert_eq!(eval.rows, 5);
-        assert_eq!(eval.padded_rows, 1);
-        // ticket order preserved across chunk boundaries
-        for i in 0..5 {
-            assert_eq!(rows.row(i), &[f64::from(i as u32) + 1.0, 0.5]);
-        }
-    }
-
-    #[test]
     #[should_panic(expected = "must be >= 1")]
     fn padding_rejects_a_zero_pad_size() {
         let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| -> Vec<f64> { vec![0.5; n * 2] };
-        let _ = Evaluator::new(&mut infer, InferMode::Shared, None).with_pad_rows_to(Some(0));
+        let _ = Evaluator::new(&mut infer, InferMode::Shared, None).with_pad_to(Some(0));
     }
 
     #[test]
     #[should_panic(expected = "shared-mode inference only")]
     fn padding_rejects_per_player_mode_at_configuration() {
         let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| -> Vec<f64> { vec![0.5; n * 2] };
-        let _ = Evaluator::new(&mut infer, InferMode::PerPlayer, None).with_pad_rows_to(Some(4));
+        let _ = Evaluator::new(&mut infer, InferMode::PerPlayer, None).with_pad_to(Some(4));
     }
 
     #[test]
@@ -531,8 +421,8 @@ mod tests {
         let mut infer = |_p: usize, _obs: Vec<f32>, n: usize| -> Vec<f64> { vec![0.5; n * 2] };
         let generation = Arc::new(AtomicU64::new(0));
         let mut caches = vec![InferCache::new(64, generation)];
-        let mut eval = Evaluator::new(&mut infer, InferMode::Shared, Some(&mut caches))
-            .with_pad_rows_to(Some(4));
+        let mut eval =
+            Evaluator::new(&mut infer, InferMode::Shared, Some(&mut caches)).with_pad_to(Some(4));
         let mut batch = eval.batch();
         batch.resolve_or_stage(0, &[7.0, 7.0]);
         batch.commit(); // padded with three [0.0, 0.0] rows
@@ -622,105 +512,6 @@ mod tests {
         );
         drop(batch);
         assert_eq!(eval.cache_lookups(), 0);
-    }
-
-    #[test]
-    fn shared_cache_evaluator_stages_dedupes_and_serves() {
-        use crate::rollout::infer_cache::ShardedInferCache;
-        let mut infer = double_infer;
-        let generation = Arc::new(AtomicU64::new(0));
-        let slots = [ShardedInferCache::new(1024, 16, generation)];
-        let mut eval = Evaluator::with_shared_cache(&mut infer, InferMode::Shared, &slots);
-
-        let mut batch = eval.batch();
-        let a = batch.resolve_or_stage(0, &[1.0, 2.0]);
-        let b = batch.resolve_or_stage(0, &[1.0, 2.0]);
-        let (Resolve::Staged(ta), Resolve::Staged(tb)) = (a, b) else {
-            panic!("cold shared cache must stage");
-        };
-        assert_eq!(
-            ta, tb,
-            "within-batch dedup applies over the shared cache too"
-        );
-        let rows = batch.commit();
-        assert_eq!(rows.row(ta), &[2.0, 4.0]);
-
-        let mut batch = eval.batch();
-        let Resolve::Resolved(row) = batch.resolve_or_stage(0, &[1.0, 2.0]) else {
-            panic!("warm shared cache must resolve");
-        };
-        assert_eq!(row, vec![2.0, 4.0]);
-        assert_eq!(eval.cache_hits(), 1);
-    }
-
-    #[test]
-    fn two_evaluators_report_their_own_shared_traffic() {
-        use crate::rollout::infer_cache::ShardedInferCache;
-        let generation = Arc::new(AtomicU64::new(0));
-        let slots = [ShardedInferCache::new(1024, 16, generation)];
-
-        let mut infer_a = double_infer;
-        let mut a = Evaluator::with_shared_cache(&mut infer_a, InferMode::Shared, &slots);
-        let mut batch = a.batch();
-        let _ = batch.resolve_or_stage(0, &[1.0, 2.0]);
-        batch.commit();
-        let mut batch = a.batch();
-        let _ = batch.resolve_or_stage(0, &[1.0, 2.0]); // hit
-        batch.commit();
-
-        let mut infer_b = double_infer;
-        let mut b = Evaluator::with_shared_cache(&mut infer_b, InferMode::Shared, &slots);
-        let mut batch = b.batch();
-        let _ = batch.resolve_or_stage(0, &[1.0, 2.0]); // hit, b's only lookup
-        batch.commit();
-
-        assert_eq!(
-            (a.cache_lookups(), a.cache_hits()),
-            (2, 1),
-            "a's own traffic only"
-        );
-        assert_eq!(
-            (b.cache_lookups(), b.cache_hits()),
-            (1, 1),
-            "b's own traffic only"
-        );
-        assert_eq!(
-            slots[0].lookups(),
-            3,
-            "the cache itself carries the global totals"
-        );
-    }
-
-    #[test]
-    fn per_player_slots_stage_under_their_own_generations() {
-        use crate::rollout::infer_cache::ShardedInferCache;
-        let gen0 = Arc::new(AtomicU64::new(0));
-        let gen1 = Arc::new(AtomicU64::new(0));
-        let slots = [
-            ShardedInferCache::new(1024, 16, gen0),
-            ShardedInferCache::new(1024, 16, gen1.clone()),
-        ];
-        let mut infer = double_infer;
-        let mut eval = Evaluator::with_shared_cache(&mut infer, InferMode::PerPlayer, &slots);
-
-        let mut batch = eval.batch();
-        let _ = batch.resolve_or_stage(0, &[1.0, 2.0]);
-        let _ = batch.resolve_or_stage(1, &[3.0, 4.0]);
-        // player 1's slot advances while the batch is in flight; player 0's does not
-        gen1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        batch.commit();
-
-        let mut batch = eval.batch();
-        assert!(
-            matches!(batch.resolve_or_stage(0, &[1.0, 2.0]), Resolve::Resolved(_)),
-            "player 0's row staged under its own (unchanged) generation must be cached"
-        );
-        drop(batch);
-        let mut batch = eval.batch();
-        assert!(
-            matches!(batch.resolve_or_stage(1, &[3.0, 4.0]), Resolve::Staged(_)),
-            "player 1's row staged under a superseded generation must be rejected"
-        );
     }
 
     #[test]

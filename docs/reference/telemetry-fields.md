@@ -17,15 +17,14 @@ disagreement from `EpsilonGreedyQ` as measured agreement.
 | `mean_disagreement` | `float` value units | `SelectiveExpectimax`, `n_heads >= 2` | Mean root action-value disagreement across ensemble heads; reported as `0.0` with one head. |
 | `infer_seconds` | `float` seconds | All engine policies | Wall time observed inside inference callbacks. |
 | `infer_calls` | `int` calls | All engine policies | Pooled callback invocations. |
-| `infer_rows` | `int` rows | All engine policies | Real observation rows evaluated, excluding `pad_rows_to` padding. Mean physical call size is `(infer_rows + padded_rows) / infer_calls`. |
-| `padded_rows` | `int` rows | All engine policies | Zero pad rows forwarded by `pad_rows_to` (0 when disabled). |
+| `infer_rows` | `int` rows | All engine policies | Real observation rows evaluated, excluding `pad` padding. Mean physical call size is `(infer_rows + padded_rows) / infer_calls`. |
+| `padded_rows` | `int` rows | All engine policies | Zero pad rows forwarded by `pad` (0 when disabled). |
 | `cache_lookups` | `int` rows | Any policy with `infer_cache` enabled | Persistent evaluation-cache lookups. |
 | `cache_hits` | `int` rows | Any policy with `infer_cache` enabled | Successful persistent evaluation-cache lookups. |
 | `terminal_sims` | `int` simulations | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Simulations ending at a terminal state. |
 | `depthcap_sims` | `int` simulations | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Simulations ending at the configured depth cap. |
-| `shared_rows` | `int` rows | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Evaluation rows shared by multiple requests within one search. |
-| `fresh_rows` | `int` rows | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Search rows requiring a new evaluation. |
-| `hit_rows` | `int` rows | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Search rows served from the persistent inference cache. |
+| `requested_rows` | `int` rows | All engine policies | Rows entering the inference queue (decision evaluations and tail bootstraps), pre-dedup and pre-cache, counted once at the queue seam; dedup and cache savings are the gap to `infer_rows`. Replaces 0.2.x's `fresh_rows`/`hit_rows`/`shared_rows` split — row provenance is an Evaluator fact. |
+| `tail_rows` | `int` rows | All engine policies | The tail-bootstrap share of `requested_rows`; `requested_rows - tail_rows` is the decision-evaluation term of the simulation identity. |
 | `extra_eval_rows` | `int` rows | `Mcts`, `AlphaZero` | Rows beyond one per simulation, from multi-perspective leaf evaluation or an `ExpandAll` chance fan. |
 
 The preceding Engine cache counters apply only when the engine was constructed with `infer_cache`;

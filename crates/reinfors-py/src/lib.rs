@@ -788,7 +788,7 @@ struct PyEngine {
 #[pymethods]
 impl PyEngine {
     #[new]
-    #[pyo3(signature = (game, reward, policy, learner, n_games, seed=0, start_buffer=false, start_buffer_capacity=1000, p_fresh=0.05, infer_cache=0, learn_players=None, n_groups=1, pad_rows_to=0))]
+    #[pyo3(signature = (game, reward, policy, learner, n_games, seed=0, start_buffer=false, start_buffer_capacity=1000, p_fresh=0.05, infer_cache=0, learn_players=None, pad=false, batch_size=0, n_threads=0))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         game: GameHandle,
@@ -802,8 +802,9 @@ impl PyEngine {
         p_fresh: f64,
         infer_cache: usize,
         learn_players: Option<Vec<usize>>,
-        n_groups: usize,
-        pad_rows_to: usize,
+        pad: bool,
+        batch_size: usize,
+        n_threads: usize,
     ) -> PyResult<Self> {
         if n_games < 1 {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -817,21 +818,23 @@ impl PyEngine {
                 1 << 16
             )));
         }
-        if pad_rows_to > 1 << 16 {
+        if n_threads > 512 {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "pad_rows_to must be <= {} (got {pad_rows_to})",
-                1 << 16
+                "n_threads must be <= 512 (got {n_threads})",
             )));
         }
-        if !matches!(n_groups, 1 | 2) {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "n_groups must be 1 or 2",
-            ));
-        }
-        if n_groups == 2 && n_games < 2 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "n_groups=2 needs n_games >= 2 to split into groups",
-            ));
+        // Workers beyond the pool size can never run: canonicalize so behaviorally
+        // identical engines share a fingerprint (0 = automatic stays 0).
+        let n_threads = if n_threads == 0 {
+            0
+        } else {
+            n_threads.min(n_games)
+        };
+        if batch_size > 1 << 20 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "batch_size must be <= {} (got {batch_size})",
+                1 << 20
+            )));
         }
         let start_buffer = if start_buffer {
             if start_buffer_capacity < 1 {
@@ -870,7 +873,6 @@ impl PyEngine {
             "engine": {
                 "n_games": n_games,
                 "seed": seed,
-                "n_groups": n_groups,
                 // Disabled knobs canonicalize to null so ignored arguments do
                 // not split fingerprints of behaviorally identical engines.
                 "start_buffer": start_buffer.as_ref().map_or(Value::Null, |sb| json!({
@@ -879,14 +881,17 @@ impl PyEngine {
                 })),
                 "infer_cache": infer_cache,
                 "learn_players": learn_players,
-                "pad_rows_to": pad_rows_to,
+                "pad": pad.then_some(true),
+                "batch_size": (batch_size > 0).then_some(batch_size),
+                "n_threads": (n_threads > 0).then_some(n_threads),
             },
         });
         let engine_params = EngineParams {
             n_games,
             seed,
-            n_groups,
-            pad_rows_to: (pad_rows_to > 0).then_some(pad_rows_to),
+            pad,
+            batch_size: (batch_size > 0).then_some(batch_size),
+            n_threads: (n_threads > 0).then_some(n_threads),
         };
         let num_agents = game.spec.num_agents();
         // Slot 0 serves a shared callback; slots 1..=N serve per-player callbacks.
@@ -895,34 +900,24 @@ impl PyEngine {
             .map(|_| std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)))
             .collect();
         let caches = (infer_cache > 0).then(|| {
-            if n_groups == 2 {
-                CacheSet::Sharded(
-                    weights_generations
-                        .iter()
-                        .map(|generation| {
-                            reinfors_core::ShardedInferCache::new(
-                                infer_cache,
-                                16,
-                                generation.clone(),
-                            )
-                        })
-                        .collect(),
-                )
-            } else {
-                CacheSet::Exclusive(
-                    weights_generations
-                        .iter()
-                        .map(|generation| InferCache::new(infer_cache, generation.clone()))
-                        .collect(),
-                )
-            }
+            CacheSet::Exclusive(
+                weights_generations
+                    .iter()
+                    .map(|generation| InferCache::new(infer_cache, generation.clone()))
+                    .collect(),
+            )
         });
         let snapshot_fp = {
             let mut stripped = config.clone();
-            stripped
-                .as_object_mut()
-                .expect("config is an object")
-                .remove("reinfors_version");
+            let obj = stripped.as_object_mut().expect("config is an object");
+            obj.remove("reinfors_version");
+            // Scheduler knobs are configuration but not composition: snapshots restore
+            // across different pad/batch_size/n_threads settings.
+            if let Some(engine) = obj.get_mut("engine").and_then(|e| e.as_object_mut()) {
+                engine.remove("pad");
+                engine.remove("batch_size");
+                engine.remove("n_threads");
+            }
             fingerprint_hex(&canonical_config_bytes(&stripped))
         };
         Ok(PyEngine {
@@ -1063,12 +1058,7 @@ impl PyEngine {
             let engine = borrow.inner.as_ref().ok_or_else(stream_active_err)?;
             let num_agents = engine.routing();
             let pair = Python::with_gil(|py| engine_callbacks(infer.bind(py), num_agents))?;
-            if engine.n_groups() == 2 && matches!(pair.1, InferMode::PerPlayer) {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "n_groups=2 supports a single shared infer callback",
-                ));
-            }
-            reject_padded_per_player(engine.pad_rows_to(), pair.1)?;
+            reject_padded_per_player(engine.pad(), pair.1)?;
             pair
         };
         let mut engine = slf
@@ -1085,8 +1075,6 @@ impl PyEngine {
             let (stop, queued) = (stop.clone(), queued.clone());
             let pause = pause.clone();
             std::thread::spawn(move || {
-                let hosted = (engine.n_groups() == 2)
-                    .then(|| engine.make_service_host(&infer, stop.clone()));
                 loop {
                     // Pausing at batch boundaries keeps state aligned with delivered batches.
                     if stop.load(std::sync::atomic::Ordering::Relaxed)
@@ -1094,12 +1082,7 @@ impl PyEngine {
                     {
                         break;
                     }
-                    let result = match &hosted {
-                        Some((host, callback_err)) => {
-                            engine.collect_thunk_hosted(collect_size, host, callback_err)
-                        }
-                        None => engine.collect_thunk(collect_size, &infer, mode, stop.clone()),
-                    };
+                    let result = engine.collect_thunk(collect_size, &infer, mode, stop.clone());
                     let fatal = result.is_err();
                     if tx.send(result).is_err() {
                         break;
@@ -1375,8 +1358,6 @@ impl Drop for CollectStream {
     }
 }
 
-type CallbackErr = std::sync::Arc<std::sync::Mutex<Option<PyErr>>>;
-
 trait ErasedEngine: Send + Sync {
     fn snapshot_payload(&self) -> PyResult<Vec<u8>>;
     fn restore_payload(&mut self, bytes: &[u8]) -> PyResult<()>;
@@ -1395,24 +1376,9 @@ trait ErasedEngine: Send + Sync {
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> PyResult<BatchThunk>;
 
-    fn make_service_host(
-        &self,
-        infer: &[Py<PyAny>],
-        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> (reinfors_core::ServiceHost, CallbackErr);
-
-    fn collect_thunk_hosted(
-        &mut self,
-        n_records: usize,
-        host: &reinfors_core::ServiceHost,
-        callback_err: &CallbackErr,
-    ) -> PyResult<BatchThunk>;
-
     fn routing(&self) -> usize;
 
-    fn n_groups(&self) -> usize;
-
-    fn pad_rows_to(&self) -> Option<usize>;
+    fn pad(&self) -> bool;
 }
 
 trait RecordBatch: Sized {
@@ -1858,8 +1824,11 @@ fn run_collect<'py, G, P, L>(
 where
     G: Game + Sync,
     G::State: Send,
-    P: Policy,
-    L: Learner<P::Evaluation>,
+    P: Policy + Sync,
+    P::Evaluation: Send,
+    P::PolicyState: Send,
+    L: Learner<P::Evaluation> + Sync,
+    L::Record: Send,
 {
     let (callbacks, mode) = engine_callbacks(infer, num_agents)?;
     let mut callback_err: Option<PyErr> = None;
@@ -1895,10 +1864,10 @@ where
     Ok((records, telemetry))
 }
 
-fn reject_padded_per_player(pad_rows_to: Option<usize>, mode: InferMode) -> PyResult<()> {
-    if pad_rows_to.is_some() && matches!(mode, InferMode::PerPlayer) {
+fn reject_padded_per_player(pad: bool, mode: InferMode) -> PyResult<()> {
+    if pad && matches!(mode, InferMode::PerPlayer) {
         return Err(pyo3::exceptions::PyValueError::new_err(
-            "pad_rows_to supports a single shared infer callback",
+            "pad supports a single shared infer callback",
         ));
     }
     Ok(())
@@ -1933,9 +1902,8 @@ fn build_telemetry<'py>(
     // + depthcap - extra_eval_rows; the subtraction removes auxiliary perspective/fan rows.
     telemetry.set_item("terminal_sims", stats.sum_terminal_sims)?;
     telemetry.set_item("depthcap_sims", stats.sum_depthcap_sims)?;
-    telemetry.set_item("shared_rows", stats.sum_shared_rows)?;
-    telemetry.set_item("fresh_rows", stats.sum_fresh_rows)?;
-    telemetry.set_item("hit_rows", stats.sum_hit_rows)?;
+    telemetry.set_item("requested_rows", stats.sum_requested_rows)?;
+    telemetry.set_item("tail_rows", stats.sum_tail_rows)?;
     telemetry.set_item("extra_eval_rows", stats.sum_extra_eval_rows)?;
     Ok(telemetry)
 }
@@ -1948,8 +1916,7 @@ struct EngineImpl<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     n_heads: usize,
     layout: InferLayout,
     num_agents: usize,
-    n_groups: usize,
-    pad_rows_to: Option<usize>,
+    pad: bool,
 }
 
 impl<G, P, L> ErasedEngine for EngineImpl<G, P, L>
@@ -1987,11 +1954,7 @@ where
         mode: InferMode,
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> PyResult<BatchThunk> {
-        reject_padded_per_player(self.pad_rows_to, mode)?;
-        debug_assert!(
-            self.n_groups == 1,
-            "grouped streams collect via collect_thunk_hosted"
-        );
+        reject_padded_per_player(self.pad, mode)?;
         let callback_err = std::sync::Arc::new(std::sync::Mutex::new(None));
         let mut infer_fn = infer_closure_gil(
             infer,
@@ -2013,81 +1976,15 @@ where
         }))
     }
 
-    fn make_service_host(
-        &self,
-        infer: &[Py<PyAny>],
-        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> (reinfors_core::ServiceHost, CallbackErr) {
-        let callbacks =
-            Python::with_gil(|py| infer.iter().map(|c| c.clone_ref(py)).collect::<Vec<_>>());
-        let callback_err: CallbackErr = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let mut infer_fn = infer_closure_gil(
-            callbacks,
-            self.dim,
-            self.action_count,
-            self.n_heads,
-            self.layout,
-            stop,
-            callback_err.clone(),
-        );
-        let err_probe = callback_err.clone();
-        let grouped_fn = move |p: usize, o: Vec<f32>, n: usize| -> Vec<f64> {
-            let out = infer_fn(p, o, n);
-            if err_probe.lock().unwrap().is_some() {
-                // Unwinds into the service's catch, cancelling both workers promptly.
-                std::panic::panic_any("python infer callback raised".to_string());
-            }
-            out
-        };
-        (reinfors_core::ServiceHost::spawn(grouped_fn), callback_err)
-    }
-
-    fn collect_thunk_hosted(
-        &mut self,
-        n_records: usize,
-        host: &reinfors_core::ServiceHost,
-        callback_err: &CallbackErr,
-    ) -> PyResult<BatchThunk> {
-        let inner = &mut self.inner;
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            inner.collect_grouped_hosted(n_records, InferMode::Shared, host)
-        }));
-        if let Some(e) = callback_err.lock().unwrap().take() {
-            return Err(e);
-        }
-        let (records, stats) = match outcome {
-            Ok(v) => v,
-            Err(payload) => std::panic::resume_unwind(payload),
-        };
-        let (dim, n_heads) = (self.dim, self.n_heads);
-        Ok(Box::new(move |py: Python<'_>| {
-            let telemetry = build_telemetry(py, &stats)?;
-            Ok(L::Record::into_py_batch(records, py, dim, n_heads, telemetry)?.unbind())
-        }))
-    }
-
     fn collect<'py>(
         &mut self,
         py: Python<'py>,
         n_records: usize,
         infer: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        if self.pad_rows_to.is_some() {
+        if self.pad {
             let (_callbacks, mode) = engine_callbacks(infer, self.num_agents)?;
-            reject_padded_per_player(self.pad_rows_to, mode)?;
-        }
-        if self.n_groups == 2 {
-            let (callbacks, mode) = engine_callbacks(infer, self.num_agents)?;
-            if matches!(mode, InferMode::PerPlayer) {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "n_groups=2 supports a single shared infer callback",
-                ));
-            }
-            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let (host, callback_err) = self.make_service_host(&callbacks, stop);
-            let thunk =
-                py.allow_threads(|| self.collect_thunk_hosted(n_records, &host, &callback_err))?;
-            return Ok(thunk(py)?.into_bound(py));
+            reject_padded_per_player(self.pad, mode)?;
         }
         let (records, telemetry) = run_collect(
             &mut self.inner,
@@ -2107,18 +2004,13 @@ where
         self.num_agents
     }
 
-    fn n_groups(&self) -> usize {
-        self.n_groups
-    }
-
-    fn pad_rows_to(&self) -> Option<usize> {
-        self.pad_rows_to
+    fn pad(&self) -> bool {
+        self.pad
     }
 }
 
 enum CacheSet {
     Exclusive(Vec<InferCache>),
-    Sharded(Vec<reinfors_core::ShardedInferCache>),
 }
 
 #[derive(Clone)]
@@ -2744,7 +2636,6 @@ where
         .with_start_distribution(start_dist);
     match infer_caches {
         Some(CacheSet::Exclusive(c)) => e = e.with_infer_caches(c),
-        Some(CacheSet::Sharded(c)) => e = e.with_sharded_infer_caches(c),
         None => {}
     }
     if let Some(lp) = learn_players {
@@ -2899,9 +2790,12 @@ where
         n_heads,
         action_count,
     )?;
-    if let Some(pad) = engine_params.pad_rows_to {
-        // exact callback row count by contract: no agent multiplier
-        check_call_buffers("pad_rows_to", pad, 1, dim, n_heads, action_count)?;
+    if engine_params.pad {
+        // pad fixes every call at exactly batch_size rows: no agent multiplier
+        let rows = engine_params
+            .batch_size
+            .unwrap_or_else(|| (engine_params.n_games / 2).max(1));
+        check_call_buffers("batch_size", rows, 1, dim, n_heads, action_count)?;
     }
     if let Some(lp) = &learn_players {
         if lp.is_empty() {
@@ -2957,8 +2851,7 @@ where
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
-                n_groups: engine_params.n_groups,
-                pad_rows_to: engine_params.pad_rows_to,
+                pad: engine_params.pad,
                 inner: build_inner(
                     game,
                     enc,
@@ -2999,8 +2892,7 @@ where
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, interior_targets);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
-                n_groups: engine_params.n_groups,
-                pad_rows_to: engine_params.pad_rows_to,
+                pad: engine_params.pad,
                 inner: build_inner(
                     game,
                     enc,
@@ -3054,8 +2946,7 @@ where
             let learner = TreeStrap::new(gamma, outcome_weight, bootstrap_p, false);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
-                n_groups: engine_params.n_groups,
-                pad_rows_to: engine_params.pad_rows_to,
+                pad: engine_params.pad,
                 inner: build_inner(
                     game,
                     enc,
@@ -3108,8 +2999,7 @@ where
             let learner = AlphaZeroLearner::new(gamma);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
-                n_groups: engine_params.n_groups,
-                pad_rows_to: engine_params.pad_rows_to,
+                pad: engine_params.pad,
                 inner: build_inner(
                     game,
                     enc,
@@ -3134,8 +3024,7 @@ where
             let learner = reinfors_core::Ppo::new(gamma, lam);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
-                n_groups: engine_params.n_groups,
-                pad_rows_to: engine_params.pad_rows_to,
+                pad: engine_params.pad,
                 inner: build_inner(
                     game,
                     enc,
@@ -3168,8 +3057,7 @@ where
             let learner = Dqn::new(n_heads, bootstrap_p, n_step, gamma);
             Ok(Box::new(EngineImpl {
                 codec: codec.take(),
-                n_groups: engine_params.n_groups,
-                pad_rows_to: engine_params.pad_rows_to,
+                pad: engine_params.pad,
                 inner: build_inner(
                     game,
                     enc,
@@ -3944,15 +3832,10 @@ trait ErasedEnv: Send + Sync {
     ) -> PyResult<Vec<usize>>;
 }
 
-// Per-env selection streams derive from (seed, batch index): reproducible for the same
-// ordered batch and seed, per the choose determinism contract.
-const CHOOSE_ENV_MIX: u64 = 0x9E37_79B9_7F4A_7C15;
-const CHOOSE_SELECT_SALT: u64 = 0xC3A5_C85C_97CB_3127;
-const CHOOSE_HEAD_SALT: u64 = 0xB492_B66F_BE98_F273;
-
-fn choose_env_rng(seed: u64, index: usize, salt: u64) -> SplitMix64 {
-    SplitMix64::new(seed ^ (index as u64).wrapping_mul(CHOOSE_ENV_MIX) ^ salt)
-}
+// Per-request selection streams derive from (seed, batch index) via the engine's
+// keying scheme: reproducible for the same ordered batch and seed, per the choose
+// determinism contract.
+use reinfors_core::rng::stream as rng_stream;
 
 #[allow(clippy::too_many_arguments)]
 fn run_choose<G, P>(
@@ -3968,16 +3851,32 @@ fn run_choose<G, P>(
 where
     G: Game + Sync,
     G::State: Send,
-    P: Policy,
+    P: Policy + Sync,
 {
     let mut infer_fn = |p: usize, o: Vec<f32>, n: usize| infer(p, o, n);
     // Within-batch dedup only: no store, nothing survives a round, stochastic
     // inference is never frozen across rounds.
     let mut evaluator = Evaluator::with_batch_dedup(&mut infer_fn, InferMode::Shared);
-    let evals = policy.evaluate(game, enc, reward, requests, seed, false, &mut evaluator);
-    let mut out = Vec::with_capacity(evals.len());
-    for (i, eval) in evals.iter().enumerate() {
-        let mut rng = choose_env_rng(seed, i, CHOOSE_SELECT_SALT);
+    let perms =
+        reinfors_core::encoder::PermTable::build(enc, game.action_count(), game.num_agents());
+    let decisions: Vec<(G::State, Vec<usize>)> =
+        requests.into_iter().map(|(s, a)| (s, vec![a])).collect();
+    let mut drive_rng = SplitMix64::keyed(seed, rng_stream::CHOOSE_DRIVE, 0);
+    let results = reinfors_core::rollout::driver::drive_to_completion(
+        policy,
+        game,
+        enc,
+        reward,
+        &perms,
+        false,
+        &decisions,
+        &mut drive_rng,
+        &mut evaluator,
+    );
+    let mut out = Vec::with_capacity(results.len());
+    for (i, per) in results.iter().enumerate() {
+        let (eval, _) = &per[0];
+        let mut rng = SplitMix64::keyed(seed, rng_stream::CHOOSE_SELECT, i as u64);
         out.push(policy.select(eval, &mut states[i], &mut rng));
     }
     Ok(out)
@@ -4082,7 +3981,13 @@ where
                     game.num_agents().saturating_sub(1),
                 )?;
                 let states: Vec<usize> = (0..impls.len())
-                    .map(|i| policy.begin_episode(&mut choose_env_rng(seed, i, CHOOSE_HEAD_SALT)))
+                    .map(|i| {
+                        policy.begin_episode(&mut SplitMix64::keyed(
+                            seed,
+                            rng_stream::CHOOSE_HEAD,
+                            i as u64,
+                        ))
+                    })
                     .collect();
                 run_choose(&policy, game, enc, reward, requests, seed, states, infer)
             }
@@ -4096,7 +4001,13 @@ where
                 let policy = qgreedy_from_spec(n_heads, epsilon)?;
                 check_max_agents(&policy, "EpsilonGreedyQ", game)?;
                 let states: Vec<usize> = (0..impls.len())
-                    .map(|i| policy.begin_episode(&mut choose_env_rng(seed, i, CHOOSE_HEAD_SALT)))
+                    .map(|i| {
+                        policy.begin_episode(&mut SplitMix64::keyed(
+                            seed,
+                            rng_stream::CHOOSE_HEAD,
+                            i as u64,
+                        ))
+                    })
                     .collect();
                 run_choose(&policy, game, enc, reward, requests, seed, states, infer)
             }

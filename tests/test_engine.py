@@ -82,6 +82,7 @@ def _engine(
         ),
         n_games=n_games,
         seed=seed,
+        n_threads=1,
     )
 
 

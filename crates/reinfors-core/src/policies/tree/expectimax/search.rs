@@ -1,12 +1,9 @@
 //! Batched best-first selective expectimax.
 
-use rayon::prelude::*;
-
 use crate::encoder::{ActionView, StateEncoder};
 use crate::game::{Actor, Game, Rng};
 use crate::policy::{ChanceMode, MAX_ENUMERATED_OUTCOMES, MAX_JOINT_SLOTS};
 use crate::reward::Reward;
-use crate::rng::SplitMix64;
 
 /// Belief model for each co-mover's action.
 #[derive(Clone, Copy)]
@@ -47,13 +44,11 @@ pub struct SearchStats {
     pub sigma_sum: f64,
     pub terminal_sims: usize,
     pub depthcap_sims: usize,
-    pub shared_rows: usize,
     pub fresh_rows: usize,
-    pub hit_rows: usize,
     pub extra_eval_rows: usize,
 }
 
-pub type InteriorTarget = (Vec<f32>, Vec<Vec<f64>>);
+pub use crate::learner::InteriorTarget;
 
 pub type SearchResult = (Vec<Vec<f64>>, Vec<InteriorTarget>, SearchStats);
 
@@ -129,11 +124,10 @@ struct Search<S> {
     // Each routed row must retain the mover whose action frame encoded it.
     opp_legal: Vec<(usize, Vec<usize>)>,
     new_leaves: Vec<usize>,
-    rng: SplitMix64,
 }
 
 impl<S> Search<S> {
-    fn new(state: S, agent: usize, seed: u64) -> Search<S> {
+    fn new(state: S, agent: usize) -> Search<S> {
         let root = Node {
             state,
             obs: Vec::new(),
@@ -159,7 +153,6 @@ impl<S> Search<S> {
             opp_obs: Vec::new(),
             opp_legal: Vec::new(),
             new_leaves: Vec::new(),
-            rng: SplitMix64::new(seed),
         }
     }
 
@@ -177,6 +170,7 @@ fn expand_round<G: Game>(
     reward: &dyn Reward<Event = G::Event>,
     cfg: &SearchConfig,
     first: bool,
+    rng: &mut dyn Rng,
 ) {
     if !first {
         sort_frontier(&s.arena, &mut s.frontier, cfg);
@@ -202,171 +196,12 @@ fn expand_round<G: Game>(
             &mut s.opp_obs,
             &mut s.opp_legal,
             &mut s.new_leaves,
-            &mut s.rng,
+            rng,
         );
         s.stats.expansions += 1;
         s.stats.max_depth = s.stats.max_depth.max(s.arena[ni].depth + 1);
     }
     s.stats.rounds += 1;
-}
-
-fn for_each_search<S, F>(searches: &mut [Search<S>], parallel: bool, f: F)
-where
-    S: Send,
-    F: Fn(usize, &mut Search<S>) + Sync,
-{
-    if parallel {
-        searches
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(i, s)| f(i, s));
-    } else {
-        for (i, s) in searches.iter_mut().enumerate() {
-            f(i, s);
-        }
-    }
-}
-
-/// Run searches in lockstep and pool each round's network rows.
-#[allow(clippy::too_many_arguments)]
-pub fn search_many<G: Game + Sync, F>(
-    game: &G,
-    enc: &dyn StateEncoder<State = G::State>,
-    reward: &dyn Reward<Event = G::Event>,
-    cfg: &SearchConfig,
-    requests: Vec<(G::State, usize)>,
-    collect_interior: bool,
-    seed: u64,
-    mut infer: F,
-) -> Vec<SearchResult>
-where
-    F: FnMut(&[usize], Vec<f32>, usize) -> Vec<f64>,
-    G::State: Send,
-{
-    assert!(
-        game.num_agents() >= 1,
-        "a game must have at least one agent"
-    );
-    assert!(
-        game.perfect_information(),
-        "tree search on a hidden-information game is clairvoyant: its values condition on state \
-         the agents cannot observe; see {}",
-        crate::COMPATIBILITY_DOCS
-    );
-    let a = game.action_count();
-    // Per-request RNG streams make results independent of the parallel schedule.
-    let mut searches: Vec<Search<G::State>> = requests
-        .into_iter()
-        .enumerate()
-        .map(|(i, (s, agent))| Search::new(s, agent, seed.wrapping_add(i as u64)))
-        .collect();
-    let budget = cfg.expansion_budget;
-    let mut first = true;
-    loop {
-        let active: Vec<usize> = (0..searches.len())
-            .filter(|&i| searches[i].active(budget))
-            .collect();
-        if active.is_empty() {
-            break;
-        }
-        let parallel = active.len() >= 2;
-
-        for_each_search(&mut searches, parallel, |_, s| {
-            if s.active(budget) {
-                expand_round(s, game, enc, reward, cfg, first);
-                for k in 0..s.new_leaves.len() {
-                    let li = s.new_leaves[k];
-                    if s.arena[li].depth < cfg.max_depth {
-                        s.frontier.push(li);
-                    }
-                }
-            }
-        });
-        first = false;
-
-        let mut obs_flat: Vec<f32> = Vec::new();
-        let mut players: Vec<usize> = Vec::new();
-        let mut span_by_idx: Vec<Option<(usize, usize)>> = vec![None; searches.len()];
-        let mut n_rows = 0;
-        for &si in &active {
-            let s = &searches[si];
-            let row_start = n_rows;
-            for (o, (mover, _)) in s.opp_obs.iter().zip(&s.opp_legal) {
-                obs_flat.extend_from_slice(o);
-                players.push(*mover);
-            }
-            for &li in &s.new_leaves {
-                obs_flat.extend_from_slice(&s.arena[li].obs);
-                players.push(s.arena[li].eval_agent);
-            }
-            n_rows += s.opp_obs.len() + s.new_leaves.len();
-            span_by_idx[si] = Some((row_start, s.opp_obs.len()));
-        }
-        if n_rows > 0 {
-            let q = infer(&players, obs_flat, n_rows);
-            let n_heads = q.len() / (n_rows * a);
-            for_each_search(&mut searches, parallel, |si, s| {
-                if let Some((row_start, n_opp)) = span_by_idx[si] {
-                    let rows = n_opp + s.new_leaves.len();
-                    let slice = &q[row_start * n_heads * a..(row_start + rows) * n_heads * a];
-                    s.n_heads = n_heads;
-                    let agent = s.agent;
-                    // At a sequential opponent leaf, available actions belong to the mover even
-                    // though the value row is evaluated from the searcher's perspective.
-                    let legal_of = |state: &G::State| match game.actor(state) {
-                        Actor::Agent(mover) => game.legal_actions(state, mover),
-                        Actor::Simultaneous => game.legal_actions(state, agent),
-                        Actor::Chance => unreachable!("chance actors are not searched"),
-                    };
-                    evaluate(
-                        &mut s.arena,
-                        &s.batch,
-                        &s.new_leaves,
-                        &s.opp_legal,
-                        enc,
-                        s.agent,
-                        &legal_of,
-                        slice,
-                        n_opp,
-                        n_heads,
-                        a,
-                        cfg,
-                        &mut s.stats,
-                    );
-                }
-            });
-        }
-    }
-
-    searches
-        .into_par_iter()
-        .map(|mut s| {
-            resolve(&mut s.arena, 0, cfg.gamma, s.n_heads);
-            let agent = s.agent;
-            // Resolve-phase MAX values are in the searcher's action frame; this deliberately differs
-            // from bootstrap leaves, whose legal set belongs to the leaf mover.
-            let legal_of = |state: &G::State| game.legal_actions(state, agent);
-            let values = node_action_values(&s.arena, 0, cfg.gamma, s.n_heads, a, &legal_of);
-            let mut interior: Vec<InteriorTarget> = Vec::new();
-            if collect_interior && s.arena[0].edges.is_some() {
-                let root_edges = take_edges(&s.arena, 0);
-                for edge in &root_edges {
-                    for &(_, _, child) in edge {
-                        collect_interior_targets(
-                            &s.arena,
-                            child,
-                            cfg.gamma,
-                            s.n_heads,
-                            a,
-                            &legal_of,
-                            &mut interior,
-                        );
-                    }
-                }
-            }
-            (values, interior, s.stats)
-        })
-        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1121,6 +956,80 @@ mod tests {
         }
     }
 
+    struct Cliff;
+    impl Game for Cliff {
+        type State = i32;
+        type Event = f64;
+        fn num_agents(&self) -> usize {
+            1
+        }
+        fn action_count(&self) -> usize {
+            2
+        }
+        fn actor(&self, _: &i32) -> Actor {
+            Actor::Agent(0)
+        }
+        fn legal_actions(&self, _: &i32, agent: usize) -> Vec<usize> {
+            if agent == 0 {
+                vec![0, 1]
+            } else {
+                Vec::new()
+            }
+        }
+        fn step(&self, s: &i32, actions: &[usize]) -> Transition<i32, f64> {
+            let a = actions[0] as i32;
+            match s {
+                // root: two evaluable children
+                0 => Transition {
+                    next_state: 1 + a,
+                    events: vec![Some(0.0)],
+                    terminal: false,
+                },
+                // both frontier nodes expand entirely to terminal children
+                1 | 2 => Transition {
+                    next_state: 10 * s + a,
+                    events: vec![Some(1.0)],
+                    terminal: true,
+                },
+                _ => unreachable!("terminal states are never stepped"),
+            }
+        }
+        fn initial_state(&self) -> i32 {
+            0
+        }
+    }
+
+    #[test]
+    fn cpu_only_expansions_continue_toward_the_budget() {
+        // top_k=1: the first frontier pick expands entirely to terminal children and
+        // emits no inference rows. The search must keep expanding the remaining
+        // frontier node rather than finishing on the empty round.
+        let cfg = SearchConfig {
+            gamma: 0.9,
+            beta: 1.0,
+            expansion_budget: 8,
+            top_k: 1,
+            max_depth: 4,
+            chance: ChanceMode::Committed { samples: 1 },
+            opponent: Opponent::Uniform,
+        };
+        let results = search_many(
+            &Cliff,
+            &LineEnc,
+            &LineReward,
+            &cfg,
+            vec![(0, 0)],
+            false,
+            0,
+            |_players: &[usize], _obs: Vec<f32>, n: usize| vec![0.5; n * 2],
+        );
+        let (_, _, stats) = &results[0];
+        assert_eq!(
+            stats.expansions, 3,
+            "the root and both terminal-fanning frontier nodes expand"
+        );
+    }
+
     fn cfg(expansion_budget: usize) -> SearchConfig {
         SearchConfig {
             gamma: 0.9,
@@ -1850,4 +1759,290 @@ mod joint_fan_bound_tests {
             |_players: &[usize], _obs: Vec<f32>, n: usize| vec![0.0; n * 2],
         );
     }
+}
+
+/// Stepped wrapper over one [`Search`]: expand-and-emit per round; absorb integrates
+/// the routed rows in place.
+pub struct Stepper<S> {
+    s: Search<S>,
+    first: bool,
+}
+
+impl<S> Stepper<S> {
+    pub(crate) fn new(state: S, agent: usize) -> Self {
+        Stepper {
+            s: Search::new(state, agent),
+            first: true,
+        }
+    }
+
+    pub(crate) fn agent(&self) -> usize {
+        self.s.agent
+    }
+
+    pub(crate) fn root_state(&self) -> &S {
+        &self.s.arena[0].state
+    }
+}
+
+/// Integrate a round's rows straight from the borrowed slice (absorb, or an empty
+/// slice for a CPU-only expansion round).
+pub(crate) fn stepper_absorb<G: Game>(
+    st: &mut Stepper<G::State>,
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    cfg: &SearchConfig,
+    q: &[f64],
+    stride: usize,
+) {
+    let a = game.action_count();
+    let n_opp = st.s.opp_legal.len();
+    let n_heads = if stride > 0 {
+        stride / a
+    } else {
+        st.s.n_heads.max(1)
+    };
+    st.s.n_heads = n_heads;
+    let agent = st.s.agent;
+    let legal_of = |state: &G::State| match game.actor(state) {
+        Actor::Agent(mover) => game.legal_actions(state, mover),
+        Actor::Simultaneous => game.legal_actions(state, agent),
+        Actor::Chance => unreachable!("chance actors are not searched"),
+    };
+    evaluate(
+        &mut st.s.arena,
+        &st.s.batch,
+        &st.s.new_leaves,
+        &st.s.opp_legal,
+        enc,
+        agent,
+        &legal_of,
+        q,
+        n_opp,
+        n_heads,
+        a,
+        cfg,
+        &mut st.s.stats,
+    );
+}
+
+pub(crate) fn stepper_round<G: Game + Sync>(
+    st: &mut Stepper<G::State>,
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
+    cfg: &SearchConfig,
+    out: &mut crate::policy::RequestSink,
+    rng: &mut dyn Rng,
+) -> crate::policy::RoundStatus
+where
+    G::State: Send,
+{
+    // A CPU-only expansion (every child terminal) emits no rows; keep expanding toward
+    // the budget instead of reporting an empty Pending round — the round contract is
+    // Pending ⇒ at least one request, Done ⇒ none.
+    loop {
+        if !st.s.active(cfg.expansion_budget) {
+            return crate::policy::RoundStatus::Done;
+        }
+        expand_round(&mut st.s, game, enc, reward, cfg, st.first, rng);
+        st.first = false;
+        for k in 0..st.s.new_leaves.len() {
+            let li = st.s.new_leaves[k];
+            if st.s.arena[li].depth < cfg.max_depth {
+                st.s.frontier.push(li);
+            }
+        }
+        let before = out.len();
+        for (o, (mover, _)) in st.s.opp_obs.iter().zip(&st.s.opp_legal) {
+            out.push(*mover, o);
+        }
+        for &li in &st.s.new_leaves {
+            out.push(st.s.arena[li].eval_agent, &st.s.arena[li].obs);
+        }
+        if out.len() > before {
+            return crate::policy::RoundStatus::Pending;
+        }
+        stepper_absorb(st, game, enc, cfg, &[], 0);
+    }
+}
+
+pub(crate) fn stepper_finish<G: Game + Sync>(
+    st: Stepper<G::State>,
+    game: &G,
+    _enc: &dyn StateEncoder<State = G::State>,
+    cfg: &SearchConfig,
+    collect_interior: bool,
+) -> SearchResult
+where
+    G::State: Send,
+{
+    let a = game.action_count();
+    let mut s = st.s;
+    resolve(&mut s.arena, 0, cfg.gamma, s.n_heads);
+    let agent = s.agent;
+    let legal_of = |state: &G::State| game.legal_actions(state, agent);
+    let values = node_action_values(&s.arena, 0, cfg.gamma, s.n_heads, a, &legal_of);
+    let mut interior: Vec<InteriorTarget> = Vec::new();
+    if collect_interior && s.arena[0].edges.is_some() {
+        let root_edges = take_edges(&s.arena, 0);
+        for edge in &root_edges {
+            for &(_, _, child) in edge {
+                collect_interior_targets(
+                    &s.arena,
+                    child,
+                    cfg.gamma,
+                    s.n_heads,
+                    a,
+                    &legal_of,
+                    &mut interior,
+                );
+            }
+        }
+    }
+    (values, interior, s.stats)
+}
+
+/// One stepper per perspective of a decision (simultaneous games evaluate several).
+pub struct MultiStepper<S> {
+    pub(crate) steppers: Vec<Stepper<S>>,
+    counts: Vec<usize>,
+}
+
+impl<S> MultiStepper<S> {
+    pub(crate) fn new(steppers: Vec<Stepper<S>>) -> Self {
+        MultiStepper {
+            steppers,
+            counts: Vec::new(),
+        }
+    }
+}
+
+/// Route the shared view's spans to each stepper and integrate them in place.
+pub(crate) fn multi_absorb<G: Game>(
+    ms: &mut MultiStepper<G::State>,
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    cfg: &SearchConfig,
+    rows: crate::policy::RowsView<'_>,
+) {
+    let mut offset = 0;
+    for (st, &count) in ms.steppers.iter_mut().zip(&ms.counts) {
+        if count > 0 {
+            let span = rows.slice(offset, count);
+            stepper_absorb(st, game, enc, cfg, span.flat(), span.stride());
+            offset += count;
+        }
+    }
+}
+
+pub(crate) fn multi_round<G: Game + Sync>(
+    ms: &mut MultiStepper<G::State>,
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
+    cfg: &SearchConfig,
+    out: &mut crate::policy::RequestSink,
+    rng: &mut dyn Rng,
+) -> crate::policy::RoundStatus
+where
+    G::State: Send,
+{
+    ms.counts.clear();
+    let mut all_done = true;
+    for st in &mut ms.steppers {
+        let before = out.len();
+        let status = stepper_round(st, game, enc, reward, cfg, out, rng);
+        ms.counts.push(out.len() - before);
+        if status == crate::policy::RoundStatus::Pending {
+            all_done = false;
+        }
+    }
+    if all_done {
+        crate::policy::RoundStatus::Done
+    } else {
+        crate::policy::RoundStatus::Pending
+    }
+}
+
+/// Lockstep search over `(state, agent)` requests — the pre-scheduler public entry, now a
+/// thin wrapper over the steppers (one barrier round per infer call).
+#[allow(clippy::too_many_arguments)]
+pub fn search_many<G: Game + Sync, F>(
+    game: &G,
+    enc: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
+    cfg: &SearchConfig,
+    requests: Vec<(G::State, usize)>,
+    collect_interior: bool,
+    seed: u64,
+    mut infer: F,
+) -> Vec<SearchResult>
+where
+    G::State: Send,
+    F: FnMut(&[usize], Vec<f32>, usize) -> Vec<f64>,
+{
+    guard_game(game);
+    let mut root = crate::rng::SplitMix64::new(seed);
+    let mut steppers: Vec<Stepper<G::State>> = requests
+        .into_iter()
+        .map(|(state, agent)| Stepper::new(state, agent))
+        .collect();
+    let mut done = vec![false; steppers.len()];
+    loop {
+        let mut sink = crate::policy::RequestSink::default();
+        let mut spans: Vec<(usize, usize, usize)> = Vec::new();
+        for (i, st) in steppers.iter_mut().enumerate() {
+            if done[i] {
+                continue;
+            }
+            let before = sink.len();
+            let status = stepper_round(st, game, enc, reward, cfg, &mut sink, &mut root);
+            let count = sink.len() - before;
+            assert!(
+                (count > 0) == (status == crate::policy::RoundStatus::Pending),
+                "round contract: Pending emits at least one request, Done emits none"
+            );
+            if count > 0 {
+                spans.push((i, before, count));
+            } else if status == crate::policy::RoundStatus::Done {
+                done[i] = true;
+            }
+        }
+        if spans.is_empty() {
+            break;
+        }
+        let n = sink.len();
+        let (players, obs) = sink.into_parts();
+        let rows = infer(&players, obs, n);
+        let stride = rows.len() / n;
+        for &(i, start, count) in &spans {
+            stepper_absorb(
+                &mut steppers[i],
+                game,
+                enc,
+                cfg,
+                &rows[start * stride..(start + count) * stride],
+                stride,
+            );
+        }
+    }
+    steppers
+        .into_iter()
+        .map(|st| stepper_finish(st, game, enc, cfg, collect_interior))
+        .collect()
+}
+
+/// Shared compatibility guards for direct search entries and stepped begins.
+pub(crate) fn guard_game<G: Game>(game: &G) {
+    assert!(
+        game.num_agents() >= 1,
+        "a game must have at least one agent"
+    );
+    assert!(
+        game.perfect_information(),
+        "tree search on a hidden-information game is clairvoyant: its values condition on state \
+         the agents cannot observe; see {}",
+        crate::COMPATIBILITY_DOCS
+    );
 }

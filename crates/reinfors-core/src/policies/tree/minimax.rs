@@ -1,14 +1,12 @@
 //! Depth-limited minimax/expectiminimax baseline.
 
 use crate::codec::bytes::Reader;
-use crate::encoder::StateEncoder;
 use crate::game::{Game, Rng};
-use crate::policy::{fold_search_stats, ChanceMode, Policy};
-use crate::reward::Reward;
+use crate::policies::tree::fold_search_stats;
+use crate::policy::{ChanceMode, Policy};
 use crate::rollout::engine::CollectStats;
-use crate::rollout::evaluator::Evaluator;
 
-use super::expectimax::search::{search_many, Opponent, SearchConfig};
+use super::expectimax::search::{Opponent, SearchConfig};
 use super::expectimax::{decode_search_eval, encode_search_eval, SearchEvaluation};
 
 /// Depth-limited minimax/expectiminimax with callback-scored frontier leaves; deterministic
@@ -88,48 +86,84 @@ impl Policy for Minimax {
 
     fn begin_episode(&self, _rng: &mut dyn Rng) {}
 
-    fn evaluate<G, F>(
+    type Search<S: Send> = super::expectimax::search::MultiStepper<S>;
+
+    fn begin_search<G: Game + Sync>(
         &self,
-        game: &G,
-        enc: &dyn StateEncoder<State = G::State>,
-        reward: &dyn Reward<Event = G::Event>,
-        requests: Vec<(G::State, usize)>,
-        seed: u64,
-        collect_interior: bool,
-        eval: &mut Evaluator<'_, F>,
-    ) -> Vec<SearchEvaluation>
+        ctx: crate::policy::SearchCtx<'_, G>,
+        state: &G::State,
+        perspectives: &[usize],
+    ) -> Self::Search<G::State>
     where
-        G: Game + Sync,
         G::State: Send,
-        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
-        let legal: Vec<Vec<usize>> = requests
-            .iter()
-            .map(|(state, agent)| game.legal_actions(state, *agent))
-            .collect();
-        search_many(
-            game,
-            enc,
-            reward,
-            &self.cfg,
-            requests,
-            collect_interior,
-            seed,
-            &mut |players: &[usize], obs, n| eval.forward(players, obs, n),
+        super::expectimax::search::guard_game(ctx.game);
+        super::expectimax::search::MultiStepper::new(
+            perspectives
+                .iter()
+                .map(|&agent| super::expectimax::search::Stepper::new(state.clone(), agent))
+                .collect(),
         )
-        .into_iter()
-        .zip(legal)
-        .map(|((mut values, interior, stats), legal)| {
-            values.truncate(1);
-            SearchEvaluation {
-                values,
-                visits: Vec::new(),
-                interior,
-                legal,
-                stats,
-            }
-        })
-        .collect()
+    }
+
+    fn round<G: Game + Sync>(
+        &self,
+        ctx: crate::policy::SearchCtx<'_, G>,
+        search: &mut Self::Search<G::State>,
+        out: &mut crate::policy::RequestSink,
+    ) -> crate::policy::RoundStatus
+    where
+        G::State: Send,
+    {
+        super::expectimax::search::multi_round(
+            search, ctx.game, ctx.enc, ctx.reward, &self.cfg, out, ctx.rng,
+        )
+    }
+
+    fn absorb<G: Game + Sync>(
+        &self,
+        ctx: crate::policy::SearchCtx<'_, G>,
+        search: &mut Self::Search<G::State>,
+        rows: crate::policy::RowsView<'_>,
+    ) where
+        G::State: Send,
+    {
+        super::expectimax::search::multi_absorb(search, ctx.game, ctx.enc, &self.cfg, rows);
+    }
+
+    fn finish<G: Game + Sync>(
+        &self,
+        ctx: crate::policy::SearchCtx<'_, G>,
+        search: Self::Search<G::State>,
+    ) -> Vec<(SearchEvaluation, Vec<crate::learner::InteriorTarget>)>
+    where
+        G::State: Send,
+    {
+        search
+            .steppers
+            .into_iter()
+            .map(|st| {
+                let agent = st.agent();
+                let legal = ctx.game.legal_actions(st.root_state(), agent);
+                let (mut values, interior, stats) = super::expectimax::search::stepper_finish(
+                    st,
+                    ctx.game,
+                    ctx.enc,
+                    &self.cfg,
+                    ctx.collect_interior,
+                );
+                values.truncate(1);
+                (
+                    SearchEvaluation {
+                        values,
+                        visits: Vec::new(),
+                        legal,
+                        stats,
+                    },
+                    interior,
+                )
+            })
+            .collect()
     }
 
     fn select(&self, eval: &SearchEvaluation, _state: &mut (), _rng: &mut dyn Rng) -> usize {
@@ -154,6 +188,7 @@ mod tests {
     use super::*;
     use crate::encoder::{ActionView, StateEncoder};
     use crate::game::{Actor, ChanceDist, Game, Transition};
+    use crate::policies::tree::expectimax::search::search_many;
     use crate::policies::tree::expectimax::search::SearchConfig as Cfg;
     use crate::reward::Reward as RewardTrait;
 
@@ -277,7 +312,6 @@ mod tests {
         let eval = SearchEvaluation {
             values: vec![vec![-3.0, 0.5]],
             visits: Vec::new(),
-            interior: Vec::new(),
             legal: vec![0, 1],
             stats: Default::default(),
         };

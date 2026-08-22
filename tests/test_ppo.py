@@ -23,6 +23,7 @@ def connect4_engine(seed: int = 0, **learner_kwargs: float) -> rf.Engine:
         rf.learners.Ppo(**learner_kwargs),
         n_games=4,
         seed=seed,
+        n_threads=1,
     )
 
 
@@ -112,8 +113,11 @@ def test_complete_rounds_batch_the_full_pool() -> None:
         )
 
     batch = engine.collect(n_records=1, infer=infer)
-    assert len(batch.obs) == 4, "one complete round of the whole 4-game pool"
-    assert rows_seen[0] == 4, "the first callback batches every game"
+    assert len(batch.obs) == 4, "the admitted sweep covers the whole 4-game pool"
+    # The scheduler fires at batch_size (n_games/2 by default); the sweep's search rows
+    # and the fragment-cut tail bootstraps all ride the same queue, so every call is a
+    # threshold batch.
+    assert rows_seen == [2, 2, 2, 2]
 
 
 def test_windows_meet_the_record_floor() -> None:
@@ -152,11 +156,12 @@ def test_windows_are_single_version_across_collects() -> None:
 
     for n, v in ((16, 1.0), (24, 2.0), (8, 3.0)):
         batch = engine.collect(n_records=n, infer=constant(v))
-        assert len(batch.obs) == n
+        # In-flight decisions at the cut complete, bounding overshoot by the pool size.
+        assert n <= len(batch.obs) < n + 4
         assert np.all(batch.values == v), f"stale step leaked into the v={v} window"
 
 
-def test_grouped_windows_meet_the_floor_and_stay_single_version() -> None:
+def test_windows_meet_the_floor_at_a_nondefault_batch_size() -> None:
     engine = rf.Engine(
         rf.games.Connect4(),
         rf.Reward(win=1.0, loss=-1.0),
@@ -164,7 +169,7 @@ def test_grouped_windows_meet_the_floor_and_stay_single_version() -> None:
         rf.learners.Ppo(),
         n_games=4,
         seed=0,
-        n_groups=2,
+        batch_size=1,
     )
 
     def constant(v: float):
@@ -179,7 +184,7 @@ def test_grouped_windows_meet_the_floor_and_stay_single_version() -> None:
 
     for n, v in ((32, 1.0), (20, 2.0)):
         batch = engine.collect(n_records=n, infer=constant(v))
-        assert n <= len(batch.obs) < n + 4, "both group floors met within one round"
+        assert n <= len(batch.obs) < n + 4, "floor met with bounded overshoot"
         assert np.all(batch.values == v)
 
 
@@ -215,7 +220,7 @@ def test_callback_error_discards_the_failed_window() -> None:
     _flaky_then_constant(connect4_engine(), n_records=16, bound=4)
 
 
-def test_grouped_callback_error_discards_the_failed_window() -> None:
+def test_fanned_callback_error_discards_the_failed_window() -> None:
     engine = rf.Engine(
         rf.games.Connect4(),
         rf.Reward(win=1.0, loss=-1.0),
@@ -223,7 +228,7 @@ def test_grouped_callback_error_discards_the_failed_window() -> None:
         rf.learners.Ppo(),
         n_games=4,
         seed=0,
-        n_groups=2,
+        n_threads=4,
     )
     _flaky_then_constant(engine, n_records=16, bound=4)
 
