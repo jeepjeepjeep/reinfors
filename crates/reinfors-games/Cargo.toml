@@ -7,7 +7,7 @@ publish = false
 
 [features]
 default = ["car-racing"]
-car-racing = ["dep:rapier2d", "dep:libm", "dep:smallvec"]
+car-racing = ["dep:rapier2d", "dep:libm", "dep:smallvec", "dep:tiny-skia"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -18,6 +18,8 @@ rs_poker = { version = "5", default-features = false }
 rapier2d = { version = "=0.35.2", features = ["serde-serialize", "enhanced-determinism"], optional = true }
 libm = { version = "0.2", optional = true }
 smallvec = { version = "1", optional = true }
+tiny-skia = { version = "0.11", features = ["png-format"], optional = true }
 
 [dev-dependencies]
 rayon = "1"
+serde_json = "1"

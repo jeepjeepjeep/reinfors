@@ -12,6 +12,8 @@ pub const FPS: f64 = 50.0;
 pub const TRACK_DETAIL_STEP: f64 = 21.0 / SCALE;
 pub const TRACK_TURN_RATE: f64 = 0.31;
 pub const TRACK_WIDTH: f64 = 40.0 / SCALE;
+pub const BORDER: f64 = 8.0 / SCALE;
+const BORDER_MIN_COUNT: usize = 4;
 const CHECKPOINTS: usize = 12;
 const MAX_ATTEMPTS: u32 = 64;
 
@@ -30,9 +32,17 @@ pub struct Tile {
     pub quad: [[f64; 2]; 4],
 }
 
+/// Red/white curb block on a hard turn; render-only geometry.
+#[derive(Clone, Copy, Debug)]
+pub struct BorderQuad {
+    pub quad: [[f64; 2]; 4],
+    pub white: bool,
+}
+
 pub struct Track {
     pub points: Vec<TrackPoint>,
     pub tiles: Vec<Tile>,
+    pub borders: Vec<BorderQuad>,
     pub fallback: bool,
     // CSR cell index: tile ids for cell c live in grid_data[grid_offsets[c]..grid_offsets[c+1]].
     grid_offsets: Vec<u32>,
@@ -96,6 +106,7 @@ impl Track {
                 }
             }
         }
+        let borders = border_quads(&points);
         cells.sort_unstable();
         let mut grid_offsets = vec![0u32; GRID_DIM * GRID_DIM + 1];
         for &(c, _) in &cells {
@@ -108,6 +119,7 @@ impl Track {
         Track {
             points,
             tiles,
+            borders,
             fallback,
             grid_offsets,
             grid_data,
@@ -264,4 +276,54 @@ fn try_generate(rng: &mut SplitMix64) -> Option<Vec<TrackPoint>> {
             .map(|&(_a, beta, x, y)| TrackPoint { beta, x, y })
             .collect(),
     )
+}
+
+/// Gymnasium's red/white curb flags: sustained one-sided turning marks a block.
+fn border_quads(points: &[TrackPoint]) -> Vec<BorderQuad> {
+    let n = points.len();
+    let beta = |i: isize| points[i.rem_euclid(n as isize) as usize].beta;
+    let mut border: Vec<bool> = (0..n)
+        .map(|i| {
+            let mut good = true;
+            let mut oneside = 0i32;
+            for neg in 0..BORDER_MIN_COUNT as isize {
+                let b1 = beta(i as isize - neg);
+                let b2 = beta(i as isize - neg - 1);
+                good &= (b1 - b2).abs() > TRACK_TURN_RATE * 0.2;
+                oneside += ((b1 - b2) > 0.0) as i32 - ((b1 - b2) < 0.0) as i32;
+            }
+            good && oneside.unsigned_abs() as usize == BORDER_MIN_COUNT
+        })
+        .collect();
+    for i in (0..n).filter(|&i| border[i]).collect::<Vec<_>>() {
+        for neg in 0..BORDER_MIN_COUNT as isize {
+            let j = (i as isize - neg).rem_euclid(n as isize) as usize;
+            border[j] = true;
+        }
+    }
+    let mut out = Vec::new();
+    for i in 0..n {
+        if !border[i] {
+            continue;
+        }
+        let p1 = points[i];
+        let p2 = points[if i == 0 { n - 1 } else { i - 1 }];
+        let side = if p2.beta - p1.beta > 0.0 { 1.0 } else { -1.0 };
+        let quad_pt = |p: &TrackPoint, w: f64| {
+            [
+                p.x + side * w * libm::cos(p.beta),
+                p.y + side * w * libm::sin(p.beta),
+            ]
+        };
+        out.push(BorderQuad {
+            quad: [
+                quad_pt(&p1, TRACK_WIDTH),
+                quad_pt(&p1, TRACK_WIDTH + BORDER),
+                quad_pt(&p2, TRACK_WIDTH + BORDER),
+                quad_pt(&p2, TRACK_WIDTH),
+            ],
+            white: i % 2 == 0,
+        });
+    }
+    out
 }

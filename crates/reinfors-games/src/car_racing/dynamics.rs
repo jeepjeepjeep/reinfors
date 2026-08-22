@@ -11,9 +11,11 @@ pub const FRICTION_LIMIT: f64 = 1_000_000.0 * SIZE * SIZE;
 pub const WHEEL_R: f64 = 27.0;
 pub const WHEEL_W: f64 = 14.0;
 pub const WHEELPOS: [[f64; 2]; 4] = [[-55.0, 80.0], [55.0, 80.0], [-55.0, -82.0], [55.0, -82.0]];
-const HULL_POLY1: [[f64; 2]; 4] = [[-60.0, 130.0], [60.0, 130.0], [60.0, 110.0], [-60.0, 110.0]];
-const HULL_POLY2: [[f64; 2]; 4] = [[-15.0, 120.0], [15.0, 120.0], [20.0, 20.0], [-20.0, 20.0]];
-const HULL_POLY3: [[f64; 2]; 8] = [
+pub(crate) const HULL_POLY1: [[f64; 2]; 4] =
+    [[-60.0, 130.0], [60.0, 130.0], [60.0, 110.0], [-60.0, 110.0]];
+pub(crate) const HULL_POLY2: [[f64; 2]; 4] =
+    [[-15.0, 120.0], [15.0, 120.0], [20.0, 20.0], [-20.0, 20.0]];
+pub(crate) const HULL_POLY3: [[f64; 2]; 8] = [
     [25.0, 20.0],
     [50.0, -10.0],
     [50.0, -40.0],
@@ -23,7 +25,7 @@ const HULL_POLY3: [[f64; 2]; 8] = [
     [-50.0, -10.0],
     [-25.0, 20.0],
 ];
-const HULL_POLY4: [[f64; 2]; 4] = [
+pub(crate) const HULL_POLY4: [[f64; 2]; 4] = [
     [-50.0, -120.0],
     [50.0, -120.0],
     [50.0, -90.0],
@@ -260,7 +262,7 @@ impl CarWorld {
     }
 
     /// Relative hull->wheel rotation, wrap-safe across the +-pi boundary.
-    fn joint_angle(&self, i: usize) -> Real {
+    pub(crate) fn joint_angle(&self, i: usize) -> Real {
         let h = self.bodies[self.hull].rotation();
         let w = self.bodies[self.wheels[i]].rotation();
         let (hc, hs) = (f64::from(h.cos()), f64::from(h.sin()));
@@ -280,6 +282,17 @@ impl CarWorld {
     pub fn hull_speed(&self) -> f64 {
         let v = self.bodies[self.hull].linvel();
         libm::sqrt((v.x as f64).powi(2) + (v.y as f64).powi(2))
+    }
+
+    /// Wheel body pose: translation and rotation (cos, sin).
+    pub(crate) fn wheel_pose(&self, i: usize) -> ([f64; 2], [f64; 2]) {
+        let body = &self.bodies[self.wheels[i]];
+        let t = body.translation();
+        let rot = body.rotation();
+        (
+            [f64::from(t.x), f64::from(t.y)],
+            [f64::from(rot.cos()), f64::from(rot.sin())],
+        )
     }
 
     /// World-space footprint quad of wheel `i`.

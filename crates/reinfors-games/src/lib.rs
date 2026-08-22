@@ -9,6 +9,8 @@ pub mod gridworld;
 pub mod holdem;
 pub mod kuhn;
 pub mod leduc;
+#[cfg(feature = "car-racing")]
+pub(crate) mod render;
 pub mod snake;
 
 pub use backgammon::{
@@ -29,7 +31,8 @@ pub(crate) mod codec_util;
 
 #[cfg(feature = "car-racing")]
 pub use car_racing::{
-    codec::CarRacingCodec, CarRacing, CarRacingEvent, CarRacingReward, CarRacingState, CarRacingVec,
+    codec::CarRacingCodec, render::CarRacingPixels, CarRacing, CarRacingEvent, CarRacingReward,
+    CarRacingState, CarRacingVec,
 };
 pub use cozy_chess::Board as ChessBoard;
 pub use gridworld::{GridEvent, GridState, GridWorld, GridWorldPlanes, GridWorldReward};

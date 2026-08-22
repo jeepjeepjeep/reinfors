@@ -6,6 +6,7 @@
 
 pub mod codec;
 pub(crate) mod dynamics;
+pub mod render;
 pub(crate) mod track;
 
 use std::num::NonZeroU32;
