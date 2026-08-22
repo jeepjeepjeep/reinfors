@@ -63,10 +63,10 @@ def test_weights_updated_is_safe_without_cache_and_during_stream() -> None:
 def _identity(t: dict[str, int], sims: int) -> tuple[int, int]:
     # Search-local and exact on any workload: every simulation lands in exactly one bucket,
     # counted by the trees themselves — no global counter (and so no truncation caveat) involved.
-    # Searches emit every row as a request (`requested_rows`); hit/shared provenance lives
-    # in the Evaluator (dedup + cache) as the gap to `infer_rows`.
+    # requested_rows counts every queued row (decision evaluations AND tail bootstraps);
+    # subtracting tail_rows recovers the search-only term of the simulation identity.
     lhs = t["decisions"] * sims
-    rhs = t["requested_rows"] + t["terminal_sims"] + t["depthcap_sims"]
+    rhs = t["requested_rows"] - t["tail_rows"] + t["terminal_sims"] + t["depthcap_sims"]
     return lhs, rhs
 
 

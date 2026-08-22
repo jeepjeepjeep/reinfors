@@ -29,5 +29,6 @@ pub struct CollectStats {
     pub sum_terminal_sims: usize,
     pub sum_depthcap_sims: usize,
     pub sum_requested_rows: usize,
+    pub sum_tail_rows: usize,
     pub sum_extra_eval_rows: usize,
 }

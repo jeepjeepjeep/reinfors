@@ -62,5 +62,5 @@ def test_chance_mode_inert_for_deterministic_games() -> None:
 def test_identity_includes_fan_term() -> None:
     t = _collect(rf.policies.AlphaZero(num_simulations=8)).telemetry
     lhs = t["decisions"] * 8
-    rhs = t["requested_rows"] + t["terminal_sims"] + t["depthcap_sims"] - t["extra_eval_rows"]
+    rhs = t["requested_rows"] - t["tail_rows"] + t["terminal_sims"] + t["depthcap_sims"] - t["extra_eval_rows"]
     assert lhs == rhs

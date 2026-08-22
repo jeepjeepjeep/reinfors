@@ -654,10 +654,10 @@ where
                             }
                         }
                         let n = meta.len();
-                        // Tail bootstraps are queued requests like any other: the
-                        // documented savings identity (requested_rows - infer_rows)
-                        // must hold for truncating runs too.
+                        // Tail bootstraps are queued requests like any other; tail_rows
+                        // lets consumers separate them from decision evaluations.
                         stats.sum_requested_rows += n;
+                        stats.sum_tail_rows += n;
                         phases[$gi] = SlotPhase::AwaitingTail {
                             fragment: $fragment,
                             meta,
@@ -742,6 +742,9 @@ where
                             obs,
                             n,
                         } => {
+                            // requested_rows counts rows once, where they enter the
+                            // queue — the only inference pathway.
+                            stats.sum_requested_rows += n;
                             match mode {
                                 InferMode::Shared => queues[0].push(players, obs, msg.gi, n),
                                 InferMode::PerPlayer => {
@@ -1245,6 +1248,7 @@ fn fold_stats(mut a: CollectStats, b: CollectStats) -> CollectStats {
     a.sum_terminal_sims += b.sum_terminal_sims;
     a.sum_depthcap_sims += b.sum_depthcap_sims;
     a.sum_requested_rows += b.sum_requested_rows;
+    a.sum_tail_rows += b.sum_tail_rows;
     a.sum_extra_eval_rows += b.sum_extra_eval_rows;
     a.infer_rows += b.infer_rows;
     a.padded_rows += b.padded_rows;

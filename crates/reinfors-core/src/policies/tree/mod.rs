@@ -16,6 +16,5 @@ pub(crate) fn fold_search_stats(eval: &SearchEvaluation, stats: &mut CollectStat
     stats.sum_expansions += s.expansions as f64;
     stats.sum_terminal_sims += s.terminal_sims;
     stats.sum_depthcap_sims += s.depthcap_sims;
-    stats.sum_requested_rows += s.fresh_rows;
     stats.sum_extra_eval_rows += s.extra_eval_rows;
 }

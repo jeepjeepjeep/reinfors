@@ -1896,6 +1896,7 @@ fn build_telemetry<'py>(
     telemetry.set_item("terminal_sims", stats.sum_terminal_sims)?;
     telemetry.set_item("depthcap_sims", stats.sum_depthcap_sims)?;
     telemetry.set_item("requested_rows", stats.sum_requested_rows)?;
+    telemetry.set_item("tail_rows", stats.sum_tail_rows)?;
     telemetry.set_item("extra_eval_rows", stats.sum_extra_eval_rows)?;
     Ok(telemetry)
 }
