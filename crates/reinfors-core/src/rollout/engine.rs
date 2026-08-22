@@ -455,6 +455,7 @@ where
             let mut queues: Vec<RequestQueue> =
                 (0..n_queues).map(|_| RequestQueue::default()).collect();
             let mut in_flight = 0usize;
+            let mut spin_budget = SPIN_RECVS_MIN;
             // The floor counts buffered learning steps through a scheduler-owned
             // counter fed by message deltas: recounting live trajectories would race
             // in-flight completions.
@@ -730,7 +731,33 @@ where
                         break;
                     }
 
-                    let msg = rx.recv().expect("scheduler channel closed");
+                    // Spin before parking: light rounds return in microseconds, so
+                    // a spin dodges the park/unpark syscalls that dominate them. The
+                    // budget adapts — hits double it, expiries halve it — so heavy
+                    // rounds decay to parking immediately and give up the core.
+                    let mut msg = None;
+                    for _ in 0..spin_budget {
+                        match rx.try_recv() {
+                            Ok(m) => {
+                                msg = Some(m);
+                                break;
+                            }
+                            Err(_) => std::hint::spin_loop(),
+                        }
+                    }
+                    let msg = match msg {
+                        Some(m) => m,
+                        None => {
+                            let parked = std::time::Instant::now();
+                            let m = rx.recv().expect("scheduler channel closed");
+                            spin_budget = if parked.elapsed() < SPIN_WORTH {
+                                (spin_budget * 2).min(SPIN_RECVS_MAX)
+                            } else {
+                                (spin_budget / 2).max(SPIN_RECVS_MIN)
+                            };
+                            m
+                        }
+                    };
                     in_flight -= 1;
                     match msg.out {
                         TaskOut::Panicked(payload) => std::panic::resume_unwind(payload),
@@ -1123,6 +1150,12 @@ struct Msg<SE, R> {
 }
 
 type MsgSender<SE, R> = std::sync::mpsc::Sender<Msg<SE, R>>;
+
+/// Bounds for the adaptive busy-wait before a parking recv; parks that resolve
+/// under SPIN_WORTH grow the budget, slower ones shrink it.
+const SPIN_RECVS_MIN: u32 = 8;
+const SPIN_RECVS_MAX: u32 = 4096;
+const SPIN_WORTH: std::time::Duration = std::time::Duration::from_micros(50);
 
 /// Forward the first `take` queued rows in one evaluator call and route the results to the
 /// destination slots' row buffers, decrementing their outstanding counts.
