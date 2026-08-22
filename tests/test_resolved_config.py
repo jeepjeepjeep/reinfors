@@ -4,6 +4,7 @@ engine whose collected records are byte-identical, for every composition family.
 
 from __future__ import annotations
 
+import copy
 import json
 from typing import Any
 
@@ -227,3 +228,20 @@ def test_zero_opp_temperature_is_rejected_and_positive_collects() -> None:
     )
     batch = engine.collect(8, lambda obs: np.full((obs.shape[0], 1, 3), 0.5))
     assert batch.obs.shape[0] >= 8
+
+
+def test_content_revision_mismatch_is_rejected() -> None:
+    engine = rf.Engine(rf.games.CarRacing(max_ticks=25), rf.Reward(), rf.policies.Ppo(), rf.learners.Ppo(), n_games=1)
+    cfg = engine.resolved_config()
+    assert cfg["game"]["revision"] == 1
+    assert cfg["game"]["encoder"]["revision"] == 1
+
+    stale = copy.deepcopy(cfg)
+    stale["game"]["revision"] = 999
+    with pytest.raises(ValueError, match="game content revision 999"):
+        rf.engine_from_config(stale)
+
+    stale = copy.deepcopy(cfg)
+    stale["game"]["encoder"]["revision"] = 999
+    with pytest.raises(ValueError, match="encoder content revision 999"):
+        rf.engine_from_config(stale)

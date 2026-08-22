@@ -21,6 +21,14 @@ use track::{Track, PLAYFIELD, TRACK_RAD};
 pub(crate) type TileSet = smallvec::SmallVec<[u32; 16]>;
 
 pub const N_ACTIONS: usize = 5;
+
+// Observation/content version axes (independent of the snapshot CODEC_VERSION):
+// GAME_REVISION covers physics/track/reward/termination behavior; the encoder
+// revisions cover rendered/derived observation content. Each rides in resolved
+// configs and fingerprints, so any content change must bump the matching axis.
+pub const GAME_REVISION: u32 = 1;
+pub const PIXEL_ENCODER_REVISION: u32 = 1;
+pub const VECTOR_ENCODER_REVISION: u32 = 1;
 const SEED_SPACE: u32 = u32::MAX;
 const OBS_DIM: usize = 21;
 

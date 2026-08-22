@@ -44,7 +44,8 @@ def test_every_game_resolves_and_exposes_its_encoder(game_name: str) -> None:
     explicit = GAME_FACTORIES[game_name](encoder=getattr(rf.encoders, encoder_info.label)())
     implicit = GAME_FACTORIES[game_name]()
 
-    assert rf.Env(implicit).resolved_config()["game"]["encoder"] == {"name": encoder_name}
+    resolved = rf.Env(implicit).resolved_config()["game"]["encoder"]
+    assert {k: v for k, v in resolved.items() if k != "revision"} == {"name": encoder_name}
     assert explicit.observation_space().shape == implicit.observation_space().shape
     assert explicit.encoder.name == encoder_name
     assert explicit.encoder.head_index(0, 0) == 0

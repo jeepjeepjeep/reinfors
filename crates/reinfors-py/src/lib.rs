@@ -523,6 +523,7 @@ fn game_cfg(spec: &GameSpec, selected_encoder: EncoderSpec) -> Value {
             ..
         } => json!({
             "name": "car_racing",
+            "revision": reinfors_games::CAR_RACING_GAME_REVISION,
             "lap_complete_percent": lap_complete_percent,
             "max_ticks": max_ticks,
             "encoder": encoder,
@@ -1174,9 +1175,11 @@ impl EncoderSpec {
             EncoderSpec::LeducPoker => json!({"name": "leduc_poker"}),
             EncoderSpec::GridWorld => json!({"name": "gridworld"}),
             EncoderSpec::CarRacing(CarRacingEncoderSpec::Pixels) => {
-                json!({"name": "car_racing_pixels"})
+                json!({"name": "car_racing_pixels", "revision": reinfors_games::CAR_RACING_PIXELS_REVISION})
             }
-            EncoderSpec::CarRacing(CarRacingEncoderSpec::Vec) => json!({"name": "car_racing_vec"}),
+            EncoderSpec::CarRacing(CarRacingEncoderSpec::Vec) => {
+                json!({"name": "car_racing_vec", "revision": reinfors_games::CAR_RACING_VEC_REVISION})
+            }
         }
     }
 
