@@ -89,7 +89,7 @@ impl Policy for SelectiveExpectimax {
         search::MultiStepper::new(
             perspectives
                 .iter()
-                .map(|&agent| search::Stepper::new(state.clone(), agent, ctx.rng.next_u64()))
+                .map(|&agent| search::Stepper::new(state.clone(), agent))
                 .collect(),
         )
     }
@@ -103,7 +103,9 @@ impl Policy for SelectiveExpectimax {
     where
         G::State: Send,
     {
-        search::multi_round(search, ctx.game, ctx.enc, ctx.reward, &self.cfg, out)
+        search::multi_round(
+            search, ctx.game, ctx.enc, ctx.reward, &self.cfg, out, ctx.rng,
+        )
     }
 
     fn absorb<G: Game + Sync>(

@@ -101,13 +101,7 @@ impl Policy for Minimax {
         super::expectimax::search::MultiStepper::new(
             perspectives
                 .iter()
-                .map(|&agent| {
-                    super::expectimax::search::Stepper::new(
-                        state.clone(),
-                        agent,
-                        ctx.rng.next_u64(),
-                    )
-                })
+                .map(|&agent| super::expectimax::search::Stepper::new(state.clone(), agent))
                 .collect(),
         )
     }
@@ -122,7 +116,7 @@ impl Policy for Minimax {
         G::State: Send,
     {
         super::expectimax::search::multi_round(
-            search, ctx.game, ctx.enc, ctx.reward, &self.cfg, out,
+            search, ctx.game, ctx.enc, ctx.reward, &self.cfg, out, ctx.rng,
         )
     }
 

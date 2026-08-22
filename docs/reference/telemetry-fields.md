@@ -17,15 +17,13 @@ disagreement from `EpsilonGreedyQ` as measured agreement.
 | `mean_disagreement` | `float` value units | `SelectiveExpectimax`, `n_heads >= 2` | Mean root action-value disagreement across ensemble heads; reported as `0.0` with one head. |
 | `infer_seconds` | `float` seconds | All engine policies | Wall time observed inside inference callbacks. |
 | `infer_calls` | `int` calls | All engine policies | Pooled callback invocations. |
-| `infer_rows` | `int` rows | All engine policies | Real observation rows evaluated, excluding `pad_rows_to` padding. Mean physical call size is `(infer_rows + padded_rows) / infer_calls`. |
-| `padded_rows` | `int` rows | All engine policies | Zero pad rows forwarded by `pad_rows_to` (0 when disabled). |
+| `infer_rows` | `int` rows | All engine policies | Real observation rows evaluated, excluding `pad` padding. Mean physical call size is `(infer_rows + padded_rows) / infer_calls`. |
+| `padded_rows` | `int` rows | All engine policies | Zero pad rows forwarded by `pad` (0 when disabled). |
 | `cache_lookups` | `int` rows | Any policy with `infer_cache` enabled | Persistent evaluation-cache lookups. |
 | `cache_hits` | `int` rows | Any policy with `infer_cache` enabled | Successful persistent evaluation-cache lookups. |
 | `terminal_sims` | `int` simulations | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Simulations ending at a terminal state. |
 | `depthcap_sims` | `int` simulations | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Simulations ending at the configured depth cap. |
-| `shared_rows` | `int` rows | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | `0` under the stepped machine (within-batch sharing became an Evaluator fact — see the dedup savings, `fresh_rows - infer_rows`); removed in 0.3.0. |
-| `fresh_rows` | `int` rows | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Evaluation rows requested by searches; dedup and cache savings appear as the gap to `infer_rows`. Renamed `requested_rows` in 0.3.0. |
-| `hit_rows` | `int` rows | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | `0` under the stepped machine (cache hits are counted in `cache_hits`); removed in 0.3.0. |
+| `requested_rows` | `int` rows | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Evaluation rows requested by searches (pre-dedup, pre-cache); dedup and cache savings are the gap to `infer_rows`. Replaces 0.2.x's `fresh_rows`/`hit_rows`/`shared_rows` split — row provenance is an Evaluator fact. |
 | `extra_eval_rows` | `int` rows | `Mcts`, `AlphaZero` | Rows beyond one per simulation, from multi-perspective leaf evaluation or an `ExpandAll` chance fan. |
 
 The preceding Engine cache counters apply only when the engine was constructed with `infer_cache`;

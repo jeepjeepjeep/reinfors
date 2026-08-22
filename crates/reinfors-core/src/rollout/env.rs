@@ -16,7 +16,7 @@ pub struct Env<G: Game> {
 
 impl<G: Game> Env<G> {
     pub fn new(game: G, encoder: Box<dyn StateEncoder<State = G::State>>, seed: u64) -> Self {
-        let episode = Episode::new(&game, seed);
+        let episode = Episode::new(&game, crate::rng::SplitMix64::new(seed));
         Env {
             game,
             encoder,

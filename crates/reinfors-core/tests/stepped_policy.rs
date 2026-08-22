@@ -256,7 +256,6 @@ fn single_threaded_scheduling_is_reproducible_and_fan_meets_the_floor() {
             EngineParams {
                 n_games: 4,
                 seed: 9,
-                n_groups: 1,
                 batch_size: Some(3),
                 n_threads,
                 ..Default::default()

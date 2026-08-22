@@ -49,8 +49,8 @@ def test_one_train_iteration_runs() -> None:
     assert np.isfinite(loss)
 
 
-def test_alphazero_example_grouped_streaming_wiring() -> None:
-    # n_groups=2 + --depth is the distinct grouped streaming path (collect_thunk branch).
+def test_alphazero_example_streaming_wiring() -> None:
+    # --depth exercises the overlapped path: a Rust worker collects while Python trains.
     import subprocess
     import sys
 
@@ -69,8 +69,6 @@ def test_alphazero_example_grouped_streaming_wiring() -> None:
             "0",
             "--n-games",
             "4",
-            "--n-groups",
-            "2",
             "--depth",
             "1",
         ],
@@ -79,5 +77,5 @@ def test_alphazero_example_grouped_streaming_wiring() -> None:
         timeout=300,
     )
     assert proc.returncode == 0, proc.stderr
-    assert "n_groups=2" in proc.stdout, "startup print must be self-describing"
+    assert "depth=1" in proc.stdout, "startup print must be self-describing"
     assert "iter   2" in proc.stdout

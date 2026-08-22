@@ -492,7 +492,6 @@ fn engine_collects_with_search_policies_through_chance() {
         EngineParams {
             n_games: 2,
             seed: 3,
-            n_groups: 1,
             ..Default::default()
         },
     );

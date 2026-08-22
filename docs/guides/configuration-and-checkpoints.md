@@ -79,7 +79,7 @@ engine.weights_updated(player=1)  # Per-player callbacks: only player 1 changed.
 Use `player=` only with a per-player callback sequence. A shared callable uses the shared partition,
 so player-specific invalidation can leave its rows stale. `weights_updated` is thread-safe during
 `collect_stream`, takes effect at the next safe round boundary, and is a no-op when caching is off.
-Monitor `cache_lookups`, `cache_hits`, and `hit_rows` in
+Monitor `cache_lookups` and `cache_hits` in
 [telemetry](../reference/telemetry-fields.md). Cache contents are excluded from snapshots, so a
 restore can change callback patterns without changing records.
 

@@ -78,8 +78,8 @@ callback, so under per-callback resampling a hit would serve an old draw while m
 one, and an all-hit round never resamples at all. Per-callback resampling therefore requires
 `infer_cache=0` (the default). Caching composes only with an externally held draw: resample
 between collects, call `Engine.weights_updated` before collecting, and keep the draw fixed for
-that collect. A draw's scope is one callback invocation — normally the full pooled round,
-though `pad_rows_to` splits oversized rounds into chunks with distinct draws. The shared draw
+that collect. A draw's scope is one callback invocation — a threshold batch of up to
+`batch_size` rows, so one search round's rows may span draws. The shared draw
 is the standard property of parallelised noisy nets: in a game with no chance events and a
 fixed start, shared noise plus greedy single-head selection plays every parallel game
 identically, adding no exploration diversity. Chance events (dealt cards, stochastic spawns)

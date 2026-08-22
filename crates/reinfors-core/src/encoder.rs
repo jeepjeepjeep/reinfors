@@ -208,7 +208,6 @@ mod tests {
                 EngineParams {
                     n_games: 1,
                     seed: 0,
-                    n_groups: 1,
                     ..Default::default()
                 },
             );
@@ -323,7 +322,6 @@ mod dispatch_tests {
             EngineParams {
                 n_games: 1,
                 seed: 0,
-                n_groups: 1,
                 ..Default::default()
             },
         );

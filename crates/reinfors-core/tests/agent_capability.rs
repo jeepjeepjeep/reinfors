@@ -259,7 +259,6 @@ fn engine_rejects_a_capped_policy_on_a_three_agent_game() {
         EngineParams {
             n_games: 1,
             seed: 0,
-            n_groups: 1,
             ..Default::default()
         },
     );
@@ -278,7 +277,6 @@ fn expectimax_engine_collects_on_a_three_agent_simultaneous_game() {
         EngineParams {
             n_games: 2,
             seed: 4,
-            n_groups: 1,
             ..Default::default()
         },
     );
@@ -366,7 +364,6 @@ fn mcts_engine_collects_on_a_three_agent_simultaneous_game() {
         EngineParams {
             n_games: 2,
             seed: 3,
-            n_groups: 1,
             ..Default::default()
         },
     );
@@ -405,7 +402,6 @@ fn alphazero_engine_collects_on_a_three_agent_sequential_game() {
         EngineParams {
             n_games: 2,
             seed: 5,
-            n_groups: 1,
             ..Default::default()
         },
     );
@@ -439,7 +435,6 @@ fn learn_players_filters_value_only_perspectives() {
         EngineParams {
             n_games: 2,
             seed: 5,
-            n_groups: 1,
             ..Default::default()
         },
     )
@@ -511,7 +506,6 @@ fn alphazero_routes_each_perspective_to_its_own_network() {
         EngineParams {
             n_games: 2,
             seed: 5,
-            n_groups: 1,
             ..Default::default()
         },
     );
@@ -541,7 +535,6 @@ fn uct_routes_sequential_leaf_rows_to_the_leaf_mover() {
         EngineParams {
             n_games: 2,
             seed: 3,
-            n_groups: 1,
             ..Default::default()
         },
     );
@@ -571,7 +564,6 @@ fn duct_routes_every_perspective_to_its_own_network() {
         EngineParams {
             n_games: 2,
             seed: 3,
-            n_groups: 1,
             ..Default::default()
         },
     );
@@ -608,7 +600,6 @@ fn expectimax_routes_opponent_model_rows_to_that_mover() {
         EngineParams {
             n_games: 2,
             seed: 4,
-            n_groups: 1,
             ..Default::default()
         },
     );
@@ -699,7 +690,6 @@ fn value_only_rows_carry_each_agents_own_return() {
         EngineParams {
             n_games: 1,
             seed: 2,
-            n_groups: 1,
             ..Default::default()
         },
     );
@@ -727,7 +717,6 @@ fn a_capability_free_policy_collects_on_a_three_agent_game() {
         EngineParams {
             n_games: 2,
             seed: 7,
-            n_groups: 1,
             ..Default::default()
         },
     );
@@ -797,7 +786,6 @@ fn truncation_bootstraps_every_perspectives_own_tail() {
         EngineParams {
             n_games: 1,
             seed: 6,
-            n_groups: 1,
             ..Default::default()
         },
     );
@@ -1125,7 +1113,6 @@ fn episode_birth_realizes_root_chance_chains() {
         EngineParams {
             n_games: 2,
             seed: 0,
-            n_groups: 1,
             ..Default::default()
         },
     );
@@ -1188,7 +1175,6 @@ fn start_distribution_restores_must_be_decision_states() {
         EngineParams {
             n_games: 1,
             seed: 0,
-            n_groups: 1,
             ..Default::default()
         },
     )
@@ -1262,7 +1248,6 @@ fn forced_maxn_supervises_both_perspectives_at_two_agents() {
             EngineParams {
                 n_games: 1,
                 seed: 9,
-                n_groups: 1,
                 ..Default::default()
             },
         );
@@ -1346,7 +1331,6 @@ fn forced_maxn_truncation_bootstraps_both_perspectives() {
         EngineParams {
             n_games: 1,
             seed: 8,
-            n_groups: 1,
             ..Default::default()
         },
     );
@@ -1391,7 +1375,6 @@ fn ppo_truncation_bootstraps_every_perspectives_own_tail() {
         EngineParams {
             n_games: 1,
             seed: 9,
-            n_groups: 1,
             ..Default::default()
         },
     );
@@ -1429,7 +1412,6 @@ fn ppo_windows_meet_the_floor_and_stay_single_version() {
         EngineParams {
             n_games: 3,
             seed: 11,
-            n_groups: 1,
             ..Default::default()
         },
     );
@@ -1453,7 +1435,7 @@ fn ppo_windows_meet_the_floor_and_stay_single_version() {
 }
 
 #[test]
-fn grouped_tail_failure_leaves_the_pool_respawnable() {
+fn tail_failure_leaves_the_pool_respawnable() {
     // A callback that dies exactly on truncation-tail inference (obs tick 2 exists only
     // there) must not strand finished episodes: the retry may see no over-horizon state.
     let mut engine = Engine::new(
@@ -1465,29 +1447,26 @@ fn grouped_tail_failure_leaves_the_pool_respawnable() {
         EngineParams {
             n_games: 2,
             seed: 3,
-            n_groups: 2,
             ..Default::default()
         },
     );
-    let flaky = reinfors_core::ServiceHost::spawn(|_p, obs: Vec<f32>, n| {
-        if obs.chunks(2).any(|row| row[0] >= 2.0) {
-            panic!("tail inference failed");
-        }
-        (0..n).flat_map(|_| [0.0, 0.0, 1.0]).collect()
-    });
     // The error surfaces as a panic (the Python layer converts it to an exception); the
     // engine must stay usable afterwards, exactly as it does across the binding.
     let aborted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        engine.collect_grouped_hosted(8, reinfors_core::InferMode::Shared, &flaky)
+        engine.collect(8, |obs: Vec<f32>, n| {
+            if obs.chunks(2).any(|row| row[0] >= 2.0) {
+                panic!("tail inference failed");
+            }
+            (0..n).flat_map(|_| [0.0, 0.0, 1.0]).collect()
+        })
     }));
     assert!(
         aborted.is_err(),
         "the flaky callback must surface its failure"
     );
-    let ok = reinfors_core::ServiceHost::spawn(|_p, _obs, n: usize| {
+    let (records, _stats) = engine.collect(8, |_obs, n: usize| {
         (0..n).flat_map(|_| [0.0, 0.0, 2.0]).collect::<Vec<f64>>()
     });
-    let (records, _stats) = engine.collect_grouped_hosted(8, reinfors_core::InferMode::Shared, &ok);
     assert!(records.len() >= 8, "retry met the floor: {}", records.len());
     for r in &records {
         assert!(
@@ -1513,7 +1492,6 @@ fn nstep_alternating_truncation_tails_cannot_bootstrap() {
         EngineParams {
             n_games: 2,
             seed: 4,
-            n_groups: 1,
             ..Default::default()
         },
     );

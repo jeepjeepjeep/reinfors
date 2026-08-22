@@ -124,18 +124,16 @@ fn callbacks_fire_at_the_threshold_with_short_drains() {
     });
     assert!(records.len() >= 4);
     let sizes = sizes.lock().unwrap();
-    // The final call is the fragment cut's gathered tail flush (batched by design,
-    // pool-sized); every search-round call obeys the threshold.
-    let (tail_flush, rounds) = sizes.split_last().unwrap();
+    // Tail bootstraps ride the same queue as search rows: EVERY call obeys the
+    // threshold, including the fragment cut's.
     assert!(
-        rounds.iter().all(|&n| n <= 2),
-        "no round call may exceed batch_size: {sizes:?}"
+        sizes.iter().all(|&n| n <= 2),
+        "no call may exceed batch_size: {sizes:?}"
     );
     assert!(
-        rounds.iter().filter(|&&n| n == 2).count() >= 2,
+        sizes.iter().filter(|&&n| n == 2).count() >= 2,
         "threshold batches must dominate: {sizes:?}"
     );
-    assert_eq!(*tail_flush, 4, "the fragment cut gathers every game's tail");
 }
 
 #[test]
@@ -158,9 +156,9 @@ fn oversized_pools_drain_short_when_starved() {
 
 #[test]
 fn the_cursor_advances_per_collect_and_survives_restores() {
-    // Snapshot layout: version(1) + counts(8) + rngs(16), then the sweep cursor u64.
+    // Snapshot layout: version(1) + counts(8) + buffer rng(8), then the sweep cursor u64.
     fn cursor(bytes: &[u8]) -> u64 {
-        u64::from_le_bytes(bytes[25..33].try_into().unwrap())
+        u64::from_le_bytes(bytes[17..25].try_into().unwrap())
     }
     let mut engine = ppo_engine(3, 2, 1);
     let infer = |_obs: Vec<f32>, n: usize| vec![0.0; n * 3];

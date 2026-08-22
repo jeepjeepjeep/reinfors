@@ -287,9 +287,9 @@ def test_flat_caps_accept_boundary_and_reject_boundary_plus_one() -> None:
     _gridworld_engine(n_games=2**16)
     with pytest.raises(ValueError, match="n_games must be <="):
         _gridworld_engine(n_games=2**16 + 1)
-    _gridworld_engine(n_games=1, pad_rows_to=2**16)
-    with pytest.raises(ValueError, match="pad_rows_to must be <="):
-        _gridworld_engine(n_games=1, pad_rows_to=2**16 + 1)
+    _gridworld_engine(n_games=1, batch_size=2**20)
+    with pytest.raises(ValueError, match="batch_size must be <="):
+        _gridworld_engine(n_games=1, batch_size=2**20 + 1)
 
 
 def test_buffer_ceiling_is_dimension_aware() -> None:
@@ -308,9 +308,9 @@ def test_buffer_ceiling_is_dimension_aware() -> None:
     # the byte budget: rows x dim f32 in, rows x heads x (actions+1) f64 out, 2^29 bytes each
     limit = min((2**29 // 4) // dim, (2**29 // 8) // (4672 + 1))
     assert limit < 2**16  # the dimension ceiling must bind below the flat cap here
-    chess_engine(n_games=2, pad_rows_to=limit)
+    chess_engine(n_games=2, pad=True, batch_size=limit)
     with pytest.raises(ValueError, match="too large for this composition"):
-        chess_engine(n_games=2, pad_rows_to=limit + 1)
+        chess_engine(n_games=2, pad=True, batch_size=limit + 1)
     with pytest.raises(ValueError, match="too large for this composition"):
         chess_engine(n_games=limit + 1)
 

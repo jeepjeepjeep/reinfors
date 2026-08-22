@@ -123,6 +123,10 @@ def engine_from_config(config: dict[str, Any]) -> Engine:
     g_name, g_kw = _split(config["game"])
     g_kw = _coerce_handles(g_kw)
     engine_kw = dict(config.get("engine", {}))
+    for gone, repl in (("n_groups", "n_threads and batch_size"), ("pad_rows_to", "pad")):
+        if gone in engine_kw:
+            msg = f"engine config field '{gone}' was removed in 0.3.0; tune {repl} instead"
+            raise ValueError(msg)
     # Null engine knobs canonicalize a default; strip them so kwargs stay typed.
     engine_kw = {k: v for k, v in engine_kw.items() if v is not None}
     # start_buffer renders as null (off) or a {capacity, p_fresh} block (on) — unpack it back
