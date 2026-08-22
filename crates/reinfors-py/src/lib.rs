@@ -19,11 +19,12 @@ use reinfors_core::{
 use reinfors_games::snake::{Cell, DeathCause};
 use reinfors_games::{
     snake_length_cell, Action, Backgammon, BackgammonEvent, BackgammonReward, BackgammonState,
-    BackgammonTesauro, Chess, ChessEvent, ChessPlanesAz119, ChessPlanesMinimal,
-    ChessPlanesOpenSpiel, ChessPlanesRelative, ChessReward, ChessState, Connect4, Connect4Event,
-    Connect4Planes, Connect4Reward, Connect4State, EgocentricSnake, GridEvent, GridState,
-    GridWorld, GridWorldPlanes, GridWorldReward, HoldemEgocentric, HoldemReward, KuhnEncoder,
-    KuhnPoker, LeducEncoder, LeducPoker, Snake, SnakeReward, SnakeState, StepEvent, TexasHoldem,
+    BackgammonTesauro, CarRacing, CarRacingCodec, CarRacingPixels, CarRacingReward, CarRacingVec,
+    Chess, ChessEvent, ChessPlanesAz119, ChessPlanesMinimal, ChessPlanesOpenSpiel,
+    ChessPlanesRelative, ChessReward, ChessState, Connect4, Connect4Event, Connect4Planes,
+    Connect4Reward, Connect4State, EgocentricSnake, GridEvent, GridState, GridWorld,
+    GridWorldPlanes, GridWorldReward, HoldemEgocentric, HoldemReward, KuhnEncoder, KuhnPoker,
+    LeducEncoder, LeducPoker, Snake, SnakeReward, SnakeState, StepEvent, TexasHoldem,
     CHESS_ACTIONS,
 };
 
@@ -513,6 +514,17 @@ fn game_cfg(spec: &GameSpec, selected_encoder: EncoderSpec) -> Value {
             "size": size,
             "goal_row": goal.0,
             "goal_col": goal.1,
+            "max_ticks": max_ticks,
+            "encoder": encoder,
+        }),
+        GameSpec::CarRacing {
+            lap_complete_percent,
+            max_ticks,
+            ..
+        } => json!({
+            "name": "car_racing",
+            "revision": reinfors_games::CAR_RACING_GAME_REVISION,
+            "lap_complete_percent": lap_complete_percent,
             "max_ticks": max_ticks,
             "encoder": encoder,
         }),
@@ -1141,6 +1153,7 @@ enum EncoderSpec {
     KuhnPoker,
     LeducPoker,
     GridWorld,
+    CarRacing(CarRacingEncoderSpec),
 }
 
 impl EncoderSpec {
@@ -1161,6 +1174,12 @@ impl EncoderSpec {
             EncoderSpec::KuhnPoker => json!({"name": "kuhn_poker"}),
             EncoderSpec::LeducPoker => json!({"name": "leduc_poker"}),
             EncoderSpec::GridWorld => json!({"name": "gridworld"}),
+            EncoderSpec::CarRacing(CarRacingEncoderSpec::Pixels) => {
+                json!({"name": "car_racing_pixels", "revision": reinfors_games::CAR_RACING_PIXELS_REVISION})
+            }
+            EncoderSpec::CarRacing(CarRacingEncoderSpec::Vec) => {
+                json!({"name": "car_racing_vec", "revision": reinfors_games::CAR_RACING_VEC_REVISION})
+            }
         }
     }
 
@@ -1177,6 +1196,8 @@ impl EncoderSpec {
             EncoderSpec::KuhnPoker => "kuhn_poker",
             EncoderSpec::LeducPoker => "leduc_poker",
             EncoderSpec::GridWorld => "gridworld",
+            EncoderSpec::CarRacing(CarRacingEncoderSpec::Pixels) => "car_racing_pixels",
+            EncoderSpec::CarRacing(CarRacingEncoderSpec::Vec) => "car_racing_vec",
         }
     }
 
@@ -1188,6 +1209,7 @@ impl EncoderSpec {
             EncoderSpec::Backgammon => 1352,
             EncoderSpec::KuhnPoker => 2,
             EncoderSpec::GridWorld => 4,
+            EncoderSpec::CarRacing(_) => 5,
         }
     }
 }
@@ -2155,6 +2177,17 @@ enum GameSpec {
         goal: (i32, i32),
         max_ticks: Option<usize>,
     },
+    CarRacing {
+        lap_complete_percent: f64,
+        max_ticks: Option<usize>,
+        encoder: CarRacingEncoderSpec,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CarRacingEncoderSpec {
+    Pixels,
+    Vec,
 }
 
 impl GameSpec {
@@ -2168,6 +2201,7 @@ impl GameSpec {
             GameSpec::KuhnPoker { .. } => "kuhn_poker",
             GameSpec::LeducPoker => "leduc_poker",
             GameSpec::GridWorld { .. } => "gridworld",
+            GameSpec::CarRacing { .. } => "car_racing",
         }
     }
 
@@ -2181,6 +2215,7 @@ impl GameSpec {
             GameSpec::KuhnPoker { .. } => EncoderSpec::KuhnPoker,
             GameSpec::LeducPoker => EncoderSpec::LeducPoker,
             GameSpec::GridWorld { .. } => EncoderSpec::GridWorld,
+            GameSpec::CarRacing { encoder, .. } => EncoderSpec::CarRacing(encoder),
         }
     }
 
@@ -2195,6 +2230,7 @@ impl GameSpec {
                 | (GameSpec::KuhnPoker { .. }, EncoderSpec::KuhnPoker)
                 | (GameSpec::LeducPoker, EncoderSpec::LeducPoker)
                 | (GameSpec::GridWorld { .. }, EncoderSpec::GridWorld)
+                | (GameSpec::CarRacing { .. }, EncoderSpec::CarRacing(_))
         )
     }
 
@@ -2207,7 +2243,7 @@ impl GameSpec {
             | GameSpec::Chess { .. }
             | GameSpec::Backgammon { .. }
             | GameSpec::LeducPoker => 2,
-            GameSpec::GridWorld { .. } => 1,
+            GameSpec::GridWorld { .. } | GameSpec::CarRacing { .. } => 1,
         }
     }
 
@@ -2258,6 +2294,20 @@ impl GameSpec {
             ),
             GameSpec::KuhnPoker { players } => of(KuhnPoker { players }, &KuhnEncoder { players }),
             GameSpec::LeducPoker => of(LeducPoker, &LeducEncoder),
+            GameSpec::CarRacing {
+                lap_complete_percent,
+                max_ticks,
+                encoder,
+            } => {
+                let game = CarRacing {
+                    lap_complete_percent,
+                    max_ticks,
+                };
+                match encoder {
+                    CarRacingEncoderSpec::Pixels => of(game, &CarRacingPixels),
+                    CarRacingEncoderSpec::Vec => of(game, &CarRacingVec),
+                }
+            }
             GameSpec::GridWorld {
                 size,
                 goal,
@@ -2291,6 +2341,9 @@ fn reward_schema(game: &GameSpec) -> &'static [(&'static str, f64)] {
         GameSpec::Chess { .. } => &[("win", 1.0), ("loss", -1.0), ("draw", 0.0)],
         GameSpec::Backgammon { .. } => &[("win", 1.0), ("gammon", 2.0), ("backgammon", 3.0)],
         GameSpec::GridWorld { .. } => &[("step", 0.0), ("goal", 1.0)],
+        GameSpec::CarRacing { .. } => {
+            &[("tile", 1000.0), ("step", -0.1), ("off_playfield", -100.0)]
+        }
         GameSpec::TexasHoldem { .. } => &[("scale", 1.0)],
         GameSpec::KuhnPoker { .. } | GameSpec::LeducPoker => &[("scale", 1.0)],
     }
@@ -2334,6 +2387,14 @@ fn build_reward(game: &GameSpec, reward: Option<PyReward>) -> PyResult<RewardBox
                 backgammon: r[2],
             })
         }
+        GameSpec::CarRacing { .. } => {
+            let r = resolve_reward(reward, reward_schema(game))?;
+            RewardBox::CarRacing(CarRacingReward {
+                tile: r[0],
+                step: r[1],
+                off_playfield: r[2],
+            })
+        }
         GameSpec::GridWorld { .. } => {
             let r = resolve_reward(reward, reward_schema(game))?;
             RewardBox::GridWorld(GridWorldReward {
@@ -2355,6 +2416,7 @@ enum RewardBox {
     Chess(ChessReward),
     Backgammon(BackgammonReward),
     GridWorld(GridWorldReward),
+    CarRacing(CarRacingReward),
 }
 
 #[derive(Clone)]
@@ -2753,6 +2815,23 @@ where
     e
 }
 
+fn check_chance_composition<G: Game>(game: &G, policy: &PolicySpec) -> PyResult<()> {
+    let mode = match policy {
+        PolicySpec::SelectiveExpectimax { chance, .. }
+        | PolicySpec::Minimax { chance, .. }
+        | PolicySpec::Mcts { chance, .. }
+        | PolicySpec::AlphaZero { chance, .. } => *chance,
+        PolicySpec::EpsilonGreedyQ { .. } | PolicySpec::Ppo => return Ok(()),
+    };
+    if matches!(mode, ChanceMode::ExpandAll) && !game.searchable_chance_enumerable() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "this game's chance is sample-only and cannot be enumerated; ExpandAll is \
+             unavailable — use a sampling chance mode (AlwaysResample or Committed)",
+        ));
+    }
+    Ok(())
+}
+
 fn check_search_budgets(policy: &PolicySpec) -> PyResult<()> {
     const MAX: u64 = 1 << 20;
     // n_heads multiplies per-node search memory (heads x actions per node), so its
@@ -2891,6 +2970,7 @@ where
         _ => 1,
     };
     check_search_budgets(&policy)?;
+    check_chance_composition(&game, &policy)?;
     check_call_buffers(
         "n_games",
         engine_params.n_games,
@@ -3387,6 +3467,35 @@ fn build_engine(
                 learn_players,
             )
         }
+        (
+            GameSpec::CarRacing {
+                lap_complete_percent,
+                max_ticks,
+                encoder,
+            },
+            RewardBox::CarRacing(reward),
+        ) => {
+            let game = CarRacing {
+                lap_complete_percent,
+                max_ticks,
+            };
+            let enc: Box<dyn StateEncoder<State = reinfors_games::CarRacingState>> = match encoder {
+                CarRacingEncoderSpec::Pixels => Box::new(CarRacingPixels),
+                CarRacingEncoderSpec::Vec => Box::new(CarRacingVec),
+            };
+            build_for_game(
+                game.clone(),
+                enc,
+                Box::new(reward),
+                Box::new(AlwaysInitialState),
+                Some(Box::new(CarRacingCodec { game })),
+                policy,
+                learner,
+                engine_params,
+                infer_caches,
+                learn_players,
+            )
+        }
         _ => unreachable!("build_reward returns the reward variant matching the game"),
     }
 }
@@ -3817,6 +3926,31 @@ impl NativeState for reinfors_games::LeducState {
     }
 }
 
+impl NativeState for reinfors_games::CarRacingState {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        match self.summary() {
+            None => {
+                d.set_item("pending", true)?;
+            }
+            Some(sum) => {
+                d.set_item("pending", false)?;
+                d.set_item("seed", sum.seed)?;
+                d.set_item("tick", sum.tick)?;
+                d.set_item("tiles_visited", sum.tiles_visited)?;
+                d.set_item("total_tiles", sum.total_tiles)?;
+                d.set_item("hull_position", sum.hull_position)?;
+                d.set_item("hull_angle", sum.hull_angle)?;
+                d.set_item("speed", sum.speed)?;
+                d.set_item("new_lap", sum.new_lap)?;
+                d.set_item("done", sum.done)?;
+                d.set_item("fallback_track", sum.fallback_track)?;
+            }
+        }
+        Ok(d)
+    }
+}
+
 impl NativeState for GridState {
     fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
@@ -3848,6 +3982,16 @@ impl NativeEvent for StepEvent {
         d.set_item("death_cause", cause)?;
         // survived_to_max_ticks is engine-only truncation metadata; Env never sets it, so exposing
         // the field here would promise a permanently false event value.
+        Ok(d.into_any())
+    }
+}
+
+impl NativeEvent for reinfors_games::CarRacingEvent {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let d = PyDict::new(py);
+        d.set_item("new_tiles", self.new_tiles)?;
+        d.set_item("total_tiles", self.total_tiles)?;
+        d.set_item("off_playfield", self.off_playfield)?;
         Ok(d.into_any())
     }
 }
@@ -4036,6 +4180,7 @@ where
             })?);
         }
         let game = impls[0].inner.game();
+        check_chance_composition(game, spec)?;
         let enc = impls[0].inner.encoder();
         let reward = impls[0].reward.as_deref().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(
@@ -4429,6 +4574,33 @@ fn build_env(game: GameSpec, reward: Option<PyReward>, seed: u64) -> PyResult<Bo
                 last_rewards: None,
             })
         }
+        GameSpec::CarRacing {
+            lap_complete_percent,
+            max_ticks,
+            encoder,
+        } => {
+            let game = CarRacing {
+                lap_complete_percent,
+                max_ticks,
+            };
+            let enc: Box<dyn StateEncoder<State = reinfors_games::CarRacingState>> = match encoder {
+                CarRacingEncoderSpec::Pixels => Box::new(CarRacingPixels),
+                CarRacingEncoderSpec::Vec => Box::new(CarRacingVec),
+            };
+            let obs_shape = enc.obs_shape();
+            Box::new(EnvImpl {
+                inner: Env::new(game.clone(), enc, seed),
+                obs_shape,
+                codec: Some(Box::new(CarRacingCodec { game })),
+                reward: reward.map(|rb| match rb {
+                    RewardBox::CarRacing(r) => {
+                        Box::new(r) as Box<dyn Reward<Event = reinfors_games::CarRacingEvent>>
+                    }
+                    _ => unreachable!("build_reward returns the reward variant matching the game"),
+                }),
+                last_rewards: None,
+            })
+        }
         GameSpec::GridWorld {
             size,
             goal,
@@ -4575,6 +4747,10 @@ fn game_handle(mut spec: GameSpec, encoder: Option<EncoderHandle>) -> PyResult<G
     if let (GameSpec::Chess { encoder, .. }, EncoderSpec::Chess(chess)) = (&mut spec, selected) {
         *encoder = chess;
     }
+    if let (GameSpec::CarRacing { encoder, .. }, EncoderSpec::CarRacing(cr)) = (&mut spec, selected)
+    {
+        *encoder = cr;
+    }
     Ok(GameHandle {
         spec,
         encoder: selected,
@@ -4583,6 +4759,11 @@ fn game_handle(mut spec: GameSpec, encoder: Option<EncoderHandle>) -> PyResult<G
 
 #[pymethods]
 impl GameHandle {
+    #[getter]
+    fn name(&self) -> &'static str {
+        self.spec.name()
+    }
+
     #[staticmethod]
     #[pyo3(signature = (grid_size=20, initial_length=3, food=3, play_to_last=true, win_food_lead=None, max_ticks=1000, num_snakes=2, encoder=None))]
     #[pyo3(name = "Snake")]
@@ -4726,6 +4907,31 @@ impl GameHandle {
         )
     }
 
+    #[staticmethod]
+    #[pyo3(signature = (lap_complete_percent=0.95, max_ticks=1000, encoder=None))]
+    #[pyo3(name = "CarRacing")]
+    fn car_racing(
+        lap_complete_percent: f64,
+        max_ticks: Option<usize>,
+        encoder: Option<EncoderHandle>,
+    ) -> PyResult<Self> {
+        check_max_ticks(max_ticks)?;
+        CarRacing {
+            lap_complete_percent,
+            max_ticks,
+        }
+        .validate()
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        game_handle(
+            GameSpec::CarRacing {
+                lap_complete_percent,
+                max_ticks,
+                encoder: CarRacingEncoderSpec::Pixels,
+            },
+            encoder,
+        )
+    }
+
     fn observation_space<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         space_to_py(py, self.spec.spaces().0)
     }
@@ -4744,7 +4950,8 @@ impl GameHandle {
             GameSpec::Snake { max_ticks, .. }
             | GameSpec::Chess { max_ticks, .. }
             | GameSpec::Backgammon { max_ticks }
-            | GameSpec::GridWorld { max_ticks, .. } => max_ticks,
+            | GameSpec::GridWorld { max_ticks, .. }
+            | GameSpec::CarRacing { max_ticks, .. } => max_ticks,
             GameSpec::Connect4
             | GameSpec::TexasHoldem { .. }
             | GameSpec::KuhnPoker { .. }
@@ -4821,7 +5028,7 @@ trait ErasedCfr: Send + Sync {
     fn nash_conv(&self) -> Result<f64, reinfors_core::EnumerationCapExceeded>;
     fn best_response_values(&self) -> Result<Vec<f64>, reinfors_core::EnumerationCapExceeded>;
     fn num_players(&self) -> usize;
-    fn expected_value(&self, player: usize) -> f64;
+    fn expected_value(&self, player: usize) -> Result<f64, reinfors_core::EnumerationCapExceeded>;
     fn average_strategy(&self, key: &[u8]) -> Option<(Vec<usize>, Vec<f64>)>;
     fn save(&self) -> Vec<u8>;
     fn load(&mut self, bytes: &[u8]) -> Result<(), String>;
@@ -4849,7 +5056,7 @@ impl<G: Game + Send + Sync> ErasedCfr for reinfors_core::CfrSolver<G> {
     fn num_players(&self) -> usize {
         reinfors_core::CfrSolver::num_players(self)
     }
-    fn expected_value(&self, player: usize) -> f64 {
+    fn expected_value(&self, player: usize) -> Result<f64, reinfors_core::EnumerationCapExceeded> {
         reinfors_core::CfrSolver::expected_value(self, player)
     }
     fn average_strategy(&self, key: &[u8]) -> Option<(Vec<usize>, Vec<f64>)> {
@@ -4987,7 +5194,8 @@ impl PyCfr {
                 self.inner.num_players()
             )));
         }
-        Ok(py.allow_threads(|| self.inner.expected_value(player)))
+        py.allow_threads(|| self.inner.expected_value(player))
+            .map_err(cap_err)
     }
 
     fn average_strategy(&self, key: &[u8]) -> Option<(Vec<usize>, Vec<f64>)> {
@@ -5891,6 +6099,22 @@ impl EncoderHandle {
     }
 
     #[staticmethod]
+    #[pyo3(name = "CarRacingPixels")]
+    fn car_racing_pixels() -> Self {
+        EncoderHandle {
+            spec: EncoderSpec::CarRacing(CarRacingEncoderSpec::Pixels),
+        }
+    }
+
+    #[staticmethod]
+    #[pyo3(name = "CarRacingVec")]
+    fn car_racing_vec() -> Self {
+        EncoderHandle {
+            spec: EncoderSpec::CarRacing(CarRacingEncoderSpec::Vec),
+        }
+    }
+
+    #[staticmethod]
     #[pyo3(name = "MinimalChess")]
     fn minimal_chess() -> Self {
         EncoderHandle {
@@ -5934,7 +6158,8 @@ impl EncoderHandle {
             | EncoderSpec::TexasHoldem
             | EncoderSpec::KuhnPoker
             | EncoderSpec::LeducPoker
-            | EncoderSpec::GridWorld => Ok(action),
+            | EncoderSpec::GridWorld
+            | EncoderSpec::CarRacing(_) => Ok(action),
         }
     }
 
@@ -5957,7 +6182,8 @@ impl EncoderHandle {
             | EncoderSpec::TexasHoldem
             | EncoderSpec::KuhnPoker
             | EncoderSpec::LeducPoker
-            | EncoderSpec::GridWorld => Ok(head),
+            | EncoderSpec::GridWorld
+            | EncoderSpec::CarRacing(_) => Ok(head),
         }
     }
 

@@ -672,7 +672,11 @@ mod tests {
         let g = game(3);
         let root = g.initial_state();
         assert!(matches!(g.actor(&root), Actor::Chance));
-        assert_eq!(g.chance_node(&root).count(), 3, "button draw first");
+        assert_eq!(
+            g.chance_node(&root).enumerable_count().unwrap(),
+            3,
+            "button draw first"
+        );
         let s = deal(&g, &mut TestRng(41));
         assert_eq!(s.hole.len(), 3);
         assert!(s.button < 3);
@@ -928,7 +932,10 @@ mod tests {
         assert_eq!(node.board.len(), 0, "the reveal is the chance");
         assert!(matches!(g.actor(node), Actor::Chance));
         assert!(g.legal_actions(node, node.to_act).is_empty());
-        assert_eq!(g.chance_node(node).count(), binomial(48, 3));
+        assert_eq!(
+            g.chance_node(node).enumerable_count().unwrap(),
+            binomial(48, 3)
+        );
         let rt = g.apply_chance_node(node, 17_000);
         assert!(!rt.terminal);
         let dealt = rt.next_state;

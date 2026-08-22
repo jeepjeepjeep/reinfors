@@ -590,7 +590,9 @@ fn push_branches<G: Game>(
                 }
             }
             ChanceMode::ExpandAll => {
-                let count = dist.count();
+                let count = dist.enumerable_count().expect(
+                    "ExpandAll cannot expand sample-only chance; use a sampling chance mode",
+                );
                 assert!(
                     count <= MAX_ENUMERATED_OUTCOMES,
                     "ExpandAll cannot enumerate {count} chance outcomes (bound {}); use a \
@@ -604,7 +606,10 @@ fn push_branches<G: Game>(
                      narrower sampling mode",
                     MAX_ENUMERATED_OUTCOMES
                 );
-                let probs: Vec<f64> = dist.iter_probs().collect();
+                let probs: Vec<f64> = dist
+                    .iter_probs()
+                    .expect("enumerable checked above")
+                    .collect();
                 for (idx, pr) in probs.into_iter().enumerate() {
                     let ct = game.apply_chance_node(&s, idx);
                     let er = crate::reward::edge_reward(reward, &ct.events, agent);
