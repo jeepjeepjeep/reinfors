@@ -216,3 +216,32 @@ def test_zero_opp_temperature_is_rejected_and_positive_collects() -> None:
     )
     batch = engine.collect(8, lambda obs: np.full((obs.shape[0], 1, 3), 0.5))
     assert batch.obs.shape[0] >= 8
+
+
+def test_scheduler_knobs_enter_config_and_fingerprint_but_not_snapshots() -> None:
+    a = rf.Engine(
+        rf.games.Connect4(),
+        rf.Reward(win=1.0, loss=-1.0),
+        rf.policies.AlphaZero(num_simulations=4),
+        rf.learners.AlphaZero(gamma=1.0),
+        n_games=2,
+        seed=0,
+    )
+    b = rf.Engine(
+        rf.games.Connect4(),
+        rf.Reward(win=1.0, loss=-1.0),
+        rf.policies.AlphaZero(num_simulations=4),
+        rf.learners.AlphaZero(gamma=1.0),
+        n_games=2,
+        seed=0,
+        batch_size=3,
+        n_threads=2,
+    )
+    assert a.resolved_config()["engine"]["batch_size"] is None, "defaults canonicalize to null"
+    assert b.resolved_config()["engine"]["batch_size"] == 3
+    assert b.resolved_config()["engine"]["n_threads"] == 2
+    assert a.config_fingerprint() != b.config_fingerprint()
+    # round-trip reconstructs the scheduler settings
+    c = rf.engine_from_config(b.resolved_config())
+    assert c.resolved_config()["engine"]["batch_size"] == 3
+    assert c.config_fingerprint() == b.config_fingerprint()

@@ -112,15 +112,18 @@ def test_complete_rounds_batch_the_full_pool() -> None:
         )
 
     batch = engine.collect(n_records=1, infer=infer)
-    assert len(batch.obs) == 4, "one complete round of the whole 4-game pool"
-    assert rows_seen[0] == 4, "the first callback batches every game"
+    assert len(batch.obs) == 4, "the admitted sweep covers the whole 4-game pool"
+    # Search rows fire at batch_size (n_games/2 by default); the fragment cut gathers
+    # every live game's tail bootstrap into one batched forward.
+    assert rows_seen == [2, 2, 4]
 
 
 def test_windows_meet_the_record_floor() -> None:
     engine = connect4_engine()
     for n in (17, 64, 5):
         batch = engine.collect(n_records=n, infer=zeros_pv(7))
-        assert n <= len(batch.obs) < n + 4, "floor met within one 4-game round"
+        # Overshoot bound: in-flight decisions at the cut, at most one per game.
+        assert n <= len(batch.obs) < n + 4, "overshoot exceeded the in-flight bound"
 
 
 def test_simultaneous_windows_overshoot_at_most_one_round() -> None:
@@ -152,7 +155,8 @@ def test_windows_are_single_version_across_collects() -> None:
 
     for n, v in ((16, 1.0), (24, 2.0), (8, 3.0)):
         batch = engine.collect(n_records=n, infer=constant(v))
-        assert len(batch.obs) == n
+        # Overshoot bound: in-flight decisions at the cut, at most one per game.
+        assert n <= len(batch.obs) < n + 4
         assert np.all(batch.values == v), f"stale step leaked into the v={v} window"
 
 
@@ -179,7 +183,8 @@ def test_grouped_windows_meet_the_floor_and_stay_single_version() -> None:
 
     for n, v in ((32, 1.0), (20, 2.0)):
         batch = engine.collect(n_records=n, infer=constant(v))
-        assert n <= len(batch.obs) < n + 4, "both group floors met within one round"
+        # Overshoot bound: in-flight decisions at the cut, at most one per game.
+        assert n <= len(batch.obs) < n + 4
         assert np.all(batch.values == v)
 
 

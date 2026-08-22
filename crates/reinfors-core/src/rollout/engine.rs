@@ -64,6 +64,10 @@ pub struct EngineParams {
     pub n_groups: usize,
     /// Fixed call shape in rows (None = off); see the inference contract.
     pub pad_rows_to: Option<usize>,
+    /// Scheduler firing threshold in rows (None = max(1, n_games / 2)).
+    pub batch_size: Option<usize>,
+    /// Worker threads running search rounds (None = 1).
+    pub n_threads: Option<usize>,
 }
 
 impl Default for EngineParams {
@@ -73,6 +77,8 @@ impl Default for EngineParams {
             seed: 0,
             n_groups: 1,
             pad_rows_to: None,
+            batch_size: None,
+            n_threads: None,
         }
     }
 }
@@ -102,6 +108,9 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     ticks: Vec<usize>,
     traj: Vec<Vec<Vec<Step<P::Evaluation>>>>,
     perms: crate::encoder::PermTable,
+    batch_size: usize,
+    sweep_cursor: usize,
+    thread_pool: rayon::ThreadPool,
 }
 
 impl<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> Engine<G, P, L>
@@ -121,6 +130,10 @@ where
         if let Some(pad) = params.pad_rows_to {
             assert!(pad >= 1, "pad_rows_to must be >= 1");
         }
+        assert!(
+            params.batch_size.is_none_or(|b| b >= 1),
+            "batch_size must be >= 1"
+        );
         assert!(
             matches!(params.n_groups, 1 | 2),
             "n_groups must be 1 or 2 (got {})",
@@ -201,6 +214,14 @@ where
             ticks,
             traj,
             perms,
+            batch_size: params
+                .batch_size
+                .unwrap_or_else(|| (params.n_games / 2).max(1)),
+            sweep_cursor: 0,
+            thread_pool: rayon::ThreadPoolBuilder::new()
+                .num_threads(params.n_threads.unwrap_or(1).max(1))
+                .build()
+                .expect("engine thread pool"),
         }
     }
 
@@ -261,6 +282,11 @@ where
     pub fn collect<F>(&mut self, n_records: usize, mut infer: F) -> (Vec<L::Record>, CollectStats)
     where
         F: FnMut(Vec<f32>, usize) -> Vec<f64>,
+        P: Sync,
+        P::Evaluation: Send,
+        P::PolicyState: Send,
+        L: Sync,
+        L::Record: Send,
     {
         self.collect_routed(n_records, InferMode::Shared, move |_player, obs, n| {
             infer(obs, n)
@@ -276,6 +302,11 @@ where
     ) -> (Vec<L::Record>, CollectStats)
     where
         F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+        P: Sync,
+        P::Evaluation: Send,
+        P::PolicyState: Send,
+        L: Sync,
+        L::Record: Send,
     {
         assert_eq!(
             self.n_groups, 1,
@@ -283,7 +314,6 @@ where
         );
         let mut out: Vec<L::Record> = Vec::new();
         let mut stats = CollectStats::default();
-        let num_agents = self.game.num_agents();
         let collect_interior = self.learner.needs_interior();
         // Move caches out so the long-lived evaluator does not borrow all of `self`.
         let mut caches = self.infer_caches.take();
@@ -307,58 +337,425 @@ where
         if fragments {
             discard_fragments(&mut self.traj);
         }
-        loop {
-            let collected = if fragments {
-                fragment_potential(out.len(), &self.traj, &self.learn_mask)
+        // Free-running scheduler: worker tasks run search rounds AND completions
+        // (finish/select/advance/records; terminal flushes) and feed per-player queues
+        // through a channel; the callback fires on this thread the moment a queue holds
+        // `batch_size` rows, overlapping inference with rounds and completions. The
+        // scheduler thread keeps only evaluator work (fires, truncation tails), floor
+        // accounting, and admission.
+        {
+            let n_games = self.episodes.len();
+            let batch_size = self.batch_size;
+            let base_cursor = self.sweep_cursor % n_games.max(1);
+            let game = &self.game;
+            let encoder = &*self.encoder;
+            let reward = &*self.reward;
+            let policy = &self.policy;
+            let learner = &self.learner;
+            let learn_mask = &self.learn_mask;
+            let sequential = self.sequential;
+            let perms = &self.perms;
+            let slots: Vec<std::sync::Mutex<SlotCtx<'_, G, P>>> = self
+                .episodes
+                .iter_mut()
+                .zip(self.traj.iter_mut())
+                .zip(self.ticks.iter_mut())
+                .zip(self.policy_states.iter_mut())
+                .zip(self.episode_returns.iter_mut())
+                .zip(self.seeded.iter_mut())
+                .map(|(((((ep, traj), tick), policy_state), returns), seeded)| {
+                    std::sync::Mutex::new(SlotCtx {
+                        ep,
+                        traj,
+                        tick,
+                        policy_state,
+                        returns,
+                        seeded,
+                    })
+                })
+                .collect();
+            let mut start = StartAccess::Exclusive(StartParts {
+                dist: &mut *self.start_dist,
+                rng: &mut self.buffer_rng,
+            });
+            let (tx, rx) = std::sync::mpsc::channel::<Msg<P::Search<G::State>, L::Record>>();
+
+            let task = |gi: usize,
+                        work: Work<P::Search<G::State>>,
+                        tx: MsgSender<P::Search<G::State>, L::Record>| {
+                let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut guard = slots[gi].lock().expect("slot lock");
+                    let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                    let (mut search, perspectives) = match work {
+                        Work::Begin => {
+                            let perspectives: Vec<usize> = (0..game.num_agents())
+                                .filter(|&si| slot.ep.agent_active(game, si))
+                                .collect();
+                            if perspectives.is_empty() {
+                                return TaskOut::Skip;
+                            }
+                            let ctx = crate::policy::SearchCtx {
+                                game,
+                                enc: encoder,
+                                reward,
+                                rng: &mut slot.ep.rng,
+                                perms,
+                                collect_interior,
+                            };
+                            (
+                                policy.begin_search(ctx, &slot.ep.state, &perspectives),
+                                perspectives,
+                            )
+                        }
+                        Work::Resume {
+                            mut search,
+                            perspectives,
+                            rows,
+                            stride,
+                        } => {
+                            if !rows.is_empty() {
+                                let view = crate::policy::RowsView::from_slice(&rows, stride);
+                                let ctx = crate::policy::SearchCtx {
+                                    game,
+                                    enc: encoder,
+                                    reward,
+                                    rng: &mut slot.ep.rng,
+                                    perms,
+                                    collect_interior,
+                                };
+                                policy.absorb(ctx, &mut search, view);
+                            }
+                            (search, perspectives)
+                        }
+                    };
+                    let ctx = crate::policy::SearchCtx {
+                        game,
+                        enc: encoder,
+                        reward,
+                        rng: &mut slot.ep.rng,
+                        perms,
+                        collect_interior,
+                    };
+                    let mut sink = crate::policy::RequestSink::default();
+                    let status = policy.round(ctx, &mut search, &mut sink);
+                    assert!(
+                        (!sink.is_empty()) == (status == crate::policy::RoundStatus::Pending),
+                        "round contract: Pending emits at least one request, Done emits none"
+                    );
+                    if !sink.is_empty() {
+                        let n = sink.len();
+                        let (players, obs) = sink.into_parts();
+                        return TaskOut::Emitted {
+                            search,
+                            perspectives,
+                            players,
+                            obs,
+                            n,
+                        };
+                    }
+                    // The search is done: run the whole completion here — finish, select,
+                    // advance, record assembly, and (terminal episodes) the flush.
+                    let ctx = crate::policy::SearchCtx {
+                        game,
+                        enc: encoder,
+                        reward,
+                        rng: &mut slot.ep.rng,
+                        perms,
+                        collect_interior,
+                    };
+                    let results = policy.finish(ctx, search);
+                    assert_eq!(
+                        results.len(),
+                        perspectives.len(),
+                        "finish must return one evaluation per perspective"
+                    );
+                    // The completion computes effects only: records, stats, and the
+                    // buffered-step delta ride the message; every shared-state effect
+                    // (reservoir draws, respawns, floor) is applied by the scheduler in
+                    // message order — the determinism contract at one worker.
+                    let before = buffered_learn_steps(slot, learn_mask);
+                    let mut records: Vec<L::Record> = Vec::new();
+                    let mut tstats = CollectStats::default();
+                    let finished = process_game_tick(
+                        game,
+                        encoder,
+                        reward,
+                        policy,
+                        learner,
+                        learn_mask,
+                        sequential,
+                        results,
+                        &perspectives,
+                        slot,
+                        &mut records,
+                        &mut tstats,
+                    );
+                    if finished == Some(true) {
+                        flush_records_game(
+                            &HashMap::new(),
+                            game,
+                            learner,
+                            encoder,
+                            slot,
+                            &mut records,
+                            &mut tstats,
+                        );
+                    }
+                    let steps_delta =
+                        buffered_learn_steps(slot, learn_mask) as isize - before as isize;
+                    TaskOut::Completed {
+                        records,
+                        stats: tstats,
+                        steps_delta,
+                        finished,
+                    }
+                }));
+                let out = match run {
+                    Ok(out) => out,
+                    Err(payload) => TaskOut::Panicked(payload),
+                };
+                let _ = tx.send(Msg { gi, out });
+            };
+            let task = &task;
+
+            let n_queues = match mode {
+                InferMode::Shared => 1,
+                InferMode::PerPlayer => self.game.num_agents(),
+            };
+            let mut phases: Vec<SlotPhase<P::Search<G::State>>> =
+                (0..n_games).map(|_| SlotPhase::Idle).collect();
+            let mut queues: Vec<RequestQueue> =
+                (0..n_queues).map(|_| RequestQueue::default()).collect();
+            let mut in_flight = 0usize;
+            // The floor counts buffered learning steps through a scheduler-owned
+            // counter fed by message deltas: recounting live trajectories would race
+            // in-flight completions.
+            let mut backlog: isize = slots
+                .iter()
+                .map(|m| buffered_learn_steps(&m.lock().expect("slot lock"), learn_mask) as isize)
+                .sum();
+            let mut cutting = if fragments {
+                out.len().saturating_add_signed(backlog)
             } else {
                 out.len()
-            };
-            if collected >= n_records {
-                break;
-            }
-            let (groups, meta) = gather_decisions(&self.game, &self.episodes, num_agents);
-            if groups.is_empty() {
-                break;
-            }
-            let evals = drive_decisions(
-                &self.policy,
-                &self.game,
-                &*self.encoder,
-                &*self.reward,
-                &self.perms,
-                collect_interior,
-                &groups,
-                &mut self.episodes,
-                &mut evaluator,
-            );
+            } >= n_records;
+            let admitted = !cutting;
 
-            let finished = {
-                let mut start = StartAccess::Exclusive(StartParts {
-                    dist: &mut *self.start_dist,
-                    rng: &mut self.buffer_rng,
-                });
-                process_tick(
-                    &self.game,
-                    &*self.encoder,
-                    &*self.reward,
-                    &self.policy,
-                    &self.learner,
-                    &self.learn_mask,
-                    self.sequential,
-                    0..self.episodes.len(),
-                    evals,
-                    &meta,
-                    &mut self.episodes,
-                    &mut self.traj,
-                    &mut self.ticks,
-                    &mut self.policy_states,
-                    &mut self.episode_returns,
-                    &mut start,
-                    &mut out,
-                    &mut stats,
-                )
-            };
-            self.flush_finished(&finished, &mut out, &mut stats, &mut evaluator);
+            // FIFO spawning on the persistent pool: at one worker, tasks execute in
+            // spawn order — the determinism contract's substrate (per-collect thread
+            // creation measurably taxed small collects).
+            self.thread_pool.in_place_scope_fifo(|s| {
+                let spawn = |gi: usize,
+                             work_item: Work<P::Search<G::State>>,
+                             phases: &mut Vec<SlotPhase<P::Search<G::State>>>,
+                             in_flight: &mut usize| {
+                    phases[gi] = SlotPhase::Running;
+                    *in_flight += 1;
+                    let txc = tx.clone();
+                    s.spawn_fifo(move |_| task(gi, work_item, txc));
+                };
+                // Fire `take` rows from one queue and hand freed slots back to the pool.
+                macro_rules! fire_settled {
+                    ($qi:expr, $take:expr) => {{
+                        let fired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            fire_batch(&mut queues[$qi], $take, &mut phases, &mut evaluator, |ph| {
+                                match ph {
+                                    SlotPhase::Blocked {
+                                        outstanding,
+                                        rows,
+                                        stride,
+                                        total,
+                                        ..
+                                    } => (outstanding, rows, stride, *total),
+                                    _ => unreachable!(
+                                        "row routed to a slot with no outstanding round"
+                                    ),
+                                }
+                            })
+                        }));
+                        let freed = match fired {
+                            Ok(freed) => freed,
+                            Err(payload) => {
+                                // Drain in-flight completions before surfacing: an episode
+                                // that just finished must respawn, never strand over-horizon.
+                                while in_flight > 0 {
+                                    let msg = rx.recv().expect("scheduler channel closed");
+                                    in_flight -= 1;
+                                    if let TaskOut::Completed {
+                                        finished: Some(terminal),
+                                        ..
+                                    } = msg.out
+                                    {
+                                        let mut guard = slots[msg.gi].lock().expect("slot lock");
+                                        let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                                        if !terminal {
+                                            flush_records_game(
+                                                &HashMap::new(),
+                                                game,
+                                                learner,
+                                                encoder,
+                                                slot,
+                                                &mut out,
+                                                &mut stats,
+                                            );
+                                        }
+                                        respawn_game(game, policy, slot, &mut start);
+                                    }
+                                }
+                                std::panic::resume_unwind(payload);
+                            }
+                        };
+                        for gi in freed {
+                            let taken = std::mem::replace(&mut phases[gi], SlotPhase::Idle);
+                            let SlotPhase::Blocked {
+                                search,
+                                perspectives,
+                                rows,
+                                stride,
+                                ..
+                            } = taken
+                            else {
+                                unreachable!("a freed slot must hold its blocked round")
+                            };
+                            spawn(
+                                gi,
+                                Work::Resume {
+                                    search,
+                                    perspectives,
+                                    rows,
+                                    stride,
+                                },
+                                &mut phases,
+                                &mut in_flight,
+                            );
+                        }
+                    }};
+                }
+                if !cutting {
+                    for k in 0..n_games {
+                        let gi = (base_cursor + k) % n_games;
+                        spawn(gi, Work::Begin, &mut phases, &mut in_flight);
+                    }
+                }
+                loop {
+                    // Each queue fires independently at the full batch_size.
+                    while let Some(qi) =
+                        (0..n_queues).find(|&qi| queues[qi].pending() >= batch_size)
+                    {
+                        fire_settled!(qi, batch_size);
+                    }
+
+                    if in_flight == 0 {
+                        if queues.iter().any(|q| q.pending() > 0) {
+                            // Drain: no round can progress without these rows.
+                            #[allow(clippy::needless_range_loop)]
+                            for qi in 0..n_queues {
+                                let n = queues[qi].pending();
+                                if n > 0 {
+                                    fire_settled!(qi, n);
+                                }
+                            }
+                            continue;
+                        }
+                        break;
+                    }
+
+                    let msg = rx.recv().expect("scheduler channel closed");
+                    in_flight -= 1;
+                    match msg.out {
+                        TaskOut::Panicked(payload) => std::panic::resume_unwind(payload),
+                        TaskOut::Skip => phases[msg.gi] = SlotPhase::Parked,
+                        TaskOut::Emitted {
+                            search,
+                            perspectives,
+                            players,
+                            obs,
+                            n,
+                        } => {
+                            match mode {
+                                InferMode::Shared => queues[0].push(players, obs, msg.gi, n),
+                                InferMode::PerPlayer => {
+                                    let dim = obs.len() / n;
+                                    for (pos, &p) in players.iter().enumerate() {
+                                        queues[p].push_row(
+                                            p,
+                                            &obs[pos * dim..(pos + 1) * dim],
+                                            msg.gi,
+                                            pos,
+                                        );
+                                    }
+                                }
+                            }
+                            phases[msg.gi] = SlotPhase::Blocked {
+                                search,
+                                perspectives,
+                                outstanding: n,
+                                total: n,
+                                rows: Vec::new(),
+                                stride: 0,
+                            };
+                        }
+                        TaskOut::Completed {
+                            records,
+                            stats: tstats,
+                            steps_delta,
+                            finished,
+                        } => {
+                            let gi = msg.gi;
+                            phases[gi] = SlotPhase::Idle;
+                            out.extend(records);
+                            stats = fold_stats(std::mem::take(&mut stats), tstats);
+                            backlog += steps_delta;
+                            let mut guard = slots[gi].lock().expect("slot lock");
+                            let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                            if finished != Some(true) {
+                                start.observe(&slot.ep.state);
+                            }
+                            match finished {
+                                None => {}
+                                Some(true) => respawn_game(game, policy, slot, &mut start),
+                                Some(false) => {
+                                    let tails = tail_values_game(
+                                        game,
+                                        policy,
+                                        learner,
+                                        encoder,
+                                        sequential,
+                                        slot,
+                                        &mut evaluator,
+                                    );
+                                    backlog -= buffered_learn_steps(slot, learn_mask) as isize;
+                                    flush_records_game(
+                                        &tails, game, learner, encoder, slot, &mut out, &mut stats,
+                                    );
+                                    respawn_game(game, policy, slot, &mut start);
+                                }
+                            }
+                            drop(guard);
+                            // The floor counts only scheduler-ordered effects: records
+                            // still riding unprocessed messages surface as the documented
+                            // admitted-at-cut overshoot (bounded by in-flight decisions).
+                            // Counting them earlier would need racy reads and break the
+                            // n_threads=1 determinism contract.
+                            let collected = if fragments {
+                                out.len().saturating_add_signed(backlog)
+                            } else {
+                                out.len()
+                            };
+                            if collected >= n_records {
+                                cutting = true;
+                            }
+                            if !cutting {
+                                spawn(gi, Work::Begin, &mut phases, &mut in_flight);
+                            }
+                        }
+                    }
+                }
+            });
+            // A no-op collect (floor already met) must not mutate engine state.
+            if admitted {
+                self.sweep_cursor = (base_cursor + 1) % n_games.max(1);
+            }
         }
         if fragments {
             flush_fragments_parts(
@@ -609,60 +1006,6 @@ where
         }
         (out, stats)
     }
-
-    fn flush_finished<F>(
-        &mut self,
-        finished: &[(usize, bool)],
-        out: &mut Vec<L::Record>,
-        stats: &mut CollectStats,
-        evaluator: &mut Evaluator<'_, F>,
-    ) where
-        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
-    {
-        let tails = self.tail_values(finished, evaluator);
-        let mut start = StartAccess::Exclusive(StartParts {
-            dist: &mut *self.start_dist,
-            rng: &mut self.buffer_rng,
-        });
-        flush_finished_parts(
-            finished,
-            &tails,
-            &self.game,
-            &self.policy,
-            &self.learner,
-            &*self.encoder,
-            &mut self.episodes,
-            &mut self.traj,
-            &mut self.ticks,
-            &mut self.policy_states,
-            &mut self.episode_returns,
-            &mut self.seeded,
-            &mut start,
-            out,
-            stats,
-        );
-    }
-
-    fn tail_values<F>(
-        &mut self,
-        finished: &[(usize, bool)],
-        evaluator: &mut Evaluator<'_, F>,
-    ) -> HashMap<(usize, usize), Vec<f64>>
-    where
-        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
-    {
-        tail_values_parts(
-            finished,
-            &self.game,
-            &self.policy,
-            &self.learner,
-            &*self.encoder,
-            self.sequential,
-            &mut self.episodes,
-            &self.traj,
-            evaluator,
-        )
-    }
 }
 
 /// Snapshot and restore mutable collection state.
@@ -675,13 +1018,15 @@ where
         codec: &dyn StateCodec<State = G::State>,
     ) -> Result<Vec<u8>, String> {
         use crate::codec::bytes::*;
-        let mut out = vec![3u8];
+        let mut out = vec![4u8];
         let n_games = self.episodes.len();
         let num_agents = self.game.num_agents();
         put_u32(&mut out, n_games as u32);
         put_u32(&mut out, num_agents as u32);
         put_u64(&mut out, self.search_rng.state());
         put_u64(&mut out, self.buffer_rng.state());
+        // Result-bearing: restores must resume the rotation, not restart it.
+        put_u64(&mut out, self.sweep_cursor as u64);
         put_u32(&mut out, self.group_rngs.len() as u32);
         for rng in &self.group_rngs {
             put_u64(&mut out, rng.state());
@@ -725,15 +1070,8 @@ where
         use crate::codec::bytes::*;
         let mut r = Reader::new(bytes);
         let version = r.u8()?;
-        if !matches!(version, 2 | 3) {
+        if version != 4 {
             return Err("unsupported engine snapshot layout version".into());
-        }
-        if version == 2 && self.n_groups > 1 {
-            return Err(
-                "version-2 snapshot predates per-group rng streams; restore it into an \
-                 n_groups=1 engine"
-                    .into(),
-            );
         }
         let n_games = r.u32()? as usize;
         let num_agents = r.u32()? as usize;
@@ -744,6 +1082,7 @@ where
         }
         let search_rng = r.u64()?;
         let buffer_rng = r.u64()?;
+        let sweep_cursor = r.u64()? as usize;
         let mut group_rng_states: Vec<u64> = Vec::new();
         if version >= 3 {
             let n = r.u32()? as usize;
@@ -869,6 +1208,7 @@ where
         })?;
         self.search_rng = SplitMix64::from_state(search_rng);
         self.buffer_rng = SplitMix64::from_state(buffer_rng);
+        self.sweep_cursor = sweep_cursor;
         // Version-2 snapshots predate group streams; construction defaults stay in place.
         for (rng, state) in self.group_rngs.iter_mut().zip(&group_rng_states) {
             *rng = SplitMix64::from_state(*state);
@@ -894,205 +1234,6 @@ where
             }
         }
         Ok(())
-    }
-}
-
-/// One decision tick for `games`: record emission, action selection, stepping, and
-/// reward attribution. Field-split from `Engine` so group workers can run it.
-#[allow(clippy::too_many_arguments)]
-fn process_tick<G, P, L>(
-    game: &G,
-    encoder: &dyn StateEncoder<State = G::State>,
-    reward: &dyn Reward<Event = G::Event>,
-    policy: &P,
-    learner: &L,
-    learn_mask: &[bool],
-    sequential: bool,
-    games: std::ops::Range<usize>,
-    evals: Vec<(P::Evaluation, Vec<crate::learner::InteriorTarget>)>,
-    meta: &[(usize, usize)],
-    episodes: &mut [Episode<G>],
-    traj: &mut [Vec<Vec<Step<P::Evaluation>>>],
-    ticks: &mut [usize],
-    policy_states: &mut [P::PolicyState],
-    episode_returns: &mut [Vec<f64>],
-    start: &mut StartAccess<'_, '_, G::State>,
-    out: &mut Vec<L::Record>,
-    stats: &mut CollectStats,
-) -> Vec<(usize, bool)>
-where
-    G: Game + Sync,
-    G::State: Send,
-    P: Policy,
-    L: Learner<P::Evaluation>,
-{
-    let num_agents = game.num_agents();
-    assert_eq!(
-        evals.len(),
-        meta.len(),
-        "policy returned {} evaluations for {} requests — one per request, in order",
-        evals.len(),
-        meta.len()
-    );
-    let mut acted: Vec<Vec<Option<usize>>> = vec![vec![None; num_agents]; episodes.len()];
-    for ((eval, targets), &(gi, si)) in evals.into_iter().zip(meta.iter()) {
-        stats.decisions += 1;
-        policy.fold_telemetry(&eval, stats);
-        if !learn_mask[si] {
-            let rel = policy.select(&eval, &mut policy_states[gi], &mut episodes[gi].rng);
-            acted[gi][si] = Some(rel);
-            continue;
-        }
-        out.extend(learner.eval_records(&eval, targets, encoder, si, &mut episodes[gi].rng));
-        let rel = policy.select(&eval, &mut policy_states[gi], &mut episodes[gi].rng);
-        acted[gi][si] = Some(rel);
-        traj[gi][si].push(Step {
-            obs: episodes[gi].observe(encoder, si),
-            evaluation: eval,
-            action: rel,
-            reward: 0.0,
-            next_obs: Vec::new(),
-            next_legal: Vec::new(),
-            terminal: false,
-        });
-    }
-
-    // MaxN consumers require value supervision for non-mover perspectives too.
-    if policy.evaluates_all_perspectives(sequential, num_agents) {
-        let action_count = game.action_count();
-        for (gi, agents) in acted.iter().enumerate() {
-            if agents.iter().all(|s| s.is_none()) {
-                continue;
-            }
-            for (si, slot) in agents.iter().enumerate() {
-                if slot.is_none() && learn_mask[si] {
-                    if let Some(evaluation) = learner.value_only_evaluation(action_count) {
-                        traj[gi][si].push(Step {
-                            obs: episodes[gi].observe(encoder, si),
-                            evaluation,
-                            action: 0,
-                            reward: 0.0,
-                            next_obs: Vec::new(),
-                            next_legal: Vec::new(),
-                            terminal: false,
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    let horizon = game.truncation_horizon();
-    let mut finished: Vec<(usize, bool)> = Vec::new();
-    for gi in games.clone() {
-        let agents = std::mem::take(&mut acted[gi]);
-        let joint: Vec<usize> = agents.iter().map(|a| a.unwrap_or(0)).collect();
-        let (mut trace, terminal) = episodes[gi].advance(game, &joint);
-        ticks[gi] += 1;
-        let truncated = horizon.is_some_and(|h| ticks[gi] >= h) && !terminal;
-        if truncated {
-            game.mark_truncation(&episodes[gi].state, &mut trace);
-            assert!(
-                trace.iter().all(|(agent, _)| *agent < num_agents),
-                "mark_truncation pushed an event for an out-of-range agent"
-            );
-        }
-        let mut tick_rewards = vec![0.0; num_agents];
-        for (agent, e) in &trace {
-            tick_rewards[*agent] += reward.step_reward(e, *agent);
-        }
-        let needs_next_obs = learner.needs_next_obs();
-        for (si, action) in agents.iter().enumerate() {
-            let reward = tick_rewards[si];
-            episode_returns[gi][si] += reward;
-            if action.is_some() {
-                let (next_obs, next_legal) = if needs_next_obs {
-                    (
-                        episodes[gi].observe(encoder, si),
-                        game.legal_actions(&episodes[gi].state, si),
-                    )
-                } else {
-                    (Vec::new(), Vec::new())
-                };
-                if let Some(step) = traj[gi][si].last_mut() {
-                    step.reward = reward;
-                    step.next_obs = next_obs;
-                    step.next_legal = next_legal;
-                    step.terminal = terminal;
-                }
-            } else if let Some(step) = traj[gi][si].last_mut() {
-                // Sequential terminal events may reward an agent that did not act this tick.
-                step.reward += reward;
-                step.terminal |= terminal;
-            }
-        }
-        if !terminal {
-            start.observe(&episodes[gi].state);
-        }
-        if terminal || truncated {
-            finished.push((gi, terminal));
-        }
-    }
-
-    finished
-}
-
-/// Emit episode records and respawn finished games. Field-split like [`process_tick`].
-#[allow(clippy::too_many_arguments)]
-fn flush_finished_parts<G, P, L>(
-    finished: &[(usize, bool)],
-    tails: &HashMap<(usize, usize), Vec<f64>>,
-    game: &G,
-    policy: &P,
-    learner: &L,
-    encoder: &dyn StateEncoder<State = G::State>,
-    episodes: &mut [Episode<G>],
-    traj: &mut [Vec<Vec<Step<P::Evaluation>>>],
-    ticks: &mut [usize],
-    policy_states: &mut [P::PolicyState],
-    episode_returns: &mut [Vec<f64>],
-    seeded: &mut [bool],
-    start: &mut StartAccess<'_, '_, G::State>,
-    out: &mut Vec<L::Record>,
-    stats: &mut CollectStats,
-) where
-    G: Game + Sync,
-    G::State: Send,
-    P: Policy,
-    L: Learner<P::Evaluation>,
-{
-    let num_agents = game.num_agents();
-
-    for &(gi, _) in finished {
-        let mut ep_reward = vec![0.0; num_agents];
-        for (si, ep_slot) in ep_reward.iter_mut().enumerate() {
-            let steps = std::mem::take(&mut traj[gi][si]);
-            *ep_slot = std::mem::take(&mut episode_returns[gi][si]);
-            if steps.is_empty() {
-                continue;
-            }
-            let tail = tails.get(&(gi, si)).cloned().unwrap_or_default();
-            out.extend(learner.episode_records(&steps, &tail, encoder, si, &mut episodes[gi].rng));
-        }
-        stats.episodes.push(EpisodeSummary {
-            reward: ep_reward,
-            length: ticks[gi],
-            seeded: seeded[gi],
-        });
-        let choice = start.choose();
-        match choice {
-            Start::Restore(state) => {
-                Episode::assert_decision_state(game, &state);
-                episodes[gi].state = state;
-                seeded[gi] = true;
-            }
-            Start::Fresh => {
-                episodes[gi].reset(game);
-                seeded[gi] = false;
-            }
-        }
-        ticks[gi] = 0;
-        policy_states[gi] = policy.begin_episode(&mut episodes[gi].rng);
     }
 }
 
@@ -1246,6 +1387,173 @@ where
     out
 }
 
+/// A game slot's scheduler state.
+enum SlotPhase<SE> {
+    Idle,
+    Running,
+    Blocked {
+        search: SE,
+        perspectives: Vec<usize>,
+        outstanding: usize,
+        total: usize,
+        rows: Vec<f64>,
+        stride: usize,
+    },
+    Parked,
+}
+
+/// One game's mutable collection state, lockable per slot so a worker task can run
+/// the whole completion while other slots proceed.
+struct SlotCtx<'a, G: Game, P: Policy> {
+    ep: &'a mut Episode<G>,
+    traj: &'a mut Vec<Vec<Step<P::Evaluation>>>,
+    tick: &'a mut usize,
+    policy_state: &'a mut P::PolicyState,
+    returns: &'a mut Vec<f64>,
+    seeded: &'a mut bool,
+}
+
+/// Work handed to a slot task: start a fresh search, or absorb routed rows and round.
+enum Work<SE> {
+    Begin,
+    Resume {
+        search: SE,
+        perspectives: Vec<usize>,
+        rows: Vec<f64>,
+        stride: usize,
+    },
+}
+
+/// A slot task's result. `Completed` covers finish/select/advance and (for terminal
+/// episodes) the flush, all run on the worker; a truncated episode leaves
+/// `pending_tail` for the scheduler, which owns the evaluator.
+enum TaskOut<SE, R> {
+    Skip,
+    Emitted {
+        search: SE,
+        perspectives: Vec<usize>,
+        players: Vec<usize>,
+        obs: Vec<f32>,
+        n: usize,
+    },
+    Completed {
+        records: Vec<R>,
+        stats: CollectStats,
+        steps_delta: isize,
+        finished: Option<bool>,
+    },
+    Panicked(Box<dyn std::any::Any + Send>),
+}
+
+struct Msg<SE, R> {
+    gi: usize,
+    out: TaskOut<SE, R>,
+}
+
+type MsgSender<SE, R> = std::sync::mpsc::Sender<Msg<SE, R>>;
+
+/// Forward the first `take` queued rows in one evaluator call and route the results to the
+/// destination slots' row buffers, decrementing their outstanding counts.
+/// FIFO request queue with an amortized-O(1) head: fires consume from `head`, appends
+/// push to the back, and the storage resets once fully drained — no per-fire shifting.
+#[derive(Default)]
+struct RequestQueue {
+    players: Vec<usize>,
+    obs: Vec<f32>,
+    dest: Vec<usize>,
+    pos: Vec<usize>,
+    head: usize,
+    dim: usize,
+}
+
+impl RequestQueue {
+    fn pending(&self) -> usize {
+        self.players.len() - self.head
+    }
+
+    /// Queue a whole round's rows (shared mode): positions run 0..n.
+    fn push(&mut self, players: Vec<usize>, obs: Vec<f32>, gi: usize, n: usize) {
+        debug_assert_eq!(players.len(), n);
+        self.dim = obs.len().checked_div(n).unwrap_or(self.dim);
+        self.players.extend(players);
+        self.obs.extend(obs);
+        self.dest.extend(std::iter::repeat_n(gi, n));
+        self.pos.extend(0..n);
+    }
+
+    /// Queue one row at a known position within its round (per-player split).
+    fn push_row(&mut self, player: usize, obs: &[f32], gi: usize, pos: usize) {
+        self.dim = obs.len();
+        self.players.push(player);
+        self.obs.extend_from_slice(obs);
+        self.dest.push(gi);
+        self.pos.push(pos);
+    }
+
+    /// Consume `take` rows from the head; compact once the consumed prefix outweighs
+    /// the pending tail, so a long collection never retains fired observations.
+    fn advance(&mut self, take: usize) {
+        self.head += take;
+        if self.head == self.players.len() {
+            self.players.clear();
+            self.obs.clear();
+            self.dest.clear();
+            self.pos.clear();
+            self.head = 0;
+        } else if self.head * 2 >= self.players.len() {
+            let h = self.head;
+            self.players.drain(..h);
+            self.dest.drain(..h);
+            self.pos.drain(..h);
+            self.obs.drain(..h * self.dim);
+            self.head = 0;
+        }
+    }
+}
+
+/// Returns the slots whose outstanding rows reached zero with this batch (each at most
+/// once, in routing order) so the caller settles only those.
+fn fire_batch<SE, F>(
+    queue: &mut RequestQueue,
+    take: usize,
+    phases: &mut [SE],
+    evaluator: &mut Evaluator<'_, F>,
+    mut route: impl FnMut(&mut SE) -> (&mut usize, &mut Vec<f64>, &mut usize, usize),
+) -> Vec<usize>
+where
+    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+{
+    let (start, dim) = (queue.head, queue.dim);
+    let players = &queue.players[start..start + take];
+    let obs = queue.obs[start * dim..(start + take) * dim].to_vec();
+    let rows = evaluator.forward(players, obs, take);
+    let stride = rows.len() / take;
+    let mut freed = Vec::new();
+    for (i, (&gi, &pos)) in queue.dest[start..start + take]
+        .iter()
+        .zip(&queue.pos[start..start + take])
+        .enumerate()
+    {
+        let (outstanding, buf, st, total) = route(&mut phases[gi]);
+        if buf.is_empty() {
+            buf.resize(total * stride, 0.0);
+            *st = stride;
+        } else {
+            assert_eq!(
+                *st, stride,
+                "infer returned a different row width for one round's requests"
+            );
+        }
+        buf[pos * stride..(pos + 1) * stride].copy_from_slice(&rows[i * stride..(i + 1) * stride]);
+        *outstanding -= 1;
+        if *outstanding == 0 {
+            freed.push(gi);
+        }
+    }
+    queue.advance(take);
+    freed
+}
+
 /// Roll back an aborted window: a failed collect (callback error, cancellation) leaves its
 /// buffered steps in `traj`, and a retry must not flush another version's steps into its batch.
 /// A successful window flushes everything, so this is a no-op except after an abort.
@@ -1304,75 +1612,6 @@ fn flush_fragments_parts<G, P, L, F>(
             out.extend(learner.episode_records(&steps, &tail, encoder, si, &mut episodes[gi].rng));
         }
     }
-}
-
-/// Truncation-tail bootstrapping, field-split like [`process_tick`].
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::needless_range_loop)]
-fn tail_values_parts<G, P, L, F>(
-    finished: &[(usize, bool)],
-    game: &G,
-    policy: &P,
-    learner: &L,
-    encoder: &dyn StateEncoder<State = G::State>,
-    sequential: bool,
-    episodes: &mut [Episode<G>],
-    traj: &[Vec<Vec<Step<P::Evaluation>>>],
-    evaluator: &mut Evaluator<'_, F>,
-) -> HashMap<(usize, usize), Vec<f64>>
-where
-    G: Game + Sync,
-    G::State: Send,
-    P: Policy,
-    L: Learner<P::Evaluation>,
-    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
-{
-    let mut tails: HashMap<(usize, usize), Vec<f64>> = HashMap::new();
-    if !learner.uses_episode_tail() {
-        return tails;
-    }
-    let a = game.action_count();
-    let num_agents = game.num_agents();
-    let all_perspectives = (policy.evaluates_all_perspectives(sequential, num_agents)
-        && learner.value_only_evaluation(a).is_some())
-        || learner.tails_all_trajectories();
-    let mut obs_flat: Vec<f32> = Vec::new();
-    let mut meta: Vec<(usize, usize)> = Vec::new();
-    for &(gi, terminal) in finished {
-        if terminal {
-            continue;
-        }
-        for si in 0..num_agents {
-            if (all_perspectives || episodes[gi].agent_active(game, si)) && !traj[gi][si].is_empty()
-            {
-                obs_flat.extend(episodes[gi].observe(encoder, si));
-                meta.push((gi, si));
-            }
-        }
-    }
-    if !meta.is_empty() {
-        let players: Vec<usize> = meta.iter().map(|&(_, si)| si).collect();
-        let q = evaluator.forward(&players, obs_flat, meta.len());
-        let stride = q.len() / meta.len();
-        // Cancellation yields zero-width rows; empty tails degrade to the terminal path and
-        // the aborted collect's records are discarded by the caller.
-        if stride == 0 {
-            return tails;
-        }
-        for (i, &(gi, si)) in meta.iter().enumerate() {
-            let row = &q[i * stride..(i + 1) * stride];
-            let state = &episodes[gi].state;
-            // Sequential non-mover rows still bootstrap over the mover's available actions;
-            // using `si` here would turn a valid sparse-action tail into an empty one.
-            let legal = match game.actor(state) {
-                Actor::Agent(mover) => game.legal_actions(state, mover),
-                Actor::Simultaneous => game.legal_actions(state, si),
-                Actor::Chance => unreachable!("chance actors are not searched"),
-            };
-            tails.insert((gi, si), learner.tail_from_row(row, a, &legal, encoder, si));
-        }
-    }
-    tails
 }
 
 fn fold_stats(mut a: CollectStats, b: CollectStats) -> CollectStats {
@@ -1509,6 +1748,7 @@ where
             ticks,
             policy_states,
             episode_returns,
+            seeded,
             &mut start,
             &mut out,
             &mut stats,
@@ -1563,8 +1803,477 @@ where
     (out, stats)
 }
 
+/// One game's decision tick: record emission, action selection, stepping. Returns
+/// `Some(terminal)` when the episode ended (terminal or truncated) this tick.
+#[allow(clippy::too_many_arguments)]
+fn process_game_tick<G, P, L>(
+    game: &G,
+    encoder: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
+    policy: &P,
+    learner: &L,
+    learn_mask: &[bool],
+    sequential: bool,
+    evals: Vec<(P::Evaluation, Vec<crate::learner::InteriorTarget>)>,
+    perspectives: &[usize],
+    slot: &mut SlotCtx<'_, G, P>,
+    out: &mut Vec<L::Record>,
+    stats: &mut CollectStats,
+) -> Option<bool>
+where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
+{
+    let num_agents = game.num_agents();
+    assert_eq!(
+        evals.len(),
+        perspectives.len(),
+        "policy returned {} evaluations for {} requests — one per request, in order",
+        evals.len(),
+        perspectives.len()
+    );
+    let mut acted: Vec<Option<usize>> = vec![None; num_agents];
+    for ((eval, targets), &si) in evals.into_iter().zip(perspectives.iter()) {
+        stats.decisions += 1;
+        policy.fold_telemetry(&eval, stats);
+        if !learn_mask[si] {
+            let rel = policy.select(&eval, &mut *slot.policy_state, &mut slot.ep.rng);
+            acted[si] = Some(rel);
+            continue;
+        }
+        out.extend(learner.eval_records(&eval, targets, encoder, si, &mut slot.ep.rng));
+        let rel = policy.select(&eval, &mut *slot.policy_state, &mut slot.ep.rng);
+        acted[si] = Some(rel);
+        slot.traj[si].push(Step {
+            obs: slot.ep.observe(encoder, si),
+            evaluation: eval,
+            action: rel,
+            reward: 0.0,
+            next_obs: Vec::new(),
+            next_legal: Vec::new(),
+            terminal: false,
+        });
+    }
+
+    // MaxN consumers require value supervision for non-mover perspectives too.
+    if policy.evaluates_all_perspectives(sequential, num_agents)
+        && acted.iter().any(|s| s.is_some())
+    {
+        let action_count = game.action_count();
+        for si in 0..num_agents {
+            if acted[si].is_none() && learn_mask[si] {
+                if let Some(evaluation) = learner.value_only_evaluation(action_count) {
+                    slot.traj[si].push(Step {
+                        obs: slot.ep.observe(encoder, si),
+                        evaluation,
+                        action: 0,
+                        reward: 0.0,
+                        next_obs: Vec::new(),
+                        next_legal: Vec::new(),
+                        terminal: false,
+                    });
+                }
+            }
+        }
+    }
+
+    let horizon = game.truncation_horizon();
+    let joint: Vec<usize> = acted.iter().map(|a| a.unwrap_or(0)).collect();
+    let (mut trace, terminal) = slot.ep.advance(game, &joint);
+    *slot.tick += 1;
+    let truncated = horizon.is_some_and(|h| *slot.tick >= h) && !terminal;
+    if truncated {
+        game.mark_truncation(&slot.ep.state, &mut trace);
+        assert!(
+            trace.iter().all(|(agent, _)| *agent < num_agents),
+            "mark_truncation pushed an event for an out-of-range agent"
+        );
+    }
+    let mut tick_rewards = vec![0.0; num_agents];
+    for (agent, e) in &trace {
+        tick_rewards[*agent] += reward.step_reward(e, *agent);
+    }
+    let needs_next_obs = learner.needs_next_obs();
+    for (si, action) in acted.iter().enumerate() {
+        let reward = tick_rewards[si];
+        slot.returns[si] += reward;
+        if action.is_some() {
+            let (next_obs, next_legal) = if needs_next_obs {
+                (
+                    slot.ep.observe(encoder, si),
+                    game.legal_actions(&slot.ep.state, si),
+                )
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            if let Some(step) = slot.traj[si].last_mut() {
+                step.reward = reward;
+                step.next_obs = next_obs;
+                step.next_legal = next_legal;
+                step.terminal = terminal;
+            }
+        } else if let Some(step) = slot.traj[si].last_mut() {
+            // Sequential terminal events may reward an agent that did not act this tick.
+            step.reward += reward;
+            step.terminal |= terminal;
+        }
+    }
+    if terminal || truncated {
+        Some(terminal)
+    } else {
+        None
+    }
+}
+
+/// One decision tick for `games` (grouped path): per-game processing in game order.
+#[allow(clippy::too_many_arguments)]
+fn process_tick<G, P, L>(
+    game: &G,
+    encoder: &dyn StateEncoder<State = G::State>,
+    reward: &dyn Reward<Event = G::Event>,
+    policy: &P,
+    learner: &L,
+    learn_mask: &[bool],
+    sequential: bool,
+    games: std::ops::Range<usize>,
+    evals: Vec<(P::Evaluation, Vec<crate::learner::InteriorTarget>)>,
+    meta: &[(usize, usize)],
+    episodes: &mut [Episode<G>],
+    traj: &mut [Vec<Vec<Step<P::Evaluation>>>],
+    ticks: &mut [usize],
+    policy_states: &mut [P::PolicyState],
+    episode_returns: &mut [Vec<f64>],
+    seeded: &mut [bool],
+    start: &mut StartAccess<'_, '_, G::State>,
+    out: &mut Vec<L::Record>,
+    stats: &mut CollectStats,
+) -> Vec<(usize, bool)>
+where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
+{
+    assert_eq!(
+        evals.len(),
+        meta.len(),
+        "policy returned {} evaluations for {} requests — one per request, in order",
+        evals.len(),
+        meta.len()
+    );
+    let mut finished: Vec<(usize, bool)> = Vec::new();
+    let mut evals = evals.into_iter();
+    let mut idx = 0;
+    for gi in games {
+        let mut perspectives = Vec::new();
+        while idx < meta.len() && meta[idx].0 == gi {
+            perspectives.push(meta[idx].1);
+            idx += 1;
+        }
+        let game_evals: Vec<_> = evals.by_ref().take(perspectives.len()).collect();
+        let mut slot = SlotCtx {
+            ep: &mut episodes[gi],
+            traj: &mut traj[gi],
+            tick: &mut ticks[gi],
+            policy_state: &mut policy_states[gi],
+            returns: &mut episode_returns[gi],
+            seeded: &mut seeded[gi],
+        };
+        let ended = process_game_tick(
+            game,
+            encoder,
+            reward,
+            policy,
+            learner,
+            learn_mask,
+            sequential,
+            game_evals,
+            &perspectives,
+            &mut slot,
+            out,
+            stats,
+        );
+        if ended != Some(true) {
+            start.observe(&slot.ep.state);
+        }
+        if let Some(terminal) = ended {
+            finished.push((gi, terminal));
+        }
+    }
+    finished
+}
+
+/// One finished game's truncation-tail bootstraps, keyed by perspective.
+#[allow(clippy::too_many_arguments)]
+fn tail_values_game<G, P, L, F>(
+    game: &G,
+    policy: &P,
+    learner: &L,
+    encoder: &dyn StateEncoder<State = G::State>,
+    sequential: bool,
+    slot: &mut SlotCtx<'_, G, P>,
+    evaluator: &mut Evaluator<'_, F>,
+) -> HashMap<usize, Vec<f64>>
+where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
+    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+{
+    let mut tails: HashMap<usize, Vec<f64>> = HashMap::new();
+    if !learner.uses_episode_tail() {
+        return tails;
+    }
+    let a = game.action_count();
+    let num_agents = game.num_agents();
+    let all_perspectives = (policy.evaluates_all_perspectives(sequential, num_agents)
+        && learner.value_only_evaluation(a).is_some())
+        || learner.tails_all_trajectories();
+    let mut obs_flat: Vec<f32> = Vec::new();
+    let mut meta: Vec<usize> = Vec::new();
+    for (si, steps) in slot.traj.iter().enumerate().take(num_agents) {
+        if (all_perspectives || slot.ep.agent_active(game, si)) && !steps.is_empty() {
+            obs_flat.extend(slot.ep.observe(encoder, si));
+            meta.push(si);
+        }
+    }
+    if meta.is_empty() {
+        return tails;
+    }
+    let q = evaluator.forward(&meta, obs_flat, meta.len());
+    let stride = q.len() / meta.len();
+    // Cancellation yields zero-width rows; empty tails degrade to the terminal path.
+    if stride == 0 {
+        return tails;
+    }
+    for (i, &si) in meta.iter().enumerate() {
+        let row = &q[i * stride..(i + 1) * stride];
+        let state = &slot.ep.state;
+        // Sequential non-mover rows still bootstrap over the mover's available actions.
+        let legal = match game.actor(state) {
+            Actor::Agent(mover) => game.legal_actions(state, mover),
+            Actor::Simultaneous => game.legal_actions(state, si),
+            Actor::Chance => unreachable!("chance actors are not searched"),
+        };
+        tails.insert(si, learner.tail_from_row(row, a, &legal, encoder, si));
+    }
+    tails
+}
+
+/// Emit one finished game's episode records and respawn it.
+#[allow(clippy::too_many_arguments)]
+/// The records half of an episode flush: emit every perspective's records and the
+/// episode summary. Pure with respect to shared engine state — safe on a worker.
+fn flush_records_game<G, P, L>(
+    tails: &HashMap<usize, Vec<f64>>,
+    game: &G,
+    learner: &L,
+    encoder: &dyn StateEncoder<State = G::State>,
+    slot: &mut SlotCtx<'_, G, P>,
+    out: &mut Vec<L::Record>,
+    stats: &mut CollectStats,
+) where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
+{
+    let num_agents = game.num_agents();
+    let mut ep_reward = vec![0.0; num_agents];
+    for (si, ep_slot) in ep_reward.iter_mut().enumerate() {
+        let steps = std::mem::take(&mut slot.traj[si]);
+        *ep_slot = std::mem::take(&mut slot.returns[si]);
+        if steps.is_empty() {
+            continue;
+        }
+        let tail = tails.get(&si).cloned().unwrap_or_default();
+        out.extend(learner.episode_records(&steps, &tail, encoder, si, &mut slot.ep.rng));
+    }
+    stats.episodes.push(EpisodeSummary {
+        reward: ep_reward,
+        length: *slot.tick,
+        seeded: *slot.seeded,
+    });
+}
+
+/// The respawn half: reservoir draw and reset. Scheduler-only — the start
+/// distribution's stream is engine state and its draw order is result-bearing.
+fn respawn_game<G, P>(
+    game: &G,
+    policy: &P,
+    slot: &mut SlotCtx<'_, G, P>,
+    start: &mut StartAccess<'_, '_, G::State>,
+) where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+{
+    match start.choose() {
+        Start::Restore(state) => {
+            Episode::assert_decision_state(game, &state);
+            slot.ep.state = state;
+            *slot.seeded = true;
+        }
+        Start::Fresh => {
+            slot.ep.reset(game);
+            *slot.seeded = false;
+        }
+    }
+    *slot.tick = 0;
+    *slot.policy_state = policy.begin_episode(&mut slot.ep.rng);
+}
+
+/// Emit records and respawn every game in `finished` (grouped path).
+#[allow(clippy::too_many_arguments)]
+fn flush_finished_parts<G, P, L>(
+    finished: &[(usize, bool)],
+    tails: &HashMap<(usize, usize), Vec<f64>>,
+    game: &G,
+    policy: &P,
+    learner: &L,
+    encoder: &dyn StateEncoder<State = G::State>,
+    episodes: &mut [Episode<G>],
+    traj: &mut [Vec<Vec<Step<P::Evaluation>>>],
+    ticks: &mut [usize],
+    policy_states: &mut [P::PolicyState],
+    episode_returns: &mut [Vec<f64>],
+    seeded: &mut [bool],
+    start: &mut StartAccess<'_, '_, G::State>,
+    out: &mut Vec<L::Record>,
+    stats: &mut CollectStats,
+) where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
+{
+    for &(gi, _) in finished {
+        let game_tails: HashMap<usize, Vec<f64>> = tails
+            .iter()
+            .filter(|((tg, _), _)| *tg == gi)
+            .map(|((_, si), v)| (*si, v.clone()))
+            .collect();
+        let mut slot = SlotCtx {
+            ep: &mut episodes[gi],
+            traj: &mut traj[gi],
+            tick: &mut ticks[gi],
+            policy_state: &mut policy_states[gi],
+            returns: &mut episode_returns[gi],
+            seeded: &mut seeded[gi],
+        };
+        flush_records_game(&game_tails, game, learner, encoder, &mut slot, out, stats);
+        respawn_game(game, policy, &mut slot, start);
+    }
+}
+
+/// Truncation-tail bootstraps for every game in `finished`, gathered into ONE forward:
+/// a fragment cut over a large pool must not fire per-game callbacks.
+#[allow(clippy::too_many_arguments)]
+fn tail_values_parts<G, P, L, F>(
+    finished: &[(usize, bool)],
+    game: &G,
+    policy: &P,
+    learner: &L,
+    encoder: &dyn StateEncoder<State = G::State>,
+    sequential: bool,
+    episodes: &mut [Episode<G>],
+    traj: &[Vec<Vec<Step<P::Evaluation>>>],
+    evaluator: &mut Evaluator<'_, F>,
+) -> HashMap<(usize, usize), Vec<f64>>
+where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
+    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+{
+    let mut tails: HashMap<(usize, usize), Vec<f64>> = HashMap::new();
+    if !learner.uses_episode_tail() {
+        return tails;
+    }
+    let a = game.action_count();
+    let num_agents = game.num_agents();
+    let all_perspectives = (policy.evaluates_all_perspectives(sequential, num_agents)
+        && learner.value_only_evaluation(a).is_some())
+        || learner.tails_all_trajectories();
+    let mut obs_flat: Vec<f32> = Vec::new();
+    let mut meta: Vec<(usize, usize)> = Vec::new();
+    for &(gi, terminal) in finished {
+        if terminal {
+            continue;
+        }
+        for (si, steps) in traj[gi].iter().enumerate() {
+            if (all_perspectives || episodes[gi].agent_active(game, si)) && !steps.is_empty() {
+                obs_flat.extend(episodes[gi].observe(encoder, si));
+                meta.push((gi, si));
+            }
+        }
+    }
+    if meta.is_empty() {
+        return tails;
+    }
+    let players: Vec<usize> = meta.iter().map(|&(_, si)| si).collect();
+    let q = evaluator.forward(&players, obs_flat, meta.len());
+    let stride = q.len() / meta.len();
+    // Cancellation yields zero-width rows; empty tails degrade to the terminal path.
+    if stride == 0 {
+        return tails;
+    }
+    for (i, &(gi, si)) in meta.iter().enumerate() {
+        let row = &q[i * stride..(i + 1) * stride];
+        let state = &episodes[gi].state;
+        // Sequential non-mover rows still bootstrap over the mover's available actions.
+        let legal = match game.actor(state) {
+            Actor::Agent(mover) => game.legal_actions(state, mover),
+            Actor::Simultaneous => game.legal_actions(state, si),
+            Actor::Chance => unreachable!("chance actors are not searched"),
+        };
+        tails.insert((gi, si), learner.tail_from_row(row, a, &legal, encoder, si));
+    }
+    tails
+}
+
+/// Buffered learning-player steps in one slot — the fragment floor's unit.
+fn buffered_learn_steps<G: Game, P: Policy>(
+    slot: &SlotCtx<'_, G, P>,
+    learn_mask: &[bool],
+) -> usize {
+    slot.traj
+        .iter()
+        .enumerate()
+        .filter(|&(si, _)| learn_mask[si])
+        .map(|(_, steps)| steps.len())
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
+    use super::RequestQueue;
+
+    #[test]
+    fn the_queue_compacts_its_consumed_prefix() {
+        let mut q = RequestQueue::default();
+        for i in 0..8 {
+            q.push_row(0, &[i as f32, 0.0], i, 0);
+        }
+        q.advance(3);
+        q.advance(3);
+        // 6 of 8 consumed: compaction must have dropped the prefix, keeping the tail.
+        assert!(q.players.len() <= 2, "consumed rows were retained");
+        assert_eq!(q.pending(), 2);
+        assert_eq!(
+            q.obs[q.head * q.dim],
+            6.0,
+            "pending rows survive compaction"
+        );
+        q.advance(2);
+        assert_eq!(q.pending(), 0);
+        assert!(q.players.is_empty(), "a drained queue resets its storage");
+    }
+
     use super::*;
     use crate::policies::tree::alphazero::{AlphaZero, AlphaZeroConfig};
     use crate::policies::tree::mcts::{NoiseScope, SequentialBackup};
@@ -1672,29 +2381,6 @@ mod tests {
                 ..Default::default()
             },
         )
-    }
-
-    fn downgrade_to_v2(mut bytes: Vec<u8>) -> Vec<u8> {
-        bytes[0] = 2;
-        let off = 1 + 4 + 4 + 8 + 8;
-        let count = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
-        bytes.drain(off..off + 4 + 8 * count);
-        bytes
-    }
-
-    #[test]
-    fn v2_snapshot_rejected_for_grouped_engine() {
-        let mut eng = engine(2);
-        let v2 = downgrade_to_v2(eng.snapshot_bytes(&Codec).unwrap());
-        let err = eng.restore_bytes(&Codec, &v2).unwrap_err();
-        assert!(err.contains("n_groups=1"), "{err}");
-    }
-
-    #[test]
-    fn v2_snapshot_accepted_for_ungrouped_engine() {
-        let mut eng = engine(1);
-        let v2 = downgrade_to_v2(eng.snapshot_bytes(&Codec).unwrap());
-        eng.restore_bytes(&Codec, &v2).unwrap();
     }
 
     #[test]

@@ -151,6 +151,21 @@ Use `engine.resolved_config()` alongside checkpoints to record all constructor d
 workflow. If the experiment enables inference caching, follow the
 [cache lifecycle guide](configuration-and-checkpoints.md#inference-cache-lifecycle).
 
+## Scheduler knobs (`batch_size`, `n_threads`)
+
+The collect loop is a threshold scheduler: worker threads run search rounds and feed
+inference requests into a shared queue, and the callback fires on the collecting thread
+the moment `batch_size` rows are queued (default `max(1, n_games/2)`) — or earlier when
+no search can progress without results — so tree work overlaps inference. Raise
+`batch_size` toward your accelerator's sweet spot for larger, fewer calls at the cost of
+some latency; `telemetry["infer_rows"] / telemetry["infer_calls"]` reports the realized
+mean. `n_threads` sets the worker count. Both are part of the resolved configuration and
+`config_fingerprint()` — changing them changes which games advance before the floor and
+therefore the returned window's composition — but they are excluded from the snapshot
+compatibility fingerprint, so checkpoints restore across different values. Collection is
+exactly reproducible at `n_threads=1` with a deterministic callback; at `n_threads>1`,
+task completion order varies between runs — a valid collection either way.
+
 ## Overlapping search and inference (`n_groups`)
 
 By default the engine's collect loop alternates between tree work on the CPU and your `infer`

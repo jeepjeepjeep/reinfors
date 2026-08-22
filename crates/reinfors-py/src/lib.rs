@@ -788,7 +788,7 @@ struct PyEngine {
 #[pymethods]
 impl PyEngine {
     #[new]
-    #[pyo3(signature = (game, reward, policy, learner, n_games, seed=0, start_buffer=false, start_buffer_capacity=1000, p_fresh=0.05, infer_cache=0, learn_players=None, n_groups=1, pad_rows_to=0))]
+    #[pyo3(signature = (game, reward, policy, learner, n_games, seed=0, start_buffer=false, start_buffer_capacity=1000, p_fresh=0.05, infer_cache=0, learn_players=None, n_groups=1, pad_rows_to=0, batch_size=0, n_threads=0))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         game: GameHandle,
@@ -804,6 +804,8 @@ impl PyEngine {
         learn_players: Option<Vec<usize>>,
         n_groups: usize,
         pad_rows_to: usize,
+        batch_size: usize,
+        n_threads: usize,
     ) -> PyResult<Self> {
         if n_games < 1 {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -821,6 +823,17 @@ impl PyEngine {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "pad_rows_to must be <= {} (got {pad_rows_to})",
                 1 << 16
+            )));
+        }
+        if n_threads > 512 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "n_threads must be <= 512 (got {n_threads})",
+            )));
+        }
+        if batch_size > 1 << 20 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "batch_size must be <= {} (got {batch_size})",
+                1 << 20
             )));
         }
         if !matches!(n_groups, 1 | 2) {
@@ -880,6 +893,8 @@ impl PyEngine {
                 "infer_cache": infer_cache,
                 "learn_players": learn_players,
                 "pad_rows_to": pad_rows_to,
+                "batch_size": (batch_size > 0).then_some(batch_size),
+                "n_threads": (n_threads > 0).then_some(n_threads),
             },
         });
         let engine_params = EngineParams {
@@ -887,6 +902,8 @@ impl PyEngine {
             seed,
             n_groups,
             pad_rows_to: (pad_rows_to > 0).then_some(pad_rows_to),
+            batch_size: (batch_size > 0).then_some(batch_size),
+            n_threads: (n_threads > 0).then_some(n_threads),
         };
         let num_agents = game.spec.num_agents();
         // Slot 0 serves a shared callback; slots 1..=N serve per-player callbacks.
@@ -919,10 +936,14 @@ impl PyEngine {
         });
         let snapshot_fp = {
             let mut stripped = config.clone();
-            stripped
-                .as_object_mut()
-                .expect("config is an object")
-                .remove("reinfors_version");
+            let obj = stripped.as_object_mut().expect("config is an object");
+            obj.remove("reinfors_version");
+            // Scheduler knobs are configuration but not composition: snapshots restore
+            // across different batch_size/n_threads settings.
+            if let Some(engine) = obj.get_mut("engine").and_then(|e| e.as_object_mut()) {
+                engine.remove("batch_size");
+                engine.remove("n_threads");
+            }
             fingerprint_hex(&canonical_config_bytes(&stripped))
         };
         Ok(PyEngine {
@@ -1858,8 +1879,11 @@ fn run_collect<'py, G, P, L>(
 where
     G: Game + Sync,
     G::State: Send,
-    P: Policy,
-    L: Learner<P::Evaluation>,
+    P: Policy + Sync,
+    P::Evaluation: Send,
+    P::PolicyState: Send,
+    L: Learner<P::Evaluation> + Sync,
+    L::Record: Send,
 {
     let (callbacks, mode) = engine_callbacks(infer, num_agents)?;
     let mut callback_err: Option<PyErr> = None;
@@ -3969,7 +3993,7 @@ fn run_choose<G, P>(
 where
     G: Game + Sync,
     G::State: Send,
-    P: Policy,
+    P: Policy + Sync,
 {
     let mut infer_fn = |p: usize, o: Vec<f32>, n: usize| infer(p, o, n);
     // Within-batch dedup only: no store, nothing survives a round, stochastic

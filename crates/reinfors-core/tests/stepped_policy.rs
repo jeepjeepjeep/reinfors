@@ -229,6 +229,56 @@ fn mcts_stepped_is_deterministic_per_seed() {
     });
 }
 
+#[test]
+fn single_threaded_scheduling_is_reproducible_and_fan_meets_the_floor() {
+    use reinfors_core::policies::tree::mcts::{ActBy, Mcts, MctsConfig};
+    use reinfors_core::rollout::engine::{Engine, EngineParams};
+    use reinfors_core::{ChanceMode, Reward as _};
+    let _ = &Zero.step_reward(&(), 0);
+    let run = |n_threads: Option<usize>| {
+        let mut engine = Engine::new(
+            RR,
+            Box::new(Enc),
+            Box::new(Zero),
+            Mcts::new(
+                MctsConfig {
+                    num_simulations: 6,
+                    uct_c: 1.4,
+                    gamma: 1.0,
+                    max_depth: 16,
+                    temperature: 0.0,
+                    temperature_drop: 0,
+                    chance: ChanceMode::AlwaysResample,
+                },
+                ActBy::Visits,
+            ),
+            reinfors_core::TreeStrap::new(0.99, 0.3, 1.0, false),
+            EngineParams {
+                n_games: 4,
+                seed: 9,
+                n_groups: 1,
+                batch_size: Some(3),
+                n_threads,
+                ..Default::default()
+            },
+        );
+        let mut infer = |_obs: Vec<f32>, n: usize| vec![0.25; n * 3];
+        engine.collect(24, &mut infer)
+    };
+    // The determinism contract: n_threads=1 is exactly reproducible; a fanned run is a
+    // valid collection (completion order may change window composition) that still
+    // meets the floor.
+    let (a, _) = run(Some(1));
+    let (b, _) = run(Some(1));
+    assert_eq!(a.len(), b.len(), "n_threads=1 reruns must match");
+    for (x, y) in a.iter().zip(&b) {
+        assert_eq!(x.0, y.0, "obs differ between n_threads=1 reruns");
+        assert_eq!(x.1, y.1, "targets differ between n_threads=1 reruns");
+    }
+    let (fanned, _) = run(Some(4));
+    assert!(fanned.len() >= 24, "fanned run must meet the record floor");
+}
+
 /// A deliberately malformed policy: one Pending round, then `finish` returns TWO
 /// evaluations for however many perspectives it was given.
 struct DoubleFinish;
@@ -328,5 +378,24 @@ fn finish_cardinality_is_checked_per_search() {
         &decisions(),
         &mut rng,
         &mut e,
+    );
+}
+
+#[test]
+#[should_panic(expected = "batch_size must be >= 1")]
+fn zero_batch_size_is_rejected_at_construction() {
+    use reinfors_core::rollout::engine::{Engine, EngineParams};
+    let _ = Engine::new(
+        RR,
+        Box::new(Enc),
+        Box::new(Zero),
+        PpoActor::new(),
+        reinfors_core::Ppo::new(1.0, 0.95),
+        EngineParams {
+            n_games: 2,
+            seed: 0,
+            batch_size: Some(0),
+            ..Default::default()
+        },
     );
 }

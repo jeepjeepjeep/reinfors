@@ -110,6 +110,7 @@ fn engine_padded(
             seed,
             n_groups: 2,
             pad_rows_to: Some(pad),
+            ..Default::default()
         },
     )
 }
