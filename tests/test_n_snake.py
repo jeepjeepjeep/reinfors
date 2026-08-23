@@ -157,6 +157,7 @@ def test_start_buffer_runs_with_three_snakes() -> None:
         n_games=2,
         seed=6,
         start_buffer=True,
+        n_threads=1,
     )
     obs, _, _, telemetry = engine.collect(40, lambda a: np.zeros((a.shape[0], 1, 3)))
     assert obs.shape[0] >= 40

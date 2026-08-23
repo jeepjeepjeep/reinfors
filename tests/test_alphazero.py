@@ -40,6 +40,7 @@ def _engine(
         rf.learners.AlphaZero(gamma=gamma),
         n_games=n_games,
         seed=seed,
+        n_threads=1,
     )
 
 
