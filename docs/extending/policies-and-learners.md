@@ -27,11 +27,24 @@ The trait is in `crates/reinfors-core/src/policy.rs`. Its surface, in the order 
   engine's composition gates read these — a policy that searches the true state of a
   hidden-information game is rejected at `Engine` construction, with a pointer to the
   [compatibility catalogue](../catalogue/compatibility.md).
-- `evaluate(...)` — the batch heart: a `Vec<(state, agent)>` of requests in, evaluations out.
-  **Return exactly one evaluation per request, in request order** — the engine pairs them
-  positionally and asserts the lengths match. All inference goes through the passed
-  `Evaluator`; a policy never calls the network directly, which is what lets the engine pool
-  requests across games into batched callback calls.
+- The stepped search machine — `type Search<S: Send>` plus `begin_search` / `round` /
+  `absorb` / `finish` — is the evaluation heart. `begin_search(ctx, state, perspectives)`
+  builds one search over the requested perspectives; `round(ctx, search, sink)` pushes this
+  round's observation rows into the `RequestSink` and returns `Pending`, or returns `Done`
+  with no rows (**the contract is exact: `Pending` emits at least one row, `Done` emits
+  none** — the scheduler asserts it); `absorb(ctx, search, rows)` integrates the answered
+  rows, borrowed from the scheduler's buffer, in emission order; `finish(ctx, search)`
+  returns **one `(evaluation, interior targets)` pair per perspective, in `perspectives`
+  order** — the engine asserts the count. A policy never calls the network directly and
+  never holds an RNG or seed: search randomness comes from `ctx.rng`, while hooks such as
+  `begin_episode` and `select` draw from their explicit RNG arguments. During engine
+  collection, inference rides the scheduler's queue, which is what lets the engine batch
+  rows across games (and decouple callback batches from your rounds — never assume a
+  round's rows share one callback call); `choose` and the Arena drive the same search
+  machine through the lockstep driver.
+  Model-free policies can delegate to the shared `OneShot` machine
+  (`policies/modelfree/mod.rs`): encode at begin, emit one round, build evaluations at
+  absorb.
 - `select(eval, policy_state, rng)` — one action from one evaluation. **The returned action
   must be legal in the game-action frame** (a game action id, not a network-head index).
 - `fold_telemetry` (optional) — surface search statistics into `CollectStats`.

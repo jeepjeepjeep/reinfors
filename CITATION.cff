@@ -5,8 +5,8 @@ type: software
 authors:
   - family-names: "Roberts"
     given-names: "Adam"
-version: "0.2.0"
-date-released: "2026-08-18"
+version: "0.3.0"
+date-released: "2026-08-22"
 repository-code: "https://github.com/jeepjeepjeep/reinfors"
 license:
   - MIT

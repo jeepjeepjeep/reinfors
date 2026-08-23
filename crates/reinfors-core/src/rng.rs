@@ -13,6 +13,14 @@ impl SplitMix64 {
         SplitMix64 { state: seed }
     }
 
+    /// The single stream-derivation scheme: independent streams exist exactly where
+    /// units interleave unpredictably (per-game slots, the start buffer, engine-less
+    /// drivers); within a sequentially-executed unit, one stream consumed in order is
+    /// equivalent and simpler.
+    pub fn keyed(seed: u64, domain: u64, index: u64) -> Self {
+        SplitMix64::new(seed ^ domain ^ index.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+    }
+
     pub(crate) fn state(&self) -> u64 {
         self.state
     }
@@ -28,6 +36,20 @@ impl SplitMix64 {
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
     }
+}
+
+/// Stream domains for [`SplitMix64::keyed`], defined once for the whole workspace.
+pub mod stream {
+    /// A game slot's episode stream (keyed by slot index).
+    pub const GAME: u64 = 0;
+    /// The start-buffer reservoir stream.
+    pub const BUFFER: u64 = 0x2545_F491_4F6C_DD1D;
+    /// Engine-less `choose` action selection (keyed by request index).
+    pub const CHOOSE_SELECT: u64 = 0xC3A5_C85C_97CB_3127;
+    /// Engine-less `choose` decision driving.
+    pub const CHOOSE_DRIVE: u64 = 0x5851_F42D_4C95_7F2D;
+    /// Per-request policy-head initialization (keyed by request index).
+    pub const CHOOSE_HEAD: u64 = 0xB492_B66F_BE98_F273;
 }
 
 /// Draw an index proportional to `probs`.
@@ -48,6 +70,10 @@ pub(crate) fn weighted_index(rng: &mut dyn Rng, probs: &[f64]) -> usize {
 }
 
 impl Rng for SplitMix64 {
+    fn next_u64(&mut self) -> u64 {
+        SplitMix64::next_u64(self)
+    }
+
     fn below(&mut self, n: usize) -> usize {
         (self.next_u64() % n as u64) as usize
     }

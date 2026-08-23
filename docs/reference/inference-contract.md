@@ -1,8 +1,10 @@
 # Inference contract
 
 `Engine` policies and network-backed solvers can both call caller-owned Python networks, but each
-execution surface defines its own contract. Engine inference is synchronous for each pooled search
-round. The current Deep CFR solver performs synchronous inference within one traversal batch.
+execution surface defines its own contract. Engine inference fires threshold batches from a
+shared request queue — a call carries up to `batch_size` rows and is deliberately decoupled
+from any one search's round. The current Deep CFR solver performs synchronous inference
+within one traversal batch.
 
 ## Input
 
@@ -15,17 +17,16 @@ obs: float32 NumPy array, shape (rows, flattened_observation_size)
 Reshape trailing dimensions using `game.observation_space().shape`. Do not assume a
 particular contiguity on input; make it contiguous if your framework requires it.
 
-Row counts vary call to call: cache hits, in-batch deduplication and terminal
-simulations all remove rows. Fixed-shape consumers (compiled or graph-captured
-forwards, XLA) can set `rf.Engine(..., pad_rows_to=N)`: every call then carries
-exactly `N` rows — short batches are padded with zero rows (pad outputs are
-discarded), oversized batches are split into `N`-row chunks. Telemetry reports pad
-rows as `padded_rows`; `infer_rows` keeps counting real rows. `N` = games per group
-(`n_games / n_groups`) fits sequential games exactly; searches that stage several
-rows per node (simultaneous/Max^N perspectives, exhaustive chance fans) exceed it
-and chunk. Padding requires a single shared callback, and the no-op guarantee
-assumes the callback's outputs are row-independent — evaluation-mode networks, no
-batch-coupled statistics — as the contract already requires for caching.
+Row counts vary call to call: the scheduler fires at `batch_size` rows but drains
+smaller batches when no search can progress, and cache hits, in-batch deduplication
+and terminal simulations all remove rows. Fixed-shape consumers (compiled or
+graph-captured forwards, XLA) can set `rf.Engine(..., pad=True)`: every call then
+carries exactly `batch_size` rows — short batches are padded with zero rows, and
+pad outputs are discarded. Telemetry reports pad rows as `padded_rows`;
+`infer_rows` keeps counting real rows. Padding requires a single shared callback,
+and the no-op guarantee assumes the callback's outputs are row-independent —
+evaluation-mode networks, no batch-coupled statistics — as the contract already
+requires for caching.
 
 ## Engine outputs by policy family
 
@@ -94,11 +95,9 @@ with the two-dimensional output described above.
 
 ## Concurrency
 
-During `collect` with `n_groups=1`, the callback runs in the calling thread. With
-`n_groups=2` it runs on a dedicated service thread instead — thread-local state
-(`torch.autocast` contexts, per-thread default devices or streams) set on the calling thread
-does not apply there; configure such state inside the callback. During `collect_stream`, the
-background collector (or its service thread, under `n_groups=2`) invokes it while Python may train
+During `collect`, the callback runs in the calling thread — search rounds may fan
+across `n_threads` workers, but the callback itself is always invoked from the
+scheduler's thread. During `collect_stream`, the background collector invokes it while Python may train
 concurrently, and the invoking thread is **fixed for the stream's lifetime**: every call across
 every batch arrives on one persistent thread, so thread-affine callbacks (a
 `torch.compile(mode="reduce-overhead")` forward, whose cudagraph state is thread-local) work
@@ -108,7 +107,7 @@ the stream itself (e.g. discard the first batch) or construct it lazily inside t
 never invoke it on the caller thread first. One-shot `collect` calls give no cross-call
 thread guarantee.
 Protect mutable model state and use a stable collector copy. A callback can
-perform RPC, but the requesting group's search blocks until it returns.
+perform RPC, but the searches awaiting that batch block until it returns.
 
 ## Cache lifetime
 

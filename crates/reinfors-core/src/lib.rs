@@ -12,10 +12,11 @@ pub mod learners;
 pub mod policies;
 pub mod policy;
 pub mod reward;
-pub(crate) mod rng;
+pub mod rng;
 pub mod rollout;
 pub mod solvers;
 pub mod space;
+pub mod stats;
 
 pub use codec::StateCodec;
 pub use encoder::{check_action_view, ActionView, IdentityView, StateEncoder};
@@ -42,8 +43,7 @@ pub use rng::SplitMix64;
 pub use rollout::engine::{CollectStats, Engine, EngineParams, EpisodeSummary};
 pub use rollout::env::Env;
 pub use rollout::evaluator::{CommittedRows, EvalBatch, Evaluator, InferMode, Resolve};
-pub use rollout::infer_cache::{InferCache, ShardedInferCache};
-pub use rollout::infer_service::ServiceHost;
+pub use rollout::infer_cache::InferCache;
 pub use rollout::start::{AlwaysInitialState, ReachedStateBuffer, Start, StartDistribution};
 pub use solvers::best_response::{
     best_response_value, enumerate_infosets, exploitability, EnumerationCapExceeded,

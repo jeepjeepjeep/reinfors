@@ -45,6 +45,7 @@ def _az_engine(seed: int = 5) -> "rf.Engine":
         rf.learners.AlphaZero(gamma=1.0),
         n_games=2,
         seed=seed,
+        n_threads=1,  # bit-identity is only contracted on the reproducible schedule
     )
 
 
@@ -56,6 +57,7 @@ def _q_engine(seed: int = 5) -> "rf.Engine":
         rf.learners.Dqn(),
         n_games=2,
         seed=seed,
+        n_threads=1,  # bit-identity is only contracted on the reproducible schedule
     )
 
 
@@ -89,7 +91,7 @@ def test_collect_stream_accepts_f32() -> None:
     engine = _az_engine()
     with engine.collect_stream(16, _az_infer(np.float32)) as stream:
         batch = stream.next()
-    assert batch.obs.shape[0] == 16
+    assert batch.obs.shape[0] >= 16  # record floor, not an exact size
 
 
 def test_wrong_dtype_names_the_accepted_ones() -> None:

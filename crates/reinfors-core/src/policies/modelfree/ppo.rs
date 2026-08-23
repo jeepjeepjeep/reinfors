@@ -1,13 +1,8 @@
 //! Stochastic actor over policy logits and a state value.
 
-use std::collections::HashMap;
-
 use crate::codec::bytes::Reader;
-use crate::encoder::{head_permutation, StateEncoder};
 use crate::game::{Game, Rng};
 use crate::policy::Policy;
-use crate::reward::Reward;
-use crate::rollout::evaluator::Evaluator;
 
 /// Masked-softmax log-probabilities parallel to `legal`, the critic's state value, and the
 /// game-frame legal action ids for one decision.
@@ -103,47 +98,57 @@ impl Policy for PpoActor {
         Ok(())
     }
 
-    fn evaluate<G, F>(
+    type Search<S: Send> = super::OneShot<S, PpoEvaluation>;
+
+    fn begin_search<G: Game + Sync>(
         &self,
-        game: &G,
-        enc: &dyn StateEncoder<State = G::State>,
-        _reward: &dyn Reward<Event = G::Event>,
-        requests: Vec<(G::State, usize)>,
-        _seed: u64,
-        _collect_interior: bool,
-        eval: &mut Evaluator<'_, F>,
-    ) -> Vec<PpoEvaluation>
+        ctx: crate::policy::SearchCtx<'_, G>,
+        state: &G::State,
+        perspectives: &[usize],
+    ) -> Self::Search<G::State>
     where
-        G: Game + Sync,
         G::State: Send,
-        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
     {
-        let n = requests.len();
-        if n == 0 {
-            return Vec::new();
-        }
-        let a = game.action_count();
-        let mut obs_flat: Vec<f32> = Vec::new();
-        for (state, agent) in &requests {
-            obs_flat.extend(enc.encode(state, *agent));
-        }
-        let players: Vec<usize> = requests.iter().map(|(_, agent)| *agent).collect();
-        // PolicyValue rows: `a` head-frame logits then the state value.
-        let rows = eval.forward(&players, obs_flat, n);
-        let width = rows.len() / n;
-        debug_assert!(width == a + 1, "PolicyValue row width {width} != {}", a + 1);
-        let mut perms: HashMap<usize, (Vec<usize>, bool)> = HashMap::new();
-        requests
+        super::one_shot_begin(&ctx, state, perspectives)
+    }
+
+    fn round<G: Game + Sync>(
+        &self,
+        _ctx: crate::policy::SearchCtx<'_, G>,
+        search: &mut Self::Search<G::State>,
+        out: &mut crate::policy::RequestSink,
+    ) -> crate::policy::RoundStatus
+    where
+        G::State: Send,
+    {
+        super::one_shot_round(search, out)
+    }
+
+    fn absorb<G: Game + Sync>(
+        &self,
+        ctx: crate::policy::SearchCtx<'_, G>,
+        search: &mut Self::Search<G::State>,
+        rows: crate::policy::RowsView<'_>,
+    ) where
+        G::State: Send,
+    {
+        let a = ctx.game.action_count();
+        debug_assert!(
+            rows.is_empty() || rows.stride() == a + 1,
+            "PolicyValue row width {} != {}",
+            rows.stride(),
+            a + 1
+        );
+        let legal_all = std::mem::take(&mut search.legal);
+        search.results = search
+            .agents
             .iter()
+            .zip(legal_all)
             .enumerate()
-            .map(|(i, (state, agent))| {
-                let (perm, identity) = perms
-                    .entry(*agent)
-                    .or_insert_with(|| head_permutation(enc, a, *agent));
-                let row = &rows[i * width..(i + 1) * width];
-                let legal = game.legal_actions(state, *agent);
-                // Same softmax either frame: index head logits directly.
-                let log_probs = if *identity {
+            .map(|(i, (&agent, legal))| {
+                let (perm, identity) = ctx.perms.get(agent);
+                let row = rows.row(i);
+                let log_probs = if identity {
                     masked_log_probs(&row[..a], &legal)
                 } else {
                     let head_legal: Vec<usize> = legal.iter().map(|&g| perm[g]).collect();
@@ -155,6 +160,21 @@ impl Policy for PpoActor {
                     legal,
                 }
             })
+            .collect();
+    }
+
+    fn finish<G: Game + Sync>(
+        &self,
+        _ctx: crate::policy::SearchCtx<'_, G>,
+        search: Self::Search<G::State>,
+    ) -> Vec<(PpoEvaluation, Vec<crate::learner::InteriorTarget>)>
+    where
+        G::State: Send,
+    {
+        search
+            .results
+            .into_iter()
+            .map(|e| (e, Vec::new()))
             .collect()
     }
 

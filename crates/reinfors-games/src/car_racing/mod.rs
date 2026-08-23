@@ -765,7 +765,7 @@ mod tests {
         assert!(codec.validate_decoded_state(&pending, false).is_err());
     }
 
-    fn engine_with(n_groups: usize) -> Engine<CarRacing, EpsilonGreedyQ, Dqn> {
+    fn engine_with(n_threads: usize) -> Engine<CarRacing, EpsilonGreedyQ, Dqn> {
         Engine::new(
             game(),
             Box::new(CarRacingVec),
@@ -775,14 +775,14 @@ mod tests {
             EngineParams {
                 n_games: 2,
                 seed: 9,
-                n_groups,
+                n_threads: Some(n_threads),
                 ..Default::default()
             },
         )
     }
 
     #[test]
-    fn engine_collects_ungrouped() {
+    fn engine_collects_single_worker() {
         let (records, stats) =
             engine_with(1).collect(16, |_obs: Vec<f32>, n: usize| vec![0.0; n * N_ACTIONS]);
         assert!(records.len() >= 16);
@@ -790,12 +790,9 @@ mod tests {
     }
 
     #[test]
-    fn engine_collects_grouped() {
-        let host = reinfors_core::ServiceHost::spawn(|_p: usize, _obs: Vec<f32>, n: usize| {
-            vec![0.0; n * N_ACTIONS]
-        });
+    fn engine_collects_multi_worker() {
         let (records, stats) =
-            engine_with(2).collect_grouped_hosted(16, reinfors_core::InferMode::Shared, &host);
+            engine_with(2).collect(16, |_obs: Vec<f32>, n: usize| vec![0.0; n * N_ACTIONS]);
         assert!(records.len() >= 16);
         assert!(stats.decisions > 0);
     }

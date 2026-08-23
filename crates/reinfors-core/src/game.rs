@@ -7,6 +7,10 @@ use crate::space::Space;
 pub trait Rng {
     fn below(&mut self, n: usize) -> usize;
     fn unit(&mut self) -> f64;
+    /// A full 64-bit draw, for seeding derived streams. Overridden natively by SplitMix64.
+    fn next_u64(&mut self) -> u64 {
+        ((self.below(1 << 32) as u64) << 32) | self.below(1 << 32) as u64
+    }
 }
 
 /// Who chooses at a node.

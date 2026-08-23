@@ -2,7 +2,7 @@
 
 use crate::encoder::{head_permutation, ActionView};
 use crate::game::Rng;
-use crate::learner::{sample_mask, Learner, Step};
+use crate::learner::{sample_mask, InteriorTarget, Learner, Step};
 use crate::policies::tree::expectimax::SearchEvaluation;
 
 /// `(observation, per-head action targets, bootstrap mask, player)`.
@@ -65,16 +65,17 @@ impl Learner<SearchEvaluation> for TreeStrap {
 
     fn eval_records(
         &self,
-        evaluation: &mut SearchEvaluation,
+        evaluation: &SearchEvaluation,
+        targets: Vec<InteriorTarget>,
         view: &dyn ActionView,
         agent: usize,
         rng: &mut dyn Rng,
     ) -> Vec<Self::Record> {
         let k = evaluation.values.len();
         // Search targets use game action ids; records supervise encoder head ids.
-        let a = evaluation.interior.first().map_or(0, |(_, v)| v[0].len());
+        let a = targets.first().map_or(0, |(_, v)| v[0].len());
         let (perm, identity) = head_permutation(view, a, agent);
-        std::mem::take(&mut evaluation.interior)
+        targets
             .into_iter()
             .map(|(obs, values)| {
                 let mask = sample_mask(rng, k, self.bootstrap_p);
@@ -144,14 +145,13 @@ fn to_head_frame(values: Vec<Vec<f64>>, perm: &[usize], identity: bool) -> Vec<V
 mod tests {
     use super::*;
     use crate::encoder::IdentityView;
-    use crate::policies::tree::expectimax::search::{InteriorTarget, SearchStats};
+    use crate::policies::tree::expectimax::search::SearchStats;
     use crate::rng::SplitMix64;
 
-    fn eval(values: Vec<Vec<f64>>, interior: Vec<InteriorTarget>) -> SearchEvaluation {
+    fn eval(values: Vec<Vec<f64>>) -> SearchEvaluation {
         SearchEvaluation {
             values,
             visits: Vec::new(),
-            interior,
             legal: (0..3).collect(),
             stats: SearchStats::default(),
         }
@@ -170,11 +170,13 @@ mod tests {
                 vec![vec![0.7, 0.8, 0.9], vec![1.0, 1.1, 1.2]],
             ),
         ];
-        let mut e = eval(vec![vec![0.0; 3], vec![0.0; 3]], interior.clone());
-        let recs = learner.eval_records(&mut e, &IdentityView, 0, &mut SplitMix64::new(5));
-        assert!(
-            e.interior.is_empty(),
-            "interior is moved out, never buffered"
+        let e = eval(vec![vec![0.0; 3], vec![0.0; 3]]);
+        let recs = learner.eval_records(
+            &e,
+            interior.clone(),
+            &IdentityView,
+            0,
+            &mut SplitMix64::new(5),
         );
         assert_eq!(recs.len(), 2);
         let mut rng = SplitMix64::new(5);
@@ -191,10 +193,7 @@ mod tests {
         let steps: Vec<Step<SearchEvaluation>> = (0..3)
             .map(|t| Step {
                 obs: vec![t as f32; 4],
-                evaluation: eval(
-                    vec![vec![0.1 * t as f64; 3], vec![0.2 * t as f64; 3]],
-                    Vec::new(),
-                ),
+                evaluation: eval(vec![vec![0.1 * t as f64; 3], vec![0.2 * t as f64; 3]]),
                 action: t % 3,
                 reward: t as f64,
                 next_obs: Vec::new(),
@@ -250,7 +249,6 @@ mod tests {
 mod frame_tests {
     use super::*;
     use crate::learner::Step;
-    use crate::policies::tree::expectimax::search::InteriorTarget;
     use crate::rng::SplitMix64;
 
     struct Rot;
@@ -263,11 +261,10 @@ mod frame_tests {
         }
     }
 
-    fn eval(values: Vec<Vec<f64>>, interior: Vec<InteriorTarget>) -> SearchEvaluation {
+    fn eval(values: Vec<Vec<f64>>) -> SearchEvaluation {
         SearchEvaluation {
             values,
             visits: Vec::new(),
-            interior,
             legal: (0..3).collect(),
             stats: Default::default(),
         }
@@ -277,8 +274,8 @@ mod frame_tests {
     fn interior_targets_scatter_into_the_head_frame() {
         let learner = TreeStrap::new(0.99, 0.0, 1.0, true);
         let interior = vec![(vec![1.0f32], vec![vec![0.1, 0.2, 0.3], vec![0.4, 0.5, 0.6]])];
-        let mut e = eval(vec![vec![0.0; 3]; 2], interior);
-        let recs = learner.eval_records(&mut e, &Rot, 0, &mut SplitMix64::new(0));
+        let e = eval(vec![vec![0.0; 3]; 2]);
+        let recs = learner.eval_records(&e, interior, &Rot, 0, &mut SplitMix64::new(0));
         assert_eq!(recs[0].1, vec![vec![0.3, 0.1, 0.2], vec![0.6, 0.4, 0.5]]);
     }
 
@@ -287,7 +284,7 @@ mod frame_tests {
         let learner = TreeStrap::new(1.0, 1.0, 1.0, false);
         let steps = vec![Step {
             obs: vec![0.0f32],
-            evaluation: eval(vec![vec![0.1, 0.2, 0.3]], Vec::new()),
+            evaluation: eval(vec![vec![0.1, 0.2, 0.3]]),
             action: 1,
             reward: 2.0,
             next_obs: Vec::new(),

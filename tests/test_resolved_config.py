@@ -22,6 +22,7 @@ def _az_chess() -> rf.Engine:
         n_games=2,
         seed=3,
         infer_cache=1024,
+        n_threads=1,
     )
 
 
@@ -117,6 +118,7 @@ def test_round_trip_reconstructs_a_record_identical_engine(family: str) -> None:
                 rf.learners.Dqn(bootstrap_p=0.5),
                 n_games=2,
                 seed=7,
+                n_threads=1,
             )
         return rf.Engine(
             rf.games.Snake(grid_size=6, initial_length=2, food=2, max_ticks=30),
@@ -128,6 +130,7 @@ def test_round_trip_reconstructs_a_record_identical_engine(family: str) -> None:
             start_buffer=True,
             start_buffer_capacity=50,
             p_fresh=0.2,
+            n_threads=1,
         )
 
     original = build()
@@ -228,6 +231,66 @@ def test_zero_opp_temperature_is_rejected_and_positive_collects() -> None:
     )
     batch = engine.collect(8, lambda obs: np.full((obs.shape[0], 1, 3), 0.5))
     assert batch.obs.shape[0] >= 8
+
+
+def test_pre_030_engine_fields_are_rejected_with_guidance() -> None:
+    base = {
+        "game": {"name": "connect4"},
+        "reward": {"win": 1.0, "loss": -1.0},
+        "policy": {"name": "alphazero", "num_simulations": 4},
+        "learner": {"name": "alphazero"},
+    }
+    for gone in ("n_groups", "pad_rows_to"):
+        cfg = {**base, "engine": {"n_games": 2, gone: 2}}
+        with pytest.raises(ValueError, match=f"'{gone}' was removed in 0.3.0"):
+            rf.engine_from_config(cfg)
+
+
+def test_scheduler_knobs_enter_config_and_fingerprint_but_not_snapshots() -> None:
+    a = rf.Engine(
+        rf.games.Connect4(),
+        rf.Reward(win=1.0, loss=-1.0),
+        rf.policies.AlphaZero(num_simulations=4),
+        rf.learners.AlphaZero(gamma=1.0),
+        n_games=2,
+        seed=0,
+    )
+    b = rf.Engine(
+        rf.games.Connect4(),
+        rf.Reward(win=1.0, loss=-1.0),
+        rf.policies.AlphaZero(num_simulations=4),
+        rf.learners.AlphaZero(gamma=1.0),
+        n_games=2,
+        seed=0,
+        batch_size=3,
+        n_threads=2,
+    )
+    assert a.resolved_config()["engine"]["batch_size"] is None, "defaults canonicalize to null"
+    assert b.resolved_config()["engine"]["batch_size"] == 3
+    assert b.resolved_config()["engine"]["n_threads"] == 2
+    assert a.config_fingerprint() != b.config_fingerprint()
+    # round-trip reconstructs the scheduler settings
+    c = rf.engine_from_config(b.resolved_config())
+    assert c.resolved_config()["engine"]["batch_size"] == 3
+    assert c.config_fingerprint() == b.config_fingerprint()
+
+
+def test_oversubscribed_n_threads_canonicalizes_to_the_pool_size() -> None:
+    def build(**kw):
+        return rf.Engine(
+            rf.games.Connect4(),
+            rf.Reward(win=1.0, loss=-1.0),
+            rf.policies.AlphaZero(num_simulations=4),
+            rf.learners.AlphaZero(gamma=1.0),
+            n_games=1,
+            seed=0,
+            **kw,
+        )
+
+    a = build(n_threads=10)
+    b = build(n_threads=1)
+    assert a.resolved_config()["engine"]["n_threads"] == 1
+    assert a.config_fingerprint() == b.config_fingerprint()
 
 
 def test_content_revision_mismatch_is_rejected() -> None:

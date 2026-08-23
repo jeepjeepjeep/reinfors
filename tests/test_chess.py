@@ -22,6 +22,7 @@ def _engine(seed: int = 0, **kwargs: Any) -> rf.Engine:
         rf.learners.AlphaZero(),
         n_games=2,
         seed=seed,
+        n_threads=1,
         **kwargs,
     )
 

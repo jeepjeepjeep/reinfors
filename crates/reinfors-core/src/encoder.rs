@@ -34,6 +34,28 @@ pub fn head_permutation(
     (perm, identity)
 }
 
+/// Per-agent head permutations, built once at engine construction (an encoder-lifetime
+/// constant; rebuilding per call was the pre-scheduler wart).
+pub struct PermTable {
+    perms: Vec<(Vec<usize>, bool)>,
+}
+
+impl PermTable {
+    pub fn build(view: &dyn ActionView, action_count: usize, num_agents: usize) -> Self {
+        PermTable {
+            perms: (0..num_agents)
+                .map(|agent| head_permutation(view, action_count, agent))
+                .collect(),
+        }
+    }
+
+    /// `(game->head permutation, is_identity)` for `agent`.
+    pub fn get(&self, agent: usize) -> (&[usize], bool) {
+        let (perm, identity) = &self.perms[agent];
+        (perm, *identity)
+    }
+}
+
 /// Assert that each agent's action mapping is bijective and invertible.
 pub fn check_action_view(view: &dyn ActionView, action_count: usize, num_agents: usize) {
     for agent in 0..num_agents {
@@ -186,7 +208,6 @@ mod tests {
                 EngineParams {
                     n_games: 1,
                     seed: 0,
-                    n_groups: 1,
                     ..Default::default()
                 },
             );
@@ -211,7 +232,6 @@ mod dispatch_tests {
     use super::*;
     use crate::game::{Actor, Game, Transition};
     use crate::policies::modelfree::epsilon_greedy_q::EpsilonGreedyQ;
-    use crate::policy::Policy;
     use crate::reward::Reward;
     use crate::rollout::evaluator::Evaluator;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -302,7 +322,6 @@ mod dispatch_tests {
             EngineParams {
                 n_games: 1,
                 seed: 0,
-                n_groups: 1,
                 ..Default::default()
             },
         );
@@ -322,9 +341,27 @@ mod dispatch_tests {
             crate::rollout::evaluator::InferMode::Shared,
             None,
         );
-        let requests = vec![(St, 0), (St, 0), (St, 0), (St, 0)];
-        let evals = policy.evaluate(&SparseShot, &enc, &NoReward, requests, 0, false, &mut eval);
+        // The table is built once for the engine's lifetime, not per decision or per scalar.
+        let perms = PermTable::build(&enc, 3, 1);
+        let built = enc.0.load(Ordering::Relaxed);
+        let decisions = vec![(St, vec![0]), (St, vec![0]), (St, vec![0]), (St, vec![0])];
+        let mut rng = crate::rng::SplitMix64::new(0);
+        let evals = crate::rollout::driver::drive_to_completion(
+            &policy,
+            &SparseShot,
+            &enc,
+            &NoReward,
+            &perms,
+            false,
+            &decisions,
+            &mut rng,
+            &mut eval,
+        );
         assert_eq!(evals.len(), 4);
-        assert_eq!(enc.0.load(Ordering::Relaxed), 3);
+        assert_eq!(
+            enc.0.load(Ordering::Relaxed),
+            built,
+            "no rebuilds after construction"
+        );
     }
 }

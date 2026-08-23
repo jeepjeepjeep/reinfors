@@ -492,7 +492,6 @@ fn engine_collects_with_search_policies_through_chance() {
         EngineParams {
             n_games: 2,
             seed: 3,
-            n_groups: 1,
             ..Default::default()
         },
     );
@@ -845,7 +844,7 @@ fn sample_only_engine_collection_draws_outcomes() {
         EngineParams {
             n_games: 2,
             seed: 3,
-            n_groups: 1,
+            n_threads: Some(1),
             ..Default::default()
         },
     );
@@ -1028,7 +1027,7 @@ fn root_only_sample_chance_supports_expand_all_and_episodes() {
         EngineParams {
             n_games: 2,
             seed: 5,
-            n_groups: 1,
+            n_threads: Some(1),
             ..Default::default()
         },
     );

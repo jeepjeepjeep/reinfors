@@ -60,6 +60,7 @@ def test_engine_snapshot_round_trips_three_player_kuhn() -> None:
         rf.learners.Dqn(),
         n_games=4,
         seed=5,
+        n_threads=1,
     )
 
     def infer(obs: np.ndarray) -> np.ndarray:

@@ -7,12 +7,15 @@ games and, where applicable, many search leaves.
 ## A collection round
 
 1. Rust advances each eligible game or search until network evaluation is needed.
-2. Requests from different games, players, and leaves are pooled into one observation array.
-3. The engine calls your inference function once for that pool.
-4. Rust routes the returned rows back into their searches and continues them.
+2. Requests from different games, players, and leaves accumulate in a shared queue.
+3. The engine calls your inference function the moment `batch_size` rows are queued (or
+   earlier when nothing can progress without results) — batches are decoupled from any one
+   search's round.
+4. Rust routes the returned rows back into their searches and continues them, overlapping
+   further search work with your calls.
 5. The learner emits records until the requested record floor is reached.
 
-The callback overhead is paid per pooled round rather than per environment or tree node.
+The callback overhead is paid per pooled callback batch rather than per environment or tree node.
 Increasing the number of parallel episode slots (`n_games`), search width, or concurrent work can
 therefore increase accelerator utilization, subject to the algorithm and game.
 
@@ -42,7 +45,7 @@ time.
 
 For DQN, only `n_games` and the record floor apply; it performs no tree search. Measure mean
 callback batch size as `infer_rows / infer_calls` (add `padded_rows` to the numerator when
-`pad_rows_to` is set): if it is small relative to the device's efficient batch size, increase
+`pad` is set): if it is small relative to the device's efficient batch size, increase
 `n_games` first. Then sweep the search budget against both throughput and task
 performance; more simulations are not automatically useful once model quality, latency, or memory
 is limiting.

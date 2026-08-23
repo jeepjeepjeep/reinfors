@@ -844,14 +844,14 @@ dependencies = [
 
 [[package]]
 name = "reinfors-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rayon",
 ]
 
 [[package]]
 name = "reinfors-games"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cozy-chess",
  "libm",
@@ -868,7 +868,7 @@ dependencies = [
 
 [[package]]
 name = "reinfors-py"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "numpy",
  "pyo3",
