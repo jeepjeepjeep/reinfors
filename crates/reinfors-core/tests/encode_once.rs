@@ -118,8 +118,7 @@ impl Reward for Zero {
 enum SinkMode {
     Plain,
     Marked,
-    /// Round 1 marks the canonical rows; round 2 emits one extra plain request the
-    /// evaluation ignores — the mark must survive the extra round.
+    /// Marks in round 1, emits an extra plain request in round 2.
     MarkedTwoRound,
     DuplicateMark,
     ForeignPerspectiveMark,
@@ -215,7 +214,6 @@ impl Policy for TestActor {
                 out.push_root(search.agents[0], search.obs[0].clone(), 99);
             }
             (1, SinkMode::MarkedTwoRound) => {
-                // An extra bootstrap-style request; its row is ignored at absorb.
                 out.push(search.agents[0], &[0.0, 0.0]);
             }
             _ => return RoundStatus::Done,
@@ -233,7 +231,7 @@ impl Policy for TestActor {
         G::State: Send,
     {
         if search.round != 1 {
-            return; // the two-round variant's second answer is discarded
+            return;
         }
         search.results = search
             .legal
@@ -308,8 +306,7 @@ where
 }
 
 fn ppo_infer(obs: Vec<f32>, n: usize) -> Vec<f64> {
-    // Two logits + a value per row (PPO tail bootstraps read row[action_count]),
-    // mildly obs-dependent so evaluations aren't constant.
+    // Two logits + the value the tail bootstrap reads, mildly obs-dependent.
     let dim = obs.len() / n.max(1);
     (0..n)
         .flat_map(|i| [f64::from(obs[i * dim]) * 0.1, 0.3, 0.05])
@@ -342,9 +339,7 @@ fn marked_and_plain_policies_produce_identical_records() {
         "marked rows must be byte-identical to fallback encodes"
     );
     assert_eq!(plain_decisions, marked_decisions);
-    // Fallback: one policy encode plus one record encode per decision (tail
-    // bootstraps encode identically in both runs). Marked: the record reuses the
-    // policy row — the count drops by exactly the decisions.
+    // Reuse drops the count by exactly one record encode per decision.
     assert_eq!(plain_encodes, marked_encodes + marked_decisions);
 }
 
@@ -363,7 +358,6 @@ fn a_mark_emitted_in_an_early_round_survives_later_rounds() {
         one_round, two_round,
         "the extra round must not disturb records"
     );
-    // The retained row crossed both rounds: no extra encode versus the one-round run.
     assert_eq!(one_round_encodes, two_round_encodes);
 }
 
@@ -376,8 +370,7 @@ fn per_player_routing_preserves_marks() {
             ppo_infer(obs, n)
         });
     assert!(!records.is_empty());
-    // Reuse must hold under per-player routing too: well under the 2x of a
-    // double-encode (the slack is fragment-cut tail bootstraps).
+    // Slack above one-per-decision is fragment-cut tail bootstraps.
     let encodes = calls.load(Ordering::Relaxed);
     let decisions = stats.decisions;
     assert!(
@@ -443,8 +436,6 @@ fn builtin_ppo_encodes_once_per_decision() {
     );
     let (records, stats) = e.collect(12, |_obs: Vec<f32>, n: usize| vec![0.0; n * 3]);
     assert!(!records.is_empty());
-    // PPO takes no per-step successor obs; fragment-cut tail bootstraps may add up to
-    // one extra encode per game. The old double-encode would be 2x decisions.
     let encodes = calls.load(Ordering::Relaxed);
     let decisions = stats.decisions;
     assert!(
@@ -474,14 +465,10 @@ fn builtin_dqn_chains_successor_obs_single_agent() {
     assert!(!records.is_empty());
     let encodes = calls.load(Ordering::Relaxed);
     let decisions = stats.decisions;
-    // One policy encode per decision plus one boundary/backfill encode per episode or
-    // fragment end; the old behavior was 3x decisions (policy + record + next_obs).
     assert!(
         encodes < 2 * decisions,
         "chaining regressed: {encodes} encodes for {decisions} decisions"
     );
-    // Every record must still carry a usable bootstrap target: chained successor rows
-    // are never empty for non-terminal records.
     for r in &records {
         assert!(
             r.terminal || !r.next_obs.is_empty(),

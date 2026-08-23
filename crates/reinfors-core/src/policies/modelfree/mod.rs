@@ -49,9 +49,7 @@ pub(crate) fn one_shot_round<S, E>(
     if search.emitted || search.agents.is_empty() {
         return RoundStatus::Done;
     }
-    // Drain: blocked searches must not hold a second copy of every observation. Each
-    // row IS the perspective's observation of the current state, so mark it canonical
-    // for reuse by that perspective's training record.
+    // Drain: blocked searches must not hold a second copy of every observation.
     for (agent, obs) in search.agents.iter().zip(search.obs.drain(..)) {
         out.push_root(*agent, obs, *agent);
     }

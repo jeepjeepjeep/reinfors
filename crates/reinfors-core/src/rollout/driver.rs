@@ -75,8 +75,7 @@ where
             break;
         }
         let n = sink.len();
-        // Choose/Env/Arena never build records: drop retained root rows before the
-        // (potentially long) inference call instead of holding them across it.
+        // No records here: drop retained roots before inference.
         let (players, obs) = sink.into_parts();
         let rows = eval.forward(&players, obs, n);
         let stride = rows.len() / n;

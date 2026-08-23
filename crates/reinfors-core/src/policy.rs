@@ -46,14 +46,10 @@ impl RequestSink {
         self.obs.extend_from_slice(obs);
     }
 
-    /// Push a request whose row is the canonical observation of the CURRENT state for
-    /// `perspective` — the row a training record for that perspective would otherwise
-    /// re-encode. The owned row is copied into the inference buffer and the allocation
-    /// retained so collection can reuse it. `player` routes inference (per-player
-    /// queues); `perspective` names whose observation this is — they usually coincide
-    /// but are deliberately separate. At most one root may be marked per perspective
-    /// per search; the engine panics on duplicates. Consumers that never read marks
-    /// (`into_parts`) drop the retained rows immediately.
+    /// Push a request whose row is the canonical current-state observation for
+    /// `perspective`, retained so training records need not re-encode it. `player`
+    /// routes inference and is deliberately separate. At most one mark per
+    /// perspective per search.
     pub fn push_root(&mut self, player: usize, obs: Vec<f32>, perspective: usize) {
         self.players.push(player);
         self.obs.extend_from_slice(&obs);

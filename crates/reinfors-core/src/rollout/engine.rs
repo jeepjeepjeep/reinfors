@@ -1110,8 +1110,7 @@ enum SlotPhase<SE> {
     Blocked {
         search: SE,
         perspectives: Vec<usize>,
-        /// Canonical per-perspective observation rows retained from `push_root`,
-        /// aligned with `perspectives`; carried across every inference round.
+        /// `push_root` rows, aligned with `perspectives`, carried across rounds.
         roots: Vec<Option<Vec<f32>>>,
         outstanding: usize,
         total: usize,
@@ -1368,8 +1367,6 @@ where
         out.extend(learner.eval_records(&eval, targets, encoder, si, &mut slot.ep.rng));
         let rel = policy.select(&eval, &mut *slot.policy_state, &mut slot.ep.rng);
         acted[si] = Some(rel);
-        // A policy-marked canonical row is byte-identical to a fresh encode (encode is
-        // a pure function of (state, agent)), so reuse it instead of re-encoding.
         let obs = roots[pi]
             .take()
             .unwrap_or_else(|| slot.ep.observe(encoder, si));
@@ -1427,10 +1424,7 @@ where
         let reward = tick_rewards[si];
         slot.returns[si] += reward;
         if action.is_some() {
-            // Single-agent, non-boundary: the agent's next decision step supplies the
-            // successor observation (the learner prefers it), so skip this encode; the
-            // trajectory tail — terminal, truncation, or fragment cut — is backfilled
-            // at flush from the still-current post-transition state.
+            // Chained: the next decision's obs is the successor; tails backfill at flush.
             let chained = needs_next_obs && num_agents == 1 && !terminal && !truncated;
             let (next_obs, next_legal) = if needs_next_obs && !chained {
                 (
@@ -1485,9 +1479,8 @@ fn flush_records_game<G, P, L>(
         if steps.is_empty() {
             continue;
         }
-        // Single-agent chained-successor mode leaves non-boundary next_obs empty; a
-        // fragment cut can therefore end on a step whose tail was never taken. The
-        // episode state still IS that step's post-transition state, so fill it here.
+        // A fragment cut can end on a chained step; the episode state is still its
+        // post-transition state.
         if learner.needs_next_obs() && num_agents == 1 {
             if let Some(last) = steps.last_mut() {
                 if !last.terminal && last.next_obs.is_empty() {
