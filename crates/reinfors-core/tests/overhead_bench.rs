@@ -1,6 +1,7 @@
 //! Scheduler-overhead probe (ignored by default): a no-op callback makes every
 //! record/second delta pure scheduling cost. Run with:
-//!   cargo test --release --test overhead_bench -- --ignored --nocapture
+//!   cargo test --release --test overhead_bench -- --ignored --nocapture --test-threads=1
+//! (--test-threads=1 keeps the probes from contending with each other)
 
 use reinfors_core::policies::tree::alphazero::{AlphaZero, AlphaZeroConfig};
 use reinfors_core::rollout::engine::{Engine, EngineParams};
@@ -110,6 +111,58 @@ fn engine(
         AlphaZeroLearner::new(1.0),
         params,
     )
+}
+
+#[test]
+#[ignore = "manual overhead probe"]
+fn modelfree_overhead_probe() {
+    use reinfors_core::{Dqn, EpsilonGreedyQ};
+    let infer = |_obs: Vec<f32>, n: usize| vec![0.1; n * 7];
+    for (label, n_games) in [("mf n1", 1usize), ("mf n8", 8)] {
+        for rep in 0..3 {
+            let mut eng = Engine::new(
+                C4ish,
+                Box::new(Enc),
+                Box::new(Zero),
+                EpsilonGreedyQ::new(1, 0.1),
+                Dqn::new(1, 1.0, 1, 0.99),
+                EngineParams {
+                    n_games,
+                    seed: 7,
+                    ..Default::default()
+                },
+            );
+            eng.collect(4096, infer);
+            let t0 = std::time::Instant::now();
+            let (a, _) = eng.collect(4096, infer);
+            let (b, _) = eng.collect(4096, infer);
+            let dt = t0.elapsed().as_secs_f64();
+            println!(
+                "{label} rep{rep} {:9.0} rec/s",
+                (a.len() + b.len()) as f64 / dt
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "manual overhead probe"]
+fn small_pool_search_overhead_probe() {
+    let infer = |_obs: Vec<f32>, n: usize| vec![0.1; n * 8];
+    for rep in 0..3 {
+        let mut eng = engine(1, |p| {
+            p.seed = 3;
+        });
+        eng.collect(256, infer);
+        let t0 = std::time::Instant::now();
+        let (a, _) = eng.collect(256, infer);
+        let (b, _) = eng.collect(256, infer);
+        let dt = t0.elapsed().as_secs_f64();
+        println!(
+            "az48 n1 rep{rep} {:9.0} rec/s",
+            (a.len() + b.len()) as f64 / dt
+        );
+    }
 }
 
 #[test]
