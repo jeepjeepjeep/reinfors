@@ -27,7 +27,7 @@ ex = _load_example()
 SUPPORT = torch.linspace(-10.0, 30.0, 41)  # asymmetric, dz = 1
 
 
-def _project(t_dist: torch.Tensor, r: list[float], disc: list[float]) -> torch.Tensor:
+def _project(t_dist: Any, r: list[float], disc: list[float]) -> Any:
     return ex.project_distribution(t_dist, torch.tensor(r), torch.tensor(disc), SUPPORT)
 
 

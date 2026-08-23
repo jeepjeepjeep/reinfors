@@ -64,7 +64,7 @@ def test_game_rejects_an_encoder_for_another_game() -> None:
         rf.games.Connect4(encoder=rf.encoders.Snake())
 
 
-GAME_FACTORIES: dict[str, Callable[[], Any]] = {
+GAME_FACTORIES: dict[str, Callable[..., Any]] = {
     "backgammon": rf.games.Backgammon,
     "car_racing": rf.games.CarRacing,
     "chess": rf.games.Chess,

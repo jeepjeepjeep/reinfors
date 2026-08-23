@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 import reinfors as rf
@@ -11,7 +13,7 @@ def zero_infer(obs: np.ndarray) -> np.ndarray:
     return np.zeros((len(obs), 1, 7), dtype=np.float32)
 
 
-def connect4_engine(seed: int = 0, **policy_kwargs: object) -> rf.Engine:
+def connect4_engine(seed: int = 0, **policy_kwargs: Any) -> rf.Engine:
     return rf.Engine(
         rf.games.Connect4(),
         rf.Reward(win=1.0, loss=-1.0),
@@ -80,7 +82,7 @@ def test_chance_defaults_to_the_exact_expectation() -> None:
         rf.games.GridWorld(size=4),
     ],
 )
-def test_rejects_non_two_player_sequential_games(game: object) -> None:
+def test_rejects_non_two_player_sequential_games(game: Any) -> None:
     with pytest.raises(ValueError, match="two-player sequential"):
         rf.Engine(
             game,

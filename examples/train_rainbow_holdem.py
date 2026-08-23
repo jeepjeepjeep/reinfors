@@ -69,6 +69,9 @@ class NoisyLinear(nn.Module):
     with learned sigma, so exploration lives in weight space and anneals via the loss. Training
     mode uses the current noise draw; eval mode uses the mean weights."""
 
+    eps_in: torch.Tensor
+    eps_out: torch.Tensor
+
     def __init__(self, in_features: int, out_features: int, sigma0: float = 0.5) -> None:
         super().__init__()
         self.w_mu = nn.Parameter(torch.empty(out_features, in_features))
@@ -106,6 +109,8 @@ class QNet(nn.Module):
     device, not a semantic one: any offset is constant per state, so action selection is
     unchanged.
     """
+
+    support: torch.Tensor
 
     def __init__(
         self,
@@ -168,7 +173,7 @@ class QNet(nn.Module):
         out = self.forward(x)
         if self.atoms is None:
             return out
-        return (out.softmax(-1) * self.support).sum(-1)  # type: ignore[operator]  # buffer typing
+        return (out.softmax(-1) * self.support).sum(-1)
 
 
 def project_distribution(
@@ -252,6 +257,7 @@ class Replay:
             idx = rng.integers(self.size, size=n)
             weights = np.ones(n, dtype=np.float32)
         else:
+            assert self.alpha is not None
             p = self.priorities[: self.size] ** self.alpha
             p /= p.sum()
             idx = rng.choice(self.size, size=n, p=p)

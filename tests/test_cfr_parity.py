@@ -6,7 +6,7 @@ interior chance nodes, fold/call/raise grammars, and both bet sizes. MCCFR is ex
 sampling stream is ours, not pyspiel's). Dev-oracle only: skipped without pyspiel.
 """
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import reinfors as rf
@@ -41,7 +41,7 @@ def test_exploitability_trajectories_match_pyspiel(game_name: str, ours_game: An
 
         # pyspiel's exploitability helper is 2-player-only; nash_conv covers every N and the
         # two are related by exactly 1/num_players.
-        ps_nc = ps_expl.nash_conv(ps_game, theirs.average_policy())
+        ps_nc = cast(float, ps_expl.nash_conv(ps_game, theirs.average_policy()))
         assert abs(ps_nc - ours.nash_conv()) < 1e-10, f"iteration {k}: {ours.nash_conv()} vs pyspiel {ps_nc}"
         assert abs(ours.exploitability() - ours.nash_conv() / ps_game.num_players()) < 1e-12
 
@@ -58,7 +58,7 @@ def test_three_player_nash_conv_matches_pyspiel() -> None:
     for _ in range(20):
         theirs.evaluate_and_update_policy()
     ours.iterate(20)
-    theirs_nc = ps_expl.nash_conv(ps_game, theirs.average_policy())
+    theirs_nc = cast(float, ps_expl.nash_conv(ps_game, theirs.average_policy()))
     assert abs(ours.nash_conv() - theirs_nc) < 1e-9, (ours.nash_conv(), theirs_nc)
     assert abs(ours.exploitability() - theirs_nc / 3) < 1e-9
     brs = ours.best_response_values()

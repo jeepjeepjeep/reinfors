@@ -9,6 +9,7 @@ Requires `pip install "gymnasium[box2d]"`; dev-only, not wired into CI.
 import argparse
 import json
 import pathlib
+from typing import Any
 
 
 def main() -> None:
@@ -31,7 +32,7 @@ def main() -> None:
         if terminated or truncated:
             break
 
-    inner = env.unwrapped
+    inner: Any = env.unwrapped
     fixture = {
         "tick": executed,
         "tile_visited_count": inner.tile_visited_count,

@@ -22,6 +22,7 @@ def test_wheel_targets_cover_the_release_matrix() -> None:
     import re
 
     spec = importlib.util.spec_from_file_location("gen_notices", REPO / "scripts" / "gen_third_party_notices.py")
+    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 

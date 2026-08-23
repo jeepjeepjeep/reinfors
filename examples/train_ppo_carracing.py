@@ -87,6 +87,7 @@ for update in range(1, args.updates + 1):
 
     net.train()
     m = len(obs)
+    policy_loss = value_loss = torch.zeros(())
     for _ in range(args.epochs):
         perm = torch.randperm(m, device=device)
         for start in range(0, m, args.minibatch):

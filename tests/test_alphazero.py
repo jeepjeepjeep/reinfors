@@ -209,7 +209,7 @@ def test_alphazero_trains_on_simultaneous_stochastic_snake() -> None:
 def test_sequential_backup_kwarg() -> None:
     # The negamax-deletion measurement seam: "maxn" forces the vector backup at 2 agents and
     # emits value-only (weight-0) rows for the non-mover; "auto" keeps mover-only supervision.
-    def collect(backup: str) -> object:
+    def collect(backup: str) -> Any:
         return rf.Engine(
             rf.games.Connect4(),
             rf.Reward(win=1.0, loss=-1.0),
