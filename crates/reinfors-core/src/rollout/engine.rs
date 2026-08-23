@@ -367,7 +367,7 @@ where
                         perms,
                         collect_interior,
                     };
-                    let mut sink = crate::policy::RequestSink::default();
+                    let mut sink = crate::policy::RequestSink::capturing_roots();
                     let status = policy.round(ctx, &mut search, &mut sink);
                     assert!(
                         (!sink.is_empty()) == (status == crate::policy::RoundStatus::Pending),
@@ -390,7 +390,9 @@ where
                                 roots[i].is_none(),
                                 "push_root marked perspective {persp} twice in one search"
                             );
-                            roots[i] = Some(row);
+                            if learn_mask[persp] {
+                                roots[i] = Some(row);
+                            }
                         }
                         return TaskOut::Emitted {
                             search,
@@ -1425,7 +1427,8 @@ where
         slot.returns[si] += reward;
         if action.is_some() {
             // Chained: the next decision's obs is the successor; tails backfill at flush.
-            let chained = needs_next_obs && num_agents == 1 && !terminal && !truncated;
+            let chained =
+                learner.chains_successor_obs() && num_agents == 1 && !terminal && !truncated;
             let (next_obs, next_legal) = if needs_next_obs && !chained {
                 (
                     slot.ep.observe(encoder, si),
@@ -1479,16 +1482,7 @@ fn flush_records_game<G, P, L>(
         if steps.is_empty() {
             continue;
         }
-        // A fragment cut can end on a chained step; the episode state is still its
-        // post-transition state.
-        if learner.needs_next_obs() && num_agents == 1 {
-            if let Some(last) = steps.last_mut() {
-                if !last.terminal && last.next_obs.is_empty() {
-                    last.next_obs = slot.ep.observe(encoder, si);
-                    last.next_legal = game.legal_actions(&slot.ep.state, si);
-                }
-            }
-        }
+        backfill_chained_tail(game, learner, encoder, &mut steps, slot, si);
         let tail = tails.get(&si).cloned().unwrap_or_default();
         out.extend(learner.episode_records(&steps, &tail, encoder, si, &mut slot.ep.rng));
     }
@@ -1610,6 +1604,32 @@ where
 
 /// Cut one game's live trajectory: bootstrap each learning perspective from its tail and
 /// emit its records; episode state, ticks, and telemetry persist into the next window.
+/// A chained trajectory's last step may lack its successor observation; the episode
+/// state is still its post-transition state, so fill it at the flush boundary.
+fn backfill_chained_tail<G, P, L>(
+    game: &G,
+    learner: &L,
+    encoder: &dyn StateEncoder<State = G::State>,
+    steps: &mut [Step<P::Evaluation>],
+    slot: &mut SlotCtx<'_, G, P>,
+    si: usize,
+) where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
+{
+    if !learner.chains_successor_obs() || game.num_agents() != 1 {
+        return;
+    }
+    if let Some(last) = steps.last_mut() {
+        if !last.terminal && last.next_obs.is_empty() {
+            last.next_obs = slot.ep.observe(encoder, si);
+            last.next_legal = game.legal_actions(&slot.ep.state, si);
+        }
+    }
+}
+
 fn flush_fragment_slot<G, P, L>(
     tails: &HashMap<usize, Vec<f64>>,
     game: &G,
@@ -1630,10 +1650,11 @@ fn flush_fragment_slot<G, P, L>(
             slot.traj[si].clear();
             continue;
         }
-        let steps = std::mem::take(&mut slot.traj[si]);
+        let mut steps = std::mem::take(&mut slot.traj[si]);
         if steps.is_empty() {
             continue;
         }
+        backfill_chained_tail(game, learner, encoder, &mut steps, slot, si);
         let tail = tails.get(&si).cloned().unwrap_or_default();
         out.extend(learner.episode_records(&steps, &tail, encoder, si, &mut slot.ep.rng));
     }

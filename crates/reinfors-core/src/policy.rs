@@ -32,28 +32,40 @@ pub enum RoundStatus {
     Done,
 }
 
-/// Collects one round's evaluation requests: `(player, encoded obs)` rows.
+/// Collects one round's evaluation requests: `(player, encoded obs)` rows. Root marks
+/// are retained only in capture mode (the collection engine); elsewhere `push_root`
+/// degrades to `push` so batched choice never holds a second copy of the rows.
 #[derive(Default)]
 pub struct RequestSink {
     pub(crate) players: Vec<usize>,
     pub(crate) obs: Vec<f32>,
     pub(crate) roots: Vec<(usize, Vec<f32>)>,
+    capture_roots: bool,
 }
 
 impl RequestSink {
+    pub(crate) fn capturing_roots() -> Self {
+        RequestSink {
+            capture_roots: true,
+            ..Default::default()
+        }
+    }
+
     pub fn push(&mut self, player: usize, obs: &[f32]) {
         self.players.push(player);
         self.obs.extend_from_slice(obs);
     }
 
     /// Push a request whose row is the canonical current-state observation for
-    /// `perspective`, retained so training records need not re-encode it. `player`
-    /// routes inference and is deliberately separate. At most one mark per
-    /// perspective per search.
+    /// `perspective`, retained (in capture mode) so training records need not
+    /// re-encode it. `player` routes inference and is deliberately separate. At most
+    /// one mark per perspective per search.
     pub fn push_root(&mut self, player: usize, obs: Vec<f32>, perspective: usize) {
         self.players.push(player);
         self.obs.extend_from_slice(&obs);
-        self.roots.push((perspective, obs));
+        if self.capture_roots {
+            self.roots.push((perspective, obs));
+        }
     }
 
     pub fn len(&self) -> usize {
