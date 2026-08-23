@@ -39,6 +39,39 @@ impl Raster {
             .fill(tiny_skia::Color::from_rgba8(rgb[0], rgb[1], rgb[2], 255));
     }
 
+    /// Alpha-blit a coverage bitmap (supersample-space coords) in a solid color.
+    pub fn blit_alpha(&mut self, x0: i32, y0: i32, w: usize, h: usize, alpha: &[u8], rgb: [u8; 3]) {
+        let (pw, ph) = (self.pixmap.width() as i32, self.pixmap.height() as i32);
+        let data = self.pixmap.data_mut();
+        for gy in 0..h as i32 {
+            let py = y0 + gy;
+            if py < 0 || py >= ph {
+                continue;
+            }
+            for gx in 0..w as i32 {
+                let px = x0 + gx;
+                if px < 0 || px >= pw {
+                    continue;
+                }
+                let a = u32::from(alpha[(gy as usize) * w + gx as usize]);
+                if a == 0 {
+                    continue;
+                }
+                let i = ((py * pw + px) * 4) as usize;
+                // Premultiplied source-over: src premul is rgb*a, and the destination
+                // alpha must advance by the same equation or transparent destinations
+                // would end up with color exceeding alpha.
+                for c in 0..3 {
+                    let d = u32::from(data[i + c]);
+                    let s = u32::from(rgb[c]);
+                    data[i + c] = ((s * a + d * (255 - a) + 127) / 255) as u8;
+                }
+                let da = u32::from(data[i + 3]);
+                data[i + 3] = ((255 * a + da * (255 - a) + 127) / 255) as u8;
+            }
+        }
+    }
+
     pub fn fill_poly(&mut self, pts: &[[f32; 2]], rgb: [u8; 3]) {
         // Cull paths fully outside the frame before touching the path builder.
         let (mut lo_x, mut lo_y, mut hi_x, mut hi_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
@@ -155,114 +188,6 @@ pub(crate) fn hwc_to_chw_f32(hwc: &[u8], h: usize, w: usize, out: &mut Vec<f32>)
 }
 
 /// 5x7 bitmap digits and minus sign, one bit per pixel, row-major from the top.
-const GLYPHS: [(char, [u8; 7]); 11] = [
-    (
-        '0',
-        [
-            0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        '1',
-        [
-            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
-        ],
-    ),
-    (
-        '2',
-        [
-            0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
-        ],
-    ),
-    (
-        '3',
-        [
-            0b11111, 0b00010, 0b00100, 0b00010, 0b00001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        '4',
-        [
-            0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
-        ],
-    ),
-    (
-        '5',
-        [
-            0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        '6',
-        [
-            0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        '7',
-        [
-            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
-        ],
-    ),
-    (
-        '8',
-        [
-            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        '9',
-        [
-            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100,
-        ],
-    ),
-    (
-        '-',
-        [
-            0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000,
-        ],
-    ),
-];
-
-/// Draw `text` with the top-left corner at `(x, y)` in final-frame units. All glyph
-/// cells fill as one compound path: abutting cells fuse seamlessly under the winding
-/// rule instead of double-blending their shared AA edges, and the per-fill setup cost
-/// is paid once per string rather than once per cell.
-pub(crate) fn draw_text(r: &mut Raster, text: &str, x: f32, y: f32, scale: f32, rgb: [u8; 3]) {
-    let f = r.factor as f32;
-    let mut pb = PathBuilder::new();
-    let mut cx = x;
-    for ch in text.chars() {
-        if let Some((_, rows)) = GLYPHS.iter().find(|(g, _)| *g == ch) {
-            for (ry, row) in rows.iter().enumerate() {
-                for bx in 0..5 {
-                    if row & (1 << (4 - bx)) != 0 {
-                        let px = (cx + bx as f32 * scale) * f;
-                        let py = (y + ry as f32 * scale) * f;
-                        pb.move_to(px, py);
-                        pb.line_to(px + scale * f, py);
-                        pb.line_to(px + scale * f, py + scale * f);
-                        pb.line_to(px, py + scale * f);
-                        pb.close();
-                    }
-                }
-            }
-        }
-        cx += 6.0 * scale;
-    }
-    let Some(path) = pb.finish() else { return };
-    let mut paint = Paint::default();
-    paint.set_color_rgba8(rgb[0], rgb[1], rgb[2], 255);
-    paint.anti_alias = true;
-    r.pixmap.fill_path(
-        &path,
-        &paint,
-        FillRule::Winding,
-        Transform::identity(),
-        None,
-    );
-}
-
 /// Debug/eyeball export; not part of any observation path.
 #[cfg(test)]
 pub(crate) fn write_png(path: &std::path::Path, hwc: &[u8], w: u32, h: u32) -> Result<(), String> {
@@ -275,4 +200,56 @@ pub(crate) fn write_png(path: &std::path::Path, hwc: &[u8], w: u32, h: u32) -> R
         data[i * 4 + 3] = 255;
     }
     pixmap.save_png(path).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blit_alpha_over_opaque_and_transparent_is_valid_premultiplied() {
+        let mut r = Raster::new(4, 4, 1);
+        r.fill_solid([0, 0, 0]);
+        r.blit_alpha(0, 0, 1, 1, &[128], [255, 255, 255]);
+        let d = r.pixmap.data();
+        assert_eq!(
+            &d[..4],
+            &[128, 128, 128, 255],
+            "opaque dst: color blends, alpha stays"
+        );
+
+        let mut r = Raster::new(4, 4, 1);
+        r.clear();
+        r.blit_alpha(0, 0, 1, 1, &[128], [255, 255, 255]);
+        let d = r.pixmap.data();
+        assert_eq!(
+            &d[..4],
+            &[128, 128, 128, 128],
+            "transparent dst: alpha must advance with color (premultiplied validity)"
+        );
+        assert!(d[0] <= d[3], "premultiplied channel must not exceed alpha");
+    }
+
+    #[test]
+    fn blit_alpha_clips_without_panicking() {
+        let mut r = Raster::new(4, 4, 1);
+        r.fill_solid([0, 0, 0]);
+        let bitmap = vec![255u8; 8 * 8];
+        r.blit_alpha(-6, -6, 8, 8, &bitmap, [255, 255, 255]);
+        r.blit_alpha(2, 2, 8, 8, &bitmap, [255, 255, 255]);
+        let d = r.pixmap.data();
+        assert_eq!(
+            &d[..4],
+            &[255, 255, 255, 255],
+            "top-left corner covered by first blit"
+        );
+        let last = (4 * 4 - 1) * 4;
+        assert_eq!(
+            &d[last..last + 4],
+            &[255, 255, 255, 255],
+            "bottom-right covered by second"
+        );
+        let mid = (4 + 1) * 4;
+        assert_eq!(&d[mid..mid + 4], &[255, 255, 255, 255]);
+    }
 }
