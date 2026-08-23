@@ -37,12 +37,27 @@ pub enum RoundStatus {
 pub struct RequestSink {
     pub(crate) players: Vec<usize>,
     pub(crate) obs: Vec<f32>,
+    pub(crate) roots: Vec<(usize, Vec<f32>)>,
 }
 
 impl RequestSink {
     pub fn push(&mut self, player: usize, obs: &[f32]) {
         self.players.push(player);
         self.obs.extend_from_slice(obs);
+    }
+
+    /// Push a request whose row is the canonical observation of the CURRENT state for
+    /// `perspective` — the row a training record for that perspective would otherwise
+    /// re-encode. The owned row is copied into the inference buffer and the allocation
+    /// retained so collection can reuse it. `player` routes inference (per-player
+    /// queues); `perspective` names whose observation this is — they usually coincide
+    /// but are deliberately separate. At most one root may be marked per perspective
+    /// per search; the engine panics on duplicates. Consumers that never read marks
+    /// (`into_parts`) drop the retained rows immediately.
+    pub fn push_root(&mut self, player: usize, obs: Vec<f32>, perspective: usize) {
+        self.players.push(player);
+        self.obs.extend_from_slice(&obs);
+        self.roots.push((perspective, obs));
     }
 
     pub fn len(&self) -> usize {
@@ -55,6 +70,12 @@ impl RequestSink {
 
     pub fn into_parts(self) -> (Vec<usize>, Vec<f32>) {
         (self.players, self.obs)
+    }
+
+    /// `into_parts` plus the retained canonical rows — collection-engine only.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn into_parts_with_roots(self) -> (Vec<usize>, Vec<f32>, Vec<(usize, Vec<f32>)>) {
+        (self.players, self.obs, self.roots)
     }
 }
 

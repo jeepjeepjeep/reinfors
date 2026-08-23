@@ -81,6 +81,12 @@ pub trait StateEncoder: ActionView {
     type State;
 
     /// Flat channel-major observation for `agent`.
+    ///
+    /// Must be a pure function of `(state, agent)`: two calls with the same inputs
+    /// must return identical bytes. The engine relies on this to reuse a
+    /// policy-encoded row for the training record instead of encoding twice
+    /// (`RequestSink::push_root`); an interior-mutable encoder would silently break
+    /// that equivalence.
     fn encode(&self, state: &Self::State, agent: usize) -> Vec<f32>;
 
     /// Observation shape `(channels, height, width)`.

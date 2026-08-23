@@ -75,7 +75,10 @@ where
             break;
         }
         let n = sink.len();
-        let rows = eval.forward(&sink.players, sink.obs, n);
+        // Choose/Env/Arena never build records: drop retained root rows before the
+        // (potentially long) inference call instead of holding them across it.
+        let (players, obs) = sink.into_parts();
+        let rows = eval.forward(&players, obs, n);
         let stride = rows.len() / n;
         for &(i, start, count) in &spans {
             let view = RowsView {
