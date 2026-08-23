@@ -1,13 +1,15 @@
 """N-player snake through the Python surface: construction/validation, Env play, engine collects
 under every search family, snapshots, config round-trips, and the PettingZoo adapter at N=3."""
 
+from typing import Any
+
 import numpy as np
 import pytest
 import reinfors as rf
 
 
-def _snake(n: int = 3, **kw) -> object:
-    args = {"grid_size": 8, "initial_length": 2, "food": 2, "max_ticks": 60, "num_snakes": n}
+def _snake(n: int = 3, **kw: Any) -> Any:
+    args: dict[str, Any] = {"grid_size": 8, "initial_length": 2, "food": 2, "max_ticks": 60, "num_snakes": n}
     args.update(kw)
     return rf.games.Snake(**args)
 
@@ -155,6 +157,7 @@ def test_start_buffer_runs_with_three_snakes() -> None:
         n_games=2,
         seed=6,
         start_buffer=True,
+        n_threads=1,
     )
     obs, _, _, telemetry = engine.collect(40, lambda a: np.zeros((a.shape[0], 1, 3)))
     assert obs.shape[0] >= 40

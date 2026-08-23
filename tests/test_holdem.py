@@ -2,13 +2,15 @@
 gate (search families reject, the DQN family trains), Env play with chip conservation,
 snapshots, config round-trips, and the PettingZoo AEC adapter."""
 
+from typing import Any
+
 import numpy as np
 import pytest
 import reinfors as rf
 
 
-def _game(n: int = 3, **kw) -> object:
-    args = {"num_players": n, "stack": 200, "small_blind": 5, "big_blind": 10}
+def _game(n: int = 3, **kw: Any) -> Any:
+    args: dict[str, Any] = {"num_players": n, "stack": 200, "small_blind": 5, "big_blind": 10}
     args.update(kw)
     return rf.games.TexasHoldem(**args)
 

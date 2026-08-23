@@ -215,7 +215,7 @@ def test_fork_carries_ticks() -> None:
 
 def test_gamma_is_required() -> None:
     with pytest.raises(TypeError):
-        _az().choose(_envs(1), _az_infer)
+        _az().choose(_envs(1), _az_infer)  # pyright: ignore[reportCallIssue]
 
 
 def test_expectimax_and_qgreedy_choose() -> None:

@@ -19,6 +19,7 @@ def _collect(policy: PolicyHandle) -> AlphaZeroBatch:
         rf.learners.AlphaZero(),
         n_games=2,
         seed=0,
+        n_threads=1,
     )
     batch = engine.collect(40, _infer)
     assert isinstance(batch, AlphaZeroBatch)
