@@ -10,17 +10,10 @@ parallel Rust backend. Your inference callback is the boundary: it receives pool
 observations and returns model outputs, so the network, framework, optimizer, replay,
 hardware placement, and distributed topology remain yours.
 
-Benchmarked against OpenSpiel's all-C++ libtorch AlphaZero on a matched chess training
-workload — two-hour rounds at each stack's best measured configuration, then
-head-to-head play between the resulting models — reinfors sustained **9.9% higher
-training throughput**, and its trained networks scored **0.605 ± 0.020** against
-OpenSpiel's over 300 paired games (**+74 Elo**). Protocol, evidence, and full results:
-[reinfors-benchmarks](https://github.com/jeepjeepjeep/reinfors-benchmarks).
-
-Reinfors is not designed to maximize throughput at any cost or to outperform a bespoke, fully
-fused JAX/XLA pipeline on the fixed workload it specializes for. It targets a practical balance:
-native simulation, search, and batching, while games, algorithms, networks, and deployment remain
-modular enough for broad experimentation.
+[Game semantics](https://jeepjeepjeep.github.io/reinfors/catalogue/games/) cover single- and multi-agent, zero-sum, cooperative, and
+general-sum tasks, with turn-taking or simultaneous decisions, explicit chance, and perfect
+or imperfect information. [Algorithms](https://jeepjeepjeep.github.io/reinfors/catalogue/algorithms/) span policy-driven value learning,
+search-guided learning, and standalone game-theoretic solving.
 
 ```python
 import numpy as np
@@ -48,25 +41,30 @@ batch = engine.collect(n_records=1024, infer=infer)
 print(batch.obs.shape, batch.targets.shape, batch.telemetry)
 ```
 
-## Why reinfors?
+## Performance
 
-- Search and sampling are native, multithreaded, and batch network requests across games
-  and search leaves.
-- `collect` supports a simple synchronous loop; `collect_stream` runs parallel Rust search
-  concurrently with Python training, with configurable queueing and bounded backpressure.
-- Networks are injectable per player and are not tied to a framework or device topology.
-- [`Arena`](https://jeepjeepjeep.github.io/reinfors/guides/arena/) runs paired evaluation matches across concurrent slots, pooling
-  native search while subprocess-backed external agents compute on bounded worker lanes.
-- Composable Rust traits make new games and algorithms straightforward to add, with safer,
-  simpler native extension than comparable C++ infrastructure.
-- [Game semantics](https://jeepjeepjeep.github.io/reinfors/catalogue/games/) cover single- and multi-agent, zero-sum,
-  cooperative, and general-sum tasks; one-shot and multi-step environments; turn-taking or
-  simultaneous decisions; explicit chance; and perfect or imperfect information.
-- Algorithms span policy-driven value learning, search-guided learning, and standalone
-  game-theoretic solving; see the [algorithm catalogue](https://jeepjeepjeep.github.io/reinfors/catalogue/algorithms/) for current
-  implementations.
-- Resolved configurations, snapshots, structured batches, and telemetry support
-  reproducible experiments.
+Reinfors' Rust backend makes it much more performant than typical all-Python RL libraries
+such as Gymnasium when training on a single core, and reinfors' built-in parallelisation
+then pushes this further. Benchmarking `car_racing` against Gymnasium's `CarRacing-v3` —
+the same game, stepped with pixel observations — a single core runs **~12x** more
+environment steps per second (~2,200 vs ~190), and parallelising collection across ten
+cores pushes the gap past **100x**:
+
+<p align="center">
+  <img src="https://github.com/jeepjeepjeep/reinfors/releases/download/v0.2.0/carracing-throughput.gif" alt="One Gymnasium car completes a single lap while reinfors completes 75" width="90%">
+</p>
+
+Benchmarked against OpenSpiel's all-C++ libtorch AlphaZero on a matched chess training
+workload — two-hour rounds at each stack's best measured configuration, then
+head-to-head play between the resulting models — reinfors sustained **9.9% higher
+training throughput**, and its trained networks scored **0.605 ± 0.020** against
+OpenSpiel's over 300 paired games (**+74 Elo**). Protocol, evidence, and full results:
+[reinfors-benchmarks](https://github.com/jeepjeepjeep/reinfors-benchmarks).
+
+Reinfors is not designed to maximize throughput at any cost or to outperform a bespoke, fully
+fused JAX/XLA pipeline on the fixed workload it specializes for. It targets a practical balance:
+native simulation, search, and batching, while games, algorithms, networks, and deployment remain
+modular enough for broad experimentation.
 
 ## Install
 
