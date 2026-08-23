@@ -7,9 +7,10 @@
 use super::dynamics::{
     CarWorld, HULL_POLY1, HULL_POLY2, HULL_POLY3, HULL_POLY4, SIZE, WHEEL_R, WHEEL_W,
 };
+use super::score_font::SCORE_GLYPHS;
 use super::track::{Track, PLAYFIELD, SCALE};
 use super::{CarRacingState, LiveState};
-use crate::render::{draw_text, FrameRenderer, Raster};
+use crate::render::{FrameRenderer, Raster};
 
 pub(crate) const FRAME: usize = 96;
 const SUPERSAMPLE: u32 = 4;
@@ -277,17 +278,28 @@ impl CarRacingRenderer {
         let score = 1000.0 * f64::from(live.visited_count) / live.track.tiles.len().max(1) as f64
             - 0.1 * f64::from(live.tick);
         let text = score_text(score);
-        let scale = (42.0 * FRAME as f64 / WINDOW_H / 7.0) as f32;
-        let width = (text.len() as f32 * 6.0 - 1.0) * scale;
-        let [cx, cy] = window([60.0, WINDOW_H - WINDOW_H * 2.5 / 40.0]);
-        draw_text(
-            r,
-            &text,
-            cx - width / 2.0,
-            cy - 3.5 * scale,
-            scale,
-            [255, 255, 255],
-        );
+        // Gym centers the rendered string at window (60, H - H*2.5/40); the atlas
+        // glyphs are already in supersample space, so lay out the pen there directly.
+        let ss = f64::from(SUPERSAMPLE) * FRAME as f64;
+        let (sx, sy) = (ss / WINDOW_W, ss / WINDOW_H);
+        let glyph = |ch: char| SCORE_GLYPHS.iter().find(|g| g.ch == ch);
+        let width: f32 = text.chars().filter_map(glyph).map(|g| g.advance).sum();
+        let height = SCORE_GLYPHS[0].height;
+        let cx = (60.0 * sx) as f32;
+        let cy = ((WINDOW_H - WINDOW_H * 2.5 / 40.0) * sy) as f32;
+        let mut pen = cx - width / 2.0;
+        let top = (cy - height as f32 / 2.0).round() as i32;
+        for g in text.chars().filter_map(glyph) {
+            r.blit_alpha(
+                pen.round() as i32,
+                top,
+                g.width,
+                g.height,
+                g.alpha,
+                [255, 255, 255],
+            );
+            pen += g.advance;
+        }
     }
 }
 
