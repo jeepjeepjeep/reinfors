@@ -10,6 +10,7 @@ This is the canonical compatibility matrix for Python's built-in handles. It is 
 | Chess | Yes | Yes | Yes | Yes | Yes | Yes | — | — | — |
 | Connect 4 | Yes | Yes | Yes | Yes | Yes | Yes | — | — | — |
 | GridWorld | Yes | Yes | Yes | Yes | — | Yes | — | — | — |
+| CarRacing | Yes | Yes | Yes | Yes | — | Yes | — | — | — |
 | Kuhn poker | Yes | Yes | — | — | — | — | Yes | Yes | Yes |
 | Leduc poker | Yes | Yes | — | — | — | — | Yes | Yes | Yes |
 | Snake | Yes | Yes | Yes | Yes | — | Yes | — | — | — |

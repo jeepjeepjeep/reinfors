@@ -298,3 +298,18 @@ def test_callback_junk_raises_not_panics() -> None:
 
     with pytest.raises(RuntimeError, match="boom from infer"):
         _az().choose(envs, raises, gamma=1.0)
+
+
+def test_search_policy_chooses_on_car_racing() -> None:
+    # Search evaluation is deliberately allowed (deterministic single-agent planning);
+    # only cost distinguishes it, and the vec encoder keeps that small.
+    game = rf.games.CarRacing(max_ticks=20, encoder=rf.encoders.CarRacingVec())
+    policy = rf.policies.SelectiveExpectimax(n_heads=1, expansion_budget=4)
+
+    def infer(obs: np.ndarray, *rest: object) -> object:
+        return np.zeros((obs.shape[0], 1, 5))
+
+    env = rf.Env(game, rf.Reward(), seed=0)
+    env.reset()
+    actions = policy.choose([env], infer, seed=1, gamma=1.0)
+    assert actions[0] in range(5)

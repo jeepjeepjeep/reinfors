@@ -296,7 +296,9 @@ fn flatten_chance_fan<G: Game>(
                 crate::game::CHANCE_CHAIN_LIMIT
             );
             let dist = game.chance_node(&s);
-            let count = dist.count();
+            let count = dist
+                .enumerable_count()
+                .expect("ExpandAll cannot expand sample-only chance; use a sampling chance mode");
             assert!(
                 count <= MAX_ENUMERATED_OUTCOMES,
                 "ExpandAll cannot enumerate {count} chance outcomes (bound {}); use a sampling chance mode for combinatorial outcome spaces",
@@ -308,7 +310,10 @@ fn flatten_chance_fan<G: Game>(
                 "a chance chain's flattened fan exceeds the enumeration bound ({}); use a narrower sampling mode",
                 MAX_ENUMERATED_OUTCOMES
             );
-            let probs: Vec<f64> = dist.iter_probs().collect();
+            let probs: Vec<f64> = dist
+                .iter_probs()
+                .expect("enumerable checked above")
+                .collect();
             for (i, q) in probs.into_iter().enumerate() {
                 let ct = game.apply_chance_node(&s, i);
                 let ci2 = merge_chance_rewards(
@@ -762,7 +767,9 @@ impl<S: Clone> Tree<S> {
                 let width = match chance {
                     ChanceMode::Committed { .. } => committed.len(),
                     ChanceMode::ExpandAll => {
-                        let count = dist.count();
+                        let count = dist.enumerable_count().expect(
+                            "ExpandAll cannot expand sample-only chance; use a sampling chance mode",
+                        );
                         assert!(
                             count <= MAX_ENUMERATED_OUTCOMES,
                             "ExpandAll cannot enumerate {count} chance outcomes (bound {}); use \
@@ -831,7 +838,10 @@ impl<S: Clone> Tree<S> {
         let NodeKind::Chance { dist, .. } = &self.arena[cni].kind else {
             unreachable!("materialize_explicit_fan on a decision node");
         };
-        let probs: Vec<f64> = dist.iter_probs().collect();
+        let probs: Vec<f64> = dist
+            .iter_probs()
+            .expect("explicit fans are only materialized for enumerable chance")
+            .collect();
         let mover = self.arena[cni].actor;
         let mut seed = Vec::with_capacity(probs.len());
         for (i, p) in probs.into_iter().enumerate() {
@@ -1042,6 +1052,7 @@ impl<S: Clone> Tree<S> {
         let mut reward_mix = vec![0.0f64; n];
         let fan_probs: Vec<f64> = if fan_weights.is_empty() {
             dist.iter_probs()
+                .expect("weightless fans come from enumerable expansion")
                 .take(self.arena[cni].child.len())
                 .collect()
         } else {

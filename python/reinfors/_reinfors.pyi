@@ -122,6 +122,9 @@ class DeepCfr:
 
 # Opaque composition handles, built via the staticmethod constructors and passed to `Engine`.
 class GameHandle:
+    # The catalogue key of the built game (matches `rf.catalog.GAMES`).
+    @property
+    def name(self) -> str: ...
     # One episode is one hand at fresh stacks. Events are zero-sum per-seat chip deltas; `scale`
     # converts units (for example, `rf.Reward(scale=1 / big_blind)` reports rewards in blinds).
     # The button is redrawn each hand so seats rotate positions. Search policies reject its hidden
@@ -175,6 +178,12 @@ class GameHandle:
         max_ticks: int | None = ...,
         encoder: EncoderHandle | None = ...,
     ) -> GameHandle: ...
+    @staticmethod
+    def CarRacing(
+        lap_complete_percent: float = ...,
+        max_ticks: int | None = ...,
+        encoder: EncoderHandle | None = ...,
+    ) -> GameHandle: ...
     def observation_space(self) -> Box: ...
     def action_space(self) -> Discrete: ...
     @property
@@ -218,6 +227,10 @@ class EncoderHandle:
     def LeducPoker() -> EncoderHandle: ...
     @staticmethod
     def GridWorld() -> EncoderHandle: ...
+    @staticmethod
+    def CarRacingPixels() -> EncoderHandle: ...
+    @staticmethod
+    def CarRacingVec() -> EncoderHandle: ...
 
 class ChanceModeHandle:
     # How a search consumes declared chance (rf.chance_modes.*; policy `chance=` kwarg). Expand-once

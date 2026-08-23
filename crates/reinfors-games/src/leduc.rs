@@ -124,7 +124,7 @@ impl Game for LeducPoker {
         let mut k = Vec::with_capacity(8 + state.history[0].len() + state.history[1].len());
         k.push(agent as u8);
         k.push(state.cards[agent]);
-        k.push(state.public.map_or(255, |c| c));
+        k.push(state.public.unwrap_or(255));
         for h in &state.history {
             k.push(h.len() as u8);
             k.extend_from_slice(h);

@@ -133,3 +133,11 @@ def test_make_dispatches_by_game_shape() -> None:
     pettingzoo = pytest.importorskip("pettingzoo")
     c4 = gym.make(rf.games.Connect4())  # turn-based multi-agent -> PettingZoo AEC
     assert isinstance(c4, pettingzoo.AECEnv)
+
+
+def test_car_racing_is_withheld_from_adapters() -> None:
+    game = rf.games.make("car_racing")
+    with pytest.raises(ValueError, match="not available through the standard-API adapters"):
+        rf.gym.gymnasium_env(game)
+    with pytest.raises(ValueError, match="not available through the standard-API adapters"):
+        rf.gym.parallel_env(game)

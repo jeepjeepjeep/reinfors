@@ -1,7 +1,7 @@
 use reinfors_core::{
-    mcts_many, search_many, ActBy, Actor, ChanceDist, ChanceMode, Engine, EngineParams, Evaluator,
-    Game, InferMode, Mcts, MctsConfig, Opponent, Reward, SearchConfig, Space, StateEncoder,
-    Transition, TreeStrap,
+    mcts_many, realize_initial_state, search_many, ActBy, Actor, ChanceDist, ChanceMode, Engine,
+    EngineParams, Evaluator, Game, InferMode, Mcts, MctsConfig, Opponent, Reward, SearchConfig,
+    Space, StateEncoder, Transition, TreeStrap,
 };
 
 #[derive(Clone)]
@@ -737,4 +737,409 @@ fn a_cycling_chain_panics_in_expectimax() {
         0,
         |_p: &[usize], _obs: Vec<f32>, n: usize| vec![0.0; n],
     );
+}
+
+/// A root chance over a seed space too large to enumerate; outcome parity pays 10 or 20.
+struct SampleOnlySeed;
+impl Game for SampleOnlySeed {
+    type State = St;
+    type Event = f64;
+    fn num_agents(&self) -> usize {
+        1
+    }
+    fn action_count(&self) -> usize {
+        1
+    }
+    fn actor(&self, s: &St) -> Actor {
+        if s.tick == 1 {
+            Actor::Chance
+        } else {
+            Actor::Agent(0)
+        }
+    }
+    fn legal_actions(&self, s: &St, _agent: usize) -> Vec<usize> {
+        if s.tick == 0 {
+            vec![0]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, f64> {
+        assert_eq!(s.tick, 0);
+        Transition {
+            next_state: St { tick: 1 },
+            events: vec![None],
+            terminal: false,
+        }
+    }
+    fn chance_enumerable(&self) -> bool {
+        false
+    }
+    fn chance_node(&self, _s: &St) -> ChanceDist {
+        ChanceDist::SampleOnlyUniform(std::num::NonZeroU32::new(1 << 20).unwrap())
+    }
+    fn apply_chance_node(&self, _s: &St, outcome: usize) -> Transition<St, f64> {
+        Transition {
+            next_state: St { tick: 2 },
+            events: vec![Some(10.0 + 10.0 * (outcome % 2) as f64)],
+            terminal: true,
+        }
+    }
+    fn initial_state(&self) -> St {
+        St { tick: 0 }
+    }
+}
+
+#[test]
+fn sample_only_resampling_converges() {
+    let cfg = mcts_cfg(4000, 8, 0.5, ChanceMode::AlwaysResample);
+    let e = run_mcts(&SampleOnlySeed, fan_chance, &cfg, vec![(St { tick: 0 }, 0)]);
+    assert!(
+        (e[0].values[0][0] - 15.0).abs() < 0.5,
+        "{}",
+        e[0].values[0][0]
+    );
+}
+
+#[test]
+fn sample_only_committed_is_seed_deterministic() {
+    let cfg = mcts_cfg(64, 8, 0.5, ChanceMode::Committed { samples: 3 });
+    let a = run_mcts(&SampleOnlySeed, fan_chance, &cfg, vec![(St { tick: 0 }, 0)]);
+    let b = run_mcts(&SampleOnlySeed, fan_chance, &cfg, vec![(St { tick: 0 }, 0)]);
+    assert_eq!(a[0].values, b[0].values);
+}
+
+#[test]
+#[should_panic(expected = "sample-only")]
+fn sample_only_expand_all_panics_in_mcts() {
+    let cfg = mcts_cfg(1, 8, 0.5, ChanceMode::ExpandAll);
+    let _ = run_mcts(&SampleOnlySeed, fan_chance, &cfg, vec![(St { tick: 0 }, 0)]);
+}
+
+#[test]
+#[should_panic(expected = "sample-only")]
+fn sample_only_expand_all_panics_in_expectimax() {
+    let _ = search_many(
+        &SampleOnlySeed,
+        &GuardEnc(fan_chance),
+        &Pass,
+        &xmax_cfg(0.5, ChanceMode::ExpandAll),
+        vec![(St { tick: 0 }, 0)],
+        false,
+        0,
+        |_p: &[usize], _obs: Vec<f32>, n: usize| vec![0.0; n],
+    );
+}
+
+#[test]
+fn sample_only_engine_collection_draws_outcomes() {
+    let mut engine = Engine::new(
+        SampleOnlySeed,
+        Box::new(GuardEnc(fan_chance)),
+        Box::new(Pass),
+        Mcts::new(
+            mcts_cfg(8, 8, 1.0, ChanceMode::Committed { samples: 1 }),
+            ActBy::Value,
+        ),
+        TreeStrap::new(1.0, 0.3, 1.0, false),
+        EngineParams {
+            n_games: 2,
+            seed: 3,
+            n_groups: 1,
+            ..Default::default()
+        },
+    );
+    let (records, stats) = engine.collect(4, |_obs: Vec<f32>, n: usize| vec![0.0; n]);
+    assert!(records.len() >= 4);
+    assert!(stats.decisions > 0);
+}
+
+#[derive(Clone)]
+struct TwoSt(u8);
+struct SampleOnlyDuel;
+impl Game for SampleOnlyDuel {
+    type State = TwoSt;
+    type Event = f64;
+    fn num_agents(&self) -> usize {
+        2
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn actor(&self, s: &TwoSt) -> Actor {
+        if s.0 == 1 {
+            Actor::Chance
+        } else {
+            Actor::Agent((s.0 % 2) as usize)
+        }
+    }
+    fn legal_actions(&self, s: &TwoSt, _agent: usize) -> Vec<usize> {
+        if s.0 == 1 {
+            Vec::new()
+        } else {
+            vec![0, 1]
+        }
+    }
+    fn step(&self, s: &TwoSt, _actions: &[usize]) -> Transition<TwoSt, f64> {
+        Transition {
+            next_state: TwoSt(s.0 + 1),
+            events: vec![None, None],
+            terminal: s.0 >= 3,
+        }
+    }
+    fn chance_node(&self, s: &TwoSt) -> ChanceDist {
+        assert_eq!(s.0, 1);
+        ChanceDist::SampleOnlyUniform(std::num::NonZeroU32::new(1 << 16).unwrap())
+    }
+    fn apply_chance_node(&self, s: &TwoSt, _outcome: usize) -> Transition<TwoSt, f64> {
+        assert_eq!(s.0, 1);
+        Transition::silent(TwoSt(2), 2)
+    }
+    fn information_states(&self) -> bool {
+        true
+    }
+    fn information_state_key(&self, s: &TwoSt, agent: usize) -> Vec<u8> {
+        vec![s.0, agent as u8]
+    }
+    fn chance_enumerable(&self) -> bool {
+        false
+    }
+    fn initial_state(&self) -> TwoSt {
+        TwoSt(0)
+    }
+}
+
+#[test]
+#[should_panic(expected = "require enumerable chance")]
+fn cfr_rejects_sample_only_chance_at_construction() {
+    let _ = reinfors_core::CfrSolver::new(
+        SampleOnlyDuel,
+        Box::new(Pass),
+        reinfors_core::CfrVariant::Vanilla,
+        7,
+    );
+}
+
+#[test]
+fn mccfr_trains_on_sample_only_chance_but_exact_surfaces_refuse() {
+    let mut solver = reinfors_core::CfrSolver::new(
+        SampleOnlyDuel,
+        Box::new(Pass),
+        reinfors_core::CfrVariant::ExternalMccfr,
+        7,
+    );
+    solver.iterate(16);
+    assert!(reinfors_core::CfrSolver::exploitability(&solver).is_err());
+    assert!(reinfors_core::CfrSolver::expected_value(&solver, 0).is_err());
+}
+
+/// Root-only sample chance: the initial state is the chance node, play is chance-free —
+/// the CarRacing shape and claim pair (whole-game false, post-realization true).
+struct RootOnlyRace;
+impl Game for RootOnlyRace {
+    type State = St;
+    type Event = f64;
+    fn num_agents(&self) -> usize {
+        1
+    }
+    fn action_count(&self) -> usize {
+        1
+    }
+    fn actor(&self, s: &St) -> Actor {
+        if s.tick == 0 {
+            Actor::Chance
+        } else {
+            Actor::Agent(0)
+        }
+    }
+    fn legal_actions(&self, s: &St, _agent: usize) -> Vec<usize> {
+        if s.tick == 0 || s.tick >= 100 {
+            Vec::new()
+        } else {
+            vec![0]
+        }
+    }
+    fn step(&self, s: &St, _actions: &[usize]) -> Transition<St, f64> {
+        Transition {
+            next_state: St { tick: 100 },
+            events: vec![Some(s.tick as f64)],
+            terminal: true,
+        }
+    }
+    fn chance_enumerable(&self) -> bool {
+        false
+    }
+    fn searchable_chance_enumerable(&self) -> bool {
+        true
+    }
+    fn chance_node(&self, s: &St) -> ChanceDist {
+        assert_eq!(s.tick, 0, "the only chance node is the root");
+        ChanceDist::SampleOnlyUniform(std::num::NonZeroU32::new(1 << 20).unwrap())
+    }
+    fn apply_chance_node(&self, s: &St, outcome: usize) -> Transition<St, f64> {
+        assert_eq!(s.tick, 0);
+        Transition::silent(
+            St {
+                tick: 1 + outcome % 64,
+            },
+            1,
+        )
+    }
+    fn initial_state(&self) -> St {
+        St { tick: 0 }
+    }
+}
+
+#[test]
+fn root_only_sample_chance_realizes_and_varies() {
+    let g = RootOnlyRace;
+    assert!(!g.chance_enumerable(), "the raw root is sample-only");
+    assert!(
+        g.searchable_chance_enumerable(),
+        "post-realization play is chance-free"
+    );
+    let mut rng = reinfors_core::SplitMix64::new(3);
+    let ticks: Vec<usize> = (0..8)
+        .map(|_| {
+            let s = realize_initial_state(&g, &mut rng);
+            assert!(matches!(g.actor(&s), Actor::Agent(0)));
+            s.tick
+        })
+        .collect();
+    assert!(
+        ticks.iter().collect::<std::collections::HashSet<_>>().len() > 1,
+        "repeated realization should draw different outcomes: {ticks:?}"
+    );
+}
+
+#[test]
+fn root_only_sample_chance_supports_expand_all_and_episodes() {
+    let never_chance = |s: &St| s.tick == 0;
+    let cfg = mcts_cfg(4, 4, 1.0, ChanceMode::ExpandAll);
+    let e = run_mcts(&RootOnlyRace, never_chance, &cfg, vec![(St { tick: 5 }, 0)]);
+    assert_eq!(e.len(), 1);
+
+    let mut engine = Engine::new(
+        RootOnlyRace,
+        Box::new(GuardEnc(never_chance)),
+        Box::new(Pass),
+        Mcts::new(cfg, ActBy::Value),
+        TreeStrap::new(1.0, 0.3, 1.0, false),
+        EngineParams {
+            n_games: 2,
+            seed: 5,
+            n_groups: 1,
+            ..Default::default()
+        },
+    );
+    let (records, stats) = engine.collect(12, |_obs: Vec<f32>, n: usize| vec![0.0; n]);
+    assert!(
+        records.len() >= 12,
+        "multi-episode collection realizes each root"
+    );
+    assert!(stats.decisions > 0);
+}
+
+/// Root-only sample chance, two players with information states: exact CFR must reject
+/// (it enumerates the raw root) while sampling solvers and engine search stay supported.
+#[derive(Clone)]
+struct RootDuelSt(u8);
+struct RootOnlyDuel;
+impl Game for RootOnlyDuel {
+    type State = RootDuelSt;
+    type Event = f64;
+    fn num_agents(&self) -> usize {
+        2
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn actor(&self, s: &RootDuelSt) -> Actor {
+        if s.0 == 0 {
+            Actor::Chance
+        } else {
+            Actor::Agent((s.0 % 2) as usize)
+        }
+    }
+    fn legal_actions(&self, s: &RootDuelSt, _agent: usize) -> Vec<usize> {
+        if s.0 == 0 {
+            Vec::new()
+        } else {
+            vec![0, 1]
+        }
+    }
+    fn step(&self, s: &RootDuelSt, _actions: &[usize]) -> Transition<RootDuelSt, f64> {
+        Transition {
+            next_state: RootDuelSt(s.0 + 1),
+            events: vec![None, None],
+            terminal: s.0 >= 3,
+        }
+    }
+    fn information_states(&self) -> bool {
+        true
+    }
+    fn information_state_key(&self, s: &RootDuelSt, agent: usize) -> Vec<u8> {
+        vec![s.0, agent as u8]
+    }
+    fn chance_enumerable(&self) -> bool {
+        false
+    }
+    fn searchable_chance_enumerable(&self) -> bool {
+        true
+    }
+    fn chance_node(&self, s: &RootDuelSt) -> ChanceDist {
+        assert_eq!(s.0, 0, "the only chance node is the root");
+        ChanceDist::SampleOnlyUniform(std::num::NonZeroU32::new(1 << 20).unwrap())
+    }
+    fn apply_chance_node(&self, s: &RootDuelSt, outcome: usize) -> Transition<RootDuelSt, f64> {
+        assert_eq!(s.0, 0);
+        Transition::silent(RootDuelSt(1 + (outcome % 2) as u8), 2)
+    }
+    fn initial_state(&self) -> RootDuelSt {
+        RootDuelSt(0)
+    }
+}
+
+#[test]
+#[should_panic(expected = "require enumerable chance")]
+fn exact_cfr_rejects_root_only_sample_chance() {
+    let _ = reinfors_core::CfrSolver::new(
+        RootOnlyDuel,
+        Box::new(Pass),
+        reinfors_core::CfrVariant::Vanilla,
+        7,
+    );
+}
+
+#[test]
+fn sampling_solvers_support_root_only_sample_chance() {
+    let mut mccfr = reinfors_core::CfrSolver::new(
+        RootOnlyDuel,
+        Box::new(Pass),
+        reinfors_core::CfrVariant::ExternalMccfr,
+        7,
+    );
+    mccfr.iterate(16);
+    assert!(reinfors_core::CfrSolver::expected_value(&mccfr, 0).is_err());
+
+    struct DuelEnc;
+    impl reinfors_core::ActionView for DuelEnc {}
+    impl StateEncoder for DuelEnc {
+        type State = RootDuelSt;
+        fn encode(&self, s: &RootDuelSt, agent: usize) -> Vec<f32> {
+            vec![f32::from(s.0), agent as f32]
+        }
+        fn obs_shape(&self) -> (usize, usize, usize) {
+            (1, 1, 2)
+        }
+        fn observation_space(&self) -> Space {
+            Space::unit_box(vec![1, 1, 2])
+        }
+    }
+    let mut deep =
+        reinfors_core::DeepCfrSolver::new(RootOnlyDuel, Box::new(DuelEnc), Box::new(Pass), 7);
+    deep.next_iteration();
+    let (adv, strat, _) =
+        deep.collect(0, 4, |_p: usize, _obs: Vec<f32>, n: usize| vec![0.0; n * 2]);
+    assert!(!adv.is_empty() || !strat.is_empty());
 }
