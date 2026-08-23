@@ -109,6 +109,7 @@ def test_round_trip_reconstructs_a_record_identical_engine(family: str) -> None:
                 rf.learners.Ppo(gamma=0.98),
                 n_games=2,
                 seed=3,
+                n_threads=1,
             )
         if family == "dqn":
             return rf.Engine(
