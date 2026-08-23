@@ -44,7 +44,8 @@ def test_every_game_resolves_and_exposes_its_encoder(game_name: str) -> None:
     explicit = GAME_FACTORIES[game_name](encoder=getattr(rf.encoders, encoder_info.label)())
     implicit = GAME_FACTORIES[game_name]()
 
-    assert rf.Env(implicit).resolved_config()["game"]["encoder"] == {"name": encoder_name}
+    resolved = rf.Env(implicit).resolved_config()["game"]["encoder"]
+    assert {k: v for k, v in resolved.items() if k != "revision"} == {"name": encoder_name}
     assert explicit.observation_space().shape == implicit.observation_space().shape
     assert explicit.encoder.name == encoder_name
     assert explicit.encoder.head_index(0, 0) == 0
@@ -65,6 +66,7 @@ def test_game_rejects_an_encoder_for_another_game() -> None:
 
 GAME_FACTORIES: dict[str, Callable[[], Any]] = {
     "backgammon": rf.games.Backgammon,
+    "car_racing": rf.games.CarRacing,
     "chess": rf.games.Chess,
     "connect4": rf.games.Connect4,
     "gridworld": rf.games.GridWorld,
@@ -76,6 +78,7 @@ GAME_FACTORIES: dict[str, Callable[[], Any]] = {
 
 DEFAULT_ENCODERS = {
     "backgammon": "backgammon",
+    "car_racing": "car_racing_pixels",
     "chess": "minimal_chess",
     "connect4": "connect4",
     "gridworld": "gridworld",
@@ -87,10 +90,12 @@ DEFAULT_ENCODERS = {
 
 ENCODER_GAMES = {
     "minimal_chess": "chess",
+    "car_racing_pixels": "car_racing",
+    "car_racing_vec": "car_racing",
     "relative_chess": "chess",
     "openspiel_chess": "chess",
     "alphazero_chess": "chess",
-    **{name: name for name in DEFAULT_ENCODERS if name != "chess"},
+    **{name: name for name in DEFAULT_ENCODERS if name not in ("chess", "car_racing")},
 }
 
 

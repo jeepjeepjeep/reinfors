@@ -100,6 +100,11 @@ impl<G: Game> CfrSolver<G> {
             game.information_states(),
             "CFR requires information-state keys (Game::information_states)"
         );
+        assert!(
+            game.chance_enumerable() || matches!(variant, CfrVariant::ExternalMccfr),
+            "exact CFR variants require enumerable chance (Game::chance_enumerable); \
+             use CfrVariant::ExternalMccfr for sample-only chance"
+        );
         // A chance root does not reveal the game's decision dynamics.
         let realized = crate::game::realize_initial_state(&game, &mut SplitMix64::new(0x0517_B0BE));
         assert!(
@@ -191,14 +196,23 @@ impl<G: Game> CfrSolver<G> {
     }
 
     /// Expected value for `player` under the average profile.
-    pub fn expected_value(&self, player: usize) -> f64 {
+    pub fn expected_value(
+        &self,
+        player: usize,
+    ) -> Result<f64, best_response::EnumerationCapExceeded> {
         assert!(
             player < self.num_players(),
             "player {player} out of range: this game has {} players",
             self.num_players()
         );
+        if !self.game.chance_enumerable() {
+            return Err(best_response::EnumerationCapExceeded(
+                "chance is sample-only; exact expected value requires enumerable chance"
+                    .to_string(),
+            ));
+        }
         let root = self.game.initial_state();
-        self.profile_value(&root)[player]
+        Ok(self.profile_value(&root)[player])
     }
 
     /// Serialize the complete solve state for exact continuation.
@@ -292,12 +306,15 @@ impl<G: Game> CfrSolver<G> {
         match self.game.actor(state) {
             Actor::Chance => {
                 let dist = self.game.chance_node(state);
+                let count = dist
+                    .enumerable_count()
+                    .expect("enumeration guarded at construction or entry");
                 assert!(
-                    dist.count() <= MAX_ENUMERATED_OUTCOMES,
-                    "chance fan {} exceeds the enumeration cap; use CfrVariant::ExternalMccfr",
-                    dist.count()
+                    count <= MAX_ENUMERATED_OUTCOMES,
+                    "chance fan {count} exceeds the enumeration cap; use CfrVariant::ExternalMccfr"
                 );
-                let probs: Vec<f64> = dist.iter_probs().collect();
+                let probs: Vec<f64> =
+                    dist.iter_probs().expect("enumerable checked above").collect();
                 let mut v = [0.0; MAX_CFR_PLAYERS];
                 for (i, p) in probs.into_iter().enumerate() {
                     let t = self.game.apply_chance_node(state, i);
@@ -463,7 +480,10 @@ impl<G: Game> CfrSolver<G> {
         match self.game.actor(state) {
             Actor::Chance => {
                 let dist = self.game.chance_node(state);
-                let probs: Vec<f64> = dist.iter_probs().collect();
+                let probs: Vec<f64> = dist
+                    .iter_probs()
+                    .expect("enumeration guarded at construction or entry")
+                    .collect();
                 let mut v = [0.0; MAX_CFR_PLAYERS];
                 for (i, p) in probs.into_iter().enumerate() {
                     let t = self.game.apply_chance_node(state, i);

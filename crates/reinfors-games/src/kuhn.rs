@@ -320,9 +320,13 @@ mod tests {
         assert!(KuhnPoker { players: 11 }.validate().is_err());
         let root = g.initial_state();
         assert!(matches!(g.actor(&root), Actor::Chance));
-        assert_eq!(g.chance_node(&root).count(), 4, "deck is players + 1");
+        assert_eq!(
+            g.chance_node(&root).enumerable_count().unwrap(),
+            4,
+            "deck is players + 1"
+        );
         let s1 = g.apply_chance_node(&root, 0).next_state;
-        assert_eq!(g.chance_node(&s1).count(), 3);
+        assert_eq!(g.chance_node(&s1).enumerable_count().unwrap(), 3);
         let s2 = g.apply_chance_node(&s1, 0).next_state;
         let s3 = g.apply_chance_node(&s2, 0).next_state;
         assert_eq!(s3.cards, vec![0, 1, 2]);
@@ -338,9 +342,9 @@ mod tests {
         let g = KuhnPoker::default();
         let root = g.initial_state();
         assert!(matches!(g.actor(&root), Actor::Chance));
-        assert_eq!(g.chance_node(&root).count(), 3);
+        assert_eq!(g.chance_node(&root).enumerable_count().unwrap(), 3);
         let s1 = g.apply_chance_node(&root, 1).next_state;
-        assert_eq!(g.chance_node(&s1).count(), 2);
+        assert_eq!(g.chance_node(&s1).enumerable_count().unwrap(), 2);
         let s2 = g.apply_chance_node(&s1, 1).next_state;
         assert_eq!(s2.cards, vec![1, 2]);
         assert!(matches!(g.actor(&s2), Actor::Agent(0)), "player 0 opens");

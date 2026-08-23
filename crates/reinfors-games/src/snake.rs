@@ -914,7 +914,7 @@ mod game_tests {
         assert_eq!(trace_events, t.events);
         assert_eq!(realized.terminal, t.terminal);
         assert!(
-            (0..dist.count())
+            (0..dist.enumerable_count().unwrap())
                 .any(|d| realized.next_state == g.apply_chance_node(&t.next_state, d).next_state),
             "the realized state must be one of the declared outcomes"
         );
@@ -1619,7 +1619,7 @@ mod n_player_tests {
                 .sum::<usize>() as i32;
         let n = n as usize;
         assert_eq!(
-            dist.count(),
+            dist.enumerable_count().unwrap(),
             n * (n - 1) * (n - 2),
             "ONE combined draw: a Committed search keeps s complete worlds, not s^k branches"
         );
@@ -1627,7 +1627,7 @@ mod n_player_tests {
         assert_eq!(s0.food.len(), 3);
         assert_eq!(s0.pending_food, 0);
         let last = g
-            .apply_chance_node(&t.next_state, dist.count() - 1)
+            .apply_chance_node(&t.next_state, dist.enumerable_count().unwrap() - 1)
             .next_state;
         assert_eq!(last.food.len(), 3);
         assert_ne!(s0.food, last.food);

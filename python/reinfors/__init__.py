@@ -99,11 +99,18 @@ def engine_from_config(config: dict[str, Any]) -> Engine:
     def _split(block: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         return block["name"], {k: v for k, v in block.items() if k != "name"}
 
+    expected_revisions: dict[str, Any] = {}
+
     def _coerce_handles(kw: dict[str, Any]) -> dict[str, Any]:
         # Nested handle blocks (as `resolved_config` renders them) become typed handles, so the
         # round-trip `engine_from_config(engine.resolved_config())` holds for every composition.
+        # Content `revision` keys are not constructor kwargs; they are recorded and verified
+        # against the built engine so a config never silently binds to different observation
+        # content than it was recorded against.
         if isinstance(kw.get("encoder"), dict):
             e = dict(kw["encoder"])
+            if "revision" in e:
+                expected_revisions["encoder"] = e.pop("revision")
             kw["encoder"] = encoders.make(e.pop("name"), **e)
         if isinstance(kw.get("chance"), dict):
             c = dict(kw["chance"])
@@ -121,6 +128,8 @@ def engine_from_config(config: dict[str, Any]) -> Engine:
         msg = f"unsupported config schema_version {schema!r}; this reinfors supports 1"
         raise ValueError(msg)
     g_name, g_kw = _split(config["game"])
+    if "revision" in g_kw:
+        expected_revisions["game"] = g_kw.pop("revision")
     g_kw = _coerce_handles(g_kw)
     engine_kw = dict(config.get("engine", {}))
     for gone, repl in (("n_groups", "n_threads and batch_size"), ("pad_rows_to", "pad")):
@@ -149,13 +158,23 @@ def engine_from_config(config: dict[str, Any]) -> Engine:
     p_name, p_kw = _split(config["policy"])
     p_kw = _coerce_handles(p_kw)
     l_name, l_kw = _split(config["learner"])
-    return Engine(
+    engine = Engine(
         make_game(g_name, **g_kw),
         reward,
         make_policy(p_name, **p_kw),
         make_learner(l_name, **l_kw),
         **engine_kw,
     )
+    built = engine.resolved_config()["game"]
+    for scope, expected in expected_revisions.items():
+        actual = built.get("revision") if scope == "game" else built.get("encoder", {}).get("revision")
+        if actual != expected:
+            msg = (
+                f"config was recorded against {scope} content revision {expected}, but this build"
+                f" has revision {actual}; observations would differ from the recorded run"
+            )
+            raise ValueError(msg)
+    return engine
 
 
 __all__ = [

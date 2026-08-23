@@ -1,12 +1,16 @@
 //! Built-in games, encoders, and rewards.
 
 pub mod backgammon;
+#[cfg(feature = "car-racing")]
+pub mod car_racing;
 pub mod chess;
 pub mod connect4;
 pub mod gridworld;
 pub mod holdem;
 pub mod kuhn;
 pub mod leduc;
+#[cfg(feature = "car-racing")]
+pub(crate) mod render;
 pub mod snake;
 
 pub use backgammon::{
@@ -25,6 +29,13 @@ pub use kuhn::{KuhnEncoder, KuhnPoker, KuhnState};
 pub use leduc::{LeducEncoder, LeducPoker, LeducState};
 pub(crate) mod codec_util;
 
+#[cfg(feature = "car-racing")]
+pub use car_racing::{
+    codec::CarRacingCodec, render::CarRacingPixels, CarRacing, CarRacingEvent, CarRacingReward,
+    CarRacingState, CarRacingSummary, CarRacingVec, GAME_REVISION as CAR_RACING_GAME_REVISION,
+    PIXEL_ENCODER_REVISION as CAR_RACING_PIXELS_REVISION,
+    VECTOR_ENCODER_REVISION as CAR_RACING_VEC_REVISION,
+};
 pub use cozy_chess::Board as ChessBoard;
 pub use gridworld::{GridEvent, GridState, GridWorld, GridWorldPlanes, GridWorldReward};
 pub use snake::{

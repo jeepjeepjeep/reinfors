@@ -4,6 +4,7 @@ engine whose collected records are byte-identical, for every composition family.
 
 from __future__ import annotations
 
+import copy
 import json
 from typing import Any
 
@@ -95,11 +96,20 @@ def test_fingerprint_separates_configs_and_is_stable() -> None:
     assert c.config_fingerprint() != a.config_fingerprint()
 
 
-@pytest.mark.parametrize("family", ["az", "dqn", "treestrap"])
+@pytest.mark.parametrize("family", ["az", "dqn", "treestrap", "ppo_carracing"])
 def test_round_trip_reconstructs_a_record_identical_engine(family: str) -> None:
     def build() -> rf.Engine:
         if family == "az":
             return _az_chess()
+        if family == "ppo_carracing":
+            return rf.Engine(
+                rf.games.CarRacing(lap_complete_percent=0.9, max_ticks=25),
+                rf.Reward(tile=500.0),
+                rf.policies.Ppo(),
+                rf.learners.Ppo(gamma=0.98),
+                n_games=2,
+                seed=3,
+            )
         if family == "dqn":
             return rf.Engine(
                 rf.games.Backgammon(max_ticks=40),
@@ -143,6 +153,8 @@ def test_round_trip_reconstructs_a_record_identical_engine(family: str) -> None:
             rows = obs.shape[0]
             if a == "chess":
                 return np.zeros((rows, 4672)), np.zeros(rows)
+            if a == "car_racing":
+                return np.full((rows, 5), 0.2), np.zeros(rows)
             assert ka is not None
             return np.full((rows, *ka), 0.25)
 
@@ -279,3 +291,20 @@ def test_oversubscribed_n_threads_canonicalizes_to_the_pool_size() -> None:
     b = build(n_threads=1)
     assert a.resolved_config()["engine"]["n_threads"] == 1
     assert a.config_fingerprint() == b.config_fingerprint()
+
+
+def test_content_revision_mismatch_is_rejected() -> None:
+    engine = rf.Engine(rf.games.CarRacing(max_ticks=25), rf.Reward(), rf.policies.Ppo(), rf.learners.Ppo(), n_games=1)
+    cfg = engine.resolved_config()
+    assert cfg["game"]["revision"] == 1
+    assert cfg["game"]["encoder"]["revision"] == 1
+
+    stale = copy.deepcopy(cfg)
+    stale["game"]["revision"] = 999
+    with pytest.raises(ValueError, match="game content revision 999"):
+        rf.engine_from_config(stale)
+
+    stale = copy.deepcopy(cfg)
+    stale["game"]["encoder"]["revision"] = 999
+    with pytest.raises(ValueError, match="encoder content revision 999"):
+        rf.engine_from_config(stale)
