@@ -298,7 +298,7 @@ def test_content_revision_mismatch_is_rejected() -> None:
     engine = rf.Engine(rf.games.CarRacing(max_ticks=25), rf.Reward(), rf.policies.Ppo(), rf.learners.Ppo(), n_games=1)
     cfg = engine.resolved_config()
     assert cfg["game"]["revision"] == 1
-    assert cfg["game"]["encoder"]["revision"] == 1
+    assert cfg["game"]["encoder"]["revision"] == 2
 
     stale = copy.deepcopy(cfg)
     stale["game"]["revision"] = 999

@@ -277,29 +277,32 @@ impl CarRacingRenderer {
     fn draw_score(r: &mut Raster, live: &LiveState) {
         let score = 1000.0 * f64::from(live.visited_count) / live.track.tiles.len().max(1) as f64
             - 0.1 * f64::from(live.tick);
-        let text = score_text(score);
         // Gym centers the rendered string at window (60, H - H*2.5/40); the atlas
         // glyphs are already in supersample space, so lay out the pen there directly.
         let ss = f64::from(SUPERSAMPLE) * FRAME as f64;
-        let (sx, sy) = (ss / WINDOW_W, ss / WINDOW_H);
-        let glyph = |ch: char| SCORE_GLYPHS.iter().find(|g| g.ch == ch);
-        let width: f32 = text.chars().filter_map(glyph).map(|g| g.advance).sum();
-        let height = SCORE_GLYPHS[0].height;
-        let cx = (60.0 * sx) as f32;
-        let cy = ((WINDOW_H - WINDOW_H * 2.5 / 40.0) * sy) as f32;
-        let mut pen = cx - width / 2.0;
-        let top = (cy - height as f32 / 2.0).round() as i32;
-        for g in text.chars().filter_map(glyph) {
-            r.blit_alpha(
-                pen.round() as i32,
-                top,
-                g.width,
-                g.height,
-                g.alpha,
-                [255, 255, 255],
-            );
-            pen += g.advance;
-        }
+        let cx = (60.0 * ss / WINDOW_W) as f32;
+        let cy = ((WINDOW_H - WINDOW_H * 2.5 / 40.0) * ss / WINDOW_H) as f32;
+        blit_score_text(r, &score_text(score), cx, cy);
+    }
+}
+
+/// Center-anchored atlas-glyph layout for the HUD score string.
+fn blit_score_text(r: &mut Raster, text: &str, cx: f32, cy: f32) {
+    let glyph = |ch: char| SCORE_GLYPHS.iter().find(|g| g.ch == ch);
+    let width: f32 = text.chars().filter_map(glyph).map(|g| g.advance).sum();
+    let height = SCORE_GLYPHS[0].height;
+    let mut pen = cx - width / 2.0;
+    let top = (cy - height as f32 / 2.0).round() as i32;
+    for g in text.chars().filter_map(glyph) {
+        r.blit_alpha(
+            pen.round() as i32,
+            top,
+            g.width,
+            g.height,
+            g.alpha,
+            [255, 255, 255],
+        );
+        pen += g.advance;
     }
 }
 
@@ -384,6 +387,63 @@ impl reinfors_core::StateEncoder for CarRacingPixels {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn score_atlas_is_complete_and_well_formed() {
+        let chars: Vec<char> = SCORE_GLYPHS.iter().map(|g| g.ch).collect();
+        let mut expected: Vec<char> = "0123456789-".chars().collect();
+        let mut sorted = chars.clone();
+        sorted.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(sorted, expected, "atlas must cover exactly 0-9 and minus");
+        for g in &SCORE_GLYPHS {
+            assert_eq!(
+                g.alpha.len(),
+                g.width * g.height,
+                "glyph {:?} bitmap size",
+                g.ch
+            );
+            assert!(g.width > 0 && g.height > 0 && g.height == SCORE_GLYPHS[0].height);
+            assert!(
+                g.advance > 0.0 && g.advance < 64.0,
+                "glyph {:?} advance",
+                g.ch
+            );
+            assert!(g.alpha.iter().any(|&a| a > 0), "glyph {:?} is blank", g.ch);
+        }
+    }
+
+    #[test]
+    fn score_text_blit_is_deterministic_and_draws_every_glyph() {
+        let text = "-0123456789";
+        let render = || {
+            let mut r = Raster::new(FRAME as u32, FRAME as u32, SUPERSAMPLE);
+            r.fill_solid([0, 0, 0]);
+            blit_score_text(
+                &mut r,
+                text,
+                (FRAME * SUPERSAMPLE as usize) as f32 / 2.0,
+                40.0,
+            );
+            r
+        };
+        let (a, b) = (render(), render());
+        assert_eq!(a.pixmap.data(), b.pixmap.data());
+
+        // Every glyph's pen band must contain ink.
+        let glyph = |ch: char| SCORE_GLYPHS.iter().find(|g| g.ch == ch).unwrap();
+        let width: f32 = text.chars().map(|c| glyph(c).advance).sum();
+        let mut pen = (FRAME * SUPERSAMPLE as usize) as f32 / 2.0 - width / 2.0;
+        let data = a.pixmap.data();
+        let pw = a.pixmap.width() as usize;
+        for ch in text.chars() {
+            let g = glyph(ch);
+            let x0 = pen.round() as usize;
+            let ink = (0..a.pixmap.height() as usize)
+                .any(|y| (x0..x0 + g.width).any(|x| data[(y * pw + x) * 4] > 0));
+            assert!(ink, "glyph {ch:?} left no ink in its band");
+            pen += g.advance;
+        }
+    }
 
     use super::super::{CarRacing, CarRacingState};
     use super::*;

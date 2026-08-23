@@ -58,11 +58,16 @@ impl Raster {
                     continue;
                 }
                 let i = ((py * pw + px) * 4) as usize;
+                // Premultiplied source-over: src premul is rgb*a, and the destination
+                // alpha must advance by the same equation or transparent destinations
+                // would end up with color exceeding alpha.
                 for c in 0..3 {
                     let d = u32::from(data[i + c]);
                     let s = u32::from(rgb[c]);
                     data[i + c] = ((s * a + d * (255 - a) + 127) / 255) as u8;
                 }
+                let da = u32::from(data[i + 3]);
+                data[i + 3] = ((255 * a + da * (255 - a) + 127) / 255) as u8;
             }
         }
     }
@@ -195,4 +200,56 @@ pub(crate) fn write_png(path: &std::path::Path, hwc: &[u8], w: u32, h: u32) -> R
         data[i * 4 + 3] = 255;
     }
     pixmap.save_png(path).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blit_alpha_over_opaque_and_transparent_is_valid_premultiplied() {
+        let mut r = Raster::new(4, 4, 1);
+        r.fill_solid([0, 0, 0]);
+        r.blit_alpha(0, 0, 1, 1, &[128], [255, 255, 255]);
+        let d = r.pixmap.data();
+        assert_eq!(
+            &d[..4],
+            &[128, 128, 128, 255],
+            "opaque dst: color blends, alpha stays"
+        );
+
+        let mut r = Raster::new(4, 4, 1);
+        r.clear();
+        r.blit_alpha(0, 0, 1, 1, &[128], [255, 255, 255]);
+        let d = r.pixmap.data();
+        assert_eq!(
+            &d[..4],
+            &[128, 128, 128, 128],
+            "transparent dst: alpha must advance with color (premultiplied validity)"
+        );
+        assert!(d[0] <= d[3], "premultiplied channel must not exceed alpha");
+    }
+
+    #[test]
+    fn blit_alpha_clips_without_panicking() {
+        let mut r = Raster::new(4, 4, 1);
+        r.fill_solid([0, 0, 0]);
+        let bitmap = vec![255u8; 8 * 8];
+        r.blit_alpha(-6, -6, 8, 8, &bitmap, [255, 255, 255]);
+        r.blit_alpha(2, 2, 8, 8, &bitmap, [255, 255, 255]);
+        let d = r.pixmap.data();
+        assert_eq!(
+            &d[..4],
+            &[255, 255, 255, 255],
+            "top-left corner covered by first blit"
+        );
+        let last = (4 * 4 - 1) * 4;
+        assert_eq!(
+            &d[last..last + 4],
+            &[255, 255, 255, 255],
+            "bottom-right covered by second"
+        );
+        let mid = (4 + 1) * 4;
+        assert_eq!(&d[mid..mid + 4], &[255, 255, 255, 255]);
+    }
 }
