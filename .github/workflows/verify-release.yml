@@ -49,8 +49,10 @@ jobs:
           info = rf.build_info()
           assert info["profile"] == "release", info
           assert info["git_dirty"] is False, info
-          # rc versions are dispatched from an untagged branch; finals build from the release tag
-          expected_tag = None if "rc" in version else "v" + version
+          # TestPyPI builds come from untagged workflow dispatches (rc or a final dry-run);
+          # PyPI finals build from the release tag.
+          index = "${{ inputs.index }}"
+          expected_tag = None if index == "testpypi" else "v" + version
           assert info["git_tag"] == expected_tag, info
           print("ok:", info)
           PYEOF
