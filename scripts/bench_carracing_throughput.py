@@ -1,9 +1,9 @@
 """Reproduce the README's CarRacing throughput comparison against Gymnasium.
 
-Two measurements, stepping the same game with pixel observations under random
-actions: one `rf.Env` (step + observe per tick) and one Gymnasium `CarRacing-v3`
-env (its `step` renders the obs). Single-threaded, bare user-stepped loops on
-both sides — the symmetric comparison. Parallel collection and collect_stream
+Two measurements under random actions, one per implementation's native 96x96
+pixel path: one `rf.Env` (step + observe per tick; CHW f32) and one Gymnasium
+`CarRacing-v3` env (its `step` renders the obs; HWC u8). Single-threaded, bare
+user-stepped loops on both sides — the symmetric comparison. Parallel collection and collect_stream
 overlap multiply reinfors' side further but have no gym-primitive equivalent,
 so they are not benchmarked here.
 
@@ -27,6 +27,7 @@ dirty state — so every result is attributable, and refuses non-release builds.
 from __future__ import annotations
 
 import argparse
+import statistics
 import time
 
 import numpy as np
@@ -105,6 +106,8 @@ def main() -> None:
     ap.add_argument("--seconds", type=float, default=30.0, help="wall time per trial")
     ap.add_argument("--trials", type=int, default=3, help="repeated trials per side")
     args = ap.parse_args()
+    if args.seconds <= 0 or args.trials <= 0:
+        ap.error("--seconds and --trials must be positive")
 
     provenance()
     bench_reinfors_single(3.0)  # warm-up, discarded
@@ -119,9 +122,8 @@ def main() -> None:
             (rf_rates if name == "rf" else gym_rates).append(fn(args.seconds))
 
     def show(label: str, rates: list[float]) -> float:
-        rates = sorted(rates)
-        med = rates[len(rates) // 2]
-        print(f"{label:<44}{med:>10,.0f}   [{rates[0]:,.0f} .. {rates[-1]:,.0f}]")
+        med = statistics.median(rates)
+        print(f"{label:<44}{med:>10,.0f}   [{min(rates):,.0f} .. {max(rates):,.0f}]")
         return med
 
     print()

@@ -46,7 +46,7 @@ print(batch.obs.shape, batch.targets.shape, batch.telemetry)
 Reinfors' native backend makes it much more performant than Python-loop RL
 libraries such as Gymnasium. Benchmarking reinfors' `car_racing` port against
 Gymnasium's `CarRacing-v3` — separate implementations of the same design, with
-matched discrete-action and 96x96 pixel-observation contracts, stepped in
+matched action space and 96x96 RGB observation content, stepped in
 single-threaded loops — reinfors runs **~20x** more environment steps per second
 (medians of three 30s trials):
 
