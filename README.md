@@ -50,12 +50,9 @@ reinfors runs **~20x** more environment steps per second (~3,800 vs ~190 on Appl
 silicon; ~14x at ~2,100 vs ~150 on a pinned 4-core EC2 instance). Reproduce with
 [`scripts/bench_carracing_throughput.py`](scripts/bench_carracing_throughput.py).
 
-Parallelising multiplies this further: `Engine` collection fans episodes across
-worker threads with one constructor argument, where Gymnasium leaves
-vectorization and its process management to the caller. And
-[`collect_stream`](https://jeepjeepjeep.github.io/reinfors/guides/streaming/) overlaps native collection — including batched
-tree search — with Python-side GPU training, an actor-learner architecture that
-gym-based stacks assemble from external frameworks:
+Parallelising multiplies this further, and in reinfors it is trivial — set
+`n_threads` — while [`collect_stream`](https://jeepjeepjeep.github.io/reinfors/guides/streaming/) overlaps collection with training as the
+normal operating mode:
 
 <p align="center">
   <img src="https://github.com/jeepjeepjeep/reinfors/releases/download/v0.2.0/carracing-throughput.gif" alt="One Gymnasium car completes a single lap while reinfors completes 75" width="90%">
