@@ -70,7 +70,14 @@ jobs:
         run: |
           python -m pip install numpy
           python -m pip install --no-index --no-deps --find-links dist reinfors
-          python -c "import reinfors as rf; rf.Env(rf.games.Connect4()).reset()"
+          python - <<'PYEOF'
+          import numpy as np
+          import reinfors as rf
+          rf.Env(rf.games.Connect4()).reset()
+          env = rf.Env(rf.games.CarRacing())  # v0.3's rapier/tiny-skia deps must load and render
+          env.reset()
+          assert np.asarray(env.observe(0)).shape == (3, 96, 96)
+          PYEOF
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wheels-${{ matrix.os }}-${{ matrix.target }}
@@ -90,8 +97,15 @@ jobs:
           python-version: "3.10"
       - name: install from the sdist
         run: |
-          python -m pip install dist/*.tar.gz
-          python -c "import reinfors as rf; rf.Env(rf.games.Connect4()).reset()"
+          python -m pip install numpy dist/*.tar.gz
+          python - <<'PYEOF'
+          import numpy as np
+          import reinfors as rf
+          rf.Env(rf.games.Connect4()).reset()
+          env = rf.Env(rf.games.CarRacing())  # v0.3's rapier/tiny-skia deps must load and render
+          env.reset()
+          assert np.asarray(env.observe(0)).shape == (3, 96, 96)
+          PYEOF
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wheels-sdist
