@@ -64,7 +64,7 @@ Parallelising multiplies this further, and in reinfors it is trivial — set
 normal operating mode:
 
 <p align="center">
-  <img src="https://github.com/jeepjeepjeep/reinfors/releases/download/v0.2.0/carracing-throughput.gif" alt="One Gymnasium car completes a single lap while reinfors completes 75" width="90%">
+  <img src="https://github.com/jeepjeepjeep/reinfors/releases/download/v0.2.0/carracing-throughput.gif" alt="One Gymnasium car completes a single lap while reinfors completes 20" width="90%">
 </p>
 
 Benchmarked against OpenSpiel's all-C++ libtorch AlphaZero on a matched chess training
