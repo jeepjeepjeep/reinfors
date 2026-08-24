@@ -43,15 +43,19 @@ print(batch.obs.shape, batch.targets.shape, batch.telemetry)
 
 ## Performance
 
-Reinfors' Rust backend makes it much more performant than typical all-Python RL libraries
-such as Gymnasium when training on a single core, and reinfors' built-in parallelisation
-then pushes this further. Benchmarking `car_racing` against Gymnasium's `CarRacing-v3` —
-the same game, stepped with pixel observations — a single core runs **~20x** more
-environment steps per second (~3,900 vs ~200). With ten worker threads, reinfors' full
-collection path sustains ~6,200 steps/s, **~14x** Gymnasium's `AsyncVectorEnv` at its
-best-scaling worker count on the same machine and **>30x** the single-core Gymnasium
-loop (Apple M-series; reproduce with
-[`scripts/bench_carracing_throughput.py`](scripts/bench_carracing_throughput.py)):
+Reinfors' Rust backend makes it much more performant than typical all-Python RL
+libraries such as Gymnasium. Benchmarking `car_racing` against Gymnasium's
+`CarRacing-v3` — the same game, stepped with pixel observations on a single pinned
+core — reinfors runs **~13x** more environment steps per second (~2,000 vs ~150 on a
+4-core EC2 instance; ~20x on Apple silicon). Reproduce with
+[`scripts/bench_carracing_throughput.py`](scripts/bench_carracing_throughput.py).
+
+Parallelising multiplies this further: `Engine` collection fans episodes across
+worker threads with one constructor argument, where Gymnasium leaves
+vectorization and its process management to the caller. And
+[`collect_stream`](https://jeepjeepjeep.github.io/reinfors/guides/streaming/) overlaps native collection — including batched
+tree search — with Python-side GPU training, an actor-learner architecture that
+gym-based stacks assemble from external frameworks:
 
 <p align="center">
   <img src="https://github.com/jeepjeepjeep/reinfors/releases/download/v0.2.0/carracing-throughput.gif" alt="One Gymnasium car completes a single lap while reinfors completes 75" width="90%">

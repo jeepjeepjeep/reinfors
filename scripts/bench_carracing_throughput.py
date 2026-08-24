@@ -1,22 +1,15 @@
 """Reproduce the README's CarRacing throughput comparison against Gymnasium.
 
-Four measurements, all stepping the same game with pixel observations:
+Two measurements, stepping the same game with pixel observations under random
+actions: one `rf.Env` (step + observe per tick) and one Gymnasium `CarRacing-v3`
+env (its `step` renders the obs). Single core, bare user-stepped loops on both
+sides — the symmetric comparison. Parallel collection and collect_stream overlap
+multiply reinfors' side further but have no gym-primitive equivalent, so they are
+not benchmarked here.
 
-  1. reinfors, single core: one `rf.Env`, step + observe per tick.
-  2. Gymnasium, single core: one `CarRacing-v3` env (its `step` renders the obs).
-  3. reinfors, parallel: `Engine.collect` worker threads driving `n_games`
-     episode slots through the PPO policy with a trivial inference callback
-     (uniform logits) — the library's real collection path.
-  4. Gymnasium, parallel: `AsyncVectorEnv` stepped with random actions.
-
-Both parallel sides sweep the same worker counts and report their best: more
-workers can hurt either stack (gym's per-step barrier, reinfors' scheduler
-sharing cores), so each gets its strongest configuration.
-
-The comparison is deliberately end-to-end rather than perfectly symmetric: the
-reinfors side pays its Python inference-callback round trip and training-batch
-assembly, the Gymnasium side pays vectorization IPC; each is the overhead its
-users actually experience.
+Build the wheel with `RUSTFLAGS="-C target-cpu=native"` for the quoted numbers;
+Gymnasium's stack selects SIMD at runtime, so a native build is the like-for-like
+configuration.
 
     uv run --no-project --with "reinfors,gymnasium[box2d]" \
         python scripts/bench_carracing_throughput.py
@@ -63,82 +56,21 @@ def bench_gym_single(seconds: float) -> float:
     return steps / (time.perf_counter() - t0)
 
 
-def bench_reinfors_parallel(seconds: float, n_threads: int, n_games: int) -> float:
-    game = rf.games.CarRacing()
-    n_actions = game.action_space().n
-    engine = rf.Engine(
-        game=game,
-        reward=rf.Reward(),
-        policy=rf.policies.Ppo(),
-        learner=rf.learners.Ppo(),
-        n_games=n_games,
-        seed=0,
-        n_threads=n_threads,
-    )
-
-    def infer(obs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        rows = obs.shape[0]
-        return (
-            np.zeros((rows, n_actions), dtype=np.float32),
-            np.zeros(rows, dtype=np.float32),
-        )
-
-    engine.collect(n_records=2 * n_games, infer=infer)  # warm-up
-    steps = 0
-    t0 = time.perf_counter()
-    while time.perf_counter() - t0 < seconds:
-        batch = engine.collect(n_records=4096, infer=infer)
-        steps += len(batch.obs)
-    return steps / (time.perf_counter() - t0)
-
-
-def bench_gym_parallel(seconds: float, n_workers: int) -> float:
-    import gymnasium as gym
-
-    envs = gym.vector.AsyncVectorEnv([(lambda: gym.make("CarRacing-v3", continuous=False)) for _ in range(n_workers)])
-    envs.reset(seed=0)
-    rng = np.random.default_rng(0)
-    envs.step(rng.integers(5, size=n_workers))  # warm-up
-    steps = 0
-    t0 = time.perf_counter()
-    while time.perf_counter() - t0 < seconds:
-        envs.step(rng.integers(5, size=n_workers))  # autoreset handles episode ends
-        steps += n_workers
-    rate = steps / (time.perf_counter() - t0)
-    envs.close()
-    return rate
-
-
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--seconds", type=float, default=10.0, help="wall time per measurement")
-    ap.add_argument("--n-threads", type=int, default=10, help="workers per parallel side")
-    ap.add_argument("--n-games", type=int, default=64, help="reinfors episode slots")
+    ap.add_argument("--seconds", type=float, default=30.0, help="wall time per measurement")
     args = ap.parse_args()
 
     r1 = bench_reinfors_single(args.seconds)
     g1 = bench_gym_single(args.seconds)
-    workers = sorted({2, 4, args.n_threads})
-    rf_runs = {w: bench_reinfors_parallel(args.seconds, w, args.n_games) for w in workers}
-    gym_runs = {w: bench_gym_parallel(args.seconds, w) for w in workers}
-    rw, rn = max(rf_runs.items(), key=lambda kv: kv[1])
-    gw, gn = max(gym_runs.items(), key=lambda kv: kv[1])
 
     print()
     print(f"{'configuration':<44}{'steps/s':>10}")
     print("-" * 54)
     print(f"{'reinfors  1 env, 1 core':<44}{r1:>10,.0f}")
     print(f"{'Gymnasium 1 env, 1 core':<44}{g1:>10,.0f}")
-    for wk, rate in rf_runs.items():
-        best = "  <- best" if wk == rw else ""
-        print(f"{f'reinfors  {wk} threads, n_games={args.n_games}':<44}{rate:>10,.0f}{best}")
-    for wk, rate in gym_runs.items():
-        best = "  <- best" if wk == gw else ""
-        print(f"{f'Gymnasium AsyncVectorEnv, {wk} processes':<44}{rate:>10,.0f}{best}")
     print("-" * 54)
-    print(f"single core:            reinfors / Gymnasium = {r1 / g1:5.1f}x")
-    print(f"parallel, best-vs-best: reinfors / Gymnasium = {rn / gn:5.1f}x")
-    print(f"best-parallel reinfors vs 1-core Gymnasium   = {rn / g1:5.1f}x")
+    print(f"single core: reinfors / Gymnasium = {r1 / g1:5.1f}x")
 
 
 if __name__ == "__main__":
