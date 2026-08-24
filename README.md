@@ -45,9 +45,9 @@ print(batch.obs.shape, batch.targets.shape, batch.telemetry)
 
 Reinfors' Rust backend makes it much more performant than typical all-Python RL
 libraries such as Gymnasium. Benchmarking `car_racing` against Gymnasium's
-`CarRacing-v3` — the same game, stepped with pixel observations on a single pinned
-core — reinfors runs **~13x** more environment steps per second (~2,000 vs ~150 on a
-4-core EC2 instance; ~20x on Apple silicon). Reproduce with
+`CarRacing-v3` — the same game, stepped with pixel observations on a single core —
+reinfors runs **~20x** more environment steps per second (~3,800 vs ~190 on Apple
+silicon; ~14x at ~2,100 vs ~150 on a pinned 4-core EC2 instance). Reproduce with
 [`scripts/bench_carracing_throughput.py`](scripts/bench_carracing_throughput.py).
 
 Parallelising multiplies this further: `Engine` collection fans episodes across
