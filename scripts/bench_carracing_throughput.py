@@ -12,11 +12,15 @@ measurements in alternating order; medians and ranges are reported, with machine
 and software provenance. The script does not set CPU affinity — pin externally
 (`taskset -c 0-3 ...` on Linux) and say so when reporting results.
 
-Build the wheel with `RUSTFLAGS="-C target-cpu=native"` for the quoted numbers;
-Gymnasium's stack selects SIMD at runtime, so a native build is the like-for-like
-configuration.
+Benchmark THIS checkout, not the registry package: build the wheel from the repo
+and install it explicitly. The published numbers use the default release profile;
+`RUSTFLAGS="-C target-cpu=native"` is a further option (Gymnasium's stack selects
+SIMD at runtime). The script prints `rf.build_info()` — profile, version, commit,
+dirty state — so every result is attributable, and refuses non-release builds.
 
-    uv run --no-project --with "reinfors,gymnasium[box2d]" \
+    uvx maturin build --release -o dist -m crates/reinfors-py/Cargo.toml
+    uv run --no-project --with ./dist/reinfors-*.whl \
+        --with "gymnasium[box2d]==1.3.0" --with numpy \
         python scripts/bench_carracing_throughput.py
 """
 
@@ -86,13 +90,14 @@ def provenance() -> None:
         affinity = f"{len(sched_getaffinity(0))} cpus in affinity mask"
     else:
         affinity = "not enforceable via this OS (report external pinning separately)"
+    info = rf.build_info()
+    assert info["profile"] == "release", f"benchmark a release build, not {info['profile']!r}"
     print(f"platform:  {platform.platform()}")
     print(f"cpu:       {cpu}")
     print(f"affinity:  {affinity}")
-    print(
-        f"python:    {platform.python_version()}  numpy: {np.__version__}  "
-        f"gymnasium: {gymnasium.__version__}  reinfors: {rf.build_info()['version']}"
-    )
+    print(f"python:    {platform.python_version()}  numpy: {np.__version__}  gymnasium: {gymnasium.__version__}")
+    dirty = " (dirty)" if info["git_dirty"] else ""
+    print(f"reinfors:  {info['version']}  {info['profile']}  commit {info['git_sha'][:12]}{dirty}")
 
 
 def main() -> None:
