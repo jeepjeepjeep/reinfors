@@ -4,12 +4,14 @@ Four measurements, all stepping the same game with pixel observations:
 
   1. reinfors, single core: one `rf.Env`, step + observe per tick.
   2. Gymnasium, single core: one `CarRacing-v3` env (its `step` renders the obs).
-  3. reinfors, parallel: `Engine.collect` with `n_threads` worker threads driving
-     `n_games` episode slots through the PPO policy with a trivial inference
-     callback (uniform logits) — the library's real collection path.
-  4. Gymnasium, parallel: `AsyncVectorEnv` stepped with random actions, swept
-     over several worker counts — its per-step barrier means more processes can
-     hurt, so the BEST worker count is reported (strongest baseline).
+  3. reinfors, parallel: `Engine.collect` worker threads driving `n_games`
+     episode slots through the PPO policy with a trivial inference callback
+     (uniform logits) — the library's real collection path.
+  4. Gymnasium, parallel: `AsyncVectorEnv` stepped with random actions.
+
+Both parallel sides sweep the same worker counts and report their best: more
+workers can hurt either stack (gym's per-step barrier, reinfors' scheduler
+sharing cores), so each gets its strongest configuration.
 
 The comparison is deliberately end-to-end rather than perfectly symmetric: the
 reinfors side pays its Python inference-callback round trip and training-batch
@@ -116,25 +118,27 @@ def main() -> None:
 
     r1 = bench_reinfors_single(args.seconds)
     g1 = bench_gym_single(args.seconds)
-    rn = bench_reinfors_parallel(args.seconds, args.n_threads, args.n_games)
-    gym_workers = sorted({2, 4, args.n_threads})
-    gym_runs = {w: bench_gym_parallel(args.seconds, w) for w in gym_workers}
+    workers = sorted({2, 4, args.n_threads})
+    rf_runs = {w: bench_reinfors_parallel(args.seconds, w, args.n_games) for w in workers}
+    gym_runs = {w: bench_gym_parallel(args.seconds, w) for w in workers}
+    rw, rn = max(rf_runs.items(), key=lambda kv: kv[1])
     gw, gn = max(gym_runs.items(), key=lambda kv: kv[1])
 
-    w = args.n_threads
     print()
     print(f"{'configuration':<44}{'steps/s':>10}")
     print("-" * 54)
     print(f"{'reinfors  1 env, 1 core':<44}{r1:>10,.0f}")
     print(f"{'Gymnasium 1 env, 1 core':<44}{g1:>10,.0f}")
-    print(f"{f'reinfors  n_threads={w}, n_games={args.n_games}':<44}{rn:>10,.0f}")
+    for wk, rate in rf_runs.items():
+        best = "  <- best" if wk == rw else ""
+        print(f"{f'reinfors  {wk} threads, n_games={args.n_games}':<44}{rate:>10,.0f}{best}")
     for wk, rate in gym_runs.items():
         best = "  <- best" if wk == gw else ""
         print(f"{f'Gymnasium AsyncVectorEnv, {wk} processes':<44}{rate:>10,.0f}{best}")
     print("-" * 54)
     print(f"single core:            reinfors / Gymnasium = {r1 / g1:5.1f}x")
     print(f"parallel, best-vs-best: reinfors / Gymnasium = {rn / gn:5.1f}x")
-    print(f"{w}-thread reinfors vs 1-core Gymnasium       = {rn / g1:5.1f}x")
+    print(f"best-parallel reinfors vs 1-core Gymnasium   = {rn / g1:5.1f}x")
 
 
 if __name__ == "__main__":
