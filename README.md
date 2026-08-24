@@ -43,11 +43,12 @@ print(batch.obs.shape, batch.targets.shape, batch.telemetry)
 
 ## Performance
 
-Reinfors' Rust backend makes it much more performant than typical all-Python RL
-libraries such as Gymnasium. Benchmarking `car_racing` against Gymnasium's
-`CarRacing-v3` — the same game, stepped with pixel observations in single-threaded
-loops — reinfors runs **~20x** more environment steps per second (medians of three
-30s trials):
+Reinfors' native backend makes it much more performant than Python-loop RL
+libraries such as Gymnasium. Benchmarking reinfors' `car_racing` port against
+Gymnasium's `CarRacing-v3` — separate implementations of the same design, with
+matched discrete-action and 96x96 pixel-observation contracts, stepped in
+single-threaded loops — reinfors runs **~20x** more environment steps per second
+(medians of three 30s trials):
 
 | Steps/s, single-threaded | Apple M1 Max | AMD EPYC 7R32 (g5.2xlarge, SMT off, pinned) |
 | --- | --- | --- |
