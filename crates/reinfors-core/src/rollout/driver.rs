@@ -75,7 +75,9 @@ where
             break;
         }
         let n = sink.len();
-        let rows = eval.forward(&sink.players, sink.obs, n);
+        // No records here: drop retained roots before inference.
+        let (players, obs) = sink.into_parts();
+        let rows = eval.forward(&players, obs, n);
         let stride = rows.len() / n;
         for &(i, start, count) in &spans {
             let view = RowsView {

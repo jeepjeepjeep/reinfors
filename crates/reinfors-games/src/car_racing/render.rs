@@ -388,6 +388,45 @@ impl reinfors_core::StateEncoder for CarRacingPixels {
 #[cfg(test)]
 mod tests {
     #[test]
+    #[ignore]
+    fn bench_parallel_render_scaling() {
+        use reinfors_core::{Game, StateEncoder};
+        let g = crate::CarRacing::default();
+        let mut states = Vec::new();
+        let mut s = crate::CarRacingState::Live(Box::new(g.realize(5)));
+        for i in 0..64 {
+            let t = g.step(&s, &[[3usize, 3, 1, 0, 2, 3][i % 6]]);
+            states.push(t.next_state.clone());
+            s = t.next_state;
+        }
+        for n in [1usize, 2, 4, 8] {
+            let stop = std::sync::atomic::AtomicBool::new(false);
+            let total = std::sync::atomic::AtomicUsize::new(0);
+            std::thread::scope(|sc| {
+                for t in 0..n {
+                    let states = &states;
+                    let stop = &stop;
+                    let total = &total;
+                    sc.spawn(move || {
+                        let mut count = 0usize;
+                        let mut i = t;
+                        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                            let _ = crate::CarRacingPixels.encode(&states[i % states.len()], 0);
+                            i += 1;
+                            count += 1;
+                        }
+                        total.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+                    });
+                }
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            });
+            let frames = total.load(std::sync::atomic::Ordering::Relaxed);
+            println!("threads={n}: {:.0} frames/s", frames as f64 / 2.0);
+        }
+    }
+
+    #[test]
     fn score_atlas_is_complete_and_well_formed() {
         let chars: Vec<char> = SCORE_GLYPHS.iter().map(|g| g.ch).collect();
         let mut expected: Vec<char> = "0123456789-".chars().collect();

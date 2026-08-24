@@ -45,6 +45,10 @@ impl Learner<QEvaluation> for Dqn {
         true
     }
 
+    fn chains_successor_obs(&self) -> bool {
+        true
+    }
+
     fn eval_records(
         &self,
         _eval: &QEvaluation,

@@ -314,7 +314,7 @@ where
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut guard = slots[gi].lock().expect("slot lock");
                     let slot: &mut SlotCtx<'_, G, P> = &mut guard;
-                    let (mut search, perspectives) = match work {
+                    let (mut search, perspectives, mut roots) = match work {
                         Work::Begin => {
                             let perspectives: Vec<usize> = (0..game.num_agents())
                                 .filter(|&si| slot.ep.agent_active(game, si))
@@ -330,14 +330,17 @@ where
                                 perms,
                                 collect_interior,
                             };
+                            let roots = vec![RootMark::Vacant; perspectives.len()];
                             (
                                 policy.begin_search(ctx, &slot.ep.state, &perspectives),
                                 perspectives,
+                                roots,
                             )
                         }
                         Work::Resume {
                             mut search,
                             perspectives,
+                            roots,
                             rows,
                             stride,
                         } => {
@@ -353,7 +356,7 @@ where
                                 };
                                 policy.absorb(ctx, &mut search, view);
                             }
-                            (search, perspectives)
+                            (search, perspectives, roots)
                         }
                     };
                     let ctx = crate::policy::SearchCtx {
@@ -364,7 +367,7 @@ where
                         perms,
                         collect_interior,
                     };
-                    let mut sink = crate::policy::RequestSink::default();
+                    let mut sink = crate::policy::RequestSink::capturing_roots();
                     let status = policy.round(ctx, &mut search, &mut sink);
                     assert!(
                         (!sink.is_empty()) == (status == crate::policy::RoundStatus::Pending),
@@ -372,10 +375,31 @@ where
                     );
                     if !sink.is_empty() {
                         let n = sink.len();
-                        let (players, obs) = sink.into_parts();
+                        let (players, obs, marked) = sink.into_parts_with_roots();
+                        for (persp, row) in marked {
+                            let i = perspectives
+                                .iter()
+                                .position(|&si| si == persp)
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "push_root marked perspective {persp}, which is not \
+                                         among this search's requested perspectives"
+                                    )
+                                });
+                            assert!(
+                                matches!(roots[i], RootMark::Vacant),
+                                "push_root marked perspective {persp} twice in one search"
+                            );
+                            roots[i] = if learn_mask[persp] {
+                                RootMark::Row(row)
+                            } else {
+                                RootMark::Dropped
+                            };
+                        }
                         return TaskOut::Emitted {
                             search,
                             perspectives,
+                            roots,
                             players,
                             obs,
                             n,
@@ -414,6 +438,7 @@ where
                         sequential,
                         results,
                         &perspectives,
+                        roots,
                         slot,
                         &mut records,
                         &mut tstats,
@@ -573,6 +598,7 @@ where
                                 SlotPhase::Blocked {
                                     search,
                                     perspectives,
+                                    roots,
                                     rows,
                                     stride,
                                     ..
@@ -581,6 +607,7 @@ where
                                     Work::Resume {
                                         search,
                                         perspectives,
+                                        roots,
                                         rows,
                                         stride,
                                     },
@@ -766,6 +793,7 @@ where
                         TaskOut::Emitted {
                             search,
                             perspectives,
+                            roots,
                             players,
                             obs,
                             n,
@@ -790,6 +818,7 @@ where
                             phases[msg.gi] = SlotPhase::Blocked {
                                 search,
                                 perspectives,
+                                roots,
                                 outstanding: n,
                                 total: n,
                                 rows: Vec::new(),
@@ -1085,6 +1114,8 @@ enum SlotPhase<SE> {
     Blocked {
         search: SE,
         perspectives: Vec<usize>,
+        /// `push_root` rows, aligned with `perspectives`, carried across rounds.
+        roots: Vec<RootMark>,
         outstanding: usize,
         total: usize,
         rows: Vec<f64>,
@@ -1119,9 +1150,31 @@ enum Work<SE> {
     Resume {
         search: SE,
         perspectives: Vec<usize>,
+        roots: Vec<RootMark>,
         rows: Vec<f64>,
         stride: usize,
     },
+}
+
+/// One perspective's `push_root` slot: `Dropped` keeps duplicate detection for
+/// non-learning perspectives without retaining their rows.
+#[derive(Clone)]
+enum RootMark {
+    Vacant,
+    Dropped,
+    Row(Vec<f32>),
+}
+
+impl RootMark {
+    fn take_row(&mut self) -> Option<Vec<f32>> {
+        match std::mem::replace(self, RootMark::Dropped) {
+            RootMark::Row(r) => Some(r),
+            other => {
+                *self = other;
+                None
+            }
+        }
+    }
 }
 
 /// A slot task's result. `Completed` carries the completion's effects — records, stats,
@@ -1132,6 +1185,7 @@ enum TaskOut<SE, R> {
     Emitted {
         search: SE,
         perspectives: Vec<usize>,
+        roots: Vec<RootMark>,
         players: Vec<usize>,
         obs: Vec<f32>,
         n: usize,
@@ -1303,6 +1357,7 @@ fn process_game_tick<G, P, L>(
     sequential: bool,
     evals: Vec<(P::Evaluation, Vec<crate::learner::InteriorTarget>)>,
     perspectives: &[usize],
+    mut roots: Vec<RootMark>,
     slot: &mut SlotCtx<'_, G, P>,
     out: &mut Vec<L::Record>,
     stats: &mut CollectStats,
@@ -1321,8 +1376,12 @@ where
         evals.len(),
         perspectives.len()
     );
+    assert!(
+        roots.len() == perspectives.len(),
+        "root rows must stay aligned with perspectives across rounds"
+    );
     let mut acted: Vec<Option<usize>> = vec![None; num_agents];
-    for ((eval, targets), &si) in evals.into_iter().zip(perspectives.iter()) {
+    for ((pi, (eval, targets)), &si) in evals.into_iter().enumerate().zip(perspectives.iter()) {
         stats.decisions += 1;
         policy.fold_telemetry(&eval, stats);
         if !learn_mask[si] {
@@ -1333,8 +1392,11 @@ where
         out.extend(learner.eval_records(&eval, targets, encoder, si, &mut slot.ep.rng));
         let rel = policy.select(&eval, &mut *slot.policy_state, &mut slot.ep.rng);
         acted[si] = Some(rel);
+        let obs = roots[pi]
+            .take_row()
+            .unwrap_or_else(|| slot.ep.observe(encoder, si));
         slot.traj[si].push(Step {
-            obs: slot.ep.observe(encoder, si),
+            obs,
             evaluation: eval,
             action: rel,
             reward: 0.0,
@@ -1387,7 +1449,10 @@ where
         let reward = tick_rewards[si];
         slot.returns[si] += reward;
         if action.is_some() {
-            let (next_obs, next_legal) = if needs_next_obs {
+            // Chained: the next decision's obs is the successor; tails backfill at flush.
+            let chained =
+                learner.chains_successor_obs() && num_agents == 1 && !terminal && !truncated;
+            let (next_obs, next_legal) = if needs_next_obs && !chained {
                 (
                     slot.ep.observe(encoder, si),
                     game.legal_actions(&slot.ep.state, si),
@@ -1435,11 +1500,12 @@ fn flush_records_game<G, P, L>(
     let num_agents = game.num_agents();
     let mut ep_reward = vec![0.0; num_agents];
     for (si, ep_slot) in ep_reward.iter_mut().enumerate() {
-        let steps = std::mem::take(&mut slot.traj[si]);
+        let mut steps = std::mem::take(&mut slot.traj[si]);
         *ep_slot = std::mem::take(&mut slot.returns[si]);
         if steps.is_empty() {
             continue;
         }
+        backfill_chained_tail(game, learner, encoder, &mut steps, slot, si);
         let tail = tails.get(&si).cloned().unwrap_or_default();
         out.extend(learner.episode_records(&steps, &tail, encoder, si, &mut slot.ep.rng));
     }
@@ -1559,6 +1625,32 @@ where
     tails
 }
 
+/// A chained trajectory's last step may lack its successor observation; the episode
+/// state is still its post-transition state, so fill it at the flush boundary.
+fn backfill_chained_tail<G, P, L>(
+    game: &G,
+    learner: &L,
+    encoder: &dyn StateEncoder<State = G::State>,
+    steps: &mut [Step<P::Evaluation>],
+    slot: &mut SlotCtx<'_, G, P>,
+    si: usize,
+) where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
+{
+    if !learner.chains_successor_obs() || game.num_agents() != 1 {
+        return;
+    }
+    if let Some(last) = steps.last_mut() {
+        if !last.terminal && last.next_obs.is_empty() {
+            last.next_obs = slot.ep.observe(encoder, si);
+            last.next_legal = game.legal_actions(&slot.ep.state, si);
+        }
+    }
+}
+
 /// Cut one game's live trajectory: bootstrap each learning perspective from its tail and
 /// emit its records; episode state, ticks, and telemetry persist into the next window.
 fn flush_fragment_slot<G, P, L>(
@@ -1581,10 +1673,11 @@ fn flush_fragment_slot<G, P, L>(
             slot.traj[si].clear();
             continue;
         }
-        let steps = std::mem::take(&mut slot.traj[si]);
+        let mut steps = std::mem::take(&mut slot.traj[si]);
         if steps.is_empty() {
             continue;
         }
+        backfill_chained_tail(game, learner, encoder, &mut steps, slot, si);
         let tail = tails.get(&si).cloned().unwrap_or_default();
         out.extend(learner.episode_records(&steps, &tail, encoder, si, &mut slot.ep.rng));
     }

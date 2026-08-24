@@ -58,6 +58,13 @@ pub trait Learner<E> {
         false
     }
 
+    /// Whether the learner reads successor observations from the trajectory's next
+    /// step, needing `Step.next_obs` only at tails — lets the engine skip
+    /// intermediate post-transition encodes (single-agent only).
+    fn chains_successor_obs(&self) -> bool {
+        false
+    }
+
     /// Whether this learner consumes auxiliary search targets.
     fn needs_interior(&self) -> bool {
         false
