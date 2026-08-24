@@ -22,10 +22,10 @@ use reinfors_games::{
     BackgammonTesauro, CarRacing, CarRacingCodec, CarRacingPixels, CarRacingReward, CarRacingVec,
     Chess, ChessEvent, ChessPlanesAz119, ChessPlanesMinimal, ChessPlanesOpenSpiel,
     ChessPlanesRelative, ChessReward, ChessState, Connect4, Connect4Event, Connect4Planes,
-    Connect4Reward, Connect4State, EgocentricSnake, GridEvent, GridState, GridWorld,
-    GridWorldPlanes, GridWorldReward, HoldemEgocentric, HoldemReward, KuhnEncoder, KuhnPoker,
-    LeducEncoder, LeducPoker, Snake, SnakeReward, SnakeState, StepEvent, TexasHoldem,
-    CHESS_ACTIONS,
+    Connect4Reward, Connect4State, DeliveryEvent, DeliveryGrid, DeliveryPlanes, DeliveryReward,
+    DeliveryState, EgocentricSnake, GridEvent, GridState, GridWorld, GridWorldPlanes,
+    GridWorldReward, HoldemEgocentric, HoldemReward, KuhnEncoder, KuhnPoker, LeducEncoder,
+    LeducPoker, Snake, SnakeReward, SnakeState, StepEvent, TexasHoldem, CHESS_ACTIONS,
 };
 
 fn action_to_u8(a: Action) -> u8 {
@@ -514,6 +514,23 @@ fn game_cfg(spec: &GameSpec, selected_encoder: EncoderSpec) -> Value {
             "size": size,
             "goal_row": goal.0,
             "goal_col": goal.1,
+            "max_ticks": max_ticks,
+            "encoder": encoder,
+        }),
+        GameSpec::Delivery {
+            size,
+            parcel,
+            dropoff,
+            p_slip,
+            max_ticks,
+        } => json!({
+            "name": "delivery",
+            "size": size,
+            "parcel_row": parcel.0,
+            "parcel_col": parcel.1,
+            "dropoff_row": dropoff.0,
+            "dropoff_col": dropoff.1,
+            "p_slip": p_slip,
             "max_ticks": max_ticks,
             "encoder": encoder,
         }),
@@ -1153,6 +1170,7 @@ enum EncoderSpec {
     KuhnPoker,
     LeducPoker,
     GridWorld,
+    Delivery,
     CarRacing(CarRacingEncoderSpec),
 }
 
@@ -1174,6 +1192,7 @@ impl EncoderSpec {
             EncoderSpec::KuhnPoker => json!({"name": "kuhn_poker"}),
             EncoderSpec::LeducPoker => json!({"name": "leduc_poker"}),
             EncoderSpec::GridWorld => json!({"name": "gridworld"}),
+            EncoderSpec::Delivery => json!({"name": "delivery"}),
             EncoderSpec::CarRacing(CarRacingEncoderSpec::Pixels) => {
                 json!({"name": "car_racing_pixels", "revision": reinfors_games::CAR_RACING_PIXELS_REVISION})
             }
@@ -1196,6 +1215,7 @@ impl EncoderSpec {
             EncoderSpec::KuhnPoker => "kuhn_poker",
             EncoderSpec::LeducPoker => "leduc_poker",
             EncoderSpec::GridWorld => "gridworld",
+            EncoderSpec::Delivery => "delivery",
             EncoderSpec::CarRacing(CarRacingEncoderSpec::Pixels) => "car_racing_pixels",
             EncoderSpec::CarRacing(CarRacingEncoderSpec::Vec) => "car_racing_vec",
         }
@@ -1208,7 +1228,7 @@ impl EncoderSpec {
             EncoderSpec::Chess(_) => CHESS_ACTIONS,
             EncoderSpec::Backgammon => 1352,
             EncoderSpec::KuhnPoker => 2,
-            EncoderSpec::GridWorld => 4,
+            EncoderSpec::GridWorld | EncoderSpec::Delivery => 4,
             EncoderSpec::CarRacing(_) => 5,
         }
     }
@@ -2177,6 +2197,13 @@ enum GameSpec {
         goal: (i32, i32),
         max_ticks: Option<usize>,
     },
+    Delivery {
+        size: i32,
+        parcel: (i32, i32),
+        dropoff: (i32, i32),
+        p_slip: f64,
+        max_ticks: Option<usize>,
+    },
     CarRacing {
         lap_complete_percent: f64,
         max_ticks: Option<usize>,
@@ -2201,6 +2228,7 @@ impl GameSpec {
             GameSpec::KuhnPoker { .. } => "kuhn_poker",
             GameSpec::LeducPoker => "leduc_poker",
             GameSpec::GridWorld { .. } => "gridworld",
+            GameSpec::Delivery { .. } => "delivery",
             GameSpec::CarRacing { .. } => "car_racing",
         }
     }
@@ -2215,6 +2243,7 @@ impl GameSpec {
             GameSpec::KuhnPoker { .. } => EncoderSpec::KuhnPoker,
             GameSpec::LeducPoker => EncoderSpec::LeducPoker,
             GameSpec::GridWorld { .. } => EncoderSpec::GridWorld,
+            GameSpec::Delivery { .. } => EncoderSpec::Delivery,
             GameSpec::CarRacing { encoder, .. } => EncoderSpec::CarRacing(encoder),
         }
     }
@@ -2230,6 +2259,7 @@ impl GameSpec {
                 | (GameSpec::KuhnPoker { .. }, EncoderSpec::KuhnPoker)
                 | (GameSpec::LeducPoker, EncoderSpec::LeducPoker)
                 | (GameSpec::GridWorld { .. }, EncoderSpec::GridWorld)
+                | (GameSpec::Delivery { .. }, EncoderSpec::Delivery)
                 | (GameSpec::CarRacing { .. }, EncoderSpec::CarRacing(_))
         )
     }
@@ -2243,7 +2273,9 @@ impl GameSpec {
             | GameSpec::Chess { .. }
             | GameSpec::Backgammon { .. }
             | GameSpec::LeducPoker => 2,
-            GameSpec::GridWorld { .. } | GameSpec::CarRacing { .. } => 1,
+            GameSpec::GridWorld { .. } | GameSpec::Delivery { .. } | GameSpec::CarRacing { .. } => {
+                1
+            }
         }
     }
 
@@ -2320,6 +2352,26 @@ impl GameSpec {
                 },
                 &GridWorldPlanes { size, goal },
             ),
+            GameSpec::Delivery {
+                size,
+                parcel,
+                dropoff,
+                p_slip,
+                max_ticks,
+            } => of(
+                DeliveryGrid {
+                    size,
+                    parcel,
+                    dropoff,
+                    p_slip,
+                    max_ticks,
+                },
+                &DeliveryPlanes {
+                    size,
+                    parcel,
+                    dropoff,
+                },
+            ),
         }
     }
 }
@@ -2341,6 +2393,13 @@ fn reward_schema(game: &GameSpec) -> &'static [(&'static str, f64)] {
         GameSpec::Chess { .. } => &[("win", 1.0), ("loss", -1.0), ("draw", 0.0)],
         GameSpec::Backgammon { .. } => &[("win", 1.0), ("gammon", 2.0), ("backgammon", 3.0)],
         GameSpec::GridWorld { .. } => &[("step", 0.0), ("goal", 1.0)],
+        GameSpec::Delivery { .. } => &[
+            ("step", 0.0),
+            ("pickup", 0.0),
+            ("deliver", 1.0),
+            ("slip", 0.0),
+            ("timeout", 0.0),
+        ],
         GameSpec::CarRacing { .. } => {
             &[("tile", 1000.0), ("step", -0.1), ("off_playfield", -100.0)]
         }
@@ -2402,6 +2461,16 @@ fn build_reward(game: &GameSpec, reward: Option<PyReward>) -> PyResult<RewardBox
                 goal: r[1],
             })
         }
+        GameSpec::Delivery { .. } => {
+            let r = resolve_reward(reward, reward_schema(game))?;
+            RewardBox::Delivery(DeliveryReward {
+                step: r[0],
+                pickup: r[1],
+                deliver: r[2],
+                slip: r[3],
+                timeout: r[4],
+            })
+        }
         GameSpec::TexasHoldem { .. } | GameSpec::KuhnPoker { .. } | GameSpec::LeducPoker => {
             let r = resolve_reward(reward, reward_schema(game))?;
             RewardBox::Holdem(HoldemReward { scale: r[0] })
@@ -2416,6 +2485,7 @@ enum RewardBox {
     Chess(ChessReward),
     Backgammon(BackgammonReward),
     GridWorld(GridWorldReward),
+    Delivery(DeliveryReward),
     CarRacing(CarRacingReward),
 }
 
@@ -3468,6 +3538,40 @@ fn build_engine(
             )
         }
         (
+            GameSpec::Delivery {
+                size,
+                parcel,
+                dropoff,
+                p_slip,
+                max_ticks,
+            },
+            RewardBox::Delivery(reward),
+        ) => {
+            let game = DeliveryGrid {
+                size,
+                parcel,
+                dropoff,
+                p_slip,
+                max_ticks,
+            };
+            build_for_game(
+                game.clone(),
+                Box::new(DeliveryPlanes {
+                    size,
+                    parcel,
+                    dropoff,
+                }),
+                Box::new(reward),
+                Box::new(AlwaysInitialState),
+                Some(Box::new(game)),
+                policy,
+                learner,
+                engine_params,
+                infer_caches,
+                learn_players,
+            )
+        }
+        (
             GameSpec::CarRacing {
                 lap_complete_percent,
                 max_ticks,
@@ -3951,6 +4055,16 @@ impl NativeState for reinfors_games::CarRacingState {
     }
 }
 
+impl NativeState for DeliveryState {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        d.set_item("pos", self.pos)?;
+        d.set_item("carrying", self.carrying)?;
+        d.set_item("done", self.done)?;
+        Ok(d)
+    }
+}
+
 impl NativeState for GridState {
     fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
@@ -4037,6 +4151,18 @@ impl NativeEvent for ChessEvent {
             ChessEvent::Draw => "draw",
         };
         Ok(s.into_pyobject(py)?.into_any())
+    }
+}
+
+impl NativeEvent for DeliveryEvent {
+    fn to_py<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let d = PyDict::new(py);
+        d.set_item("picked_up", self.picked_up)?;
+        d.set_item("delivered", self.delivered)?;
+        d.set_item("slipped", self.slipped)?;
+        // timed_out is engine-only truncation metadata; Env never sets it, so exposing the field
+        // here would promise a permanently false event value (see Snake above).
+        Ok(d.into_any())
     }
 }
 
@@ -4631,6 +4757,46 @@ fn build_env(game: GameSpec, reward: Option<PyReward>, seed: u64) -> PyResult<Bo
                 last_rewards: None,
             })
         }
+        GameSpec::Delivery {
+            size,
+            parcel,
+            dropoff,
+            p_slip,
+            max_ticks,
+        } => {
+            let enc = DeliveryPlanes {
+                size,
+                parcel,
+                dropoff,
+            };
+            let obs_shape = enc.obs_shape();
+            Box::new(EnvImpl {
+                inner: Env::new(
+                    DeliveryGrid {
+                        size,
+                        parcel,
+                        dropoff,
+                        p_slip,
+                        max_ticks,
+                    },
+                    Box::new(enc),
+                    seed,
+                ),
+                obs_shape,
+                codec: Some(Box::new(DeliveryGrid {
+                    size,
+                    parcel,
+                    dropoff,
+                    p_slip,
+                    max_ticks,
+                })),
+                reward: reward.map(|rb| match rb {
+                    RewardBox::Delivery(r) => Box::new(r) as Box<dyn Reward<Event = DeliveryEvent>>,
+                    _ => unreachable!("build_reward returns the reward variant matching the game"),
+                }),
+                last_rewards: None,
+            })
+        }
     })
 }
 
@@ -4908,6 +5074,48 @@ impl GameHandle {
     }
 
     #[staticmethod]
+    #[pyo3(signature = (size=5, parcel_row=None, parcel_col=None, dropoff_row=None, dropoff_col=None, p_slip=0.15, max_ticks=100, encoder=None))]
+    #[pyo3(name = "Delivery")]
+    #[allow(clippy::too_many_arguments)]
+    fn delivery(
+        size: i32,
+        parcel_row: Option<i32>,
+        parcel_col: Option<i32>,
+        dropoff_row: Option<i32>,
+        dropoff_col: Option<i32>,
+        p_slip: f64,
+        max_ticks: Option<usize>,
+        encoder: Option<EncoderHandle>,
+    ) -> PyResult<Self> {
+        check_max_ticks(max_ticks)?;
+        // Invalid negative sizes must reach validate() as errors, not overflow here.
+        let far = size.saturating_sub(1);
+        // Defaults put the parcel and dropoff in opposite corners: the longest haul the
+        // grid affords, so a default configuration is not trivially solvable.
+        let parcel = (parcel_row.unwrap_or(0), parcel_col.unwrap_or(far));
+        let dropoff = (dropoff_row.unwrap_or(far), dropoff_col.unwrap_or(0));
+        DeliveryGrid {
+            size,
+            parcel,
+            dropoff,
+            p_slip,
+            max_ticks,
+        }
+        .validate()
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        game_handle(
+            GameSpec::Delivery {
+                size,
+                parcel,
+                dropoff,
+                p_slip,
+                max_ticks,
+            },
+            encoder,
+        )
+    }
+
+    #[staticmethod]
     #[pyo3(signature = (lap_complete_percent=0.95, max_ticks=1000, encoder=None))]
     #[pyo3(name = "CarRacing")]
     fn car_racing(
@@ -4951,6 +5159,7 @@ impl GameHandle {
             | GameSpec::Chess { max_ticks, .. }
             | GameSpec::Backgammon { max_ticks }
             | GameSpec::GridWorld { max_ticks, .. }
+            | GameSpec::Delivery { max_ticks, .. }
             | GameSpec::CarRacing { max_ticks, .. } => max_ticks,
             GameSpec::Connect4
             | GameSpec::TexasHoldem { .. }
@@ -6099,6 +6308,14 @@ impl EncoderHandle {
     }
 
     #[staticmethod]
+    #[pyo3(name = "Delivery")]
+    fn delivery() -> Self {
+        EncoderHandle {
+            spec: EncoderSpec::Delivery,
+        }
+    }
+
+    #[staticmethod]
     #[pyo3(name = "CarRacingPixels")]
     fn car_racing_pixels() -> Self {
         EncoderHandle {
@@ -6159,6 +6376,7 @@ impl EncoderHandle {
             | EncoderSpec::KuhnPoker
             | EncoderSpec::LeducPoker
             | EncoderSpec::GridWorld
+            | EncoderSpec::Delivery
             | EncoderSpec::CarRacing(_) => Ok(action),
         }
     }
@@ -6183,6 +6401,7 @@ impl EncoderHandle {
             | EncoderSpec::KuhnPoker
             | EncoderSpec::LeducPoker
             | EncoderSpec::GridWorld
+            | EncoderSpec::Delivery
             | EncoderSpec::CarRacing(_) => Ok(head),
         }
     }

@@ -32,6 +32,10 @@ NONE_BANKS: dict[str, list[Any]] = {
     "win_food_lead": INT_EDGES,
     "goal_row": INT_EDGES,
     "goal_col": INT_EDGES,
+    "parcel_row": INT_EDGES,
+    "parcel_col": INT_EDGES,
+    "dropoff_row": INT_EDGES,
+    "dropoff_col": INT_EDGES,
     "temperature_drop": INT_EDGES,
     "top_k": INT_EDGES,
     "learn_players": [[-1], [0, 2**31], "wrong-type"],
@@ -393,6 +397,40 @@ def test_gridworld_explicit_goal_is_honored_and_validated() -> None:
         rf.games.GridWorld(size=1)  # 1x1 has no non-goal start cell: would hang, not panic
 
 
+def test_delivery_objectives_derive_from_size() -> None:
+    # Like GridWorld's goal, the default parcel/dropoff follow `size`: opposite corners, so a default
+    # configuration is the longest haul the grid affords rather than a fixed absolute cell.
+    for size in [3, 7]:
+        env = rf.Env(rf.games.Delivery(size=size, p_slip=0.0), rf.Reward(), seed=0)
+        env.reset()
+        agent, parcel, dropoff = env.observe(0).reshape(3, size, size)
+        assert agent.sum() == 1.0 and parcel.sum() == 1.0 and dropoff.sum() == 1.0
+        assert parcel[0, size - 1] == 1.0 and dropoff[size - 1, 0] == 1.0
+        assert agent[0, size - 1] == 0.0 and agent[size - 1, 0] == 0.0  # never born on an objective
+
+
+def test_delivery_explicit_objectives_are_honored_and_validated() -> None:
+    game = rf.games.Delivery(size=5, parcel_row=2, parcel_col=1, dropoff_row=0, dropoff_col=0)
+    env = rf.Env(game, rf.Reward(), seed=0)
+    env.reset()
+    _, parcel, dropoff = env.observe(0).reshape(3, 5, 5)
+    assert parcel[2, 1] == 1.0 and dropoff[0, 0] == 1.0
+    with pytest.raises(ValueError, match=r"parcel .* outside the 4x4 grid"):
+        rf.games.Delivery(size=4, parcel_row=4, parcel_col=0)
+    with pytest.raises(ValueError, match=r"dropoff .* outside the 4x4 grid"):
+        rf.games.Delivery(size=4, dropoff_row=0, dropoff_col=-1)
+    with pytest.raises(ValueError, match="must differ"):
+        rf.games.Delivery(size=4, parcel_row=1, parcel_col=1, dropoff_row=1, dropoff_col=1)
+    with pytest.raises(ValueError, match="size must be >= 2"):
+        rf.games.Delivery(size=1)  # no free start cell beside two objectives
+    with pytest.raises(ValueError, match="2\\^31"):
+        rf.games.Delivery(size=2**31 - 1)
+    for bad in [-0.1, 1.5, float("nan"), float("inf")]:
+        with pytest.raises(ValueError, match="p_slip"):
+            rf.games.Delivery(p_slip=bad)
+    _play(rf.games.Delivery(size=2, p_slip=1.0))  # the smallest grid and certain slipping really run
+
+
 def test_snake_placement_is_validated_by_construction() -> None:
     with pytest.raises(ValueError, match="outside the grid"):
         rf.games.Snake(grid_size=2)  # placement puts a head out of bounds
@@ -408,7 +446,7 @@ def test_snake_placement_is_validated_by_construction() -> None:
 
 
 def test_max_ticks_zero_rejected_everywhere() -> None:
-    ctors: list[Any] = [rf.games.Snake, rf.games.GridWorld, rf.games.Chess, rf.games.Backgammon]
+    ctors: list[Any] = [rf.games.Snake, rf.games.GridWorld, rf.games.Delivery, rf.games.Chess, rf.games.Backgammon]
     for ctor in ctors:
         with pytest.raises(ValueError, match="max_ticks"):
             ctor(max_ticks=0)
