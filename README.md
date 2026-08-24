@@ -47,10 +47,16 @@ Reinfors' Rust backend makes it much more performant than typical all-Python RL
 libraries such as Gymnasium. Benchmarking `car_racing` against Gymnasium's
 `CarRacing-v3` — the same game, stepped with pixel observations in single-threaded
 loops — reinfors runs **~20x** more environment steps per second (medians of three
-30s trials: 3,850 vs 195 on an Apple M1 Max; ~14x at ~2,100 vs ~150 on a 4-core EC2
-instance, SMT off, `taskset`-pinned). Reproduce with
-[`scripts/bench_carracing_throughput.py`](scripts/bench_carracing_throughput.py),
-which reports medians, ranges, and machine provenance.
+30s trials):
+
+| Steps/s, single-threaded | Apple M1 Max | AMD EPYC 7R32 (g5.2xlarge, SMT off, pinned) |
+| --- | --- | --- |
+| reinfors `car_racing` | 3,850 | 2,069 |
+| Gymnasium `CarRacing-v3` | 195 | 148 |
+| **speedup** | **19.7x** | **14.0x** |
+
+Reproduce with [`scripts/bench_carracing_throughput.py`](scripts/bench_carracing_throughput.py), which reports medians,
+ranges, and machine provenance.
 
 Parallelising multiplies this further, and in reinfors it is trivial — set
 `n_threads` — while [`collect_stream`](https://jeepjeepjeep.github.io/reinfors/guides/streaming/) overlaps collection with training as the
