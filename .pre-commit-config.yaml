@@ -13,8 +13,8 @@ repos:
       - id: check-merge-conflict
       - id: check-added-large-files
         args: [--maxkb=500]
-        # README media in assets/ is exempt (bounded, deliberate; see assets/ history)
-        exclude: ^assets/
+        # the one deliberate README media exception; widen file-by-file, never by directory
+        exclude: ^assets/carracing-throughput\.gif$
 
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
