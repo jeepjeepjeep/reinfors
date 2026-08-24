@@ -5,6 +5,7 @@ pub mod backgammon;
 pub mod car_racing;
 pub mod chess;
 pub mod connect4;
+pub mod delivery;
 pub mod gridworld;
 pub mod holdem;
 pub mod kuhn;
@@ -22,6 +23,7 @@ pub use chess::{
     ChessPlanesOpenSpiel, ChessPlanesRelative, ChessReward, ChessState, CHESS_ACTIONS,
 };
 pub use connect4::{Connect4, Connect4Event, Connect4Planes, Connect4Reward, Connect4State};
+pub use delivery::{DeliveryEvent, DeliveryGrid, DeliveryPlanes, DeliveryReward, DeliveryState};
 pub use holdem::{
     HoldemEgocentric, HoldemReward, HoldemState, Street, TexasHoldem, HOLDEM_ACTIONS,
 };

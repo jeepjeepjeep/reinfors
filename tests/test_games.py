@@ -6,6 +6,7 @@ K/A) keeps them torch-free — the model and gradient step live in the consumer,
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Callable
 from typing import Any
 
@@ -155,6 +156,7 @@ def test_registries_list_the_built_in_names() -> None:
         "car_racing",
         "chess",
         "connect4",
+        "delivery",
         "gridworld",
         "kuhn_poker",
         "leduc_poker",
@@ -186,6 +188,56 @@ def test_game_handles_advertise_spaces() -> None:
     assert rf.games.Connect4().action_space().n == 7
     assert rf.games.GridWorld(size=5).observation_space().shape == (2, 5, 5)
     assert rf.games.GridWorld(size=5).action_space().n == 4
+    assert rf.games.Delivery(size=5).observation_space().shape == (3, 5, 5)
+    assert rf.games.Delivery(size=5).action_space().n == 4
+
+
+def test_delivery_pickup_then_dropoff_scores_and_terminates() -> None:
+    # Deterministic footing makes the episode scriptable: walk onto the parcel (pickup event, parcel
+    # plane empties), then carry it onto the dropoff (delivered event, terminal). The parcel is only
+    # ever picked up once, and the dropoff does nothing while empty-handed.
+    game = rf.games.Delivery(size=3, parcel_row=0, parcel_col=2, dropoff_row=2, dropoff_col=0, p_slip=0.0)
+    env = rf.Env(game, rf.Reward(step=-0.01, pickup=0.3, deliver=1.0), seed=0)
+    env.reset()
+    up, down, left, right = 0, 1, 2, 3
+    rows, cols = np.nonzero(env.observe(0)[0])
+    r, c = int(rows[0]), int(cols[0])
+    plan = [up] * r + [right] * (2 - c)  # to the parcel at (0, 2)
+    plan += [down] * 2 + [left] * 2  # then to the dropoff at (2, 0)
+    events = []
+    for a in plan:
+        assert not env.done() and env.legal_actions(0) == [0, 1, 2, 3]
+        events.append(env.step({0: a})[0][1])
+        assert env.rewards is not None and isinstance(env.rewards[0], float)
+    assert env.done() and env.legal_actions(0) == [] and env.active_agents() == []
+    assert [e for e in events if e["picked_up"]] == [events[r + (2 - c) - 1]]
+    assert [e for e in events if e["delivered"]] == [events[-1]]
+    assert not any(e["slipped"] for e in events) and set(events[0]) == {"picked_up", "delivered", "slipped"}
+    assert env.rewards == [1.0 - 0.01]
+    obs = env.observe(0).reshape(3, 3, 3)
+    assert obs[1].sum() == 0.0 and obs[0][2, 0] == 1.0 and obs[2][2, 0] == 1.0  # parcel plane empty, agent on dropoff
+    assert env.state() == {"pos": (2, 0), "carrying": True, "done": True}
+
+
+def test_delivery_slip_is_seeded_and_deflects_perpendicular() -> None:
+    # Certain slipping never moves as intended and always reports the slip; the realized deflection
+    # is reproducible from the seed, so two envs with the same seed and actions stay in lockstep.
+    def run(seed: int) -> list[tuple[int, int]]:
+        env = rf.Env(rf.games.Delivery(size=5, p_slip=1.0), seed=seed)
+        env.reset()
+        path = [env.state()["pos"]]
+        for _ in range(8):
+            if env.done():
+                break
+            ((_, event),) = env.step({0: 3})  # always "right"
+            assert event["slipped"]
+            path.append(env.state()["pos"])
+        return path
+
+    path = run(4)
+    for (r0, c0), (r1, c1) in itertools.pairwise(path):
+        assert c1 == c0 and abs(r1 - r0) <= 1  # deflected up or down (or blocked), never right
+    assert run(4) == path
 
 
 def test_loop_prone_games_default_to_a_finite_truncation_horizon() -> None:
@@ -194,6 +246,7 @@ def test_loop_prone_games_default_to_a_finite_truncation_horizon() -> None:
     # on its own, so it truncates never. `max_ticks=None` is the explicit opt-in to "never truncate".
     assert rf.games.Snake().truncation_horizon() == 1000
     assert rf.games.GridWorld().truncation_horizon() == 1000
+    assert rf.games.Delivery().truncation_horizon() == 100
     assert rf.games.Connect4().truncation_horizon() is None
     assert rf.games.Snake(max_ticks=None).truncation_horizon() is None  # explicit opt-out
     assert rf.games.Snake(max_ticks=250).truncation_horizon() == 250
