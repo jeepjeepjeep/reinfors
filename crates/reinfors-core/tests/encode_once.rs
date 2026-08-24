@@ -477,6 +477,43 @@ fn builtin_dqn_chains_successor_obs_single_agent() {
     }
 }
 
+/// Action-dependent episode length: action 0 after the first tick terminates, so
+/// two slots finish at different times and a collect boundary can cut one mid-episode.
+struct VarLine;
+impl Game for VarLine {
+    type State = St;
+    type Event = ();
+    fn num_agents(&self) -> usize {
+        1
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn actor(&self, _s: &St) -> Actor {
+        Actor::Agent(0)
+    }
+    fn legal_actions(&self, _s: &St, agent: usize) -> Vec<usize> {
+        if agent == 0 {
+            vec![0, 1]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, s: &St, a: &[usize]) -> Transition<St, ()> {
+        Transition {
+            next_state: St { tick: s.tick + 1 },
+            events: vec![None],
+            terminal: s.tick >= 1 && a[0] == 0,
+        }
+    }
+    fn initial_state(&self) -> St {
+        St { tick: 0 }
+    }
+    fn truncation_horizon(&self) -> Option<usize> {
+        Some(7)
+    }
+}
+
 /// Line variant with a truncation horizon and no natural terminal.
 struct TruncLine;
 impl Game for TruncLine {
@@ -561,7 +598,9 @@ fn dqn_key(r: &reinfors_core::DqnRecord) -> Vec<u64> {
     k
 }
 
-fn dqn_collect<G, L>(game: G, learner: L, floors: &[usize]) -> Vec<Vec<u64>>
+// Two slots so a collect boundary can leave one trajectory live mid-episode.
+#[allow(clippy::type_complexity)]
+fn dqn_collect<G, L>(game: G, learner: L, floors: &[usize]) -> (Vec<Vec<u64>>, Vec<(usize, usize)>)
 where
     G: Game<State = St, Event = ()> + Sync,
     L: reinfors_core::Learner<reinfors_core::QEvaluation, Record = reinfors_core::DqnRecord> + Sync,
@@ -575,18 +614,20 @@ where
         reinfors_core::EpsilonGreedyQ::new(1, 0.5),
         learner,
         EngineParams {
-            n_games: 1,
+            n_games: 2,
             seed: 9,
             n_threads: Some(1),
             ..Default::default()
         },
     );
     let mut keys = Vec::new();
+    let mut per_collect = Vec::new();
     for &floor in floors {
-        let (records, _) = e.collect(floor, |_obs: Vec<f32>, n: usize| vec![0.0; n * 2]);
+        let (records, stats) = e.collect(floor, |_obs: Vec<f32>, n: usize| vec![0.0; n * 2]);
+        per_collect.push((records.len(), stats.decisions));
         keys.extend(records.iter().map(dqn_key));
     }
-    keys
+    (keys, per_collect)
 }
 
 #[test]
@@ -594,31 +635,79 @@ fn chained_dqn_records_match_the_legacy_path_bytewise() {
     let dqn = || reinfors_core::Dqn::new(1, 1.0, 1, 0.99);
     // Terminals; a truncation boundary; a mid-episode cut spanning two collects.
     assert_eq!(
-        dqn_collect(Line, dqn(), &[12]),
-        dqn_collect(Line, NoChain(dqn()), &[12])
+        dqn_collect(Line, dqn(), &[12]).0,
+        dqn_collect(Line, NoChain(dqn()), &[12]).0
     );
     assert_eq!(
-        dqn_collect(TruncLine, dqn(), &[8]),
-        dqn_collect(TruncLine, NoChain(dqn()), &[8])
+        dqn_collect(TruncLine, dqn(), &[8]).0,
+        dqn_collect(TruncLine, NoChain(dqn()), &[8]).0
     );
-    assert_eq!(
-        dqn_collect(Line, dqn(), &[2, 2]),
-        dqn_collect(Line, NoChain(dqn()), &[2, 2])
+    let (chained, shape) = dqn_collect(VarLine, dqn(), &[3, 3]);
+    let (legacy, _) = dqn_collect(VarLine, NoChain(dqn()), &[3, 3]);
+    assert_eq!(chained, legacy);
+    // Collect #1 must cut mid-episode: more decisions than emitted one-step records
+    // means a trajectory crossed the boundary and finished in collect #2.
+    let (emitted, decisions) = shape[0];
+    assert!(
+        decisions > emitted,
+        "no live trajectory at the boundary: {decisions} decisions, {emitted} records"
     );
 }
 
 #[test]
 fn needs_next_obs_without_chaining_still_receives_every_row() {
-    let keys = dqn_collect(
+    let mut e = Engine::new(
         Line,
-        NoChain(reinfors_core::Dqn::new(1, 1.0, 1, 0.99)),
-        &[2, 2],
+        Box::new(CountingEnc {
+            calls: Arc::new(AtomicUsize::new(0)),
+        }),
+        Box::new(Zero),
+        reinfors_core::EpsilonGreedyQ::new(1, 0.5),
+        AssertNextObs,
+        EngineParams {
+            n_games: 2,
+            seed: 9,
+            n_threads: Some(1),
+            ..Default::default()
+        },
     );
-    assert!(!keys.is_empty());
-    for k in &keys {
-        let terminal = k[3] == 1;
-        let sep = k.iter().position(|&v| v == u64::MAX).unwrap();
-        let next_obs_len = k[sep + 1..].iter().position(|&v| v == u64::MAX).unwrap();
-        assert!(terminal || next_obs_len > 0);
+    let (records, _) = e.collect(4, |_obs: Vec<f32>, n: usize| vec![0.0; n * 2]);
+    assert!(records.iter().sum::<usize>() >= 4);
+}
+
+/// Asserts the public contract directly: every buffered step arrives with its
+/// post-transition observation, no chaining assumed.
+struct AssertNextObs;
+impl reinfors_core::Learner<reinfors_core::QEvaluation> for AssertNextObs {
+    type Record = usize;
+    fn needs_next_obs(&self) -> bool {
+        true
+    }
+    fn eval_records(
+        &self,
+        _e: &reinfors_core::QEvaluation,
+        _t: Vec<reinfors_core::InteriorTarget>,
+        _view: &dyn reinfors_core::ActionView,
+        _agent: usize,
+        _rng: &mut dyn Rng,
+    ) -> Vec<usize> {
+        Vec::new()
+    }
+    fn episode_records(
+        &self,
+        trajectory: &[reinfors_core::Step<reinfors_core::QEvaluation>],
+        _tail: &[f64],
+        _view: &dyn reinfors_core::ActionView,
+        _agent: usize,
+        _rng: &mut dyn Rng,
+    ) -> Vec<usize> {
+        for (i, step) in trajectory.iter().enumerate() {
+            assert!(
+                !step.next_obs.is_empty(),
+                "step {i} of {} lost its post-transition observation",
+                trajectory.len()
+            );
+        }
+        vec![trajectory.len()]
     }
 }

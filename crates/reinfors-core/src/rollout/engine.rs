@@ -330,7 +330,7 @@ where
                                 perms,
                                 collect_interior,
                             };
-                            let roots = vec![None; perspectives.len()];
+                            let roots = vec![RootMark::Vacant; perspectives.len()];
                             (
                                 policy.begin_search(ctx, &slot.ep.state, &perspectives),
                                 perspectives,
@@ -387,12 +387,14 @@ where
                                     )
                                 });
                             assert!(
-                                roots[i].is_none(),
+                                matches!(roots[i], RootMark::Vacant),
                                 "push_root marked perspective {persp} twice in one search"
                             );
-                            if learn_mask[persp] {
-                                roots[i] = Some(row);
-                            }
+                            roots[i] = if learn_mask[persp] {
+                                RootMark::Row(row)
+                            } else {
+                                RootMark::Dropped
+                            };
                         }
                         return TaskOut::Emitted {
                             search,
@@ -1113,7 +1115,7 @@ enum SlotPhase<SE> {
         search: SE,
         perspectives: Vec<usize>,
         /// `push_root` rows, aligned with `perspectives`, carried across rounds.
-        roots: Vec<Option<Vec<f32>>>,
+        roots: Vec<RootMark>,
         outstanding: usize,
         total: usize,
         rows: Vec<f64>,
@@ -1148,10 +1150,31 @@ enum Work<SE> {
     Resume {
         search: SE,
         perspectives: Vec<usize>,
-        roots: Vec<Option<Vec<f32>>>,
+        roots: Vec<RootMark>,
         rows: Vec<f64>,
         stride: usize,
     },
+}
+
+/// One perspective's `push_root` slot: `Dropped` keeps duplicate detection for
+/// non-learning perspectives without retaining their rows.
+#[derive(Clone)]
+enum RootMark {
+    Vacant,
+    Dropped,
+    Row(Vec<f32>),
+}
+
+impl RootMark {
+    fn take_row(&mut self) -> Option<Vec<f32>> {
+        match std::mem::replace(self, RootMark::Dropped) {
+            RootMark::Row(r) => Some(r),
+            other => {
+                *self = other;
+                None
+            }
+        }
+    }
 }
 
 /// A slot task's result. `Completed` carries the completion's effects — records, stats,
@@ -1162,7 +1185,7 @@ enum TaskOut<SE, R> {
     Emitted {
         search: SE,
         perspectives: Vec<usize>,
-        roots: Vec<Option<Vec<f32>>>,
+        roots: Vec<RootMark>,
         players: Vec<usize>,
         obs: Vec<f32>,
         n: usize,
@@ -1334,7 +1357,7 @@ fn process_game_tick<G, P, L>(
     sequential: bool,
     evals: Vec<(P::Evaluation, Vec<crate::learner::InteriorTarget>)>,
     perspectives: &[usize],
-    mut roots: Vec<Option<Vec<f32>>>,
+    mut roots: Vec<RootMark>,
     slot: &mut SlotCtx<'_, G, P>,
     out: &mut Vec<L::Record>,
     stats: &mut CollectStats,
@@ -1370,7 +1393,7 @@ where
         let rel = policy.select(&eval, &mut *slot.policy_state, &mut slot.ep.rng);
         acted[si] = Some(rel);
         let obs = roots[pi]
-            .take()
+            .take_row()
             .unwrap_or_else(|| slot.ep.observe(encoder, si));
         slot.traj[si].push(Step {
             obs,
@@ -1602,8 +1625,6 @@ where
     tails
 }
 
-/// Cut one game's live trajectory: bootstrap each learning perspective from its tail and
-/// emit its records; episode state, ticks, and telemetry persist into the next window.
 /// A chained trajectory's last step may lack its successor observation; the episode
 /// state is still its post-transition state, so fill it at the flush boundary.
 fn backfill_chained_tail<G, P, L>(
@@ -1630,6 +1651,8 @@ fn backfill_chained_tail<G, P, L>(
     }
 }
 
+/// Cut one game's live trajectory: bootstrap each learning perspective from its tail and
+/// emit its records; episode state, ticks, and telemetry persist into the next window.
 fn flush_fragment_slot<G, P, L>(
     tails: &HashMap<usize, Vec<f64>>,
     game: &G,
