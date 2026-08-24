@@ -7,7 +7,7 @@ body:
     attributes:
       label: reinfors version
       description: "`python -c \"import reinfors as rf; print(rf.build_info())\"`"
-      placeholder: '{"version": "0.2.0", "git_sha": "...", "profile": "release", ...}'
+      placeholder: '{"version": "0.3.0", "git_sha": "...", "profile": "release", ...}'
     validations:
       required: true
   - type: input
