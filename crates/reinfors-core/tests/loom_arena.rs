@@ -51,8 +51,11 @@ fn reserve_race_stays_disjoint_and_closes_once() {
             mine.0.end <= theirs.0.start || theirs.0.end <= mine.0.start,
             "spans overlap: {mine:?} vs {theirs:?}"
         );
-        // Exactly one path closed the buffer (3 rows, requests of 2 + 2).
-        assert_eq!(usize::from(mine.1) + usize::from(theirs.1), 1);
+        assert_eq!(
+            usize::from(mine.1) + usize::from(theirs.1),
+            1,
+            "exactly one close"
+        );
         let arena = Arc::try_unwrap(arena).unwrap_or_else(|_| panic!("worker leaked arena"));
         let info = arena.close_info().expect("filled buffer must be closed");
         assert_eq!(info.rows, 3);
@@ -80,9 +83,11 @@ fn alias_vs_close_linearizes() {
             AliasOutcome::Saturated => unreachable!("limit is 4"),
         };
         let frozen = closer.join().unwrap().expect("only closer closes");
-        // Either the alias beat the close and is in the frozen count, or it lost
-        // and reserved nothing — no interleaving orphans a claimant.
-        assert_eq!(frozen, u64::from(aliased));
+        assert_eq!(
+            frozen,
+            u64::from(aliased),
+            "no interleaving orphans a claimant"
+        );
         assert_eq!(arena.close_info().unwrap().aliases, frozen);
     });
 }
