@@ -52,10 +52,14 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    the point.
 
    *Stage 2 (opt-in, per encoder):* add `StateEncoder::encode_into(state, agent,
-   dst: &mut [f32])` with a default that delegates to `encode()`, plus a sink
-   `push_with(player, dim, |dst| ...)` that reserves the span and hands the
-   encoder the destination slice. This removes the last copy for the rows where
-   it compounds — high-volume, never-retained search leaf rows. `car_racing`'s
+   dst: &mut [f32])` with a default that delegates to `encode()`, plus a
+   state-backed sink operation `push_state(player, state)` under which the SINK
+   calls the encoder: cache key first (see the caching element), then, on a
+   miss, span reservation and `encode_into`. This removes the last copy for the
+   rows where it compounds — high-volume, never-retained search leaf rows — and
+   guarantees key/row coherence structurally, because the key and the row come
+   from the same encoder and state; a closure-based push cannot promise that,
+   so legacy arbitrary-row pushes keep observation hashing. `car_racing`'s
    pixel encoder is already shaped for it (its downsample writes into a
    caller-provided buffer).
 
@@ -208,14 +212,43 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    evaluator hashes and compacts rows at fire time — inherently O(bytes) on the
    scheduler. Instead:
 
-   - *Worker-read, scheduler-write.* Workers hash the row they just encoded
-     (cache-hot, parallel; ~10us for a 110 KB row against a ~350us encode) and
-     look the key up in a read-mostly shared cache. The scheduler remains the
-     cache's ONLY writer: inserts and eviction happen at routing time, in
-     message order. The write-side logic (insert, evict, the per-player
-     `Exclusive` slots) survives; read-side promotion does NOT — today's cache
-     promotes entries during lookup, and under this split recency moves to the
-     writer (next bullet).
+   - *Cache identity is an encoder capability.* The lookup must precede the
+     reservation — a hit reserves nothing, and there is no un-reserving from a
+     monotone cursor — so the key must exist BEFORE the row does. Only the
+     encoder knows what the observation depends on, so it names its own key:
+
+     ```rust
+     fn cache_key(
+         &self,
+         state: &Self::State,
+         perspective: usize,
+         hasher: &mut CacheHasher,
+     ) -> bool;
+     ```
+
+     Built-in encoders stream the minimal identity that guarantees identical
+     observations; imperfect-information encoders stream their
+     information-state representation (recovering the hits that a full-state
+     key would lose); a conservative encoder hashes the full state; `false`
+     means no pre-encoding key exists, and the request takes a worker-local
+     scratch path instead — encode into scratch, hash the bytes, copy to a
+     span only on a miss (stage-1 economics for that row, per request, not
+     per route). The contract is an invariant with teeth: equal `cache_key`
+     streams MUST imply byte-identical encoded rows — a too-narrow key only
+     costs hits, a too-wide key silently serves wrong predictions. Encoder
+     keys and observation-hash keys share one cache, domain-separated by a
+     leading tag byte so the two key spaces cannot collide. `CacheHasher` is
+     an opaque engine-owned streamer (the engine picks function and seed, and
+     can salt per route). On a hit, the encoder never runs — for expensive
+     encoders that saving dwarfs the GPU trip itself.
+   - *Worker-read, scheduler-write.* Workers compute the key (cache-hot,
+     parallel) and look it up in a read-mostly shared cache. The scheduler
+     remains the cache's ONLY writer: inserts and eviction happen at routing
+     time, in message order, keyed by the hash the worker sends with its span
+     metadata — the scheduler never touches bytes. The write-side logic
+     (insert, evict, the per-player `Exclusive` slots) survives; read-side
+     promotion does NOT — today's cache promotes entries during lookup, and
+     under this split recency moves to the writer (next bullet).
    - *Publication is shallow copy-on-write; recency lives outside it.* A shard
      is an `Arc<HashMap<Key, Arc<Row>>>` behind an atomic pointer; an insert or
      evict clones the shard map SHALLOWLY (`C/S` pointer clones for capacity
@@ -446,6 +479,12 @@ engine:
 - Cache-maintenance microbenchmark: insert/evict/promotion measured at target
   capacity before the COW sharding is accepted; escalation to a per-shard
   persistent map if shard clones measure high.
+- Cache-key soundness: a property test per built-in encoder — states with
+  equal `cache_key` streams must encode byte-identically — alongside the
+  existing parity suites.
+- Key-space separation: encoder-derived and observation-hash keys never
+  collide (tag-byte domain separation exercised on a route using both push
+  paths).
 - Retained Python arrays: a callback that stores every batch it receives —
   arrays stay valid and unchanged after arbitrary further collection.
 - Padded-suffix initialization: with `pad=True`, the suffix reads as zeros on
