@@ -1,5 +1,6 @@
 //! Stage-1 zero-copy scheduler vs the classic path.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use reinfors_core::codec::bytes::Reader;
@@ -7,6 +8,7 @@ use reinfors_core::policies::modelfree::ppo::masked_log_probs;
 use reinfors_core::policy::{RequestSink, RoundStatus, RowsView, SearchCtx};
 use reinfors_core::rollout::engine::{Engine, EngineParams};
 use reinfors_core::rollout::evaluator::InferMode;
+use reinfors_core::rollout::infer_cache::InferCache;
 use reinfors_core::{
     Actor, Game, Policy, PpoEvaluation, Reward, Rng, Space, StateEncoder, Transition,
 };
@@ -574,4 +576,203 @@ fn noop_collect_allocates_nothing_and_the_engine_reuses() {
     assert_eq!(stats.infer_calls, 0);
     let (records, _) = e.collect(6, |obs: Vec<f32>, n: usize| ppo_infer(&obs, n));
     assert!(!records.is_empty());
+}
+
+/// Constant observation per agent: every decision after the first is a cache hit.
+struct ConstEnc;
+impl reinfors_core::ActionView for ConstEnc {}
+impl StateEncoder for ConstEnc {
+    type State = St;
+    fn encode(&self, _s: &St, agent: usize) -> Vec<f32> {
+        vec![1.0, agent as f32]
+    }
+    fn obs_shape(&self) -> (usize, usize, usize) {
+        (1, 1, 2)
+    }
+    fn observation_space(&self) -> Space {
+        Space::Box {
+            shape: vec![1, 1, 2],
+            low: f32::NEG_INFINITY,
+            high: f32::INFINITY,
+        }
+    }
+}
+
+/// f32-exact outputs so cached (f32-stored) rows are bit-identical to fresh ones.
+fn exact_infer(obs: &[f32], n: usize) -> Vec<f64> {
+    let dim = obs.len() / n.max(1);
+    (0..n)
+        .flat_map(|i| [f64::from(obs[i * dim]) * 0.25, 0.5, 0.25])
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn engine_full<G: Game<State = St, Event = ()> + Sync>(
+    game: G,
+    enc: Box<dyn StateEncoder<State = St>>,
+    fan: usize,
+    rounds: usize,
+    n_games: usize,
+    batch_size: usize,
+    zero_copy: bool,
+    cache: Option<usize>,
+) -> (
+    Engine<G, FanActor, reinfors_core::Ppo>,
+    Option<Arc<AtomicU64>>,
+)
+where
+    G::State: Send,
+{
+    let n_agents = game.num_agents();
+    let mut e = Engine::new(
+        game,
+        enc,
+        Box::new(Zero),
+        FanActor { fan, rounds },
+        reinfors_core::Ppo::new(1.0, 0.95),
+        EngineParams {
+            n_games,
+            seed: 11,
+            n_threads: Some(1),
+            batch_size: Some(batch_size),
+            zero_copy,
+            ..Default::default()
+        },
+    );
+    let mut generation = None;
+    if let Some(cap) = cache {
+        let shared = Arc::new(AtomicU64::new(0));
+        e = e.with_infer_caches(
+            (0..=n_agents)
+                .map(|_| InferCache::new(cap, shared.clone()))
+                .collect(),
+        );
+        generation = Some(shared);
+    }
+    (e, generation)
+}
+
+#[test]
+fn cached_records_match_uncached_and_skip_inference() {
+    let run = |cache: Option<usize>| {
+        let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 1, 1, true, cache);
+        let (records, stats) = e.collect(9, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
+        (records.iter().map(record_key).collect::<Keys>(), stats)
+    };
+    let (plain, pstats) = run(None);
+    let (cached, cstats) = run(Some(64));
+    assert!(!plain.is_empty());
+    assert_eq!(plain, cached, "cache hits must not change record content");
+    assert!(cstats.cache_hits > 0);
+    assert!(
+        cstats.infer_rows < pstats.infer_rows,
+        "hits must skip inference"
+    );
+}
+
+#[test]
+fn cached_zero_copy_matches_the_classic_cached_path() {
+    let run = |zero_copy: bool| {
+        let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 1, 1, zero_copy, Some(64));
+        let (records, stats) = e.collect(9, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
+        (records.iter().map(record_key).collect::<Keys>(), stats)
+    };
+    let (classic, classic_stats) = run(false);
+    let (zero, zero_stats) = run(true);
+    assert_eq!(classic, zero, "cached records must match across paths");
+    assert_eq!(classic_stats.cache_hits, zero_stats.cache_hits);
+    assert_eq!(classic_stats.infer_rows, zero_stats.infer_rows);
+}
+
+#[test]
+fn cached_collection_is_deterministic() {
+    let run = || {
+        let (mut e, _) = engine_full(TruncLine, Box::new(ConstEnc), 2, 2, 2, 3, true, Some(64));
+        let (records, stats) = e.collect(20, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
+        (
+            records.iter().map(record_key).collect::<Keys>(),
+            stats.infer_rows,
+            stats.cache_hits,
+        )
+    };
+    assert_eq!(run(), run());
+}
+
+#[test]
+fn generation_bump_mid_collect_demotes_and_stays_correct() {
+    let (plain, _) = {
+        let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 2, 1, true, None);
+        let (records, stats) = e.collect(9, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
+        (records.iter().map(record_key).collect::<Keys>(), stats)
+    };
+    for bump_at in 1..=4 {
+        let (mut e, generation) = engine_full(Line, Box::new(ConstEnc), 1, 1, 2, 1, true, Some(64));
+        let generation = generation.expect("cache installed");
+        let mut calls = 0;
+        let (records, _) = e.collect(9, move |obs: Vec<f32>, n: usize| {
+            calls += 1;
+            if calls == bump_at {
+                generation.fetch_add(1, Ordering::Relaxed);
+            }
+            exact_infer(&obs, n)
+        });
+        let keys: Keys = records.iter().map(record_key).collect();
+        assert_eq!(plain, keys, "bump at call {bump_at} corrupted records");
+    }
+}
+
+#[test]
+fn per_player_cached_routing_matches_uncached() {
+    let run = |cache: Option<usize>| {
+        let (mut e, _) = engine_full(RR, Box::new(Enc), 1, 1, 2, 3, true, cache);
+        let (records, stats) =
+            e.collect_routed(16, InferMode::PerPlayer, |_player, obs: Vec<f32>, n| {
+                exact_infer(&obs, n)
+            });
+        (records.iter().map(record_key).collect::<Keys>(), stats)
+    };
+    let (mut plain, _) = run(None);
+    let (mut cached, cstats) = run(Some(64));
+    // Gating legitimately reorders cross-slot flushes at the cut: compare multisets.
+    plain.sort();
+    cached.sort();
+    assert_eq!(plain, cached);
+    assert!(cstats.cache_hits > 0, "repeated states must hit per route");
+}
+
+#[test]
+fn the_cache_persists_across_collects() {
+    let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 1, 1, true, Some(64));
+    let (_, first) = e.collect(3, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
+    assert!(first.infer_calls > 0);
+    let (records, second) = e.collect(3, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
+    assert!(!records.is_empty());
+    assert_eq!(
+        second.infer_calls, 0,
+        "every row must hit the persisted cache"
+    );
+    assert!(second.cache_hits > 0);
+}
+
+#[test]
+fn reinstalling_caches_discards_the_old_zero_copy_cache() {
+    let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 1, 1, true, Some(64));
+    let (r1, s1) = e.collect(3, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
+    assert!(s1.infer_calls > 0);
+    let shared = Arc::new(AtomicU64::new(0));
+    let mut e = e.with_infer_caches(
+        (0..=1)
+            .map(|_| InferCache::new(64, shared.clone()))
+            .collect(),
+    );
+    let (r2, s2) = e.collect(3, |obs: Vec<f32>, n: usize| {
+        exact_infer(&obs, n).iter().map(|v| v * 2.0).collect()
+    });
+    assert!(
+        s2.infer_calls > 0,
+        "the replaced cache served the old collection's values"
+    );
+    let k1: Keys = r1.iter().map(record_key).collect();
+    let k2: Keys = r2.iter().map(record_key).collect();
+    assert_ne!(k1, k2, "records must reflect the new callback's outputs");
 }

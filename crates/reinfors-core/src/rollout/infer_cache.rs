@@ -74,6 +74,10 @@ impl InferCache {
         self.seen_generation
     }
 
+    pub(crate) fn params(&self) -> (usize, Arc<AtomicU64>) {
+        (self.half_capacity * 2, self.generation.clone())
+    }
+
     /// Clear entries when the shared weights generation changes.
     pub fn sync_generation(&mut self) {
         let now = self.generation.load(Ordering::Relaxed);
