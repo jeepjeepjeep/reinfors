@@ -118,7 +118,7 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
      duplicate row rides to inference, compute not correctness; alias pressure
      never closes a buffer, closing stays owned by capacity and fire cadence. Close
      is itself a CAS: performed by the reservation that fills the buffer to
-     capacity, or by the scheduler at quiescence. The closing CAS freezes exact
+     capacity, or by the scheduler at a ladder close (stall or quiescence). The closing CAS freezes exact
      final counts `(k rows, m aliases)`, and the scheduler seals routing only
      after processing exactly `k` commit and `m` alias messages — every CAS that
      beat the close is guaranteed a routing entry. A loser (CAS after close)
