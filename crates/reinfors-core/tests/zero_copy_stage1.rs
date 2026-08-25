@@ -300,7 +300,6 @@ fn engine_with<G: Game<State = St, Event = ()> + Sync>(
     fan: usize,
     rounds: usize,
     batch_size: usize,
-    zero_copy: bool,
 ) -> Engine<G, FanActor, reinfors_core::Ppo>
 where
     G::State: Send,
@@ -316,7 +315,6 @@ where
             seed: 11,
             n_threads: Some(1),
             batch_size: Some(batch_size),
-            zero_copy,
             ..Default::default()
         },
     )
@@ -348,7 +346,6 @@ fn run_shared<G: Game<State = St, Event = ()> + Sync>(
     rounds: usize,
     batch_size: usize,
     n_records: usize,
-    zero_copy: bool,
 ) -> (
     Keys,
     reinfors_core::rollout::engine::CollectStats,
@@ -359,7 +356,7 @@ where
 {
     let batches = Arc::new(Mutex::new(Vec::new()));
     let seen = batches.clone();
-    let mut e = engine_with(game(), fan, rounds, batch_size, zero_copy);
+    let mut e = engine_with(game(), fan, rounds, batch_size);
     let (records, stats) = e.collect(n_records, move |obs: Vec<f32>, n: usize| {
         seen.lock().unwrap().push(n);
         ppo_infer(&obs, n)
@@ -370,32 +367,26 @@ where
 }
 
 #[test]
-fn zero_copy_matches_the_classic_path() {
-    let (classic, classic_stats, _) = run_shared(|| Line, 1, 1, 2, 12, false);
-    let (zero, zero_stats, _) = run_shared(|| Line, 1, 1, 2, 12, true);
-    assert!(!classic.is_empty());
-    assert_eq!(classic, zero, "records must be byte-identical across paths");
-    assert_eq!(classic_stats.decisions, zero_stats.decisions);
-    assert_eq!(
-        classic_stats.sum_requested_rows,
-        zero_stats.sum_requested_rows
-    );
-    assert_eq!(classic_stats.infer_rows, zero_stats.infer_rows);
+fn collection_accounts_every_row() {
+    let (records, stats, batches) = run_shared(|| Line, 1, 1, 2, 12);
+    assert!(!records.is_empty());
+    assert_eq!(stats.sum_requested_rows, stats.infer_rows);
+    assert_eq!(batches.iter().sum::<usize>(), stats.infer_rows);
 }
 
 #[test]
 fn zero_copy_is_deterministic() {
-    let (a, _, batches_a) = run_shared(|| Line, 3, 1, 4, 12, true);
-    let (b, _, batches_b) = run_shared(|| Line, 3, 1, 4, 12, true);
+    let (a, _, batches_a) = run_shared(|| Line, 3, 1, 4, 12);
+    let (b, _, batches_b) = run_shared(|| Line, 3, 1, 4, 12);
     assert_eq!(a, b, "fixed-seed zero-copy runs must be byte-identical");
     assert_eq!(batches_a, batches_b, "fire cadence must be deterministic");
 }
 
 #[test]
 fn rounds_split_across_arenas() {
-    let (classic, _, _) = run_shared(|| Line, 5, 1, 4, 12, false);
-    let (zero, zero_stats, batches) = run_shared(|| Line, 5, 1, 4, 12, true);
-    assert_eq!(classic, zero, "split rounds must not disturb records");
+    let (zero, zero_stats, batches) = run_shared(|| Line, 5, 1, 4, 12);
+    let (again, _, _) = run_shared(|| Line, 5, 1, 4, 12);
+    assert_eq!(zero, again, "split rounds must stay deterministic");
     assert!(
         batches.iter().filter(|&&n| n == 4).count() >= 2,
         "capacity fires must dominate: {batches:?}"
@@ -409,19 +400,22 @@ fn rounds_split_across_arenas() {
 
 #[test]
 fn truncation_tails_ride_worker_tasks() {
-    let (classic, classic_stats, _) = run_shared(|| TruncLine, 1, 1, 2, 8, false);
-    let (zero, zero_stats, _) = run_shared(|| TruncLine, 1, 1, 2, 8, true);
-    assert_eq!(classic, zero, "tail-bootstrapped records must match");
+    let (zero, zero_stats, _) = run_shared(|| TruncLine, 1, 1, 2, 8);
+    let (again, again_stats, _) = run_shared(|| TruncLine, 1, 1, 2, 8);
+    assert_eq!(
+        zero, again,
+        "tail-bootstrapped records must stay deterministic"
+    );
     assert!(zero_stats.sum_tail_rows > 0, "horizon must produce tails");
-    assert_eq!(classic_stats.sum_tail_rows, zero_stats.sum_tail_rows);
+    assert_eq!(zero_stats.sum_tail_rows, again_stats.sum_tail_rows);
 }
 
 #[test]
 fn per_player_routing_stays_partitioned() {
-    let run = |zero_copy: bool| {
+    let run = |_: bool| {
         let batches: RoutedBatches = Arc::new(Mutex::new(Vec::new()));
         let seen = batches.clone();
-        let mut e = engine_with(RR, 2, 1, 3, zero_copy);
+        let mut e = engine_with(RR, 2, 1, 3);
         let (records, _) =
             e.collect_routed(10, InferMode::PerPlayer, move |player, obs: Vec<f32>, n| {
                 seen.lock().unwrap().push((player, obs.clone(), n));
@@ -448,7 +442,7 @@ fn per_player_routing_stays_partitioned() {
 #[test]
 fn callback_panics_unwind_cleanly() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut e = engine_with(Line, 1, 1, 2, true);
+        let mut e = engine_with(Line, 1, 1, 2);
         let mut calls = 0;
         e.collect(12, move |obs: Vec<f32>, n: usize| {
             calls += 1;
@@ -460,15 +454,15 @@ fn callback_panics_unwind_cleanly() {
 }
 
 #[test]
-fn multi_round_searches_match_the_classic_path() {
-    let (classic, _, _) = run_shared(|| Line, 3, 2, 4, 12, false);
-    let (zero, _, _) = run_shared(|| Line, 3, 2, 4, 12, true);
-    assert!(!classic.is_empty());
-    assert_eq!(classic, zero, "multi-round records must match across paths");
+fn multi_round_searches_stay_deterministic() {
+    let (zero, _, _) = run_shared(|| Line, 3, 2, 4, 12);
+    let (again, _, _) = run_shared(|| Line, 3, 2, 4, 12);
+    assert!(!zero.is_empty());
+    assert_eq!(zero, again, "multi-round records must stay deterministic");
 }
 
 #[test]
-fn dqn_chained_records_match() {
+fn dqn_chained_records_are_reproducible() {
     fn key(r: &reinfors_core::DqnRecord) -> (usize, Vec<u32>, usize, u64, Vec<u32>, bool, u64) {
         (
             r.player,
@@ -480,7 +474,7 @@ fn dqn_chained_records_match() {
             r.discount.to_bits(),
         )
     }
-    let run = |zero_copy: bool| {
+    let run = |_: bool| {
         let mut e = Engine::new(
             Line,
             Box::new(Enc),
@@ -492,7 +486,6 @@ fn dqn_chained_records_match() {
                 seed: 7,
                 n_threads: Some(1),
                 batch_size: Some(2),
-                zero_copy,
                 ..Default::default()
             },
         );
@@ -528,7 +521,6 @@ fn multi_threaded_stress_races_arena_replacement() {
             seed: 3,
             n_threads: Some(4),
             batch_size: Some(4),
-            zero_copy: true,
             ..Default::default()
         },
     );
@@ -545,7 +537,7 @@ fn multi_threaded_stress_races_arena_replacement() {
 #[test]
 fn callback_panic_with_tails_in_flight_leaves_the_engine_reusable() {
     for panic_at in 1..=10 {
-        let mut e = engine_with(TruncLine, 1, 1, 1, true);
+        let mut e = engine_with(TruncLine, 1, 1, 1);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut calls = 0;
             e.collect(24, move |obs: Vec<f32>, n: usize| {
@@ -570,7 +562,7 @@ fn callback_panic_with_tails_in_flight_leaves_the_engine_reusable() {
 
 #[test]
 fn noop_collect_allocates_nothing_and_the_engine_reuses() {
-    let mut e = engine_with(Line, 1, 1, 2, true);
+    let mut e = engine_with(Line, 1, 1, 2);
     let (records, stats) = e.collect(0, |obs: Vec<f32>, n: usize| ppo_infer(&obs, n));
     assert!(records.is_empty());
     assert_eq!(stats.infer_calls, 0);
@@ -614,7 +606,6 @@ fn engine_full<G: Game<State = St, Event = ()> + Sync>(
     rounds: usize,
     n_games: usize,
     batch_size: usize,
-    zero_copy: bool,
     cache: Option<usize>,
 ) -> (
     Engine<G, FanActor, reinfors_core::Ppo>,
@@ -635,7 +626,6 @@ where
             seed: 11,
             n_threads: Some(1),
             batch_size: Some(batch_size),
-            zero_copy,
             ..Default::default()
         },
     );
@@ -655,7 +645,7 @@ where
 #[test]
 fn cached_records_match_uncached_and_skip_inference() {
     let run = |cache: Option<usize>| {
-        let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 1, 1, true, cache);
+        let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 1, 1, cache);
         let (records, stats) = e.collect(9, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
         (records.iter().map(record_key).collect::<Keys>(), stats)
     };
@@ -671,9 +661,9 @@ fn cached_records_match_uncached_and_skip_inference() {
 }
 
 #[test]
-fn cached_zero_copy_matches_the_classic_cached_path() {
-    let run = |zero_copy: bool| {
-        let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 1, 1, zero_copy, Some(64));
+fn cached_runs_are_reproducible() {
+    let run = |_: bool| {
+        let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 1, 1, Some(64));
         let (records, stats) = e.collect(9, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
         (records.iter().map(record_key).collect::<Keys>(), stats)
     };
@@ -687,7 +677,7 @@ fn cached_zero_copy_matches_the_classic_cached_path() {
 #[test]
 fn cached_collection_is_deterministic() {
     let run = || {
-        let (mut e, _) = engine_full(TruncLine, Box::new(ConstEnc), 2, 2, 2, 3, true, Some(64));
+        let (mut e, _) = engine_full(TruncLine, Box::new(ConstEnc), 2, 2, 2, 3, Some(64));
         let (records, stats) = e.collect(20, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
         (
             records.iter().map(record_key).collect::<Keys>(),
@@ -701,12 +691,12 @@ fn cached_collection_is_deterministic() {
 #[test]
 fn generation_bump_mid_collect_demotes_and_stays_correct() {
     let (plain, _) = {
-        let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 2, 1, true, None);
+        let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 2, 1, None);
         let (records, stats) = e.collect(9, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
         (records.iter().map(record_key).collect::<Keys>(), stats)
     };
     for bump_at in 1..=4 {
-        let (mut e, generation) = engine_full(Line, Box::new(ConstEnc), 1, 1, 2, 1, true, Some(64));
+        let (mut e, generation) = engine_full(Line, Box::new(ConstEnc), 1, 1, 2, 1, Some(64));
         let generation = generation.expect("cache installed");
         let mut calls = 0;
         let (records, _) = e.collect(9, move |obs: Vec<f32>, n: usize| {
@@ -724,7 +714,7 @@ fn generation_bump_mid_collect_demotes_and_stays_correct() {
 #[test]
 fn per_player_cached_routing_matches_uncached() {
     let run = |cache: Option<usize>| {
-        let (mut e, _) = engine_full(RR, Box::new(Enc), 1, 1, 2, 3, true, cache);
+        let (mut e, _) = engine_full(RR, Box::new(Enc), 1, 1, 2, 3, cache);
         let (records, stats) =
             e.collect_routed(16, InferMode::PerPlayer, |_player, obs: Vec<f32>, n| {
                 exact_infer(&obs, n)
@@ -742,7 +732,7 @@ fn per_player_cached_routing_matches_uncached() {
 
 #[test]
 fn the_cache_persists_across_collects() {
-    let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 1, 1, true, Some(64));
+    let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 1, 1, Some(64));
     let (_, first) = e.collect(3, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
     assert!(first.infer_calls > 0);
     let (records, second) = e.collect(3, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
@@ -756,7 +746,7 @@ fn the_cache_persists_across_collects() {
 
 #[test]
 fn reinstalling_caches_discards_the_old_zero_copy_cache() {
-    let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 1, 1, true, Some(64));
+    let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 1, 1, Some(64));
     let (r1, s1) = e.collect(3, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
     assert!(s1.infer_calls > 0);
     let shared = Arc::new(AtomicU64::new(0));
@@ -962,7 +952,6 @@ fn state_engine<G: Game<State = St, Event = ()> + Sync>(
     fan: usize,
     n_games: usize,
     batch_size: usize,
-    zero_copy: bool,
     cache: Option<usize>,
 ) -> StateEngineParts<G>
 where
@@ -984,7 +973,6 @@ where
             seed: 11,
             n_threads: Some(1),
             batch_size: Some(batch_size),
-            zero_copy,
             ..Default::default()
         },
     );
@@ -1002,9 +990,9 @@ where
 }
 
 #[test]
-fn push_state_matches_the_classic_path() {
-    let run = |zero_copy: bool| {
-        let (mut e, _, _) = state_engine(Line, false, 3, 2, 4, zero_copy, None);
+fn push_state_runs_are_reproducible() {
+    let run = |_: bool| {
+        let (mut e, _, _) = state_engine(Line, false, 3, 2, 4, None);
         let (records, stats) = e.collect(12, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
         (records.iter().map(record_key).collect::<Keys>(), stats)
     };
@@ -1018,7 +1006,7 @@ fn push_state_matches_the_classic_path() {
 #[test]
 fn encoder_key_hits_skip_the_encoder() {
     let run = |cache: Option<usize>| {
-        let (mut e, encodes, _) = state_engine(Line, true, 4, 1, 1, true, cache);
+        let (mut e, encodes, _) = state_engine(Line, true, 4, 1, 1, cache);
         let (records, stats) = e.collect(9, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
         (
             records.iter().map(record_key).collect::<Keys>(),
@@ -1039,7 +1027,7 @@ fn encoder_key_hits_skip_the_encoder() {
 #[test]
 fn scratch_fallback_hits_match_uncached() {
     let run = |cache: Option<usize>| {
-        let (mut e, _, _) = state_engine(Line, false, 4, 1, 1, true, cache);
+        let (mut e, _, _) = state_engine(Line, false, 4, 1, 1, cache);
         let (records, stats) = e.collect(9, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
         (records.iter().map(record_key).collect::<Keys>(), stats)
     };
@@ -1070,7 +1058,6 @@ fn drift_engine(
             seed: 11,
             n_threads: Some(2),
             batch_size: Some(4),
-            zero_copy: true,
             ..Default::default()
         },
     );
@@ -1129,7 +1116,7 @@ fn stale_encoder_key_hits_demote_by_reencoding() {
 #[test]
 fn stage2_collection_is_deterministic() {
     let run = || {
-        let (mut e, _, _) = state_engine(TruncLine, true, 3, 2, 3, true, Some(64));
+        let (mut e, _, _) = state_engine(TruncLine, true, 3, 2, 3, Some(64));
         let (records, stats) = e.collect(20, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
         (
             records.iter().map(record_key).collect::<Keys>(),
@@ -1228,7 +1215,6 @@ fn multi_threaded_state_backed_collection_stays_sound() {
             seed: 3,
             n_threads: Some(4),
             batch_size: Some(4),
-            zero_copy: true,
             ..Default::default()
         },
     )
@@ -1340,7 +1326,7 @@ fn in_flight_duplicate_keys_alias_to_one_fired_row() {
     let run = |cache: Option<usize>| {
         let batches = Arc::new(Mutex::new(Vec::new()));
         let seen = batches.clone();
-        let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 4, 4, true, cache);
+        let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 4, 4, cache);
         let (records, stats) = e.collect(12, move |obs: Vec<f32>, n: usize| {
             seen.lock().unwrap().push(n);
             exact_infer(&obs, n)
