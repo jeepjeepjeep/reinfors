@@ -82,10 +82,13 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    concurrently writing workers receive strictly disjoint ranges (see the
    reservation protocol).
 
-   Canonical root rows (`push_root`) keep an owned copy in both stages, by
-   design: the training record needs a row that outlives the batch, and the
-   arena's storage is destined for Python ownership. One parallel copy is the
-   floor for that one row per decision.
+   Canonical root rows (`push_root`) always encode, by design: the training
+   record needs a row that outlives the batch, and the arena's storage is
+   destined for Python ownership. On a validated cache hit the root encodes
+   once, directly into owned record storage — the cache saves the GPU trip,
+   never the encode. On a miss it encodes into the arena and copies into
+   record storage. One encode plus at most one copy per decision is the
+   floor for that one row.
 2. **The reservation protocol is more than an atomic bump.** Disjoint concurrent
    writes into shared storage force an `unsafe` interior-mutability wrapper, so
    these invariants must be documented beside that wrapper and tested
@@ -239,8 +242,10 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
      keys and observation-hash keys share one cache, domain-separated by a
      leading tag byte so the two key spaces cannot collide. `CacheHasher` is
      an opaque engine-owned streamer (the engine picks function and seed, and
-     can salt per route). On a hit, the encoder never runs — for expensive
-     encoders that saving dwarfs the GPU trip itself.
+     can salt per route). A validated NON-ROOT hit normally avoids encoding —
+     for expensive encoders that saving dwarfs the GPU trip itself. Root rows
+     always encode (the record needs the row — see (1)), and a demoted hit
+     re-encodes; "the encoder never runs" is not the claim.
    - *Worker-read, scheduler-write.* Workers compute the key (cache-hot,
      parallel) and look it up in a read-mostly shared cache. The scheduler
      remains the cache's ONLY writer: inserts and eviction happen at routing
@@ -336,12 +341,16 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
      scheduler is also the single thread that applies invalidation, so hit
      notifications carry their generation-at-lookup and the scheduler validates
      it at release. Current generation → deliver. Stale → demote that TICKET:
-     the scheduler spawns a recompute task and a worker re-emits the retained
-     row through the completely ordinary reservation path into the fresh open
-     buffer — indistinguishable from a first-time miss; the round's other
-     tickets are untouched and the slot keeps waiting on its mailbox. Two
-     supporting rules: a slot keeps a gated ticket's encoded row until the
-     release confirms the hit (so demotion never re-encodes), and each fired
+     the scheduler spawns a recompute task and a worker re-emits it through
+     the completely ordinary reservation path into the fresh open buffer —
+     indistinguishable from a first-time miss; the round's other tickets are
+     untouched and the slot keeps waiting on its mailbox. What a gated ticket
+     retains for that re-emission depends on how it was keyed: an encoder-key
+     ticket holds a cloned state plus perspective (cheap for the small-state
+     games that cache; only hit tickets pay the clone) and demotion re-encodes
+     via `push_state`; an observation-hash ticket holds its scratch row and
+     demotion reuses it without re-encoding; a root ticket, hit or demoted,
+     encodes exactly once either way (see (1)). Second rule: each fired
      batch carries its fire-time generation so routing skips cache INSERTS from
      pre-boundary fires (delivering their values to waiting slots is fine — that
      is the documented in-flight-work semantics — but they must not seed the
@@ -524,6 +533,10 @@ engine:
 - Cache-key soundness: a property test per built-in encoder — states with
   equal `cache_key` streams must encode byte-identically — alongside the
   existing parity suites.
+- Demotion from every retention source: a stale encoder-key hit re-encodes
+  from its ticket's cloned state; a stale observation-hash hit reuses its
+  scratch row; a root hit produces its record row whether validated or
+  demoted.
 - Key-space separation: encoder-derived and observation-hash keys never
   collide (tag-byte domain separation exercised on a route using both push
   paths).
