@@ -158,6 +158,26 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
      fire) lets a second requester of an already-reserved key record an alias
      ticket instead of reserving; the scheduler routes the one prediction row to
      every claimant.
+   - *Invalidation is validated at the gate.* `weights_updated()` clears the
+     cache at a safe boundary, but a worker can take an old shard snapshot,
+     resolve a hit from it, and hold that row through a retained `Arc` past the
+     boundary — no worker-side generation check can close this (the window
+     between check and use is unbounded under preemption). The gate closes it
+     structurally: every hit already waits for a scheduler release, and the
+     scheduler is also the single thread that applies invalidation, so hit
+     notifications carry their generation-at-lookup and the scheduler validates
+     it at release. Current generation → deliver. Stale → demote: the scheduler
+     spawns the slot's resume task with a recompute verdict, and a worker
+     re-emits the retained rows through the completely ordinary reservation path
+     into the fresh open buffer — indistinguishable from a first-time miss. Two
+     supporting rules: a gated slot's search state keeps its encoded rows until
+     the release confirms the hit (so demotion never re-encodes), and each fired
+     batch carries its fire-time generation so routing skips cache INSERTS from
+     pre-boundary fires (delivering their values to waiting slots is fine — that
+     is the documented in-flight-work semantics — but they must not seed the
+     post-boundary cache). Net: no post-boundary decision ever consumes a
+     pre-boundary cached value, at the cost of a few demoted hits in the one
+     round straddling the update.
    - *Two planes, never reconciled.* Cache reads and buffer reservations are
      separate communication paths with one monotone invariant: a reserved span
      is inference work, unconditionally. If a key completes and is inserted
