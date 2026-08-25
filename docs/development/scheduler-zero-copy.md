@@ -92,7 +92,7 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    - *Disjointness.* The wrapper's core aliasing invariant: every handed-out
      span is a strictly disjoint `&mut [f32]`, guaranteed by the reservation
      arithmetic (non-overlapping ranges from a monotone cursor) and tested
-     independently — zeroed allocation makes the values valid, but only
+     independently — the per-span zero makes the values valid, but only
      disjointness makes the mutable references sound.
    - *Splitting.* A round emitting more rows than the open buffer's remaining
      space splits across buffers; more than a whole batch, across several fires.
