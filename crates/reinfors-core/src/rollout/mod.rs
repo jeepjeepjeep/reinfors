@@ -1,5 +1,6 @@
 //! Rollout collection and caller-driven environments.
 
+pub mod arena;
 pub mod driver;
 pub mod engine;
 pub mod env;
