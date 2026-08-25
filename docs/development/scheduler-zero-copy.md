@@ -566,6 +566,11 @@ engine:
   seals.
 - Allocation-path benchmark: measured with recycled allocations, not fresh
   ones — lazily mapped fresh pages understate what dirty buffers pay.
+- Atomic-ordering benchmark: the packed state word publishes no observation
+  bytes (`resolved` does), so its CAS operations may weaken to Relaxed on
+  modification-order grounds; measure that, and cache-line padding between
+  `state` and `resolved` (two independently contended RMWs), on ARM before
+  adopting either.
 - Pool backpressure and cancellation: reservation parks at pool exhaustion and
   wakes on fire; dropping the engine mid-window releases parked workers and
   leaks no arena.
