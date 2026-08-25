@@ -2024,7 +2024,10 @@ impl RouteShared {
         }
     }
 
-    // allocated OUTSIDE the route lock: workers must never queue behind an allocation
+    // Allocation happens UNDER the route lock: one claim, so the validated
+    // batch-size bound is a real bound, not a per-racing-worker bound. Nobody
+    // useful is excluded — workers need the arena, the scheduler never locks
+    // this, and final-span deferral keeps fires off this path.
     fn fresh(&self) -> std::sync::Arc<RouteArena> {
         let id = self
             .next_id
@@ -2036,23 +2039,20 @@ impl RouteShared {
     }
 
     fn current(&self) -> std::sync::Arc<RouteArena> {
-        if let Some(open) = self.open.lock().expect("route lock").as_ref() {
+        let mut open = self.open.lock().expect("route lock");
+        if let Some(open) = open.as_ref() {
             return open.clone();
         }
         let fresh = self.fresh();
-        self.open
-            .lock()
-            .expect("route lock")
-            .get_or_insert(fresh)
-            .clone()
+        *open = Some(fresh.clone());
+        fresh
     }
 
     fn replace_if(&self, old: &std::sync::Arc<RouteArena>) {
-        let fresh = self.fresh();
         let mut open = self.open.lock().expect("route lock");
         match open.as_ref() {
             Some(cur) if !std::sync::Arc::ptr_eq(cur, old) => {}
-            _ => *open = Some(fresh),
+            _ => *open = Some(self.fresh()),
         }
     }
 }
