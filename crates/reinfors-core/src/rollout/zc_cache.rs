@@ -110,12 +110,19 @@ impl ZcCache {
         let mut touched: HashMap<usize, Shard> = HashMap::new();
         for key in self.promotes.drain(..) {
             let si = (key as usize) & mask;
-            // current-half keys need no promotion: never clone a shard for them
-            let in_prev = match touched.get(&si) {
-                Some(t) => t.prev.contains_key(&key),
-                None => self.view.shards[si].prev.contains_key(&key),
+            // Prefer current: promote only prev-half keys absent from current,
+            // and never clone a shard for the others.
+            let (in_current, in_prev) = match touched.get(&si) {
+                Some(t) => (t.current.contains_key(&key), t.prev.contains_key(&key)),
+                None => {
+                    let shard = &self.view.shards[si];
+                    (
+                        shard.current.contains_key(&key),
+                        shard.prev.contains_key(&key),
+                    )
+                }
             };
-            if !in_prev {
+            if in_current || !in_prev {
                 continue;
             }
             let shard = touched
@@ -133,6 +140,13 @@ impl ZcCache {
             let shard = touched
                 .entry(si)
                 .or_insert_with(|| (*self.view.shards[si]).clone());
+            // The halves stay disjoint: replace in place without rotation, and a
+            // key rotated to prev moves back rather than duplicating.
+            if let Some(slot) = shard.current.get_mut(&key) {
+                *slot = row;
+                continue;
+            }
+            shard.prev.remove(&key);
             if shard.current.len() >= shard_half {
                 shard.prev = std::mem::take(&mut shard.current);
             }
@@ -207,6 +221,28 @@ mod tests {
         assert!(
             Arc::ptr_eq(&before, &c.view()),
             "a current-half promotion must not publish a new view"
+        );
+    }
+
+    #[test]
+    fn duplicate_keys_across_halves_cannot_resurrect_stale_values() {
+        let (mut c, _) = cache(4);
+        c.stage_insert(1, &[1.0]);
+        c.stage_insert(2, &[2.0]);
+        c.publish(0);
+        c.stage_insert(3, &[3.0]);
+        c.publish(0);
+        assert!(c.view().lookup(1).is_some(), "key 1 rotated to prev");
+        c.stage_insert(1, &[10.0]);
+        c.publish(0);
+        assert_eq!(&c.view().lookup(1).expect("reinserted")[..], &[10.0]);
+        c.stage_promote(1);
+        c.stage_insert(4, &[4.0]);
+        c.publish(0);
+        assert_eq!(
+            &c.view().lookup(1).expect("still present")[..],
+            &[10.0],
+            "promotion resurrected the stale prev-half value"
         );
     }
 
