@@ -82,3 +82,4 @@ nav:
   - Development:
       - Setup: development/setup.md
       - Documentation: development/documentation.md
+      - "Proposal: zero-copy marshalling": development/scheduler-zero-copy.md

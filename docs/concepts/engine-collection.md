@@ -88,6 +88,6 @@ Whether that matters is a function of row size:
 The pure render path scales near-linearly on the same machine (3.7x at 4
 threads, 7.1x at 8), so the plateau is this marshalling, not the simulation.
 Small-row games never notice it; pixel-scale games hit it once a few workers can
-out-produce one thread's memory bandwidth. Reducing it (workers writing rows
-directly into the pooled callback buffer) is the current known scaling limit of
-the scheduler design.
+out-produce one thread's memory bandwidth. Reducing it is the current known
+scaling limit of the scheduler design; the proposed fix is documented in
+[zero-copy observation marshalling](../development/scheduler-zero-copy.md).
