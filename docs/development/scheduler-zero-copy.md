@@ -185,6 +185,23 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
      atomic pointer swaps; evicted rows stay alive through `Arc` clones held by
      in-flight readers; recency updates ride the span metadata workers already
      send ("keys I touched"), applied by the writer in order.
+   - *Cache views are pinned at spawn.* A lookup that dereferences the shared
+     shard pointers at read time sees an insert published in the SAME generation
+     — or misses it — by pure pointer-load timing, and hit-vs-miss changes
+     whether an arena row is occupied and hence fire cadence: nondeterministic
+     even at `n_threads=1`, because scheduler and worker are still two threads.
+     So the scheduler attaches the snapshot current at spawn (an `Arc` clone of
+     the shard-pointer array) to each `Work` item, and worker lookups read only
+     through that pinned view. Which snapshot an item carries is then a pure
+     function of the serial spawn sequence: read outcomes depend on
+     deterministic spawn order, not timing. Pinning applies at every thread
+     count — the cost is an `Arc` clone per item and a microseconds-stale view
+     (marginal hit-rate loss), and old views die with their in-flight items, so
+     retained memory stays bounded by in-flight work. The generation gate below
+     is unchanged and complementary: pinning gives same-generation read
+     determinism; the gate gives cross-generation validity. A state inserted
+     after a pin can still be recomputed by that item as a miss — the same
+     duplicate-compute window as the two-plane rule below, covered the same way.
    - *A hit never reserves a span.* The batch contains only genuine misses by
      construction — no dead rows, no fire-time compaction, no wasted callback
      compute.
@@ -329,6 +346,10 @@ engine:
 - Generation invalidation during lookup: hits resolved from a pre-invalidation
   shard are demoted at the gate; no post-boundary decision consumes a
   pre-boundary row; pre-boundary fires never insert.
+- Pinned-view determinism: a scheduler insert racing a lookup never changes
+  outcomes — each Work item's hits and misses are a function of its spawn-time
+  snapshot; fixed-seed `n_threads=1` runs are byte-identical with the cache
+  enabled.
 - All-hit and sparse-miss batches: gated hits release on fire or quiescence
   flush; a window of pure hits terminates.
 - High-hit partial-buffer starvation: configs below the sizing rule make
