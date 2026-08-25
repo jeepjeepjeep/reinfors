@@ -416,11 +416,17 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    race a worker reservation: even at `n_threads=1` the scheduler and worker
    are concurrent threads, and at the Kth fire a worker mid-reservation lands
    in the old or the next buffer by CAS timing. The threshold therefore
-   triggers a brief scheduling barrier — stop spawning/resuming worker
-   tasks, drain already-running tasks and their commit messages, close and
-   fire the stalled routes on that stable prefix, resume normal admission —
-   paid only on an actual starvation event, where a partial fire is already
-   accepted. Without the barrier the protocol stays memory-safe and live,
+   triggers a brief scheduling barrier: stop spawning and resuming worker
+   tasks, but keep the scheduler's loop fully live for everything else —
+   processing commits and aliases, firing buffers that seal at capacity,
+   waking allocation/backpressure waiters, receiving panic messages. This is
+   not optional politeness: a large round already running can fill the
+   bounded pool and block on a replacement arena, and a scheduler that
+   stopped servicing fires during the drain would deadlock against it. Only
+   when running tasks reach zero does the scheduler perform the forced
+   partial closes on that stable prefix, then resume normal admission. The
+   barrier is paid only on an actual starvation event, where a partial fire
+   is already accepted. Without the barrier the protocol stays memory-safe and live,
    but exact one-thread batch ordering is not formally deterministic. On a
    `pad=True` route, a partial close is where the padded suffix comes from,
    and the scheduler must not zero it itself: it atomically closes the
@@ -534,6 +540,9 @@ engine:
   commit counts (never the arena cursor), and the Kth-fire close drains
   running tasks and their commit messages before closing; fixed-seed
   `n_threads=1` runs stay byte-identical with induced stalls.
+- Stall-barrier liveness: a barrier triggered while a running round is blocked
+  on pool backpressure still services capacity fires and wakes the waiter; the
+  drain terminates and no configuration deadlocks.
 - High-hit partial-buffer starvation: configs below the sizing rule make
   progress through the ladder and increment its counters.
 - Cache-maintenance microbenchmark: insert/evict/promotion measured at target
