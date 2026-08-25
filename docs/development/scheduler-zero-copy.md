@@ -303,6 +303,8 @@ should be unchanged, which doubles as the no-regression control.
 
 ## Validation
 
+Engine-level gates:
+
 - Determinism at `n_threads=1` under the new semantics: fixed seed produces
   byte-identical batches run-to-run (equality against the OLD scheduler is not a
   goal — hit gating and fire cadence legitimately reorder collection).
@@ -312,3 +314,34 @@ should be unchanged, which doubles as the no-regression control.
   fragment cuts, panic drains) unchanged.
 - Throughput gate: pixel collection at 8 threads must beat the current plateau by
   a stated margin on the benchmark machine before the old path is removed.
+
+Protocol-level coverage, tested against the arena wrapper independently of the
+engine:
+
+- Out-of-order commits: spans committed in permuted orders still seal exactly
+  once, with correct `(k, m)` reconciliation.
+- Panic between reserve and commit: the RAII guard poisons the span; sealing and
+  the scheduler's panic drain both terminate.
+- Requests crossing and exceeding capacity: emissions split across buffers and
+  across multiple fires, preserving `absorb` order through the routing table.
+- Alias-versus-seal races: the atomic close either admits the alias into the
+  fire's counts or fails its CAS; no interleaving orphans a claimant.
+- Generation invalidation during lookup: hits resolved from a pre-invalidation
+  shard are demoted at the gate; no post-boundary decision consumes a
+  pre-boundary row; pre-boundary fires never insert.
+- All-hit and sparse-miss batches: gated hits release on fire or quiescence
+  flush; a window of pure hits terminates.
+- High-hit partial-buffer starvation: configs below the sizing rule make
+  progress through the quiescence flush and increment its counter.
+- Retained Python arrays: a callback that stores every batch it receives —
+  arrays stay valid and unchanged after arbitrary further collection.
+- Padded-suffix initialization: with `pad=True`, the suffix reads as zeros on
+  every platform/allocator, including after buffer splits and quiescence seals.
+- Pool backpressure and cancellation: reservation parks at pool exhaustion and
+  wakes on fire; dropping the engine mid-window releases parked workers and
+  leaks no arena.
+- Per-player and tail ordering: per-player routes and worker tail tasks preserve
+  today's routing and `AwaitingTail` semantics under the arena.
+- Tooling: the unsafe storage wrapper runs under Miri; the reservation /
+  close / alias protocol gets a small Loom model checking the CAS
+  interleavings exhaustively.
