@@ -9,6 +9,7 @@ use crate::learner::{Learner, Step};
 use crate::policy::Policy;
 use crate::reward::Reward;
 use crate::rng::SplitMix64;
+use crate::rollout::arena::{Arena, Reserve};
 use crate::rollout::episode::Episode;
 use crate::rollout::evaluator::{Evaluator, InferMode};
 use crate::rollout::infer_cache::InferCache;
@@ -47,6 +48,10 @@ pub struct EngineParams {
     /// Worker threads running search rounds (None = available cores; always capped
     /// at `n_games` — more workers than game slots can never run).
     pub n_threads: Option<usize>,
+    /// Experimental zero-copy collection: workers copy encoded rows into shared
+    /// arenas and the scheduler routes metadata only. Excludes infer caches and
+    /// `pad` until the arena path supports them.
+    pub zero_copy: bool,
 }
 
 impl Default for EngineParams {
@@ -57,6 +62,7 @@ impl Default for EngineParams {
             pad: false,
             batch_size: None,
             n_threads: None,
+            zero_copy: false,
         }
     }
 }
@@ -84,6 +90,7 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     perms: crate::encoder::PermTable,
     batch_size: usize,
     sweep_cursor: usize,
+    zero_copy: bool,
     thread_pool: rayon::ThreadPool,
 }
 
@@ -163,6 +170,7 @@ where
                 .batch_size
                 .unwrap_or_else(|| (params.n_games / 2).max(1)),
             sweep_cursor: 0,
+            zero_copy: params.zero_copy,
             thread_pool: rayon::ThreadPoolBuilder::new()
                 // At most one task per game slot can run: workers beyond n_games idle.
                 .num_threads(
@@ -240,6 +248,9 @@ where
         L: Sync,
         L::Record: Send,
     {
+        if self.zero_copy {
+            return self.collect_arena(n_records, mode, infer);
+        }
         let mut out: Vec<L::Record> = Vec::new();
         let mut stats = CollectStats::default();
         let collect_interior = self.learner.needs_interior();
@@ -905,6 +916,788 @@ where
         self.infer_caches = caches;
         (out, stats)
     }
+
+    /// Zero-copy collection: the scheduler never touches observation bytes.
+    fn collect_arena<F>(
+        &mut self,
+        n_records: usize,
+        mode: InferMode,
+        mut infer: F,
+    ) -> (Vec<L::Record>, CollectStats)
+    where
+        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+        P: Sync,
+        P::Evaluation: Send,
+        P::PolicyState: Send,
+        L: Sync,
+        L::Record: Send,
+    {
+        assert!(
+            self.infer_caches.is_none(),
+            "zero_copy does not support infer caches yet"
+        );
+        assert!(!self.pad, "zero_copy does not support pad yet");
+        let mut out: Vec<L::Record> = Vec::new();
+        let mut stats = CollectStats::default();
+        let collect_interior = self.learner.needs_interior();
+        let fragments = self.learner.bootstraps_fragments();
+        if fragments {
+            discard_fragments(&mut self.traj);
+        }
+        let (c, h, w) = self.encoder.obs_shape();
+        let obs_dim = c * h * w;
+        {
+            let n_games = self.episodes.len();
+            let batch_size = self.batch_size;
+            let base_cursor = self.sweep_cursor % n_games.max(1);
+            let game = &self.game;
+            let encoder = &*self.encoder;
+            let reward = &*self.reward;
+            let policy = &self.policy;
+            let learner = &self.learner;
+            let learn_mask = &self.learn_mask;
+            let sequential = self.sequential;
+            let perms = &self.perms;
+            let slots: Vec<std::sync::Mutex<SlotCtx<'_, G, P>>> = self
+                .episodes
+                .iter_mut()
+                .zip(self.traj.iter_mut())
+                .zip(self.ticks.iter_mut())
+                .zip(self.policy_states.iter_mut())
+                .zip(self.episode_returns.iter_mut())
+                .zip(self.seeded.iter_mut())
+                .map(|(((((ep, traj), tick), policy_state), returns), seeded)| {
+                    std::sync::Mutex::new(SlotCtx {
+                        ep,
+                        traj,
+                        tick,
+                        policy_state,
+                        returns,
+                        seeded,
+                    })
+                })
+                .collect();
+            let mut start = StartParts {
+                dist: &mut *self.start_dist,
+                rng: &mut self.buffer_rng,
+            };
+            let (tx, rx) = std::sync::mpsc::channel::<AMsg<P::Search<G::State>, L::Record>>();
+            let n_routes = match mode {
+                InferMode::Shared => 1,
+                InferMode::PerPlayer => self.game.num_agents(),
+            };
+            let routes: Vec<RouteShared> = (0..n_routes)
+                .map(|_| RouteShared::new(batch_size, obs_dim))
+                .collect();
+            let routes = &routes;
+            let route_of = move |si: usize| match mode {
+                InferMode::Shared => 0,
+                InferMode::PerPlayer => si,
+            };
+
+            let task = |gi: usize,
+                        work: AWork<P::Search<G::State>>,
+                        tx: AMsgSender<P::Search<G::State>, L::Record>| {
+                let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut guard = slots[gi].lock().expect("slot lock");
+                    let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                    let (mut search, perspectives, mut roots) = match work {
+                        AWork::Begin => {
+                            let perspectives: Vec<usize> = (0..game.num_agents())
+                                .filter(|&si| slot.ep.agent_active(game, si))
+                                .collect();
+                            if perspectives.is_empty() {
+                                return ATaskOut::Skip;
+                            }
+                            let ctx = crate::policy::SearchCtx {
+                                game,
+                                enc: encoder,
+                                reward,
+                                rng: &mut slot.ep.rng,
+                                perms,
+                                collect_interior,
+                            };
+                            let roots = vec![RootMark::Vacant; perspectives.len()];
+                            (
+                                policy.begin_search(ctx, &slot.ep.state, &perspectives),
+                                perspectives,
+                                roots,
+                            )
+                        }
+                        AWork::Resume {
+                            mut search,
+                            perspectives,
+                            roots,
+                            rows,
+                            stride,
+                        } => {
+                            if !rows.is_empty() {
+                                let view = crate::policy::RowsView::from_slice(&rows, stride);
+                                let ctx = crate::policy::SearchCtx {
+                                    game,
+                                    enc: encoder,
+                                    reward,
+                                    rng: &mut slot.ep.rng,
+                                    perms,
+                                    collect_interior,
+                                };
+                                policy.absorb(ctx, &mut search, view);
+                            }
+                            (search, perspectives, roots)
+                        }
+                        AWork::Tail { fragment } => {
+                            let reqs =
+                                tail_requests(game, policy, learner, encoder, sequential, slot);
+                            let n = reqs.len();
+                            let mut meta = Vec::with_capacity(n);
+                            let mut spans = Vec::new();
+                            for (pos, (si, obs)) in reqs.into_iter().enumerate() {
+                                let route = route_of(si);
+                                push_route_rows(
+                                    route,
+                                    &routes[route],
+                                    &[(pos as u32, obs.as_slice())],
+                                    &mut spans,
+                                );
+                                meta.push(si);
+                            }
+                            return ATaskOut::TailEmitted {
+                                fragment,
+                                meta,
+                                n,
+                                spans,
+                            };
+                        }
+                    };
+                    let ctx = crate::policy::SearchCtx {
+                        game,
+                        enc: encoder,
+                        reward,
+                        rng: &mut slot.ep.rng,
+                        perms,
+                        collect_interior,
+                    };
+                    let mut sink = crate::policy::RequestSink::capturing_roots();
+                    let status = policy.round(ctx, &mut search, &mut sink);
+                    assert!(
+                        (!sink.is_empty()) == (status == crate::policy::RoundStatus::Pending),
+                        "round contract: Pending emits at least one request, Done emits none"
+                    );
+                    if !sink.is_empty() {
+                        let n = sink.len();
+                        let (players, obs, marked) = sink.into_parts_with_roots();
+                        for (persp, row) in marked {
+                            let i = perspectives
+                                .iter()
+                                .position(|&si| si == persp)
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "push_root marked perspective {persp}, which is not \
+                                         among this search's requested perspectives"
+                                    )
+                                });
+                            assert!(
+                                matches!(roots[i], RootMark::Vacant),
+                                "push_root marked perspective {persp} twice in one search"
+                            );
+                            roots[i] = if learn_mask[persp] {
+                                RootMark::Row(row)
+                            } else {
+                                RootMark::Dropped
+                            };
+                        }
+                        let mut spans = Vec::new();
+                        match mode {
+                            InferMode::Shared => {
+                                let rows: Vec<(u32, &[f32])> = (0..n)
+                                    .map(|i| (i as u32, &obs[i * obs_dim..(i + 1) * obs_dim]))
+                                    .collect();
+                                push_route_rows(0, &routes[0], &rows, &mut spans);
+                            }
+                            InferMode::PerPlayer =>
+                            {
+                                #[allow(clippy::needless_range_loop)]
+                                for route in 0..n_routes {
+                                    let rows: Vec<(u32, &[f32])> = players
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|&(_, &pl)| pl == route)
+                                        .map(|(i, _)| {
+                                            (i as u32, &obs[i * obs_dim..(i + 1) * obs_dim])
+                                        })
+                                        .collect();
+                                    if !rows.is_empty() {
+                                        push_route_rows(route, &routes[route], &rows, &mut spans);
+                                    }
+                                }
+                            }
+                        }
+                        return ATaskOut::Emitted {
+                            search,
+                            perspectives,
+                            roots,
+                            n,
+                            spans,
+                        };
+                    }
+                    let ctx = crate::policy::SearchCtx {
+                        game,
+                        enc: encoder,
+                        reward,
+                        rng: &mut slot.ep.rng,
+                        perms,
+                        collect_interior,
+                    };
+                    let results = policy.finish(ctx, search);
+                    assert_eq!(
+                        results.len(),
+                        perspectives.len(),
+                        "finish must return one evaluation per perspective"
+                    );
+                    let before = buffered_learn_steps(slot, learn_mask);
+                    let mut records: Vec<L::Record> = Vec::new();
+                    let mut tstats = CollectStats::default();
+                    let finished = process_game_tick(
+                        game,
+                        encoder,
+                        reward,
+                        policy,
+                        learner,
+                        learn_mask,
+                        sequential,
+                        results,
+                        &perspectives,
+                        roots,
+                        slot,
+                        &mut records,
+                        &mut tstats,
+                    );
+                    if finished == Some(true) {
+                        flush_records_game(
+                            &HashMap::new(),
+                            game,
+                            learner,
+                            encoder,
+                            slot,
+                            &mut records,
+                            &mut tstats,
+                        );
+                    }
+                    let steps_delta =
+                        buffered_learn_steps(slot, learn_mask) as isize - before as isize;
+                    ATaskOut::Completed {
+                        records,
+                        stats: tstats,
+                        steps_delta,
+                        finished,
+                    }
+                }));
+                let out = match run {
+                    Ok(out) => out,
+                    Err(payload) => ATaskOut::Panicked(payload),
+                };
+                let _ = tx.send(AMsg { gi, out });
+            };
+            let task = &task;
+
+            let mut phases: Vec<SlotPhase<P::Search<G::State>>> =
+                (0..n_games).map(|_| SlotPhase::Idle).collect();
+            let mut pending: Vec<std::collections::HashMap<u64, PendingArena>> = (0..n_routes)
+                .map(|_| std::collections::HashMap::new())
+                .collect();
+            let mut in_flight = 0usize;
+            let mut spin_budget = SPIN_RECVS_MIN;
+            let mut backlog: isize = slots
+                .iter()
+                .map(|m| buffered_learn_steps(&m.lock().expect("slot lock"), learn_mask) as isize)
+                .sum();
+            let mut cutting = if fragments {
+                out.len().saturating_add_signed(backlog)
+            } else {
+                out.len()
+            } >= n_records;
+            let admitted = !cutting;
+            let mut frag_stage = false;
+
+            self.thread_pool.in_place_scope_fifo(|s| {
+                let spawn = |gi: usize,
+                             work_item: AWork<P::Search<G::State>>,
+                             phases: &mut Vec<SlotPhase<P::Search<G::State>>>,
+                             in_flight: &mut usize| {
+                    phases[gi] = SlotPhase::Running;
+                    *in_flight += 1;
+                    let txc = tx.clone();
+                    s.spawn_fifo(move |_| task(gi, work_item, txc));
+                };
+                // Drain in-flight completions before surfacing: a finished episode
+                // must respawn, never strand over-horizon.
+                macro_rules! drain_after_callback_panic {
+                    ($payload:expr) => {{
+                        while in_flight > 0 {
+                            let msg = rx.recv().expect("scheduler channel closed");
+                            in_flight -= 1;
+                            match msg.out {
+                                ATaskOut::Completed {
+                                    finished: Some(terminal),
+                                    ..
+                                } => {
+                                    let mut guard = slots[msg.gi].lock().expect("slot lock");
+                                    let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                                    if !terminal {
+                                        flush_records_game(
+                                            &HashMap::new(),
+                                            game,
+                                            learner,
+                                            encoder,
+                                            slot,
+                                            &mut out,
+                                            &mut stats,
+                                        );
+                                    }
+                                    respawn_game(game, policy, slot, &mut start);
+                                }
+                                // A truncation tail caught mid-task resolves empty here,
+                                // exactly like a parked one below.
+                                ATaskOut::TailEmitted {
+                                    fragment: false, ..
+                                } => {
+                                    let mut guard = slots[msg.gi].lock().expect("slot lock");
+                                    let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                                    flush_records_game(
+                                        &HashMap::new(),
+                                        game,
+                                        learner,
+                                        encoder,
+                                        slot,
+                                        &mut out,
+                                        &mut stats,
+                                    );
+                                    respawn_game(game, policy, slot, &mut start);
+                                }
+                                _ => {}
+                            }
+                        }
+                        for gi in 0..n_games {
+                            if !matches!(
+                                phases[gi],
+                                SlotPhase::AwaitingTail {
+                                    fragment: false,
+                                    ..
+                                }
+                            ) {
+                                continue;
+                            }
+                            phases[gi] = SlotPhase::Idle;
+                            let mut guard = slots[gi].lock().expect("slot lock");
+                            let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                            flush_records_game(
+                                &HashMap::new(),
+                                game,
+                                learner,
+                                encoder,
+                                slot,
+                                &mut out,
+                                &mut stats,
+                            );
+                            respawn_game(game, policy, slot, &mut start);
+                        }
+                        std::panic::resume_unwind($payload);
+                    }};
+                }
+                macro_rules! settle_freed {
+                    ($freed:expr) => {{
+                        for gi in $freed {
+                            match std::mem::replace(&mut phases[gi], SlotPhase::Idle) {
+                                SlotPhase::Blocked {
+                                    search,
+                                    perspectives,
+                                    roots,
+                                    rows,
+                                    stride,
+                                    ..
+                                } => spawn(
+                                    gi,
+                                    AWork::Resume {
+                                        search,
+                                        perspectives,
+                                        roots,
+                                        rows,
+                                        stride,
+                                    },
+                                    &mut phases,
+                                    &mut in_flight,
+                                ),
+                                SlotPhase::AwaitingTail {
+                                    fragment,
+                                    meta,
+                                    rows,
+                                    stride,
+                                    ..
+                                } => {
+                                    let mut guard = slots[gi].lock().expect("slot lock");
+                                    let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                                    let tails = tails_from_rows(
+                                        &meta, &rows, stride, game, learner, encoder, slot,
+                                    );
+                                    backlog -= buffered_learn_steps(slot, learn_mask) as isize;
+                                    if fragment {
+                                        flush_fragment_slot(
+                                            &tails, game, learner, encoder, learn_mask, slot,
+                                            &mut out,
+                                        );
+                                    } else {
+                                        flush_records_game(
+                                            &tails, game, learner, encoder, slot, &mut out,
+                                            &mut stats,
+                                        );
+                                        respawn_game(game, policy, slot, &mut start);
+                                    }
+                                    drop(guard);
+                                    let collected = if fragments {
+                                        out.len().saturating_add_signed(backlog)
+                                    } else {
+                                        out.len()
+                                    };
+                                    if collected >= n_records {
+                                        cutting = true;
+                                    }
+                                    if !cutting && matches!(phases[gi], SlotPhase::Idle) {
+                                        spawn(gi, AWork::Begin, &mut phases, &mut in_flight);
+                                    }
+                                }
+                                _ => unreachable!("a freed slot must hold outstanding rows"),
+                            }
+                        }
+                    }};
+                }
+                macro_rules! try_fire {
+                    ($route:expr, $id:expr) => {{
+                        let ready = pending[$route].get(&$id).is_some_and(|pa| {
+                            pa.arc
+                                .arena
+                                .close_info()
+                                .is_some_and(|info| info.rows == pa.seen)
+                        });
+                        if ready {
+                            let pa = pending[$route].remove(&$id).expect("readiness checked");
+                            let take = pa.arc.arena.close_info().expect("closed").rows;
+                            let obs = pa
+                                .arc
+                                .arena
+                                .take_rows()
+                                .expect("every span accounted and committed");
+                            let t0 = std::time::Instant::now();
+                            let call = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                || infer($route, obs, take),
+                            ));
+                            let rows = match call {
+                                Ok(rows) => rows,
+                                Err(payload) => drain_after_callback_panic!(payload),
+                            };
+                            stats.infer_seconds += t0.elapsed().as_secs_f64();
+                            stats.infer_calls += 1;
+                            stats.infer_rows += take;
+                            assert!(
+                                rows.len().is_multiple_of(take),
+                                "infer returned {} values for {} rows (not divisible)",
+                                rows.len(),
+                                take
+                            );
+                            let stride = rows.len() / take;
+                            let mut freed = Vec::new();
+                            for i in 0..take {
+                                let (g, pos) = pa.dest[i];
+                                let (gi, pos) = (g as usize, pos as usize);
+                                let (outstanding, buf, st, total) = match &mut phases[gi] {
+                                    SlotPhase::Blocked {
+                                        outstanding,
+                                        rows: buf,
+                                        stride: st,
+                                        total,
+                                        ..
+                                    }
+                                    | SlotPhase::AwaitingTail {
+                                        outstanding,
+                                        rows: buf,
+                                        stride: st,
+                                        total,
+                                        ..
+                                    } => (outstanding, buf, st, *total),
+                                    _ => unreachable!(
+                                        "row routed to a slot with no outstanding round"
+                                    ),
+                                };
+                                if buf.is_empty() {
+                                    buf.resize(total * stride, 0.0);
+                                    *st = stride;
+                                } else {
+                                    assert_eq!(
+                                        *st, stride,
+                                        "infer returned a different row width for one round's requests"
+                                    );
+                                }
+                                buf[pos * stride..(pos + 1) * stride]
+                                    .copy_from_slice(&rows[i * stride..(i + 1) * stride]);
+                                *outstanding -= 1;
+                                if *outstanding == 0 {
+                                    freed.push(gi);
+                                }
+                            }
+                            settle_freed!(freed);
+                        }
+                    }};
+                }
+                macro_rules! account_spans {
+                    ($gi:expr, $spans:expr) => {{
+                        for span in $spans {
+                            let route = span.route;
+                            let id = span.arena.id;
+                            let pa = pending[route].entry(id).or_insert_with(|| PendingArena {
+                                arc: span.arena.clone(),
+                                dest: vec![(u32::MAX, u32::MAX); batch_size],
+                                seen: 0,
+                            });
+                            for (j, &pos) in span.positions.iter().enumerate() {
+                                pa.dest[span.first_row + j] = ($gi as u32, pos);
+                            }
+                            pa.seen += span.positions.len();
+                            try_fire!(route, id);
+                        }
+                    }};
+                }
+                if !cutting {
+                    for k in 0..n_games {
+                        let gi = (base_cursor + k) % n_games;
+                        spawn(gi, AWork::Begin, &mut phases, &mut in_flight);
+                    }
+                }
+                loop {
+                    if in_flight == 0 {
+                        if pending.iter().any(|m| !m.is_empty()) {
+                            // Drain: no round can progress without these rows.
+                            #[allow(clippy::needless_range_loop)]
+                            for route in 0..n_routes {
+                                let mut ids: Vec<u64> = pending[route].keys().copied().collect();
+                                ids.sort_unstable();
+                                for id in ids {
+                                    if let Some(pa) = pending[route].get(&id) {
+                                        if pa.arc.arena.close_info().is_none() {
+                                            pa.arc.arena.close();
+                                        }
+                                    }
+                                    try_fire!(route, id);
+                                }
+                            }
+                            continue;
+                        }
+                        // Cut step 5: bootstrap live fragments through tail tasks.
+                        if fragments && !frag_stage {
+                            frag_stage = true;
+                            let mut spawned_any = false;
+                            #[allow(clippy::needless_range_loop)]
+                            for gi in 0..n_games {
+                                let has_steps = slots[gi]
+                                    .lock()
+                                    .expect("slot lock")
+                                    .traj
+                                    .iter()
+                                    .any(|steps| !steps.is_empty());
+                                if !has_steps {
+                                    continue;
+                                }
+                                spawn(
+                                    gi,
+                                    AWork::Tail { fragment: true },
+                                    &mut phases,
+                                    &mut in_flight,
+                                );
+                                spawned_any = true;
+                            }
+                            if spawned_any {
+                                continue;
+                            }
+                        }
+                        break;
+                    }
+
+                    let mut msg = None;
+                    for _ in 0..spin_budget {
+                        match rx.try_recv() {
+                            Ok(m) => {
+                                msg = Some(m);
+                                break;
+                            }
+                            Err(_) => std::hint::spin_loop(),
+                        }
+                    }
+                    let msg = match msg {
+                        Some(m) => m,
+                        None => {
+                            let parked = std::time::Instant::now();
+                            let m = rx.recv().expect("scheduler channel closed");
+                            spin_budget = if parked.elapsed() < SPIN_WORTH {
+                                (spin_budget * 2).min(SPIN_RECVS_MAX)
+                            } else {
+                                (spin_budget / 2).max(SPIN_RECVS_MIN)
+                            };
+                            m
+                        }
+                    };
+                    in_flight -= 1;
+                    match msg.out {
+                        ATaskOut::Panicked(payload) => std::panic::resume_unwind(payload),
+                        ATaskOut::Skip => phases[msg.gi] = SlotPhase::Parked,
+                        ATaskOut::Emitted {
+                            search,
+                            perspectives,
+                            roots,
+                            n,
+                            spans,
+                        } => {
+                            let gi = msg.gi;
+                            stats.sum_requested_rows += n;
+                            // installed before any accounting that could fire
+                            phases[gi] = SlotPhase::Blocked {
+                                search,
+                                perspectives,
+                                roots,
+                                outstanding: n,
+                                total: n,
+                                rows: Vec::new(),
+                                stride: 0,
+                            };
+                            account_spans!(gi, spans);
+                        }
+                        ATaskOut::TailEmitted {
+                            fragment,
+                            meta,
+                            n,
+                            spans,
+                        } => {
+                            let gi = msg.gi;
+                            if n == 0 {
+                                phases[gi] = SlotPhase::Idle;
+                                let mut guard = slots[gi].lock().expect("slot lock");
+                                let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                                backlog -= buffered_learn_steps(slot, learn_mask) as isize;
+                                if fragment {
+                                    flush_fragment_slot(
+                                        &HashMap::new(),
+                                        game,
+                                        learner,
+                                        encoder,
+                                        learn_mask,
+                                        slot,
+                                        &mut out,
+                                    );
+                                } else {
+                                    flush_records_game(
+                                        &HashMap::new(),
+                                        game,
+                                        learner,
+                                        encoder,
+                                        slot,
+                                        &mut out,
+                                        &mut stats,
+                                    );
+                                    respawn_game(game, policy, slot, &mut start);
+                                }
+                                drop(guard);
+                                if !fragment {
+                                    let collected = if fragments {
+                                        out.len().saturating_add_signed(backlog)
+                                    } else {
+                                        out.len()
+                                    };
+                                    if collected >= n_records {
+                                        cutting = true;
+                                    }
+                                    if !cutting && matches!(phases[gi], SlotPhase::Idle) {
+                                        spawn(gi, AWork::Begin, &mut phases, &mut in_flight);
+                                    }
+                                }
+                            } else {
+                                stats.sum_requested_rows += n;
+                                stats.sum_tail_rows += n;
+                                phases[gi] = SlotPhase::AwaitingTail {
+                                    fragment,
+                                    meta,
+                                    outstanding: n,
+                                    total: n,
+                                    rows: Vec::new(),
+                                    stride: 0,
+                                };
+                                account_spans!(gi, spans);
+                            }
+                        }
+                        ATaskOut::Completed {
+                            records,
+                            stats: tstats,
+                            steps_delta,
+                            finished,
+                        } => {
+                            let gi = msg.gi;
+                            phases[gi] = SlotPhase::Idle;
+                            out.extend(records);
+                            stats = fold_stats(std::mem::take(&mut stats), tstats);
+                            backlog += steps_delta;
+                            let mut guard = slots[gi].lock().expect("slot lock");
+                            let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                            if finished != Some(true) {
+                                start.observe(&slot.ep.state);
+                            }
+                            let mut needs_tail = false;
+                            match finished {
+                                None => {}
+                                Some(true) => respawn_game(game, policy, slot, &mut start),
+                                Some(false) => {
+                                    if learner.uses_episode_tail() {
+                                        needs_tail = true;
+                                    } else {
+                                        backlog -= buffered_learn_steps(slot, learn_mask) as isize;
+                                        flush_records_game(
+                                            &HashMap::new(),
+                                            game,
+                                            learner,
+                                            encoder,
+                                            slot,
+                                            &mut out,
+                                            &mut stats,
+                                        );
+                                        respawn_game(game, policy, slot, &mut start);
+                                    }
+                                }
+                            }
+                            drop(guard);
+                            if needs_tail {
+                                spawn(
+                                    gi,
+                                    AWork::Tail { fragment: false },
+                                    &mut phases,
+                                    &mut in_flight,
+                                );
+                            }
+                            let collected = if fragments {
+                                out.len().saturating_add_signed(backlog)
+                            } else {
+                                out.len()
+                            };
+                            if collected >= n_records {
+                                cutting = true;
+                            }
+                            if !cutting && matches!(phases[gi], SlotPhase::Idle) {
+                                spawn(gi, AWork::Begin, &mut phases, &mut in_flight);
+                            }
+                        }
+                    }
+                }
+            });
+            if admitted {
+                self.sweep_cursor = (base_cursor + 1) % n_games.max(1);
+            }
+        }
+        (out, stats)
+    }
 }
 
 /// Snapshot and restore mutable collection state.
@@ -1205,6 +1998,167 @@ struct Msg<SE, R> {
 }
 
 type MsgSender<SE, R> = std::sync::mpsc::Sender<Msg<SE, R>>;
+
+/// One arena in a route's ownership-per-fire sequence.
+struct RouteArena {
+    id: u64,
+    arena: Arena,
+}
+
+/// A route's open-arena slot; workers allocate replacements, never the scheduler.
+struct RouteShared {
+    // lazy: unused routes and no-op collects allocate nothing
+    open: std::sync::Mutex<Option<std::sync::Arc<RouteArena>>>,
+    next_id: std::sync::atomic::AtomicU64,
+    capacity: usize,
+    dim: usize,
+}
+
+impl RouteShared {
+    fn new(capacity: usize, dim: usize) -> Self {
+        RouteShared {
+            open: std::sync::Mutex::new(None),
+            next_id: std::sync::atomic::AtomicU64::new(0),
+            capacity,
+            dim,
+        }
+    }
+
+    // Allocation happens UNDER the route lock: one claim, so the validated
+    // batch-size bound is a real bound, not a per-racing-worker bound. Nobody
+    // useful is excluded — workers need the arena, the scheduler never locks
+    // this, and final-span deferral keeps fires off this path.
+    fn fresh(&self) -> std::sync::Arc<RouteArena> {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::sync::Arc::new(RouteArena {
+            id,
+            arena: Arena::new(self.capacity, self.dim, 0),
+        })
+    }
+
+    fn current(&self) -> std::sync::Arc<RouteArena> {
+        let mut open = self.open.lock().expect("route lock");
+        if let Some(open) = open.as_ref() {
+            return open.clone();
+        }
+        let fresh = self.fresh();
+        *open = Some(fresh.clone());
+        fresh
+    }
+
+    fn replace_if(&self, old: &std::sync::Arc<RouteArena>) {
+        let mut open = self.open.lock().expect("route lock");
+        match open.as_ref() {
+            Some(cur) if !std::sync::Arc::ptr_eq(cur, old) => {}
+            _ => *open = Some(self.fresh()),
+        }
+    }
+}
+
+/// Which arena rows hold which round positions — bytes never ride the channel.
+struct ASpan {
+    route: usize,
+    arena: std::sync::Arc<RouteArena>,
+    first_row: usize,
+    positions: Vec<u32>,
+}
+
+/// Copy rows into the route's open arenas, splitting across buffers at capacity.
+fn push_route_rows(
+    route_idx: usize,
+    route: &RouteShared,
+    rows: &[(u32, &[f32])],
+    spans: &mut Vec<ASpan>,
+) {
+    let mut next = 0;
+    while next < rows.len() {
+        let cur = route.current();
+        let (mut span, closes) = match cur.arena.try_reserve(rows.len() - next) {
+            Reserve::Full { span, closed } => (span, closed.is_some()),
+            Reserve::Partial { span, .. } => (span, true),
+            Reserve::Closed => {
+                route.replace_if(&cur);
+                continue;
+            }
+        };
+        let take = span.rows();
+        let first = span.row_range().start;
+        let mut positions = Vec::with_capacity(take);
+        for (pos, row) in &rows[next..next + take] {
+            span.push_row(row);
+            positions.push(*pos);
+        }
+        span.commit();
+        spans.push(ASpan {
+            route: route_idx,
+            arena: cur.clone(),
+            first_row: first,
+            positions,
+        });
+        next += take;
+        // A close on the task's FINAL span defers replacement to the next
+        // requester, so the sealed arena's fire never waits on an allocation.
+        if closes && next < rows.len() {
+            route.replace_if(&cur);
+        }
+    }
+}
+
+enum AWork<SE> {
+    Begin,
+    Resume {
+        search: SE,
+        perspectives: Vec<usize>,
+        roots: Vec<RootMark>,
+        rows: Vec<f64>,
+        stride: usize,
+    },
+    Tail {
+        fragment: bool,
+    },
+}
+
+/// `TaskOut`, except observations stay in the arenas.
+enum ATaskOut<SE, R> {
+    Skip,
+    Emitted {
+        search: SE,
+        perspectives: Vec<usize>,
+        roots: Vec<RootMark>,
+        n: usize,
+        spans: Vec<ASpan>,
+    },
+    TailEmitted {
+        fragment: bool,
+        meta: Vec<usize>,
+        n: usize,
+        spans: Vec<ASpan>,
+    },
+    Completed {
+        records: Vec<R>,
+        stats: CollectStats,
+        steps_delta: isize,
+        finished: Option<bool>,
+    },
+    Panicked(Box<dyn std::any::Any + Send>),
+}
+
+struct AMsg<SE, R> {
+    gi: usize,
+    out: ATaskOut<SE, R>,
+}
+
+type AMsgSender<SE, R> = std::sync::mpsc::Sender<AMsg<SE, R>>;
+
+/// `seen` counts rows through processed messages only — never the live cursor —
+/// so the fire decision is a pure function of message order.
+struct PendingArena {
+    arc: std::sync::Arc<RouteArena>,
+    dest: Vec<(u32, u32)>,
+    seen: usize,
+}
 
 /// Bounds for the adaptive busy-wait before a parking recv; parks that resolve
 /// under SPIN_WORTH grow the budget, slower ones shrink it.

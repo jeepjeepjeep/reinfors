@@ -3,7 +3,7 @@
 //! seals into an owned `Vec<f32>` with zero copies. Protocol and invariants:
 //! `docs/development/scheduler-zero-copy.md`, element 2.
 
-use std::mem::{ManuallyDrop, MaybeUninit};
+use std::mem::MaybeUninit;
 use std::ops::Range;
 use std::ptr::NonNull;
 
@@ -64,6 +64,7 @@ pub enum SealError {
     NotClosed,
     CommitsPending,
     Poisoned,
+    Released,
 }
 
 pub struct Arena {
@@ -74,6 +75,7 @@ pub struct Arena {
     // committed or poisoned rows; Release on write, Acquire at seal
     resolved: AtomicU64,
     poisoned: AtomicBool,
+    released: AtomicBool,
     aliases_abandoned: AtomicU64,
     capacity: usize,
     dim: usize,
@@ -103,6 +105,7 @@ impl Arena {
             state: AtomicU64::new(pack(false, 0, 0)),
             resolved: AtomicU64::new(0),
             poisoned: AtomicBool::new(false),
+            released: AtomicBool::new(false),
             aliases_abandoned: AtomicU64::new(0),
             capacity,
             dim,
@@ -232,18 +235,26 @@ impl Arena {
 
     /// The committed prefix as an owned `Vec<f32>` (capacity slack rides along).
     pub fn into_rows(self) -> Result<Vec<f32>, (Self, SealError)> {
-        let info = match self.seal_state() {
-            Ok(info) => info,
-            Err(e) => return Err((self, e)),
-        };
-        let this = ManuallyDrop::new(self);
+        match self.take_rows() {
+            Ok(rows) => Ok(rows),
+            Err(e) => Err((self, e)),
+        }
+    }
+
+    /// Seal through a shared handle; succeeds once, after which the storage
+    /// belongs to the returned `Vec` and the arena's `Drop` is inert.
+    pub fn take_rows(&self) -> Result<Vec<f32>, SealError> {
+        let info = self.seal_state()?;
+        if self.released.swap(true, Ordering::AcqRel) {
+            return Err(SealError::Released);
+        }
         // SAFETY: seal_state proved rows 0..info.rows initialized (Acquire pairing
-        // each commit's Release); ManuallyDrop keeps the reclaim single.
+        // each commit's Release); the released CAS keeps the reclaim single.
         Ok(unsafe {
             Vec::from_raw_parts(
-                this.buf.as_ptr().cast::<f32>(),
-                info.rows * this.dim,
-                this.cap_elems,
+                self.buf.as_ptr().cast::<f32>(),
+                info.rows * self.dim,
+                self.cap_elems,
             )
         })
     }
@@ -251,6 +262,9 @@ impl Arena {
 
 impl Drop for Arena {
     fn drop(&mut self) {
+        if self.released.load(Ordering::Acquire) {
+            return;
+        }
         // SAFETY: rebuilds the forgotten Vec at len 0 to free the allocation.
         unsafe { drop(Vec::from_raw_parts(self.buf.as_ptr(), 0, self.cap_elems)) }
     }
