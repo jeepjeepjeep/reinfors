@@ -36,13 +36,21 @@ scheduler: GIL + infer(batch)                    place → notify
    encodes/copies its rows straight into the span. The mpsc message carries only
    metadata: `(slot, span, players)` — bytes never ride the channel.
 2. **Fixed batch shape.** The buffer's capacity IS the callback batch size, padded
-   on the final short fire of a window (`pad_rows_to` semantics). Fixed shapes make
-   the NumPy array a stable preallocated object that wraps the buffer without
-   copying — and give callers a static shape to `torch.compile` against.
-3. **Buffer rotation.** Two (or more) buffers per queue rotate: workers fill the
-   next while the callback runs on the current, extending the existing
-   collection/inference overlap down into buffer granularity. A buffer is recycled
-   once its prediction rows have been routed.
+   on the final short fire of a window (`pad_rows_to` semantics). Stable shape is
+   what callers need to `torch.compile` against; the array object itself is fresh
+   per fire.
+3. **Ownership per fire.** Each fired buffer is a distinct allocation, moved into
+   its NumPy array exactly as today (Python owns the storage; its GC frees it).
+   Nothing is recycled when the callback returns: callbacks legitimately retain
+   arrays, wrap them in `torch.from_numpy`, or start asynchronous device
+   transfers, and reuse on return would mutate retained tensors or race an
+   in-flight copy. Workers simply open a freshly allocated arena while the
+   callback runs on the previous one — the allocator hands back same-sized blocks
+   essentially for free, and the pages are touched by worker writes either way.
+   If profiling ever shows allocation itself mattering, storage can be returned
+   to a pool through the NumPy owner's deallocator capsule — reuse gated on the
+   array's actual death, so retained arrays delay reuse safely instead of being
+   corrupted by it.
 4. **The scheduler's remaining job** is control flow only: reservation accounting,
    firing, routing the (small, f64) prediction rows back to blocked slots, floor
    and record bookkeeping. All of it is O(rows), none of it is O(bytes).
