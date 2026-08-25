@@ -59,6 +59,18 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    pixel encoder is already shaped for it (its downsample writes into a
    caller-provided buffer).
 
+   Handing encoders `&mut [f32]` requires the storage to be initialized —
+   constructing a reference over uninitialized memory is unsound regardless of
+   the element type. Arenas are therefore allocated zeroed
+   (`vec![0f32; capacity * dim]`), keeping `MaybeUninit` out of every API.
+   Large zeroed allocations are *commonly* satisfied with lazily mapped zero
+   pages, making the zeroing near-free in practice — but neither Rust's
+   allocator nor the OS guarantees this, so it is an expected cost profile,
+   not an invariant; a recycled dirty allocation would require a real zeroing
+   pass. Zero initialization also solves only value validity: the unsafe arena
+   wrapper must separately guarantee that concurrently writing workers receive
+   strictly disjoint `&mut` slices (see the reservation protocol).
+
    Canonical root rows (`push_root`) keep an owned copy in both stages, by
    design: the training record needs a row that outlives the batch, and the
    arena's storage is destined for Python ownership. One parallel copy is the
@@ -70,6 +82,11 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
 
    - *Bounded reservation.* Spans are claimed by CAS on the write cursor that
      fails at capacity — a plain `fetch_add(k)` can overrun the buffer.
+   - *Disjointness.* The wrapper's core aliasing invariant: every handed-out
+     span is a strictly disjoint `&mut [f32]`, guaranteed by the reservation
+     arithmetic (non-overlapping ranges from a monotone cursor) and tested
+     independently — zeroed allocation makes the values valid, but only
+     disjointness makes the mutable references sound.
    - *Splitting.* A round emitting more rows than the open buffer's remaining
      space splits across buffers; more than a whole batch, across several fires.
      Spans address `(buffer, range)` pairs, and a search's rows may span fires —
@@ -91,10 +108,10 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    initialized prefix (O(1) for `f32`, capacity slack rides along until Python
    frees it) and moves it into NumPy as `(n, dim)`, exactly today's
    variable-shape default, zero copies. Padding stays the `pad=True` opt-in for
-   callers who want `torch.compile`-stable shapes: with it enabled, sealing a
-   short fire memsets the uninitialized tail — O(padded bytes), but only the
-   tail of the final short fire of a window, so the O(rows) scheduler claim
-   stands. Zero-copy must never require padding.
+   callers who want `torch.compile`-stable shapes: with it enabled, a short
+   fire's tail is already zero (arenas are allocated zeroed for soundness — see
+   element 1), so padding costs nothing at seal time. Zero-copy must never
+   require padding.
 4. **Memory is bounded, checked, and lazy.** Arena memory is
    `pool_depth x capacity x dim x 4` bytes per inference route, and pixel rows
    make that real money: two 1,024-row `car_racing` buffers are ~216 MiB, and
@@ -120,7 +137,10 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    If profiling ever shows allocation itself mattering, storage can be returned
    to a pool through the NumPy owner's deallocator capsule — reuse gated on the
    array's actual death, so retained arrays delay reuse safely instead of being
-   corrupted by it.
+   corrupted by it. Note the coupled cost: recycled buffers come back dirty, so
+   pooling reopens the zeroing question (a real memset per reuse, or
+   `MaybeUninit` internally) — a deferred cost the pooling path carries, not a
+   free optimization.
 6. **The evaluator is replaced, not layered over.** A pooled buffer placed
    underneath the current `Evaluator::forward` would still be staged row-by-row
    into `EvalBatch::obs_flat` — the copy would move, not disappear. The arena IS
