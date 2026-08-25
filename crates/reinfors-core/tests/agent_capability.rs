@@ -165,7 +165,7 @@ impl Policy for CappedStub {
         &self,
         _ctx: reinfors_core::policy::SearchCtx<'_, G>,
         _search: &mut Self::Search<G::State>,
-        _out: &mut reinfors_core::policy::RequestSink,
+        _out: &mut reinfors_core::policy::RequestSink<'_, G::State>,
     ) -> reinfors_core::policy::RoundStatus
     where
         G::State: Send,

@@ -103,7 +103,7 @@ impl Policy for EpsilonGreedyQ {
         &self,
         _ctx: crate::policy::SearchCtx<'_, G>,
         search: &mut Self::Search<G::State>,
-        out: &mut crate::policy::RequestSink,
+        out: &mut crate::policy::RequestSink<'_, G::State>,
     ) -> crate::policy::RoundStatus
     where
         G::State: Send,

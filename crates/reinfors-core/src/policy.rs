@@ -32,18 +32,49 @@ pub enum RoundStatus {
     Done,
 }
 
-/// Collects one round's evaluation requests: `(player, encoded obs)` rows. Root marks
-/// are retained only in capture mode (the collection engine); elsewhere `push_root`
-/// degrades to `push` so batched choice never holds a second copy of the rows.
-#[derive(Default)]
-pub struct RequestSink {
-    pub(crate) players: Vec<usize>,
-    pub(crate) obs: Vec<f32>,
-    pub(crate) roots: Vec<(usize, Vec<f32>)>,
-    capture_roots: bool,
+/// The zero-copy engine's state-backed emission seam: rows born in arena spans,
+/// cache identity resolved before any reservation.
+pub(crate) trait StateSink<S> {
+    fn push_state(
+        &mut self,
+        enc: &dyn crate::encoder::StateEncoder<State = S>,
+        player: usize,
+        state: &S,
+        pos: u32,
+        scratch: &mut Vec<f32>,
+    );
 }
 
-impl RequestSink {
+/// Collects one round's evaluation requests: `(player, encoded obs)` rows, or
+/// state-backed requests (`push_state`) that the zero-copy engine encodes straight
+/// into arena storage. Root marks are retained only in capture mode.
+pub struct RequestSink<'e, S> {
+    pub(crate) players: Vec<usize>,
+    pub(crate) obs: Vec<f32>,
+    pub(crate) buffered_pos: Vec<u32>,
+    pub(crate) roots: Vec<(usize, Vec<f32>)>,
+    capture_roots: bool,
+    n: usize,
+    pub(crate) backend: Option<&'e mut dyn StateSink<S>>,
+    scratch: Vec<f32>,
+}
+
+impl<S> Default for RequestSink<'_, S> {
+    fn default() -> Self {
+        RequestSink {
+            players: Vec::new(),
+            obs: Vec::new(),
+            buffered_pos: Vec::new(),
+            roots: Vec::new(),
+            capture_roots: false,
+            n: 0,
+            backend: None,
+            scratch: Vec::new(),
+        }
+    }
+}
+
+impl<'e, S> RequestSink<'e, S> {
     pub(crate) fn capturing_roots() -> Self {
         RequestSink {
             capture_roots: true,
@@ -51,9 +82,19 @@ impl RequestSink {
         }
     }
 
+    pub(crate) fn with_backend(backend: &'e mut dyn StateSink<S>) -> Self {
+        RequestSink {
+            capture_roots: true,
+            backend: Some(backend),
+            ..Default::default()
+        }
+    }
+
     pub fn push(&mut self, player: usize, obs: &[f32]) {
         self.players.push(player);
         self.obs.extend_from_slice(obs);
+        self.buffered_pos.push(self.n as u32);
+        self.n += 1;
     }
 
     /// Push a request whose row is the canonical current-state observation for
@@ -63,21 +104,51 @@ impl RequestSink {
     pub fn push_root(&mut self, player: usize, obs: Vec<f32>, perspective: usize) {
         self.players.push(player);
         self.obs.extend_from_slice(&obs);
+        self.buffered_pos.push(self.n as u32);
+        self.n += 1;
         if self.capture_roots {
             self.roots.push((perspective, obs));
         }
     }
 
+    /// Push a request identified by its state: the zero-copy engine resolves the
+    /// cache before reserving and encodes misses directly into arena storage; on
+    /// other paths this encodes and buffers exactly like `push`.
+    pub fn push_state(
+        &mut self,
+        enc: &dyn crate::encoder::StateEncoder<State = S>,
+        player: usize,
+        state: &S,
+    ) {
+        let pos = self.n as u32;
+        if let Some(backend) = self.backend.as_mut() {
+            backend.push_state(enc, player, state, pos, &mut self.scratch);
+            self.n += 1;
+            return;
+        }
+        let row = enc.encode(state, player);
+        self.players.push(player);
+        self.obs.extend_from_slice(&row);
+        self.buffered_pos.push(pos);
+        self.n += 1;
+    }
+
     pub fn len(&self) -> usize {
-        self.players.len()
+        self.n
     }
 
     pub fn is_empty(&self) -> bool {
-        self.players.is_empty()
+        self.n == 0
     }
 
     pub fn into_parts(self) -> (Vec<usize>, Vec<f32>) {
         (self.players, self.obs)
+    }
+
+    /// Buffered rows (with emission positions) plus retained root rows — engine only.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn into_zc_parts(self) -> (Vec<usize>, Vec<f32>, Vec<u32>, Vec<(usize, Vec<f32>)>) {
+        (self.players, self.obs, self.buffered_pos, self.roots)
     }
 
     /// `into_parts` plus the retained canonical rows — collection-engine only.
@@ -177,7 +248,7 @@ pub trait Policy {
         &self,
         ctx: SearchCtx<'_, G>,
         search: &mut Self::Search<G::State>,
-        out: &mut RequestSink,
+        out: &mut RequestSink<'_, G::State>,
     ) -> RoundStatus
     where
         G::State: Send;

@@ -223,7 +223,7 @@ fn rounds_execute_while_the_callback_runs() {
             &self,
             _ctx: reinfors_core::policy::SearchCtx<'_, G>,
             emitted: &mut bool,
-            out: &mut reinfors_core::policy::RequestSink,
+            out: &mut reinfors_core::policy::RequestSink<'_, G::State>,
         ) -> reinfors_core::policy::RoundStatus
         where
             G::State: Send,

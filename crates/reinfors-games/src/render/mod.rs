@@ -110,14 +110,21 @@ impl Raster {
 
     /// Box-filter straight into a flat channel-major f32 row (raw 0-255 values),
     /// skipping the intermediate HWC buffer.
+    #[allow(dead_code)]
     pub fn downsample_chw_f32(&self, out: &mut Vec<f32>, final_w: usize, final_h: usize) {
+        out.clear();
+        out.resize(3 * final_h * final_w, 0.0);
+        self.downsample_chw_f32_into(out, final_w, final_h);
+    }
+
+    /// `downsample_chw_f32` into caller-provided storage (the zero-copy arena path).
+    pub fn downsample_chw_f32_into(&self, out: &mut [f32], final_w: usize, final_h: usize) {
         let f = self.factor as usize;
         let src = self.pixmap.data();
         let src_w = final_w * f;
         let area = (f * f) as u32;
         let plane = final_h * final_w;
-        out.clear();
-        out.resize(3 * plane, 0.0);
+        assert_eq!(out.len(), 3 * plane, "obs row width mismatch");
         let (rp, rest) = out.split_at_mut(plane);
         let (gp, bp) = rest.split_at_mut(plane);
         // Two passes per output row, both integer-exact vs the naive form: a

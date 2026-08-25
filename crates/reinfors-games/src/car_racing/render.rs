@@ -360,15 +360,19 @@ impl reinfors_core::StateEncoder for CarRacingPixels {
     type State = CarRacingState;
 
     fn encode(&self, state: &CarRacingState, _agent: usize) -> Vec<f32> {
+        let mut out = vec![0.0; 3 * FRAME * FRAME];
+        self.encode_into(state, _agent, &mut out);
+        out
+    }
+
+    fn encode_into(&self, state: &CarRacingState, _agent: usize, dst: &mut [f32]) {
         let CarRacingState::Live(live) = state else {
             unreachable!("encode on a pending CarRacing state (kept out of observations)");
         };
-        let mut out = Vec::new();
         RASTER.with_borrow_mut(|r| {
             rasterize(live, r);
-            r.downsample_chw_f32(&mut out, FRAME, FRAME);
+            r.downsample_chw_f32_into(dst, FRAME, FRAME);
         });
-        out
     }
 
     fn obs_shape(&self) -> (usize, usize, usize) {
