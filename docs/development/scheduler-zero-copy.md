@@ -85,10 +85,16 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    - *Lifecycle.* Each buffer moves `Filling → Sealed → InInference → Released`
      (released = moved into NumPy), with transitions owned by the scheduler.
 
-3. **Fixed batch shape.** The buffer's capacity IS the callback batch size, padded
-   on the final short fire of a window (`pad_rows_to` semantics). Stable shape is
-   what callers need to `torch.compile` against; the array object itself is fresh
-   per fire.
+3. **Capacity is fixed; shape is not.** The buffer's capacity is a
+   protocol-internal constant — spans must be reserved against a fixed limit —
+   and is NOT a callback-shape contract. A short fire truncates the `Vec` to its
+   initialized prefix (O(1) for `f32`, capacity slack rides along until Python
+   frees it) and moves it into NumPy as `(n, dim)`, exactly today's
+   variable-shape default, zero copies. Padding stays the `pad=True` opt-in for
+   callers who want `torch.compile`-stable shapes: with it enabled, sealing a
+   short fire memsets the uninitialized tail — O(padded bytes), but only the
+   tail of the final short fire of a window, so the O(rows) scheduler claim
+   stands. Zero-copy must never require padding.
 4. **Ownership per fire.** Each fired buffer is a distinct allocation, moved into
    its NumPy array exactly as today (Python owns the storage; its GC frees it).
    Nothing is recycled when the callback returns: callbacks legitimately retain
