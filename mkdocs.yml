@@ -54,6 +54,7 @@ nav:
   - Concepts:
       - concepts/index.md
       - Architecture: concepts/architecture.md
+      - Engine collection internals: concepts/engine-collection.md
       - Sampling and training: concepts/sampling-and-training.md
   - Catalogue:
       - catalogue/index.md

@@ -7,5 +7,7 @@ for the first example and useful when choosing an experiment architecture.
   `Env` onto their Rust and Python responsibilities.
 - [Sampling and training](sampling-and-training.md) follows one collection round, explains pooled
   inference, and connects `n_games` and search budgets to hardware utilization.
+- [Engine collection internals](engine-collection.md) shows the runtime: thread roles, the
+  scheduler/worker message flow, and where throughput is bound today.
 
 When the model is clear, put it into practice with the [training guide](../guides/training.md).
