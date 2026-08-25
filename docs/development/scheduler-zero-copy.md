@@ -30,20 +30,39 @@ directly; the scheduler stops touching observation bytes entirely.
 
 ```text
 TODAY                                    PROPOSED
-worker: encode → emit rows ──mpsc──▶     worker: encode → reserve a row span in
-scheduler: copy into queue (A)                   the open pooled buffer (atomic
-scheduler: copy into NumPy (B)                   offset bump) → write rows in
-scheduler: GIL + infer(batch)                    place → notify
-                                         scheduler: count reservations; when the
+worker: encode → sink → emit ──mpsc──▶   worker: encode → reserve a row span in
+scheduler: copy into queue                       the open pooled buffer (atomic
+scheduler: copy out at fire                      offset bump) → copy rows into
+scheduler: copy into eval batch                  the span → notify
+scheduler: GIL + infer(batch)            scheduler: count reservations; when the
                                                  buffer fills: GIL + infer(batch
                                                  wrapping the buffer, no copy)
 ```
 
-1. **Pooled write buffers.** Each request queue owns a preallocated, fixed-capacity
-   observation buffer (one per inference route: shared, or per player). A worker
-   emitting `k` rows reserves a contiguous span with an atomic offset add and
-   encodes/copies its rows straight into the span. The mpsc message carries only
-   metadata: `(slot, span, players)` — bytes never ride the channel.
+1. **Pooled write buffers, in two stages.** Each request queue owns a
+   fixed-capacity observation buffer (one per inference route: shared, or per
+   player). A worker emitting `k` rows reserves a contiguous span with an atomic
+   offset add and fills it; the mpsc message carries only metadata:
+   `(slot, span, players)` — bytes never ride the channel.
+
+   *Stage 1 (policy-agnostic, no encoder/policy API changes):* the policy encodes
+   into worker-local `Vec`s exactly as today, and the worker copies them into its
+   span. The copy inventory becomes two worker-side copies and **zero** scheduler
+   copies — the surviving copy is parallel and scales with `n_threads`, which is
+   the point.
+
+   *Stage 2 (opt-in, per encoder):* add `StateEncoder::encode_into(state, agent,
+   dst: &mut [f32])` with a default that delegates to `encode()`, plus a sink
+   `push_with(player, dim, |dst| ...)` that reserves the span and hands the
+   encoder the destination slice. This removes the last copy for the rows where
+   it compounds — high-volume, never-retained search leaf rows. `car_racing`'s
+   pixel encoder is already shaped for it (its downsample writes into a
+   caller-provided buffer).
+
+   Canonical root rows (`push_root`) keep an owned copy in both stages, by
+   design: the training record needs a row that outlives the batch, and the
+   arena's storage is destined for Python ownership. One parallel copy is the
+   floor for that one row per decision.
 2. **Fixed batch shape.** The buffer's capacity IS the callback batch size, padded
    on the final short fire of a window (`pad_rows_to` semantics). Stable shape is
    what callers need to `torch.compile` against; the array object itself is fresh
