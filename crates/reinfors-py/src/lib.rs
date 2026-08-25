@@ -843,9 +843,9 @@ impl PyEngine {
         } else {
             n_threads.min(n_games)
         };
-        if zero_copy && (infer_cache > 0 || pad) {
+        if zero_copy && pad {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "zero_copy does not support infer_cache or pad yet",
+                "zero_copy does not support pad yet",
             ));
         }
         if batch_size > 1 << 20 {

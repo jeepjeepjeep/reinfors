@@ -52,8 +52,11 @@ def test_oversized_arena_is_rejected_at_construction() -> None:
 def test_unsupported_combinations_are_rejected() -> None:
     with pytest.raises(ValueError, match="zero_copy"):
         _engine(zero_copy=True, pad=True)
-    with pytest.raises(ValueError, match="zero_copy"):
-        _engine(zero_copy=True, infer_cache=64)
+
+
+def test_infer_cache_composes_and_serves_hits() -> None:
+    batch = _engine(zero_copy=True, infer_cache=1024).collect(n_records=24, infer=_infer)
+    assert len(batch.obs) >= 24
 
 
 def test_collect_matches_the_classic_path() -> None:

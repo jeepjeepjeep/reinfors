@@ -14,6 +14,7 @@ use crate::rollout::episode::Episode;
 use crate::rollout::evaluator::{Evaluator, InferMode};
 use crate::rollout::infer_cache::InferCache;
 use crate::rollout::start::{AlwaysInitialState, Start, StartDistribution};
+use crate::rollout::zc_cache::{CacheView, ZcCache};
 
 pub use crate::stats::EpisodeSummary;
 
@@ -91,6 +92,7 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     batch_size: usize,
     sweep_cursor: usize,
     zero_copy: bool,
+    zc_caches: Option<Vec<ZcCache>>,
     thread_pool: rayon::ThreadPool,
 }
 
@@ -171,6 +173,7 @@ where
                 .unwrap_or_else(|| (params.n_games / 2).max(1)),
             sweep_cursor: 0,
             zero_copy: params.zero_copy,
+            zc_caches: None,
             thread_pool: rayon::ThreadPoolBuilder::new()
                 // At most one task per game slot can run: workers beyond n_games idle.
                 .num_threads(
@@ -932,11 +935,19 @@ where
         L: Sync,
         L::Record: Send,
     {
-        assert!(
-            self.infer_caches.is_none(),
-            "zero_copy does not support infer caches yet"
-        );
         assert!(!self.pad, "zero_copy does not support pad yet");
+        if let (Some(classic), None) = (self.infer_caches.as_ref(), self.zc_caches.as_ref()) {
+            self.zc_caches = Some(
+                classic
+                    .iter()
+                    .map(|c| {
+                        let (capacity, generation) = c.params();
+                        ZcCache::new(capacity, generation)
+                    })
+                    .collect(),
+            );
+        }
+        let mut zc_caches = self.zc_caches.take();
         let mut out: Vec<L::Record> = Vec::new();
         let mut stats = CollectStats::default();
         let collect_interior = self.learner.needs_interior();
@@ -990,13 +1001,24 @@ where
                 .map(|_| RouteShared::new(batch_size, obs_dim))
                 .collect();
             let routes = &routes;
-            let route_of = move |si: usize| match mode {
-                InferMode::Shared => 0,
-                InferMode::PerPlayer => si,
-            };
+            // route -> cache slot: shared uses slot 0, per-player slots 1..=N
+            let mut route_caches: Option<Vec<&mut ZcCache>> =
+                zc_caches.as_mut().map(|c| match mode {
+                    InferMode::Shared => c[..1].iter_mut().collect(),
+                    InferMode::PerPlayer => c[1..].iter_mut().collect(),
+                });
+            if let Some(rc) = route_caches.as_mut() {
+                for cache in rc.iter_mut() {
+                    cache.sync_generation();
+                }
+            }
+            let mut views: Pins = route_caches
+                .as_ref()
+                .map(|rc| rc.iter().map(|c| c.view()).collect());
 
             let task = |gi: usize,
                         work: AWork<P::Search<G::State>>,
+                        pins: Pins,
                         tx: AMsgSender<P::Search<G::State>, L::Record>| {
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut guard = slots[gi].lock().expect("slot lock");
@@ -1049,23 +1071,20 @@ where
                             let reqs =
                                 tail_requests(game, policy, learner, encoder, sequential, slot);
                             let n = reqs.len();
-                            let mut meta = Vec::with_capacity(n);
+                            let meta: Vec<usize> = reqs.iter().map(|(si, _)| *si).collect();
+                            let rows_in: Vec<(usize, &[f32])> =
+                                reqs.iter().map(|(si, obs)| (*si, obs.as_slice())).collect();
                             let mut spans = Vec::new();
-                            for (pos, (si, obs)) in reqs.into_iter().enumerate() {
-                                let route = route_of(si);
-                                push_route_rows(
-                                    route,
-                                    &routes[route],
-                                    &[(pos as u32, obs.as_slice())],
-                                    &mut spans,
-                                );
-                                meta.push(si);
-                            }
+                            let mut hits = Vec::new();
+                            let lookups =
+                                classify_rows(mode, &pins, &rows_in, routes, &mut spans, &mut hits);
                             return ATaskOut::TailEmitted {
                                 fragment,
                                 meta,
                                 n,
                                 spans,
+                                hits,
+                                lookups,
                             };
                         }
                     };
@@ -1106,38 +1125,21 @@ where
                                 RootMark::Dropped
                             };
                         }
+                        let rows_in: Vec<(usize, &[f32])> = (0..n)
+                            .map(|i| (players[i], &obs[i * obs_dim..(i + 1) * obs_dim]))
+                            .collect();
                         let mut spans = Vec::new();
-                        match mode {
-                            InferMode::Shared => {
-                                let rows: Vec<(u32, &[f32])> = (0..n)
-                                    .map(|i| (i as u32, &obs[i * obs_dim..(i + 1) * obs_dim]))
-                                    .collect();
-                                push_route_rows(0, &routes[0], &rows, &mut spans);
-                            }
-                            InferMode::PerPlayer =>
-                            {
-                                #[allow(clippy::needless_range_loop)]
-                                for route in 0..n_routes {
-                                    let rows: Vec<(u32, &[f32])> = players
-                                        .iter()
-                                        .enumerate()
-                                        .filter(|&(_, &pl)| pl == route)
-                                        .map(|(i, _)| {
-                                            (i as u32, &obs[i * obs_dim..(i + 1) * obs_dim])
-                                        })
-                                        .collect();
-                                    if !rows.is_empty() {
-                                        push_route_rows(route, &routes[route], &rows, &mut spans);
-                                    }
-                                }
-                            }
-                        }
+                        let mut hits = Vec::new();
+                        let lookups =
+                            classify_rows(mode, &pins, &rows_in, routes, &mut spans, &mut hits);
                         return ATaskOut::Emitted {
                             search,
                             perspectives,
                             roots,
                             n,
                             spans,
+                            hits,
+                            lookups,
                         };
                     }
                     let ctx = crate::policy::SearchCtx {
@@ -1205,6 +1207,7 @@ where
             let mut pending: Vec<std::collections::HashMap<u64, PendingArena>> = (0..n_routes)
                 .map(|_| std::collections::HashMap::new())
                 .collect();
+            let mut gated: Vec<Vec<(usize, AHit)>> = (0..n_routes).map(|_| Vec::new()).collect();
             let mut in_flight = 0usize;
             let mut spin_budget = SPIN_RECVS_MIN;
             let mut backlog: isize = slots
@@ -1222,12 +1225,13 @@ where
             self.thread_pool.in_place_scope_fifo(|s| {
                 let spawn = |gi: usize,
                              work_item: AWork<P::Search<G::State>>,
+                             pins: Pins,
                              phases: &mut Vec<SlotPhase<P::Search<G::State>>>,
                              in_flight: &mut usize| {
                     phases[gi] = SlotPhase::Running;
                     *in_flight += 1;
                     let txc = tx.clone();
-                    s.spawn_fifo(move |_| task(gi, work_item, txc));
+                    s.spawn_fifo(move |_| task(gi, work_item, pins, txc));
                 };
                 // Drain in-flight completions before surfacing: a finished episode
                 // must respawn, never strand over-horizon.
@@ -1304,6 +1308,90 @@ where
                         std::panic::resume_unwind($payload);
                     }};
                 }
+                macro_rules! deliver_hit {
+                    ($gi:expr, $hit:expr, $freed:expr) => {{
+                        let stride = $hit.value.len();
+                        let (outstanding, buf, st, total) = match &mut phases[$gi] {
+                            SlotPhase::Blocked {
+                                outstanding,
+                                rows: buf,
+                                stride: st,
+                                total,
+                                ..
+                            }
+                            | SlotPhase::AwaitingTail {
+                                outstanding,
+                                rows: buf,
+                                stride: st,
+                                total,
+                                ..
+                            } => (outstanding, buf, st, *total),
+                            _ => unreachable!("hit released to a slot with no outstanding round"),
+                        };
+                        if buf.is_empty() {
+                            buf.resize(total * stride, 0.0);
+                            *st = stride;
+                        } else {
+                            assert_eq!(*st, stride, "cached row width differs from fired rows");
+                        }
+                        let pos = $hit.pos as usize;
+                        for (dst, src) in buf[pos * stride..(pos + 1) * stride]
+                            .iter_mut()
+                            .zip($hit.value.iter())
+                        {
+                            *dst = f64::from(*src);
+                        }
+                        *outstanding -= 1;
+                        if *outstanding == 0 {
+                            $freed.push($gi);
+                        }
+                    }};
+                }
+                // Validate each gated ticket's pinned generation at release: current
+                // delivers; stale demotes through the ordinary reservation path.
+                macro_rules! release_gated {
+                    ($route:expr, $freed:expr) => {{
+                        if let Some(rc) = route_caches.as_mut() {
+                            let cache = &mut rc[$route];
+                            cache.sync_generation();
+                            let seen = cache.seen_generation();
+                            let mut demote: std::collections::BTreeMap<
+                                usize,
+                                Vec<(usize, u32, u128, Vec<f32>)>,
+                            > = std::collections::BTreeMap::new();
+                            for (gi, hit) in gated[$route].drain(..) {
+                                if hit.gen == seen {
+                                    cache.stage_promote(hit.key);
+                                    deliver_hit!(gi, hit, $freed);
+                                } else {
+                                    demote
+                                        .entry(gi)
+                                        .or_default()
+                                        .push((hit.route, hit.pos, hit.key, hit.row));
+                                }
+                            }
+                            for (gi, items) in demote {
+                                in_flight += 1;
+                                let txc = tx.clone();
+                                s.spawn_fifo(move |_| {
+                                    let mut spans = Vec::new();
+                                    for (route, pos, key, row) in &items {
+                                        push_route_rows(
+                                            *route,
+                                            &routes[*route],
+                                            &[(*pos, *key, row.as_slice())],
+                                            &mut spans,
+                                        );
+                                    }
+                                    let _ = txc.send(AMsg {
+                                        gi,
+                                        out: ATaskOut::DemoteEmitted { spans },
+                                    });
+                                });
+                            }
+                        }
+                    }};
+                }
                 macro_rules! settle_freed {
                     ($freed:expr) => {{
                         for gi in $freed {
@@ -1324,6 +1412,7 @@ where
                                         rows,
                                         stride,
                                     },
+                                    views.clone(),
                                     &mut phases,
                                     &mut in_flight,
                                 ),
@@ -1362,7 +1451,13 @@ where
                                         cutting = true;
                                     }
                                     if !cutting && matches!(phases[gi], SlotPhase::Idle) {
-                                        spawn(gi, AWork::Begin, &mut phases, &mut in_flight);
+                                        spawn(
+                                            gi,
+                                            AWork::Begin,
+                                            views.clone(),
+                                            &mut phases,
+                                            &mut in_flight,
+                                        );
                                     }
                                 }
                                 _ => unreachable!("a freed slot must hold outstanding rows"),
@@ -1386,6 +1481,10 @@ where
                                 .arena
                                 .take_rows()
                                 .expect("every span accounted and committed");
+                            let gen_at_fire = route_caches.as_mut().map(|rc| {
+                                rc[$route].sync_generation();
+                                rc[$route].seen_generation()
+                            });
                             let t0 = std::time::Instant::now();
                             let call = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                                 || infer($route, obs, take),
@@ -1443,6 +1542,19 @@ where
                                     freed.push(gi);
                                 }
                             }
+                            if let Some(rc) = route_caches.as_mut() {
+                                let cache = &mut rc[$route];
+                                for i in 0..take {
+                                    cache.stage_insert(pa.keys[i], &rows[i * stride..(i + 1) * stride]);
+                                }
+                            }
+                            release_gated!($route, freed);
+                            if let (Some(rc), Some(vs), Some(g)) =
+                                (route_caches.as_mut(), views.as_mut(), gen_at_fire)
+                            {
+                                rc[$route].publish(g);
+                                vs[$route] = rc[$route].view();
+                            }
                             settle_freed!(freed);
                         }
                     }};
@@ -1455,10 +1567,12 @@ where
                             let pa = pending[route].entry(id).or_insert_with(|| PendingArena {
                                 arc: span.arena.clone(),
                                 dest: vec![(u32::MAX, u32::MAX); batch_size],
+                                keys: vec![0; batch_size],
                                 seen: 0,
                             });
                             for (j, &pos) in span.positions.iter().enumerate() {
                                 pa.dest[span.first_row + j] = ($gi as u32, pos);
+                                pa.keys[span.first_row + j] = span.keys[j];
                             }
                             pa.seen += span.positions.len();
                             try_fire!(route, id);
@@ -1468,7 +1582,7 @@ where
                 if !cutting {
                     for k in 0..n_games {
                         let gi = (base_cursor + k) % n_games;
-                        spawn(gi, AWork::Begin, &mut phases, &mut in_flight);
+                        spawn(gi, AWork::Begin, views.clone(), &mut phases, &mut in_flight);
                     }
                 }
                 loop {
@@ -1490,6 +1604,24 @@ where
                             }
                             continue;
                         }
+                        // Quiescence release: with nothing in flight there is no
+                        // cadence left to gate against.
+                        if gated.iter().any(|g| !g.is_empty()) {
+                            let mut freed = Vec::new();
+                            #[allow(clippy::needless_range_loop)]
+                            for route in 0..n_routes {
+                                release_gated!(route, freed);
+                                if let (Some(rc), Some(vs)) =
+                                    (route_caches.as_mut(), views.as_mut())
+                                {
+                                    let g = rc[route].seen_generation();
+                                    rc[route].publish(g);
+                                    vs[route] = rc[route].view();
+                                }
+                            }
+                            settle_freed!(freed);
+                            continue;
+                        }
                         // Cut step 5: bootstrap live fragments through tail tasks.
                         if fragments && !frag_stage {
                             frag_stage = true;
@@ -1508,6 +1640,7 @@ where
                                 spawn(
                                     gi,
                                     AWork::Tail { fragment: true },
+                                    views.clone(),
                                     &mut phases,
                                     &mut in_flight,
                                 );
@@ -1553,9 +1686,13 @@ where
                             roots,
                             n,
                             spans,
+                            hits,
+                            lookups,
                         } => {
                             let gi = msg.gi;
                             stats.sum_requested_rows += n;
+                            stats.cache_lookups += lookups;
+                            stats.cache_hits += hits.len();
                             // installed before any accounting that could fire
                             phases[gi] = SlotPhase::Blocked {
                                 search,
@@ -1566,6 +1703,13 @@ where
                                 rows: Vec::new(),
                                 stride: 0,
                             };
+                            for hit in hits {
+                                gated[hit.route].push((gi, hit));
+                            }
+                            account_spans!(gi, spans);
+                        }
+                        ATaskOut::DemoteEmitted { spans } => {
+                            let gi = msg.gi;
                             account_spans!(gi, spans);
                         }
                         ATaskOut::TailEmitted {
@@ -1573,6 +1717,8 @@ where
                             meta,
                             n,
                             spans,
+                            hits,
+                            lookups,
                         } => {
                             let gi = msg.gi;
                             if n == 0 {
@@ -1613,12 +1759,20 @@ where
                                         cutting = true;
                                     }
                                     if !cutting && matches!(phases[gi], SlotPhase::Idle) {
-                                        spawn(gi, AWork::Begin, &mut phases, &mut in_flight);
+                                        spawn(
+                                            gi,
+                                            AWork::Begin,
+                                            views.clone(),
+                                            &mut phases,
+                                            &mut in_flight,
+                                        );
                                     }
                                 }
                             } else {
                                 stats.sum_requested_rows += n;
                                 stats.sum_tail_rows += n;
+                                stats.cache_lookups += lookups;
+                                stats.cache_hits += hits.len();
                                 phases[gi] = SlotPhase::AwaitingTail {
                                     fragment,
                                     meta,
@@ -1627,6 +1781,9 @@ where
                                     rows: Vec::new(),
                                     stride: 0,
                                 };
+                                for hit in hits {
+                                    gated[hit.route].push((gi, hit));
+                                }
                                 account_spans!(gi, spans);
                             }
                         }
@@ -1673,6 +1830,7 @@ where
                                 spawn(
                                     gi,
                                     AWork::Tail { fragment: false },
+                                    views.clone(),
                                     &mut phases,
                                     &mut in_flight,
                                 );
@@ -1686,7 +1844,7 @@ where
                                 cutting = true;
                             }
                             if !cutting && matches!(phases[gi], SlotPhase::Idle) {
-                                spawn(gi, AWork::Begin, &mut phases, &mut in_flight);
+                                spawn(gi, AWork::Begin, views.clone(), &mut phases, &mut in_flight);
                             }
                         }
                     }
@@ -1696,6 +1854,7 @@ where
                 self.sweep_cursor = (base_cursor + 1) % n_games.max(1);
             }
         }
+        self.zc_caches = zc_caches;
         (out, stats)
     }
 }
@@ -1896,6 +2055,11 @@ where
                 cache.force_clear();
             }
         }
+        if let Some(caches) = self.zc_caches.as_mut() {
+            for cache in caches.iter_mut() {
+                cache.force_clear();
+            }
+        }
         Ok(())
     }
 }
@@ -2063,13 +2227,73 @@ struct ASpan {
     arena: std::sync::Arc<RouteArena>,
     first_row: usize,
     positions: Vec<u32>,
+    keys: Vec<u128>,
+}
+
+/// A cache hit resolved at the worker: reserves nothing, parks until its route's
+/// next release point. `row` is retained so a stale hit can demote by re-emission.
+struct AHit {
+    route: usize,
+    pos: u32,
+    key: u128,
+    gen: u64,
+    value: std::sync::Arc<[f32]>,
+    row: Vec<f32>,
+}
+
+type Pins = Option<Vec<std::sync::Arc<CacheView>>>;
+
+/// Route rows through the pinned cache views: hits park, misses go to the arenas.
+fn classify_rows(
+    mode: InferMode,
+    pins: &Pins,
+    rows_in: &[(usize, &[f32])],
+    routes: &[RouteShared],
+    spans: &mut Vec<ASpan>,
+    hits: &mut Vec<AHit>,
+) -> usize {
+    let route_of = |p: usize| match mode {
+        InferMode::Shared => 0,
+        InferMode::PerPlayer => p,
+    };
+    let mut lookups = 0;
+    let mut misses: Vec<Vec<(u32, u128, &[f32])>> = vec![Vec::new(); routes.len()];
+    for (i, (player, row)) in rows_in.iter().enumerate() {
+        let route = route_of(*player);
+        let mut key = 0u128;
+        if let Some(pins) = pins {
+            key = match mode {
+                InferMode::Shared => InferCache::key(row),
+                InferMode::PerPlayer => InferCache::key_for_player(*player, row),
+            };
+            lookups += 1;
+            if let Some(value) = pins[route].lookup(key) {
+                hits.push(AHit {
+                    route,
+                    pos: i as u32,
+                    key,
+                    gen: pins[route].generation,
+                    value,
+                    row: row.to_vec(),
+                });
+                continue;
+            }
+        }
+        misses[route].push((i as u32, key, row));
+    }
+    for (route, rows) in misses.iter().enumerate() {
+        if !rows.is_empty() {
+            push_route_rows(route, &routes[route], rows, spans);
+        }
+    }
+    lookups
 }
 
 /// Copy rows into the route's open arenas, splitting across buffers at capacity.
 fn push_route_rows(
     route_idx: usize,
     route: &RouteShared,
-    rows: &[(u32, &[f32])],
+    rows: &[(u32, u128, &[f32])],
     spans: &mut Vec<ASpan>,
 ) {
     let mut next = 0;
@@ -2086,9 +2310,11 @@ fn push_route_rows(
         let take = span.rows();
         let first = span.row_range().start;
         let mut positions = Vec::with_capacity(take);
-        for (pos, row) in &rows[next..next + take] {
+        let mut keys = Vec::with_capacity(take);
+        for (pos, key, row) in &rows[next..next + take] {
             span.push_row(row);
             positions.push(*pos);
+            keys.push(*key);
         }
         span.commit();
         spans.push(ASpan {
@@ -2096,6 +2322,7 @@ fn push_route_rows(
             arena: cur.clone(),
             first_row: first,
             positions,
+            keys,
         });
         next += take;
         // A close on the task's FINAL span defers replacement to the next
@@ -2129,11 +2356,18 @@ enum ATaskOut<SE, R> {
         roots: Vec<RootMark>,
         n: usize,
         spans: Vec<ASpan>,
+        hits: Vec<AHit>,
+        lookups: usize,
     },
     TailEmitted {
         fragment: bool,
         meta: Vec<usize>,
         n: usize,
+        spans: Vec<ASpan>,
+        hits: Vec<AHit>,
+        lookups: usize,
+    },
+    DemoteEmitted {
         spans: Vec<ASpan>,
     },
     Completed {
@@ -2157,6 +2391,7 @@ type AMsgSender<SE, R> = std::sync::mpsc::Sender<AMsg<SE, R>>;
 struct PendingArena {
     arc: std::sync::Arc<RouteArena>,
     dest: Vec<(u32, u32)>,
+    keys: Vec<u128>,
     seen: usize,
 }
 
