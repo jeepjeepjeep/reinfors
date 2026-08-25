@@ -92,9 +92,27 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
      Spans address `(buffer, range)` pairs, and a search's rows may span fires —
      `absorb` order is preserved by the routing table, not by contiguity.
    - *Commit tracking.* Reservation and completion are distinct states: workers
-     finish out of order, so a buffer seals on "every reserved span committed"
-     (a committed count, not the cursor), and span commits publish with Release
-     ordering that the sealing check Acquires before any byte reaches inference.
+     finish out of order, so span commits publish with Release ordering that the
+     sealing check Acquires before any byte reaches inference.
+   - *Atomic close, linearized with aliases.* "Every reserved span committed" is
+     not a sufficient sealing predicate: aliases reserve nothing, so an alias
+     registered while the scheduler freezes routing would wait forever for a
+     prediction row no routing entry delivers. Each buffer therefore carries one
+     packed atomic — `(closed, row_cursor, alias_count)` — and reservations AND
+     alias registrations are both CASes on it, both failing once closed. Close
+     is itself a CAS: performed by the reservation that fills the buffer to
+     capacity, or by the scheduler at quiescence. The closing CAS freezes exact
+     final counts `(k rows, m aliases)`, and the scheduler seals routing only
+     after processing exactly `k` commit and `m` alias messages — every CAS that
+     beat the close is guaranteed a routing entry. A loser (CAS after close)
+     retries against the next generation: cache first (its result may have
+     landed — gated hit), then the new buffer's staged map, else an ordinary
+     reservation; termination is structural since generations advance
+     monotonically. Cost: the reserve path keeps its single CAS (the word was
+     already there), aliases gain one CAS, reconciliation is two integer
+     compares per message, and close-race retries reuse their computed hash —
+     bookkeeping noise against fire cadence. The alias-vs-close interleaving
+     joins the independently tested invariants.
    - *Panic safety.* Reservation is held by an RAII guard that commits or poisons
      its span on drop: a worker panicking after reserving must not leave an
      uncommitted hole that stalls sealing forever. The scheduler's existing
@@ -215,9 +233,11 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    gated hits wait forever. The scheduler already has the exact observation
    point: its idle path blocks on the message channel, and blocking with
    `in_flight == 0` and no admissible slot IS the stall. The guard there
-   triggers the flush: seal each non-empty open buffer at its current fill
-   (truncate-to-prefix; the arena's commit rule makes this race-free, since
-   zero in-flight tasks implies every reserved span is committed), fire it,
+   triggers the flush: close each open buffer (the same atomic close as a
+   capacity fill), seal at current fill (truncate-to-prefix; race-free because
+   zero in-flight tasks implies every reserved span is committed AND every
+   registered alias message already processed — the `(k, m)` reconciliation is
+   trivially satisfied at true quiescence), fire non-empty buffers,
    then release ALL gated hits — including on routes whose buffer is empty,
    because the gate is a pacing device and at quiescence there is no cadence
    left to pace against. Released slots respawn into the fresh buffer and the
