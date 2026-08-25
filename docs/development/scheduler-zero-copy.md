@@ -137,6 +137,22 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
      must stay deadlock-free with an arena in flight.
    - *Lifecycle.* Each buffer moves `Filling → Sealed → InInference → Released`
      (released = moved into NumPy), with transitions owned by the scheduler.
+   - *An explicit `RoundMailbox`, installed at spawn.* Stage 2 commits spans
+     while `Policy::round(...)` is still executing, so a full arena can fire
+     — and its predictions return — before the worker sends
+     `TaskOut::Emitted`, i.e. before the scheduler owns the search state.
+     Deferring commits until the round returns is not safe: a round larger
+     than the pool's remaining capacity would hold uncommitted spans and
+     deadlock the fire. Instead the scheduler installs the round's mailbox
+     BEFORE spawning it; commits and returned predictions resolve tickets
+     into it even while the worker still owns the search; `Emitted` transfers
+     the search state and marks the ticket set complete; and the slot resumes
+     only when BOTH have happened — state transferred and every ticket
+     resolved. Either arrival order works, and it is the same join the
+     mailbox already performs for rounds straddling fires. One cleanup
+     obligation: a worker panicking mid-round after committing spans fires
+     normally but never sends `Emitted` — the panic drain must also discard
+     the orphaned mailbox and its parked predictions.
 
 3. **Capacity is fixed; shape is not.** The buffer's capacity is a
    protocol-internal constant — spans must be reserved against a fixed limit —
@@ -239,8 +255,11 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
      construction — no dead rows, no fire-time compaction, no wasted callback
      compute.
    - *Hits are gated on fire cadence — per ticket, per route.* Every emitted
-     row is a ticket in its slot's round mailbox, and the slot resumes only
-     when ALL tickets resolve — the mailbox machinery is today's, unchanged. A
+     row is a ticket in its slot's `RoundMailbox` (installed at spawn — see
+     the reservation protocol), and the slot resumes only when the round's
+     search state has transferred AND all tickets resolve. Hits, aliases,
+     misses, and rows spanning multiple fires are all just entries there,
+     resolved by different paths. A
      ticket resolves by its fire returning (miss), by aliasing a reserved row
      (alias), or — for a hit — at its release point: the row's value is already
      in hand at the worker, but the ticket parks until the next completed fire
@@ -396,6 +415,10 @@ engine:
   once, with correct `(k, m)` reconciliation.
 - Panic between reserve and commit: the RAII guard poisons the span; sealing and
   the scheduler's panic drain both terminate.
+- Mid-round fires: a round exceeding the open buffer's remaining capacity fires
+  and returns predictions before `Emitted`; the slot resumes correctly in
+  either arrival order, and a mid-round panic after committed spans drains the
+  orphaned mailbox.
 - Requests crossing and exceeding capacity: emissions split across buffers and
   across multiple fires, preserving `absorb` order through the routing table.
 - Alias-versus-seal races: the atomic close either admits the alias into the
