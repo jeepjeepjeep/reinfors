@@ -83,8 +83,10 @@ Steps 3 and 4 are the serialization point: after the worker-side sink copy (A),
 thread** — into the request queue (B), out of the queue at fire (C), and into
 the evaluator's cache/dedup batch (D) — while the workers that produced the rows
 sit blocked. The final hand-off to NumPy is an ownership move, not a copy.
-Per-player inference routing adds one more regrouping copy. Everything else
-scales with `n_threads`.
+Per-player inference routing adds one more regrouping copy, and truncation-tail
+bootstrap observations are encoded on the scheduler thread too (a full render
+per tail row for pixel games, though only at episode cuts, not per step).
+Everything else scales with `n_threads`.
 
 Whether this matters is a function of row size:
 

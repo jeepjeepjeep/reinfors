@@ -95,7 +95,21 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    short fire memsets the uninitialized tail — O(padded bytes), but only the
    tail of the final short fire of a window, so the O(rows) scheduler claim
    stands. Zero-copy must never require padding.
-4. **Ownership per fire.** Each fired buffer is a distinct allocation, moved into
+4. **Memory is bounded, checked, and lazy.** Arena memory is
+   `pool_depth x capacity x dim x 4` bytes per inference route, and pixel rows
+   make that real money: two 1,024-row `car_racing` buffers are ~216 MiB, and
+   per-player routing multiplies by the player count. Therefore: routes allocate
+   their buffers lazily on first request (per-player mode with `learn_players`
+   filtering means some routes never fire at all); size arithmetic is checked at
+   construction (`capacity * dim * 4` via `checked_mul`, rejected loudly on
+   overflow); pool depth (buffers concurrently alive inside the engine: filling
+   plus sealed-awaiting-inference) is bounded and configurable; and reservation
+   applies explicit backpressure — a worker that cannot reserve because the pool
+   is exhausted parks until a fire completes, which is safe because the
+   scheduler can always drain a sealed buffer through inference. Buffers already
+   moved into NumPy are the caller's memory, not the pool's.
+
+5. **Ownership per fire.** Each fired buffer is a distinct allocation, moved into
    its NumPy array exactly as today (Python owns the storage; its GC frees it).
    Nothing is recycled when the callback returns: callbacks legitimately retain
    arrays, wrap them in `torch.from_numpy`, or start asynchronous device
@@ -107,12 +121,12 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    to a pool through the NumPy owner's deallocator capsule — reuse gated on the
    array's actual death, so retained arrays delay reuse safely instead of being
    corrupted by it.
-5. **The evaluator is replaced, not layered over.** A pooled buffer placed
+6. **The evaluator is replaced, not layered over.** A pooled buffer placed
    underneath the current `Evaluator::forward` would still be staged row-by-row
    into `EvalBatch::obs_flat` — the copy would move, not disappear. The arena IS
    the batch, and this is the only path: there is no fallback evaluator to fork
    behavior on, so caching and deduplication must work inside it.
-6. **Caching moves to a read/write split; the cache stays an overlay.** Today the
+7. **Caching moves to a read/write split; the cache stays an overlay.** Today the
    evaluator hashes and compacts rows at fire time — inherently O(bytes) on the
    scheduler. Instead:
 
@@ -144,7 +158,13 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
      staged map covers duplicates within a buffer, the two-plane rule covers
      staleness across fires, and both failure costs are compute, not
      correctness.
-7. **The scheduler's remaining job** is control flow only: reservation accounting,
+8. **Tail bootstraps become worker tasks.** Today `tail_requests` encodes the
+   truncation/fragment bootstrap observations on the scheduler thread — for
+   pixel games that is a full render each, serialized. Under the arena, a cut
+   spawns a tail task onto the worker pool that encodes, reserves, and commits
+   like any other emission, with a tail marker routing its prediction rows to
+   the existing `AwaitingTail` bookkeeping.
+9. **The scheduler's remaining job** is control flow only: reservation accounting,
    firing, key lookups' insert/evict side, routing the (small, f64) prediction
    rows back to blocked slots, floor and record bookkeeping. All of it is
    O(rows), none of it is O(bytes).
