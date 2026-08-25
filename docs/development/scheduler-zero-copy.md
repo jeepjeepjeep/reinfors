@@ -101,18 +101,47 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    to a pool through the NumPy owner's deallocator capsule — reuse gated on the
    array's actual death, so retained arrays delay reuse safely instead of being
    corrupted by it.
-5. **The evaluator is replaced for arena batches, not layered over.** A pooled
-   buffer placed underneath the current `Evaluator::forward` would still be
-   staged row-by-row into `EvalBatch::obs_flat` — the copy would move, not
-   disappear. Arena batches need a specialized forward path where the arena IS
-   the batch. The infer cache and batch dedup are the design risk here: they key
-   and compact rows during staging. Keys can be hashed from arena spans in place;
-   dedup either works through ticket indirection into the arena or is disabled in
-   arena mode for v1 (it exists for search workloads with repeated leaves, which
-   are not the large-row workloads this proposal targets).
-6. **The scheduler's remaining job** is control flow only: reservation accounting,
-   firing, routing the (small, f64) prediction rows back to blocked slots, floor
-   and record bookkeeping. All of it is O(rows), none of it is O(bytes).
+5. **The evaluator is replaced, not layered over.** A pooled buffer placed
+   underneath the current `Evaluator::forward` would still be staged row-by-row
+   into `EvalBatch::obs_flat` — the copy would move, not disappear. The arena IS
+   the batch, and this is the only path: there is no fallback evaluator to fork
+   behavior on, so caching and deduplication must work inside it.
+6. **Caching moves to a read/write split; the cache stays an overlay.** Today the
+   evaluator hashes and compacts rows at fire time — inherently O(bytes) on the
+   scheduler. Instead:
+
+   - *Worker-read, scheduler-write.* Workers hash the row they just encoded
+     (cache-hot, parallel; ~10us for a 110 KB row against a ~350us encode) and
+     look the key up in a read-mostly shared cache. The scheduler remains the
+     cache's ONLY writer: inserts, eviction, and resizing happen at routing time,
+     in message order, so today's single-threaded cache logic (including the
+     per-player `Exclusive` slots) survives unchanged. Readers see shards behind
+     atomic pointer swaps; evicted rows stay alive through `Arc` clones held by
+     in-flight readers; recency updates ride the span metadata workers already
+     send ("keys I touched"), applied by the writer in order.
+   - *A hit never reserves a span.* The batch contains only genuine misses by
+     construction — no dead rows, no fire-time compaction, no wasted callback
+     compute.
+   - *In-flight duplicates alias.* A per-buffer staged map (fixed capacity,
+     insert-or-read-only, CAS on empty slots, cleared by the scheduler at each
+     fire) lets a second requester of an already-reserved key record an alias
+     ticket instead of reserving; the scheduler routes the one prediction row to
+     every claimant.
+   - *Two planes, never reconciled.* Cache reads and buffer reservations are
+     separate communication paths with one monotone invariant: a reserved span
+     is inference work, unconditionally. If a key completes and is inserted
+     after a worker's miss decision (the lookup-to-fire staleness window), that
+     worker's row rides to inference anyway — one redundant row, and the
+     routing-time insert is idempotent because a deterministic callback returns
+     identical values for identical bytes. The scheduler never re-checks the
+     cache for buffered rows; correctness never depends on cache state. The
+     staged map covers duplicates within a buffer, the two-plane rule covers
+     staleness across fires, and both failure costs are compute, not
+     correctness.
+7. **The scheduler's remaining job** is control flow only: reservation accounting,
+   firing, key lookups' insert/evict side, routing the (small, f64) prediction
+   rows back to blocked slots, floor and record bookkeeping. All of it is
+   O(rows), none of it is O(bytes).
 
 ## What must not change
 
