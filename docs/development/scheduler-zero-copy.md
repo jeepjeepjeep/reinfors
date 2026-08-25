@@ -31,9 +31,9 @@ directly; the scheduler stops touching observation bytes entirely.
 ```text
 TODAY                                    PROPOSED
 worker: encode → sink → emit ──mpsc──▶   worker: encode → reserve a row span in
-scheduler: copy into queue                       the open pooled buffer (atomic
-scheduler: copy out at fire                      offset bump) → copy rows into
-scheduler: copy into eval batch                  the span → notify
+scheduler: copy into queue                       the open pooled buffer (bounded
+scheduler: copy out at fire                      CAS reservation) → copy rows in
+scheduler: copy into eval batch                  → commit → notify
 scheduler: GIL + infer(batch)            scheduler: count reservations; when the
                                                  buffer fills: GIL + infer(batch
                                                  wrapping the buffer, no copy)
@@ -41,8 +41,8 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
 
 1. **Pooled write buffers, in two stages.** Each request queue owns a
    fixed-capacity observation buffer (one per inference route: shared, or per
-   player). A worker emitting `k` rows reserves a contiguous span with an atomic
-   offset add and fills it; the mpsc message carries only metadata:
+   player). A worker emitting `k` rows reserves a span through the protocol in
+   (2), fills it, and commits; the mpsc message carries only metadata:
    `(slot, span, players)` — bytes never ride the channel.
 
    *Stage 1 (policy-agnostic, no encoder/policy API changes):* the policy encodes
@@ -63,11 +63,33 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    design: the training record needs a row that outlives the batch, and the
    arena's storage is destined for Python ownership. One parallel copy is the
    floor for that one row per decision.
-2. **Fixed batch shape.** The buffer's capacity IS the callback batch size, padded
+2. **The reservation protocol is more than an atomic bump.** Disjoint concurrent
+   writes into shared storage force an `unsafe` interior-mutability wrapper, so
+   these invariants must be documented beside that wrapper and tested
+   independently of the engine:
+
+   - *Bounded reservation.* Spans are claimed by CAS on the write cursor that
+     fails at capacity — a plain `fetch_add(k)` can overrun the buffer.
+   - *Splitting.* A round emitting more rows than the open buffer's remaining
+     space splits across buffers; more than a whole batch, across several fires.
+     Spans address `(buffer, range)` pairs, and a search's rows may span fires —
+     `absorb` order is preserved by the routing table, not by contiguity.
+   - *Commit tracking.* Reservation and completion are distinct states: workers
+     finish out of order, so a buffer seals on "every reserved span committed"
+     (a committed count, not the cursor), and span commits publish with Release
+     ordering that the sealing check Acquires before any byte reaches inference.
+   - *Panic safety.* Reservation is held by an RAII guard that commits or poisons
+     its span on drop: a worker panicking after reserving must not leave an
+     uncommitted hole that stalls sealing forever. The scheduler's existing
+     panic-drain path must stay deadlock-free with an arena in flight.
+   - *Lifecycle.* Each buffer moves `Filling → Sealed → InInference → Released`
+     (released = moved into NumPy), with transitions owned by the scheduler.
+
+3. **Fixed batch shape.** The buffer's capacity IS the callback batch size, padded
    on the final short fire of a window (`pad_rows_to` semantics). Stable shape is
    what callers need to `torch.compile` against; the array object itself is fresh
    per fire.
-3. **Ownership per fire.** Each fired buffer is a distinct allocation, moved into
+4. **Ownership per fire.** Each fired buffer is a distinct allocation, moved into
    its NumPy array exactly as today (Python owns the storage; its GC frees it).
    Nothing is recycled when the callback returns: callbacks legitimately retain
    arrays, wrap them in `torch.from_numpy`, or start asynchronous device
@@ -79,7 +101,7 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    to a pool through the NumPy owner's deallocator capsule — reuse gated on the
    array's actual death, so retained arrays delay reuse safely instead of being
    corrupted by it.
-4. **The evaluator is replaced for arena batches, not layered over.** A pooled
+5. **The evaluator is replaced for arena batches, not layered over.** A pooled
    buffer placed underneath the current `Evaluator::forward` would still be
    staged row-by-row into `EvalBatch::obs_flat` — the copy would move, not
    disappear. Arena batches need a specialized forward path where the arena IS
@@ -88,7 +110,7 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    dedup either works through ticket indirection into the arena or is disabled in
    arena mode for v1 (it exists for search workloads with repeated leaves, which
    are not the large-row workloads this proposal targets).
-5. **The scheduler's remaining job** is control flow only: reservation accounting,
+6. **The scheduler's remaining job** is control flow only: reservation accounting,
    firing, routing the (small, f64) prediction rows back to blocked slots, floor
    and record bookkeeping. All of it is O(rows), none of it is O(bytes).
 
