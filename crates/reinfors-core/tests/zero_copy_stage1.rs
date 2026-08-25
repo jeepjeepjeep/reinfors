@@ -1089,18 +1089,23 @@ fn stage2_collection_is_deterministic() {
 }
 
 #[test]
-fn equal_cache_key_streams_encode_identically() {
+fn equal_cache_keys_encode_identically_on_both_paths() {
     let enc = KeyedEnc {
         encodes: Arc::new(AtomicU64::new(0)),
         keyed: true,
     };
-    let mut by_key: std::collections::HashMap<u64, Vec<f32>> = std::collections::HashMap::new();
+    let mut by_key: std::collections::HashMap<u128, Vec<f32>> = std::collections::HashMap::new();
+    let mut distinct = std::collections::HashSet::new();
     for tick in 0..32 {
         let state = St { tick };
         let mut hasher = CacheHasher::seeded(0);
         assert!(enc.cache_key(&state, 0, &mut hasher));
-        let key = (state.tick % 2) as u64;
+        let key = hasher.finish();
+        distinct.insert(key);
         let row = enc.encode(&state, 0);
+        let mut into = vec![0.0f32; row.len()];
+        enc.encode_into(&state, 0, &mut into);
+        assert_eq!(row, into, "encode and encode_into must agree byte-for-byte");
         match by_key.entry(key) {
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert(row);
@@ -1114,4 +1119,67 @@ fn equal_cache_key_streams_encode_identically() {
             }
         }
     }
+    assert_eq!(distinct.len(), 2, "tick parity must yield exactly two keys");
+}
+
+#[test]
+fn hasher_framing_separates_field_boundaries() {
+    let mut a = CacheHasher::seeded(0);
+    a.write(&[1]);
+    a.write(&[2, 3]);
+    let mut b = CacheHasher::seeded(0);
+    b.write(&[1, 2]);
+    b.write(&[3]);
+    assert_ne!(
+        a.finish(),
+        b.finish(),
+        "unframed fields collide deterministically"
+    );
+}
+
+#[test]
+fn multi_threaded_state_backed_collection_stays_sound() {
+    let encodes = Arc::new(AtomicU64::new(0));
+    let shared = Arc::new(AtomicU64::new(0));
+    let batches = Arc::new(Mutex::new(Vec::new()));
+    let seen = batches.clone();
+    let mut e = Engine::new(
+        TruncLine,
+        Box::new(KeyedEnc {
+            encodes: encodes.clone(),
+            keyed: true,
+        }),
+        Box::new(Zero),
+        StateActor { fan: 5 },
+        reinfors_core::Ppo::new(1.0, 0.95),
+        EngineParams {
+            n_games: 8,
+            seed: 3,
+            n_threads: Some(4),
+            batch_size: Some(4),
+            zero_copy: true,
+            ..Default::default()
+        },
+    )
+    .with_infer_caches(
+        (0..=1)
+            .map(|_| InferCache::new(64, shared.clone()))
+            .collect(),
+    );
+    let (records, stats) = e.collect(300, move |obs: Vec<f32>, n: usize| {
+        seen.lock().unwrap().push(n);
+        exact_infer(&obs, n)
+    });
+    assert!(records.len() >= 300);
+    let batches = batches.lock().unwrap().clone();
+    assert!(batches.iter().all(|&n| n <= 4), "fires exceed capacity");
+    assert_eq!(batches.iter().sum::<usize>(), stats.infer_rows);
+    assert!(
+        stats.cache_hits > 0,
+        "keyed repeats must hit under contention"
+    );
+    assert!(
+        (encodes.load(Ordering::Relaxed) as usize) < stats.sum_requested_rows,
+        "hits must skip encoding under contention"
+    );
 }

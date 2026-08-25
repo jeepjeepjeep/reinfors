@@ -49,7 +49,7 @@ impl CacheHasher {
         h
     }
 
-    pub fn write(&mut self, bytes: &[u8]) {
+    fn absorb(&mut self, bytes: &[u8]) {
         const PRIME_A: u64 = 0x0000_0100_0000_01B3;
         const PRIME_B: u64 = 0x9E37_79B9_7F4A_7C15;
         for &x in bytes {
@@ -59,12 +59,19 @@ impl CacheHasher {
         self.len += bytes.len() as u64;
     }
 
+    /// Variable-length fields are length-prefixed, so `([1], [2,3])` and
+    /// `([1,2], [3])` produce distinct streams.
+    pub fn write(&mut self, bytes: &[u8]) {
+        self.absorb(&(bytes.len() as u64).to_le_bytes());
+        self.absorb(bytes);
+    }
+
     pub fn write_u8(&mut self, v: u8) {
-        self.write(&[v]);
+        self.absorb(&[v]);
     }
 
     pub fn write_u64(&mut self, v: u64) {
-        self.write(&v.to_le_bytes());
+        self.absorb(&v.to_le_bytes());
     }
 
     pub fn write_usize(&mut self, v: usize) {
@@ -72,8 +79,9 @@ impl CacheHasher {
     }
 
     pub fn write_f32s(&mut self, v: &[f32]) {
+        self.absorb(&(v.len() as u64).to_le_bytes());
         let bytes = unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<u8>(), v.len() * 4) };
-        self.write(bytes);
+        self.absorb(bytes);
     }
 
     pub fn finish(&self) -> u128 {

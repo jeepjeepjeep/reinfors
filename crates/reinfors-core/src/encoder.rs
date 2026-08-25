@@ -86,15 +86,19 @@ pub trait StateEncoder: ActionView {
     fn encode(&self, state: &Self::State, agent: usize) -> Vec<f32>;
 
     /// Encode directly into `dst` (len = the flat obs dim); the zero-copy engine
-    /// hands out arena rows here. Override to skip the default's allocation+copy.
+    /// hands out arena rows here. MUST produce bytes identical to
+    /// `encode(state, agent)` — the two are used interchangeably across paths,
+    /// and `cache_key` validity is defined against that canonical row. Override
+    /// to skip the default's allocation+copy.
     fn encode_into(&self, state: &Self::State, agent: usize, dst: &mut [f32]) {
         let row = self.encode(state, agent);
         dst.copy_from_slice(&row);
     }
 
     /// Stream this observation's cache identity. Contract: equal streams MUST
-    /// imply byte-identical `encode` output — a too-narrow key only costs hits,
-    /// a too-wide key silently serves wrong predictions. Return `false` (the
+    /// imply byte-identical encoded rows. Omitting state the observation
+    /// depends on silently serves WRONG evaluations; including unnecessary
+    /// state only reduces hits — when unsure, include it. Return `false` (the
     /// default) when no pre-encoding key exists; those rows fall back to
     /// observation hashing through a scratch encode.
     fn cache_key(

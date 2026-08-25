@@ -1408,6 +1408,7 @@ where
                                             Retained::State(state, agent) => emit_arena_row(
                                                 *route,
                                                 &routes[*route],
+                                                &mut None,
                                                 *pos,
                                                 *key,
                                                 &mut |dst| {
@@ -2243,11 +2244,17 @@ impl RouteShared {
         fresh
     }
 
-    fn replace_if(&self, old: &std::sync::Arc<RouteArena>) {
+    /// Returns the open arena after the replacement attempt (the winner's, or the
+    /// one another worker already installed).
+    fn replace_if(&self, old: &std::sync::Arc<RouteArena>) -> std::sync::Arc<RouteArena> {
         let mut open = self.open.lock().expect("route lock");
         match open.as_ref() {
-            Some(cur) if !std::sync::Arc::ptr_eq(cur, old) => {}
-            _ => *open = Some(self.fresh()),
+            Some(cur) if !std::sync::Arc::ptr_eq(cur, old) => cur.clone(),
+            _ => {
+                let fresh = self.fresh();
+                *open = Some(fresh.clone());
+                fresh
+            }
         }
     }
 }
@@ -2298,27 +2305,40 @@ fn obs_hash_key(mode: InferMode, player: usize, row: &[f32]) -> u128 {
 
 /// Reserve one arena row and initialize it in place, coalescing contiguous
 /// same-arena emissions into one span.
+/// `open` caches the route's current arena so steady-state emissions take no
+/// lock; it refreshes only on a close.
 fn emit_arena_row(
     route_idx: usize,
     route: &RouteShared,
+    open: &mut Option<std::sync::Arc<RouteArena>>,
     pos: u32,
     key: u128,
     fill: &mut dyn FnMut(&mut [f32]),
     spans: &mut Vec<ASpan>,
 ) {
     loop {
-        let cur = route.current();
-        let mut span = match cur.arena.try_reserve(1) {
-            Reserve::Full { span, .. } => span,
+        let cur = match open.as_ref() {
+            Some(cur) => cur.clone(),
+            None => {
+                let cur = route.current();
+                *open = Some(cur.clone());
+                cur
+            }
+        };
+        let (mut span, closes) = match cur.arena.try_reserve(1) {
+            Reserve::Full { span, closed } => (span, closed.is_some()),
             Reserve::Partial { .. } => unreachable!("single-row reservations never split"),
             Reserve::Closed => {
-                route.replace_if(&cur);
+                *open = Some(route.replace_if(&cur));
                 continue;
             }
         };
         let first = span.row_range().start;
         fill(span.zeroed());
         span.commit();
+        if closes {
+            *open = None;
+        }
         match spans.last_mut() {
             Some(last)
                 if last.route == route_idx
@@ -2345,6 +2365,7 @@ fn emit_arena_row(
 /// on the encoder-key and cache-off paths.
 struct ArenaSink<'a, S> {
     routes: &'a [RouteShared],
+    open: Vec<Option<std::sync::Arc<RouteArena>>>,
     pins: Pins,
     mode: InferMode,
     dim: usize,
@@ -2357,6 +2378,7 @@ impl<'a, S> ArenaSink<'a, S> {
     fn new(routes: &'a [RouteShared], pins: Pins, mode: InferMode, dim: usize) -> Self {
         ArenaSink {
             routes,
+            open: routes.iter().map(|_| None).collect(),
             pins,
             mode,
             dim,
@@ -2396,6 +2418,7 @@ impl<S: Clone> crate::policy::StateSink<S> for ArenaSink<'_, S> {
                 emit_arena_row(
                     route,
                     &self.routes[route],
+                    &mut self.open[route],
                     pos,
                     key,
                     &mut |dst| enc.encode_into(state, player, dst),
@@ -2424,6 +2447,7 @@ impl<S: Clone> crate::policy::StateSink<S> for ArenaSink<'_, S> {
             emit_arena_row(
                 route,
                 &self.routes[route],
+                &mut self.open[route],
                 pos,
                 key,
                 &mut |dst| dst.copy_from_slice(row),
@@ -2434,6 +2458,7 @@ impl<S: Clone> crate::policy::StateSink<S> for ArenaSink<'_, S> {
         emit_arena_row(
             route,
             &self.routes[route],
+            &mut self.open[route],
             pos,
             key_unused(),
             &mut |dst| enc.encode_into(state, player, dst),
