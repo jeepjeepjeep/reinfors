@@ -1123,7 +1123,7 @@ fn equal_cache_keys_encode_identically_on_both_paths() {
 }
 
 #[test]
-fn hasher_framing_separates_field_boundaries() {
+fn hasher_framing_separates_field_boundaries_and_types() {
     let mut a = CacheHasher::seeded(0);
     a.write(&[1]);
     a.write(&[2, 3]);
@@ -1134,6 +1134,25 @@ fn hasher_framing_separates_field_boundaries() {
         a.finish(),
         b.finish(),
         "unframed fields collide deterministically"
+    );
+    let mut c = CacheHasher::seeded(0);
+    c.write(&[7]);
+    let mut d = CacheHasher::seeded(0);
+    d.write_u64(1);
+    d.write_u8(7);
+    assert_ne!(
+        c.finish(),
+        d.finish(),
+        "untyped writes collide across helpers"
+    );
+    let mut e = CacheHasher::seeded(0);
+    e.write_f32s(&[1.0]);
+    let mut f = CacheHasher::seeded(0);
+    f.write(&1.0f32.to_le_bytes());
+    assert_ne!(
+        e.finish(),
+        f.finish(),
+        "f32 and byte writes must not collide"
     );
 }
 
@@ -1182,4 +1201,18 @@ fn multi_threaded_state_backed_collection_stays_sound() {
         (encodes.load(Ordering::Relaxed) as usize) < stats.sum_requested_rows,
         "hits must skip encoding under contention"
     );
+    // Row correctness, not just accounting: every record's evaluation must be
+    // exactly what the callback returns for that record's own observation — a
+    // misrouted row under contention breaks the pairing.
+    for r in &records {
+        assert_eq!(r.obs[1], r.player as f32, "obs routed to the wrong player");
+        assert!(r.obs[0] == 0.0 || r.obs[0] == 1.0);
+        let logits = [f64::from(r.obs[0]) * 0.25, 0.5];
+        let expected = masked_log_probs(&logits, &[0, 1]);
+        assert_eq!(
+            r.behavior_log_prob.to_bits(),
+            expected[r.action].to_bits(),
+            "record evaluation does not match its own observation"
+        );
+    }
 }

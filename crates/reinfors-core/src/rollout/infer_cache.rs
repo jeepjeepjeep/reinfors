@@ -59,18 +59,20 @@ impl CacheHasher {
         self.len += bytes.len() as u64;
     }
 
-    /// Variable-length fields are length-prefixed, so `([1], [2,3])` and
-    /// `([1,2], [3])` produce distinct streams.
+    /// Every write is self-delimiting: a type tag plus, for variable-length
+    /// fields, a length prefix — so no sequence of calls collides with another.
     pub fn write(&mut self, bytes: &[u8]) {
+        self.absorb(&[0xB0]);
         self.absorb(&(bytes.len() as u64).to_le_bytes());
         self.absorb(bytes);
     }
 
     pub fn write_u8(&mut self, v: u8) {
-        self.absorb(&[v]);
+        self.absorb(&[0xB1, v]);
     }
 
     pub fn write_u64(&mut self, v: u64) {
+        self.absorb(&[0xB2]);
         self.absorb(&v.to_le_bytes());
     }
 
@@ -79,6 +81,7 @@ impl CacheHasher {
     }
 
     pub fn write_f32s(&mut self, v: &[f32]) {
+        self.absorb(&[0xB3]);
         self.absorb(&(v.len() as u64).to_le_bytes());
         let bytes = unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<u8>(), v.len() * 4) };
         self.absorb(bytes);

@@ -2325,10 +2325,11 @@ fn emit_arena_row(
                 cur
             }
         };
-        let (mut span, closes) = match cur.arena.try_reserve(1) {
-            Reserve::Full { span, closed } => (span, closed.is_some()),
+        let mut span = match cur.arena.try_reserve(1) {
+            Reserve::Full { span, .. } => span,
             Reserve::Partial { .. } => unreachable!("single-row reservations never split"),
             Reserve::Closed => {
+                // the retained closed Arc goes straight to replace_if: one lock
                 *open = Some(route.replace_if(&cur));
                 continue;
             }
@@ -2336,9 +2337,6 @@ fn emit_arena_row(
         let first = span.row_range().start;
         fill(span.zeroed());
         span.commit();
-        if closes {
-            *open = None;
-        }
         match spans.last_mut() {
             Some(last)
                 if last.route == route_idx
