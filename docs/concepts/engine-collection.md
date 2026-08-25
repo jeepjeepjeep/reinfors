@@ -45,15 +45,20 @@ slot is ready next.
     (model-free policies mark their row
     canonical — `push_root` — so step 6
     reuses it instead of re-encoding)
- 2. TaskOut::Emitted ─────────────────────▶ 3. COPY A: append each row to the
+ 2. TaskOut::Emitted ─────────────────────▶ 3. COPY B: append each row to the
     slot parks as Blocked                      request queue's flat buffer;
     (search + retained rows carried)           count it toward the batch
+    (COPY A already happened in step 1:
+    each row into the sink's flat buffer)
                                             4. queue reaches `batch_size`:
-                                               COPY B: assemble rows into the
-                                               NumPy array, take the GIL, call
-                                               the caller's infer callback,
-                                               route prediction rows back to
-                                               each blocked slot
+                                               COPY C: slice the fired rows out
+                                               of the queue; COPY D: stage them
+                                               into the evaluator's batch (the
+                                               cache/dedup layer); move that
+                                               buffer into NumPy (no copy),
+                                               take the GIL, call the caller's
+                                               infer callback, route prediction
+                                               rows back to each blocked slot
  5. Work::Resume ◀───────────────────────── freed slots respawn on the pool
     absorb predictions; either another
     round (tree search: many leaf rows
@@ -73,16 +78,19 @@ leaf rows into the same shared batches.
 
 ## Where the time goes
 
-Steps 3 and 4 are the serialization point: **every observation row crosses the
-single scheduler thread twice** — once copied into the request queue (A), once
-converted into the callback's NumPy batch (B) — while the workers that produced
-them sit blocked. Everything else scales with `n_threads`.
+Steps 3 and 4 are the serialization point: after the worker-side sink copy (A),
+**every observation row is copied three more times on the single scheduler
+thread** — into the request queue (B), out of the queue at fire (C), and into
+the evaluator's cache/dedup batch (D) — while the workers that produced the rows
+sit blocked. The final hand-off to NumPy is an ownership move, not a copy.
+Per-player inference routing adds one more regrouping copy. Everything else
+scales with `n_threads`.
 
-Whether that matters is a function of row size:
+Whether this matters is a function of row size:
 
 | observation row | scheduler traffic | measured ceiling (Apple M1 Max)          |
 | --- | --- | --- |
-| `car_racing` pixels, ~110 KB | ~2 × 110 KB per step | ~8,000 steps/s, flat from ~8 threads |
+| `car_racing` pixels, ~110 KB | ~3 × 110 KB per step | ~8,000 steps/s, flat from ~8 threads |
 | `car_racing` vec, 84 B | negligible | ~260,000 steps/s (scheduling-bound, not copy-bound) |
 
 The pure render path scales near-linearly on the same machine (3.7x at 4

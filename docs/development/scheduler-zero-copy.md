@@ -6,13 +6,22 @@ bound this proposal removes.
 
 ## Problem
 
-Every observation row a worker produces crosses the single scheduler thread twice:
-appended into the request queue's flat buffer when the slot's rows are emitted, then
-assembled into the NumPy array handed to the infer callback. For pixel-scale rows
-(~110 KB) that is ~220 KB of single-threaded memory traffic per environment step,
-and it caps `car_racing` pixel collection near 8,000 steps/s regardless of
-`n_threads` — while the render work itself scales near-linearly across workers.
-Small rows never notice; large rows turn the scheduler into the pipeline.
+An observation row born in the encoder is copied four times before inference —
+once on the worker, three times on the single scheduler thread:
+
+```text
+encoder Vec ──▶ RequestSink::obs        (worker: sink append)
+            ──▶ RequestQueue::obs       (scheduler: queue append)
+            ──▶ fired slice `.to_vec()` (scheduler: fire)
+            ──▶ EvalBatch::obs_flat     (scheduler: cache/dedup staging)
+            ──▶ NumPy                   (ownership move — already zero-copy)
+```
+
+Per-player routing adds one more regrouping copy. For pixel-scale rows (~110 KB)
+that is ~330 KB of single-threaded memory traffic per environment step, and it
+caps `car_racing` pixel collection near 8,000 steps/s regardless of `n_threads`
+— while the render work itself scales near-linearly across workers. Small rows
+never notice; large rows turn the scheduler into the pipeline.
 
 ## Proposal
 
@@ -51,7 +60,16 @@ scheduler: GIL + infer(batch)                    place → notify
    to a pool through the NumPy owner's deallocator capsule — reuse gated on the
    array's actual death, so retained arrays delay reuse safely instead of being
    corrupted by it.
-4. **The scheduler's remaining job** is control flow only: reservation accounting,
+4. **The evaluator is replaced for arena batches, not layered over.** A pooled
+   buffer placed underneath the current `Evaluator::forward` would still be
+   staged row-by-row into `EvalBatch::obs_flat` — the copy would move, not
+   disappear. Arena batches need a specialized forward path where the arena IS
+   the batch. The infer cache and batch dedup are the design risk here: they key
+   and compact rows during staging. Keys can be hashed from arena spans in place;
+   dedup either works through ticket indirection into the arena or is disabled in
+   arena mode for v1 (it exists for search workloads with repeated leaves, which
+   are not the large-row workloads this proposal targets).
+5. **The scheduler's remaining job** is control flow only: reservation accounting,
    firing, routing the (small, f64) prediction rows back to blocked slots, floor
    and record bookkeeping. All of it is O(rows), none of it is O(bytes).
 
