@@ -144,8 +144,16 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    scheduler can always drain a sealed buffer through inference. Buffers already
    moved into NumPy are the caller's memory, not the pool's.
 
-5. **Ownership per fire.** Each fired buffer is a distinct allocation, moved into
-   its NumPy array exactly as today (Python owns the storage; its GC frees it).
+5. **Ownership per fire; allocation is worker work.** Each fired buffer is a
+   distinct allocation, moved into its NumPy array exactly as today (Python owns
+   the storage; its GC frees it). Replacement arenas are allocated OFF the
+   scheduler, by rule: the worker whose reservation CAS closed the previous
+   buffer allocates the next one (equivalently: workers keep a pre-zeroed spare
+   staged). This matters because zeroed allocation is only *commonly* free — an
+   allocator that really memsets would spend one full arena of byte work per
+   fire (amortized: one row-equivalent per row), which on the scheduler would
+   silently re-add the serialized cost this proposal removes. On a worker it is
+   one-row-encode-scale work, parallel, on one of many threads.
    Nothing is recycled when the callback returns: callbacks legitimately retain
    arrays, wrap them in `torch.from_numpy`, or start asynchronous device
    transfers, and reuse on return would mutate retained tensors or race an
@@ -258,10 +266,17 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    spawns a tail task onto the worker pool that encodes, reserves, and commits
    like any other emission, with a tail marker routing its prediction rows to
    the existing `AwaitingTail` bookkeeping.
-10. **The scheduler's remaining job** is control flow only: reservation accounting,
-   firing, key lookups' insert/evict side, routing the (small, f64) prediction
-   rows back to blocked slots, floor and record bookkeeping. All of it is
-   O(rows), none of it is O(bytes).
+10. **The scheduler performs no O(bytes) operations — by construction, with the
+   residue ledger stated.** Its work is reservation accounting, firing, key
+   lookups' insert/evict side, routing the (small, f64) prediction rows back to
+   blocked slots, and floor/record bookkeeping — all O(rows). The system's
+   remaining byte work lives elsewhere, priced: worker-side row copies (two in
+   stage 1, approaching zero for stage-2 encoders, one owned copy for canonical
+   root rows); worst-case arena zeroing on the closing worker (commonly ~free
+   via lazy zero pages, bounded by one row-equivalent per row when the
+   allocator really memsets); and kernel zero-page faults when a `pad=True`
+   suffix is first read by the callback (kernel work, not engine work). Nothing
+   in that ledger is serialized.
 
 ## What must not change
 
