@@ -98,8 +98,14 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
      not a sufficient sealing predicate: aliases reserve nothing, so an alias
      registered while the scheduler freezes routing would wait forever for a
      prediction row no routing entry delivers. Each buffer therefore carries one
-     packed atomic — `(closed, row_cursor, alias_count)` — and reservations AND
-     alias registrations are both CASes on it, both failing once closed. Close
+     packed atomic — a single `AtomicU64`: `closed:1`, `row_cursor:31`,
+     `alias_count:32`, with buffer capacity checked `< 2^31` at construction
+     and the alias count bounded below its field by the staged map's fixed
+     capacity (checked, never assumed) — and reservations AND alias
+     registrations are both CASes on it, both failing once closed. A saturated
+     alias count or full staged map falls back to an ordinary reservation — a
+     duplicate row rides to inference, compute not correctness; alias pressure
+     never closes a buffer, closing stays owned by capacity and fire cadence. Close
      is itself a CAS: performed by the reservation that fills the buffer to
      capacity, or by the scheduler at quiescence. The closing CAS freezes exact
      final counts `(k rows, m aliases)`, and the scheduler seals routing only
@@ -115,8 +121,13 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
      joins the independently tested invariants.
    - *Panic safety.* Reservation is held by an RAII guard that commits or poisons
      its span on drop: a worker panicking after reserving must not leave an
-     uncommitted hole that stalls sealing forever. The scheduler's existing
-     panic-drain path must stay deadlock-free with an arena in flight.
+     uncommitted hole that stalls sealing forever. Aliases get the same
+     treatment: the alias CAS hands back a ticket whose `Drop`, if uncommitted,
+     delivers an abandonment notification through the panic drain, and
+     reconciliation counts abandonments toward `m` (the slot is dead — the
+     scheduler accounts, routes nothing), so `(k, m)` never waits on a
+     notification that cannot arrive. The scheduler's existing panic-drain path
+     must stay deadlock-free with an arena in flight.
    - *Lifecycle.* Each buffer moves `Filling → Sealed → InInference → Released`
      (released = moved into NumPy), with transitions owned by the scheduler.
 
@@ -179,12 +190,29 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    - *Worker-read, scheduler-write.* Workers hash the row they just encoded
      (cache-hot, parallel; ~10us for a 110 KB row against a ~350us encode) and
      look the key up in a read-mostly shared cache. The scheduler remains the
-     cache's ONLY writer: inserts, eviction, and resizing happen at routing time,
-     in message order, so today's single-threaded cache logic (including the
-     per-player `Exclusive` slots) survives unchanged. Readers see shards behind
-     atomic pointer swaps; evicted rows stay alive through `Arc` clones held by
-     in-flight readers; recency updates ride the span metadata workers already
-     send ("keys I touched"), applied by the writer in order.
+     cache's ONLY writer: inserts and eviction happen at routing time, in
+     message order. The write-side logic (insert, evict, the per-player
+     `Exclusive` slots) survives; read-side promotion does NOT — today's cache
+     promotes entries during lookup, and under this split recency moves to the
+     writer (next bullet).
+   - *Publication is shallow copy-on-write; recency lives outside it.* A shard
+     is an `Arc<HashMap<Key, Arc<Row>>>` behind an atomic pointer; an insert or
+     evict clones the shard map SHALLOWLY (`C/S` pointer clones for capacity
+     `C` over `S` shards — size shards so `C/S <~ 64` and maintenance is
+     sub-microsecond, O(rows)-scale), mutates, and swaps the pointer. Evicted
+     rows stay alive through `Arc` clones held by in-flight readers and pinned
+     views. Recency metadata is deliberately NOT in the shared shards: workers
+     never read it, so it needs no snapshot semantics — the scheduler keeps a
+     private LRU fed by the span metadata workers already send ("keys I
+     touched"), and promotions mutate only that private structure. Only
+     insert/evict touch the shared shards; a COW map that also carried recency
+     would clone a shard per LOOKUP and cost more than the copies it removes.
+     An in-place `RwLock` shard is not an alternative: pinned views (above)
+     require immutable snapshots, and retrofitting those onto in-place mutation
+     (sequence-gated lookups, deferred eviction) rebuilds copy-on-write with
+     epoch machinery on top. If shard-clone cost still measures high at target
+     capacity, the escalation path is a per-shard persistent map (structural
+     sharing, O(log n) insert) — same snapshot semantics, cheaper writes.
    - *Cache views are pinned at spawn.* A lookup that dereferences the shared
      shard pointers at read time sees an insert published in the SAME generation
      — or misses it — by pure pointer-load timing, and hit-vs-miss changes
@@ -205,22 +233,36 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    - *A hit never reserves a span.* The batch contains only genuine misses by
      construction — no dead rows, no fire-time compaction, no wasted callback
      compute.
-   - *Hits are gated on fire cadence.* A hit resolves at the worker (the row is
-     already in hand) but the slot parks until the next full batch has fired;
-     the scheduler releases all gated slots after each fire. Ungated hits would
-     let cache-hot slots free-run: they would advance many decisions per fire,
-     starve rare misses of batch-mates, and let the record floor close on a
-     batch that overrepresents cache-hot (i.e. recurring) states. Gating
-     restores today's pacing — hits resolve at fire cadence — so the sampling
-     mix does not shift, and unlike counting hits toward the firing threshold it
-     never fires a partial batch: the GPU always sees `batch_size` rows in
-     steady state. The latency cost is absorbed by slot count, not throughput —
+   - *Hits are gated on fire cadence — per ticket, per route.* Every emitted
+     row is a ticket in its slot's round mailbox, and the slot resumes only
+     when ALL tickets resolve — the mailbox machinery is today's, unchanged. A
+     ticket resolves by its fire returning (miss), by aliasing a reserved row
+     (alias), or — for a hit — at its release point: the row's value is already
+     in hand at the worker, but the ticket parks until the next completed fire
+     OF ITS OWN inference route. The gate exists for two per-route properties —
+     sampling cadence and generation validation — so parking a player-A hit on
+     player B's callback would pace nothing and validate nothing. Ungated hits
+     would let cache-hot slots free-run: many decisions per fire, rare misses
+     starved of batch-mates, the record floor closing on a batch that
+     overrepresents recurring states. Gating restores today's pacing, and
+     unlike counting hits toward the firing threshold it never fires a partial
+     batch: the GPU always sees `batch_size` rows in steady state. Ticket
+     granularity makes the mixed cases free: a round with misses on route R
+     releases its R hits at the same fire that resolves those misses — zero
+     added latency for any round with at least one same-route miss; only
+     pure-hit rounds wait for a fire driven by other slots (or the flush).
+     Rounds split across buffers need no new rule: tickets resolve fire-by-fire
+     and the mailbox joins them, exactly as when a round's requests straddle
+     fires today. The latency cost is absorbed by slot count, not throughput —
      see the sizing rule below.
    - *In-flight duplicates alias.* A per-buffer staged map (fixed capacity,
      insert-or-read-only, CAS on empty slots, cleared by the scheduler at each
      fire) lets a second requester of an already-reserved key record an alias
      ticket instead of reserving; the scheduler routes the one prediction row to
-     every claimant.
+     every claimant. A full staged map falls back to an ordinary reservation —
+     a duplicate row rides to inference; compute cost, not correctness (bounds
+     and abandonment handling live with the reservation protocol's packed
+     atomic).
    - *Invalidation is validated at the gate.* `weights_updated()` clears the
      cache at a safe boundary, but a worker can take an old shard snapshot,
      resolve a hit from it, and hold that row through a retained `Arc` past the
@@ -229,12 +271,13 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
      structurally: every hit already waits for a scheduler release, and the
      scheduler is also the single thread that applies invalidation, so hit
      notifications carry their generation-at-lookup and the scheduler validates
-     it at release. Current generation → deliver. Stale → demote: the scheduler
-     spawns the slot's resume task with a recompute verdict, and a worker
-     re-emits the retained rows through the completely ordinary reservation path
-     into the fresh open buffer — indistinguishable from a first-time miss. Two
-     supporting rules: a gated slot's search state keeps its encoded rows until
-     the release confirms the hit (so demotion never re-encodes), and each fired
+     it at release. Current generation → deliver. Stale → demote that TICKET:
+     the scheduler spawns a recompute task and a worker re-emits the retained
+     row through the completely ordinary reservation path into the fresh open
+     buffer — indistinguishable from a first-time miss; the round's other
+     tickets are untouched and the slot keeps waiting on its mailbox. Two
+     supporting rules: a slot keeps a gated ticket's encoded row until the
+     release confirms the hit (so demotion never re-encodes), and each fired
      batch carries its fire-time generation so routing skips cache INSERTS from
      pre-boundary fires (delivering their values to waiting slots is fine — that
      is the documented in-flight-work semantics — but they must not seed the
@@ -252,31 +295,36 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
      staged map covers duplicates within a buffer, the two-plane rule covers
      staleness across fires, and both failure costs are compute, not
      correctness.
-8. **The quiescence flush guarantees liveness.** Gating creates one stall the
-   ungated design could not have: if every slot is parked — hit-gated or
-   contributing to a miss buffer below capacity — no fire can happen and the
-   gated hits wait forever. The scheduler already has the exact observation
-   point: its idle path blocks on the message channel, and blocking with
-   `in_flight == 0` and no admissible slot IS the stall. The guard there
-   triggers the flush: close each open buffer (the same atomic close as a
-   capacity fill), seal at current fill (truncate-to-prefix; race-free because
-   zero in-flight tasks implies every reserved span is committed AND every
-   registered alias message already processed — the `(k, m)` reconciliation is
-   trivially satisfied at true quiescence), fire non-empty buffers,
-   then release ALL gated hits — including on routes whose buffer is empty,
-   because the gate is a pacing device and at quiescence there is no cadence
-   left to pace against. Released slots respawn into the fresh buffer and the
-   system exits quiescence. Detection is an O(1) counter check at a point the
-   loop already visits; determinism at `n_threads=1` holds because quiescence
-   occurs at structurally fixed points.
+8. **The per-route flush guarantees liveness.** Gating creates one stall the
+   ungated design could not have: a route whose lookups keep hitting never
+   accumulates misses, so it never fires, and its gated tickets wait forever —
+   and a GLOBAL quiescence guard misses this, because an unrelated route can
+   keep `in_flight` nonzero indefinitely while the hit-bound route starves.
+   The flush is therefore per route: at points the scheduler's loop already
+   visits (the recv-block idle path, the end of each routing pass), any route
+   with gated tickets, no in-flight rows, and no pending rows in its open
+   buffer releases those tickets — generation-validated against the route's
+   current generation directly, since no fire is involved. Safe for the
+   sampling mix by the gate's own logic: with nothing of the route's in
+   flight, there are no misses for the hits to outrun. Global quiescence —
+   every slot parked, `in_flight == 0` — is the degenerate case: it closes
+   each open buffer (the same atomic close as a capacity fill), seals at
+   current fill (truncate-to-prefix; race-free because zero in-flight tasks
+   implies every reserved span is committed AND every registered alias message
+   already processed — the `(k, m)` reconciliation is trivially satisfied at
+   true quiescence), fires non-empty buffers, then releases every route's
+   gated tickets. Released slots respawn into the fresh buffer and the system
+   exits quiescence. Detection is an O(1) per-route counter check;
+   determinism at `n_threads=1` holds because both checks occur at
+   structurally fixed points.
 
-   Sizing rule: full batches in steady state need roughly
+   Sizing rule (per route): full batches in steady state need roughly
    `n_games >= 2 x batch_size / (1 - hit_rate)` — one batch's worth of misses
    accumulating while the previous batch is in the callback, with hit-gated
-   slots not contributing. A well-sized run only flushes at window boundaries,
-   so a quiescence-flush counter in telemetry directly exposes undersized
-   configurations: if it ticks in steady state, the config violates the sizing
-   rule and the operator sees small batches coming.
+   tickets not contributing. A well-sized run only flushes at window
+   boundaries, so per-route flush counters in telemetry directly expose
+   undersized configurations: if one ticks in steady state, the config
+   violates the sizing rule and the operator sees small batches coming.
 9. **Tail bootstraps become worker tasks.** Today `tail_requests` encodes the
    truncation/fragment bootstrap observations on the scheduler thread — for
    pixel games that is a full render each, serialized. Under the arena, a cut
@@ -326,7 +374,7 @@ Engine-level gates:
   byte-identical batches run-to-run (equality against the OLD scheduler is not a
   goal — hit gating and fire cadence legitimately reorder collection).
 - Telemetry assertions: per-slot record counts and hit rates exposed; the
-  quiescence-flush counter stays at zero in a correctly sized steady-state run.
+  per-route flush counters stay at zero in a correctly sized steady-state run.
 - The existing scheduler test suite (firing thresholds, per-player routing,
   fragment cuts, panic drains) unchanged.
 - Throughput gate: pixel collection at 8 threads must beat the current plateau by
@@ -343,6 +391,9 @@ engine:
   across multiple fires, preserving `absorb` order through the routing table.
 - Alias-versus-seal races: the atomic close either admits the alias into the
   fire's counts or fails its CAS; no interleaving orphans a claimant.
+- Alias overflow and abandonment: a full staged map falls back to an ordinary
+  reservation; an alias ticket dropped without commit delivers an abandonment
+  counted toward `m`.
 - Generation invalidation during lookup: hits resolved from a pre-invalidation
   shard are demoted at the gate; no post-boundary decision consumes a
   pre-boundary row; pre-boundary fires never insert.
@@ -350,10 +401,19 @@ engine:
   outcomes — each Work item's hits and misses are a function of its spawn-time
   snapshot; fixed-seed `n_threads=1` runs are byte-identical with the cache
   enabled.
-- All-hit and sparse-miss batches: gated hits release on fire or quiescence
-  flush; a window of pure hits terminates.
+- All-hit and sparse-miss batches: gated tickets release on their route's fire
+  or its flush; a window of pure hits terminates.
+- Mixed hit/miss rounds and cross-buffer rounds: the slot resumes only when
+  every ticket resolves; same-route hits release with the fire that resolves
+  the round's misses.
+- Idle-route release: a route with gated tickets, nothing in flight, and an
+  empty open buffer releases without a fire, even while unrelated routes stay
+  busy.
 - High-hit partial-buffer starvation: configs below the sizing rule make
-  progress through the quiescence flush and increment its counter.
+  progress through the flush and increment its per-route counter.
+- Cache-maintenance microbenchmark: insert/evict/promotion measured at target
+  capacity before the COW sharding is accepted; escalation to a per-shard
+  persistent map if shard clones measure high.
 - Retained Python arrays: a callback that stores every batch it receives —
   arrays stay valid and unchanged after arbitrary further collection.
 - Padded-suffix initialization: with `pad=True`, the suffix reads as zeros on
