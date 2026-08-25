@@ -800,7 +800,7 @@ struct PyEngine {
 #[pymethods]
 impl PyEngine {
     #[new]
-    #[pyo3(signature = (game, reward, policy, learner, n_games, seed=0, start_buffer=false, start_buffer_capacity=1000, p_fresh=0.05, infer_cache=0, learn_players=None, pad=false, batch_size=0, n_threads=0))]
+    #[pyo3(signature = (game, reward, policy, learner, n_games, seed=0, start_buffer=false, start_buffer_capacity=1000, p_fresh=0.05, infer_cache=0, learn_players=None, pad=false, batch_size=0, n_threads=0, zero_copy=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         game: GameHandle,
@@ -817,6 +817,7 @@ impl PyEngine {
         pad: bool,
         batch_size: usize,
         n_threads: usize,
+        zero_copy: bool,
     ) -> PyResult<Self> {
         if n_games < 1 {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -842,6 +843,11 @@ impl PyEngine {
         } else {
             n_threads.min(n_games)
         };
+        if zero_copy && (infer_cache > 0 || pad) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "zero_copy does not support infer_cache or pad yet",
+            ));
+        }
         if batch_size > 1 << 20 {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "batch_size must be <= {} (got {batch_size})",
@@ -896,6 +902,7 @@ impl PyEngine {
                 "pad": pad.then_some(true),
                 "batch_size": (batch_size > 0).then_some(batch_size),
                 "n_threads": (n_threads > 0).then_some(n_threads),
+                "zero_copy": zero_copy.then_some(true),
             },
         });
         let engine_params = EngineParams {
@@ -904,6 +911,7 @@ impl PyEngine {
             pad,
             batch_size: (batch_size > 0).then_some(batch_size),
             n_threads: (n_threads > 0).then_some(n_threads),
+            zero_copy,
         };
         let num_agents = game.spec.num_agents();
         // Slot 0 serves a shared callback; slots 1..=N serve per-player callbacks.
@@ -929,6 +937,7 @@ impl PyEngine {
                 engine.remove("pad");
                 engine.remove("batch_size");
                 engine.remove("n_threads");
+                engine.remove("zero_copy");
             }
             fingerprint_hex(&canonical_config_bytes(&stripped))
         };
