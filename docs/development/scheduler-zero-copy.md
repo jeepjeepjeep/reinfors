@@ -142,6 +142,17 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    - *A hit never reserves a span.* The batch contains only genuine misses by
      construction — no dead rows, no fire-time compaction, no wasted callback
      compute.
+   - *Hits are gated on fire cadence.* A hit resolves at the worker (the row is
+     already in hand) but the slot parks until the next full batch has fired;
+     the scheduler releases all gated slots after each fire. Ungated hits would
+     let cache-hot slots free-run: they would advance many decisions per fire,
+     starve rare misses of batch-mates, and let the record floor close on a
+     batch that overrepresents cache-hot (i.e. recurring) states. Gating
+     restores today's pacing — hits resolve at fire cadence — so the sampling
+     mix does not shift, and unlike counting hits toward the firing threshold it
+     never fires a partial batch: the GPU always sees `batch_size` rows in
+     steady state. The latency cost is absorbed by slot count, not throughput —
+     see the sizing rule below.
    - *In-flight duplicates alias.* A per-buffer staged map (fixed capacity,
      insert-or-read-only, CAS on empty slots, cleared by the scheduler at each
      fire) lets a second requester of an already-reserved key record an alias
@@ -158,13 +169,36 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
      staged map covers duplicates within a buffer, the two-plane rule covers
      staleness across fires, and both failure costs are compute, not
      correctness.
-8. **Tail bootstraps become worker tasks.** Today `tail_requests` encodes the
+8. **The quiescence flush guarantees liveness.** Gating creates one stall the
+   ungated design could not have: if every slot is parked — hit-gated or
+   contributing to a miss buffer below capacity — no fire can happen and the
+   gated hits wait forever. The scheduler already has the exact observation
+   point: its idle path blocks on the message channel, and blocking with
+   `in_flight == 0` and no admissible slot IS the stall. The guard there
+   triggers the flush: seal each non-empty open buffer at its current fill
+   (truncate-to-prefix; the arena's commit rule makes this race-free, since
+   zero in-flight tasks implies every reserved span is committed), fire it,
+   then release ALL gated hits — including on routes whose buffer is empty,
+   because the gate is a pacing device and at quiescence there is no cadence
+   left to pace against. Released slots respawn into the fresh buffer and the
+   system exits quiescence. Detection is an O(1) counter check at a point the
+   loop already visits; determinism at `n_threads=1` holds because quiescence
+   occurs at structurally fixed points.
+
+   Sizing rule: full batches in steady state need roughly
+   `n_games >= 2 x batch_size / (1 - hit_rate)` — one batch's worth of misses
+   accumulating while the previous batch is in the callback, with hit-gated
+   slots not contributing. A well-sized run only flushes at window boundaries,
+   so a quiescence-flush counter in telemetry directly exposes undersized
+   configurations: if it ticks in steady state, the config violates the sizing
+   rule and the operator sees small batches coming.
+9. **Tail bootstraps become worker tasks.** Today `tail_requests` encodes the
    truncation/fragment bootstrap observations on the scheduler thread — for
    pixel games that is a full render each, serialized. Under the arena, a cut
    spawns a tail task onto the worker pool that encodes, reserves, and commits
    like any other emission, with a tail marker routing its prediction rows to
    the existing `AwaitingTail` bookkeeping.
-9. **The scheduler's remaining job** is control flow only: reservation accounting,
+10. **The scheduler's remaining job** is control flow only: reservation accounting,
    firing, key lookups' insert/evict side, routing the (small, f64) prediction
    rows back to blocked slots, floor and record bookkeeping. All of it is
    O(rows), none of it is O(bytes).
@@ -194,8 +228,11 @@ should be unchanged, which doubles as the no-regression control.
 
 ## Validation
 
-- A/B byte-equality of collected batches at `n_threads=1` against the current
-  scheduler on a cheap game and on `car_racing` pixels.
+- Determinism at `n_threads=1` under the new semantics: fixed seed produces
+  byte-identical batches run-to-run (equality against the OLD scheduler is not a
+  goal — hit gating and fire cadence legitimately reorder collection).
+- Telemetry assertions: per-slot record counts and hit rates exposed; the
+  quiescence-flush counter stays at zero in a correctly sized steady-state run.
 - The existing scheduler test suite (firing thresholds, per-player routing,
   fragment cuts, panic drains) unchanged.
 - Throughput gate: pixel collection at 8 threads must beat the current plateau by
