@@ -110,7 +110,6 @@ impl Raster {
 
     /// Box-filter straight into a flat channel-major f32 row (raw 0-255 values),
     /// skipping the intermediate HWC buffer.
-    #[allow(dead_code)]
     pub fn downsample_chw_f32(&self, out: &mut Vec<f32>, final_w: usize, final_h: usize) {
         out.clear();
         out.resize(3 * final_h * final_w, 0.0);
