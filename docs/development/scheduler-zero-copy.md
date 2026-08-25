@@ -237,8 +237,9 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
      scratch path instead — encode into scratch, hash the bytes, copy to a
      span only on a miss (stage-1 economics for that row, per request, not
      per route). The contract is an invariant with teeth: equal `cache_key`
-     streams MUST imply byte-identical encoded rows — a too-narrow key only
-     costs hits, a too-wide key silently serves wrong predictions. Encoder
+     streams MUST imply byte-identical encoded rows — omitting state the
+     observation depends on silently serves wrong predictions; including
+     unnecessary state only costs hits. Encoder
      keys and observation-hash keys share one cache, domain-separated by a
      leading tag byte so the two key spaces cannot collide. `CacheHasher` is
      an opaque engine-owned streamer (the engine picks function and seed, and
@@ -549,8 +550,8 @@ engine:
   capacity before the COW sharding is accepted; escalation to a per-shard
   persistent map if shard clones measure high.
 - Cache-key soundness: a property test per built-in encoder — states with
-  equal `cache_key` streams must encode byte-identically — alongside the
-  existing parity suites.
+  equal `cache_key` streams must encode byte-identically, on both `encode`
+  and `encode_into` — alongside the existing parity suites.
 - Demotion from every retention source: a stale encoder-key hit re-encodes
   from its ticket's cloned state; a stale observation-hash hit reuses its
   scratch row; a root hit produces its record row whether validated or
