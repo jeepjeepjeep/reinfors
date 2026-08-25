@@ -165,8 +165,8 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    frees it) and moves it into NumPy as `(n, dim)`, exactly today's
    variable-shape default, zero copies. Padding stays the `pad=True` opt-in for
    callers who want `torch.compile`-stable shapes: with it enabled, a short
-   fire's suffix is initialized by a spawned worker task (see the flush in
-   element 8) — full fires have no suffix and cost nothing. Zero-copy must
+   fire's suffix is initialized by a spawned worker task (see the fire ladder
+   in element 8) — full fires have no suffix and cost nothing. Zero-copy must
    never require padding.
 4. **Memory is bounded, checked, and lazy.** Arena memory is
    `pool_depth x capacity x dim x 4` bytes per inference route, and pixel rows
@@ -307,7 +307,7 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
      granularity makes the mixed cases free: a round with misses on route R
      releases its R hits at the same fire that resolves those misses — zero
      added latency for any round with at least one same-route miss; only
-     pure-hit rounds wait for a fire driven by other slots (or the flush).
+     pure-hit rounds wait for a fire driven by other slots (or the ladder).
      Rounds split across buffers need no new rule: tickets resolve fire-by-fire
      and the mailbox joins them, exactly as when a round's requests straddle
      fires today. The latency cost is absorbed by slot count, not throughput —
@@ -352,40 +352,70 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
      staged map covers duplicates within a buffer, the two-plane rule covers
      staleness across fires, and both failure costs are compute, not
      correctness.
-8. **The per-route flush guarantees liveness.** Gating creates one stall the
-   ungated design could not have: a route whose lookups keep hitting never
-   accumulates misses, so it never fires, and its gated tickets wait forever —
-   and a GLOBAL quiescence guard misses this, because an unrelated route can
-   keep `in_flight` nonzero indefinitely while the hit-bound route starves.
-   The flush is therefore per route: at points the scheduler's loop already
-   visits (the recv-block idle path, the end of each routing pass), any route
-   with gated tickets, no in-flight rows, and no pending rows in its open
-   buffer releases those tickets — generation-validated against the route's
-   current generation directly, since no fire is involved. Safe for the
-   sampling mix by the gate's own logic: with nothing of the route's in
-   flight, there are no misses for the hits to outrun. Global quiescence —
-   every slot parked, `in_flight == 0` — is the degenerate case: it closes
-   each open buffer (the same atomic close as a capacity fill), seals at
-   current fill (truncate-to-prefix; race-free because zero in-flight tasks
-   implies every reserved span is committed AND every registered alias message
-   already processed — the `(k, m)` reconciliation is trivially satisfied at
-   true quiescence), fires non-empty buffers, then releases every route's
-   gated tickets. On a `pad=True` route, a partial close is where the padded
-   suffix comes from, and the scheduler must not zero it itself: it atomically
-   closes the buffer, spawns a small worker task that initializes rows
-   `k..capacity`, and fires only after that task publishes completion.
-   Unpadded drains truncate and need no suffix work. Released slots respawn into the fresh buffer and the system
-   exits quiescence. Detection is an O(1) per-route counter check;
-   determinism at `n_threads=1` holds because both checks occur at
-   structurally fixed points.
+8. **A fire ladder guarantees liveness.** Gating and partial buffers create
+   stalls the ungated design could not have, and a GLOBAL quiescence guard
+   misses them: an unrelated route can keep `in_flight` nonzero indefinitely
+   while a stalled route starves — whether hit-bound (every lookup hits, no
+   misses accumulate, no fire ever comes) or stuck on a partial buffer whose
+   producers are all blocked on that very buffer. No snapshot condition can
+   detect the latter — a slot blocked on route B may or may not emit A rows
+   after it resumes — so the ladder detects lack of PROGRESS instead:
+
+   - *Fire at capacity* — the normal case.
+   - *Progress-counted partial close.* Per route, the scheduler records
+     buffer fill at each completed fire. A route with unresolved demand —
+     pending rows or gated tickets — whose fill has not advanced across K
+     consecutive completed fires engine-wide is closed and fired as a partial
+     batch, its gated tickets released under normal fire semantics; a stalled
+     route with an EMPTY buffer "fires" as a no-op and just releases its
+     tickets, generation-validated against the route's current generation
+     directly. Only real, non-empty inference fires advance this clock — an
+     empty release does not count, or stalled empty routes would tick one
+     another into release cascades. A healthy route's buffer grows between
+     fires, so the counter never reaches K in balanced steady state; it
+     triggers exactly when starvation is real, and over-eagerness is tunable
+     via K. Scope honestly: this bounds ZERO-PROGRESS time, not total
+     latency — a route receiving one row every K-1 foreign fires keeps
+     resetting its counter and can take a long time to fill, a deliberate
+     utilization tradeoff; a separate larger maximum-age threshold can be
+     added later if measurements show trickling routes are a problem.
+   - *Global quiescence* — every slot parked, `in_flight == 0` — remains the
+     terminal drain, and the only detector for a single-route engine (no
+     foreign fires to count): close each open buffer (the same atomic close
+     as a capacity fill), seal at current fill (truncate-to-prefix;
+     race-free because zero in-flight tasks implies every reserved span is
+     committed AND every registered alias message already processed — the
+     `(k, m)` reconciliation is trivially satisfied at true quiescence),
+     fire non-empty buffers, release every route's gated tickets.
+
+   The counter is deterministic, but closing can still race a worker
+   reservation: even at `n_threads=1` the scheduler and worker are
+   concurrent threads, and at the Kth fire a worker mid-reservation lands in
+   the old or the next buffer by CAS timing. The threshold therefore
+   triggers a brief scheduling barrier — stop spawning/resuming worker
+   tasks, drain already-running tasks and their commit messages, close and
+   fire the stalled routes on that stable prefix, resume normal admission —
+   paid only on an actual starvation event, where a partial fire is already
+   accepted. Without the barrier the protocol stays memory-safe and live,
+   but exact one-thread batch ordering is not formally deterministic. On a
+   `pad=True` route, a partial close is where the padded suffix comes from,
+   and the scheduler must not zero it itself: it atomically closes the
+   buffer, spawns a small worker task that initializes rows `k..capacity`,
+   and fires only after that task publishes completion; unpadded closes
+   truncate and need no suffix work. Telemetry distinguishes partial
+   miss-buffer closes, empty hit-only releases, and forced global drains.
+
+   Today's engine has this hole in miniature — partial queues fire only at
+   global settle, so a hot route can starve a cold route's staged rows for
+   the whole window. The ladder is strictly stronger than today's behaviour.
 
    Sizing rule (per route): full batches in steady state need roughly
    `n_games >= 2 x batch_size / (1 - hit_rate)` — one batch's worth of misses
    accumulating while the previous batch is in the callback, with hit-gated
-   tickets not contributing. A well-sized run only flushes at window
-   boundaries, so per-route flush counters in telemetry directly expose
-   undersized configurations: if one ticks in steady state, the config
-   violates the sizing rule and the operator sees small batches coming.
+   tickets not contributing. A well-sized run only closes partially at
+   window boundaries, so the ladder's counters directly expose undersized
+   configurations: if one ticks in steady state, the config violates the
+   sizing rule and the operator sees small batches coming.
 9. **Tail bootstraps become worker tasks.** Today `tail_requests` encodes the
    truncation/fragment bootstrap observations on the scheduler thread — for
    pixel games that is a full render each, serialized. Under the arena, a cut
@@ -435,7 +465,8 @@ Engine-level gates:
   byte-identical batches run-to-run (equality against the OLD scheduler is not a
   goal — hit gating and fire cadence legitimately reorder collection).
 - Telemetry assertions: per-slot record counts and hit rates exposed; the
-  per-route flush counters stay at zero in a correctly sized steady-state run.
+  stall-close, empty-release, and global-drain counters stay at zero in a
+  correctly sized steady-state run.
 - The existing scheduler test suite (firing thresholds, per-player routing,
   fragment cuts, panic drains) unchanged.
 - Throughput gate: pixel collection at 8 threads must beat the current plateau by
@@ -467,15 +498,19 @@ engine:
   snapshot; fixed-seed `n_threads=1` runs are byte-identical with the cache
   enabled.
 - All-hit and sparse-miss batches: gated tickets release on their route's fire
-  or its flush; a window of pure hits terminates.
+  or its stall release; a window of pure hits terminates.
 - Mixed hit/miss rounds and cross-buffer rounds: the slot resumes only when
   every ticket resolves; same-route hits release with the fire that resolves
   the round's misses.
-- Idle-route release: a route with gated tickets, nothing in flight, and an
-  empty open buffer releases without a fire, even while unrelated routes stay
-  busy.
+- Starved-route close: a route with a partial buffer and gated tickets whose
+  producers are all blocked on it closes and fires after K foreign fires while
+  an unrelated route stays hot; an empty stalled route releases as a no-op;
+  empty releases never advance the stall clock (no release cascades).
+- Stall-barrier determinism: the Kth-fire close drains running tasks and their
+  commit messages before closing; fixed-seed `n_threads=1` runs stay
+  byte-identical with induced stalls.
 - High-hit partial-buffer starvation: configs below the sizing rule make
-  progress through the flush and increment its per-route counter.
+  progress through the ladder and increment its counters.
 - Cache-maintenance microbenchmark: insert/evict/promotion measured at target
   capacity before the COW sharding is accepted; escalation to a per-shard
   persistent map if shard clones measure high.
