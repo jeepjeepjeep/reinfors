@@ -1236,14 +1236,33 @@ where
                         while in_flight > 0 {
                             let msg = rx.recv().expect("scheduler channel closed");
                             in_flight -= 1;
-                            if let ATaskOut::Completed {
-                                finished: Some(terminal),
-                                ..
-                            } = msg.out
-                            {
-                                let mut guard = slots[msg.gi].lock().expect("slot lock");
-                                let slot: &mut SlotCtx<'_, G, P> = &mut guard;
-                                if !terminal {
+                            match msg.out {
+                                ATaskOut::Completed {
+                                    finished: Some(terminal),
+                                    ..
+                                } => {
+                                    let mut guard = slots[msg.gi].lock().expect("slot lock");
+                                    let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                                    if !terminal {
+                                        flush_records_game(
+                                            &HashMap::new(),
+                                            game,
+                                            learner,
+                                            encoder,
+                                            slot,
+                                            &mut out,
+                                            &mut stats,
+                                        );
+                                    }
+                                    respawn_game(game, policy, slot, &mut start);
+                                }
+                                // A truncation tail caught mid-task resolves empty here,
+                                // exactly like a parked one below.
+                                ATaskOut::TailEmitted {
+                                    fragment: false, ..
+                                } => {
+                                    let mut guard = slots[msg.gi].lock().expect("slot lock");
+                                    let slot: &mut SlotCtx<'_, G, P> = &mut guard;
                                     flush_records_game(
                                         &HashMap::new(),
                                         game,
@@ -1253,8 +1272,9 @@ where
                                         &mut out,
                                         &mut stats,
                                     );
+                                    respawn_game(game, policy, slot, &mut start);
                                 }
-                                respawn_game(game, policy, slot, &mut start);
+                                _ => {}
                             }
                         }
                         for gi in 0..n_games {
@@ -1987,7 +2007,8 @@ struct RouteArena {
 
 /// A route's open-arena slot; workers allocate replacements, never the scheduler.
 struct RouteShared {
-    open: std::sync::Mutex<std::sync::Arc<RouteArena>>,
+    // lazy: unused routes and no-op collects allocate nothing
+    open: std::sync::Mutex<Option<std::sync::Arc<RouteArena>>>,
     next_id: std::sync::atomic::AtomicU64,
     capacity: usize,
     dim: usize,
@@ -1996,30 +2017,42 @@ struct RouteShared {
 impl RouteShared {
     fn new(capacity: usize, dim: usize) -> Self {
         RouteShared {
-            open: std::sync::Mutex::new(std::sync::Arc::new(RouteArena {
-                id: 0,
-                arena: Arena::new(capacity, dim, 0),
-            })),
-            next_id: std::sync::atomic::AtomicU64::new(1),
+            open: std::sync::Mutex::new(None),
+            next_id: std::sync::atomic::AtomicU64::new(0),
             capacity,
             dim,
         }
     }
 
+    // allocated OUTSIDE the route lock: workers must never queue behind an allocation
+    fn fresh(&self) -> std::sync::Arc<RouteArena> {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::sync::Arc::new(RouteArena {
+            id,
+            arena: Arena::new(self.capacity, self.dim, 0),
+        })
+    }
+
     fn current(&self) -> std::sync::Arc<RouteArena> {
-        self.open.lock().expect("route lock").clone()
+        if let Some(open) = self.open.lock().expect("route lock").as_ref() {
+            return open.clone();
+        }
+        let fresh = self.fresh();
+        self.open
+            .lock()
+            .expect("route lock")
+            .get_or_insert(fresh)
+            .clone()
     }
 
     fn replace_if(&self, old: &std::sync::Arc<RouteArena>) {
+        let fresh = self.fresh();
         let mut open = self.open.lock().expect("route lock");
-        if std::sync::Arc::ptr_eq(&open, old) {
-            let id = self
-                .next_id
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            *open = std::sync::Arc::new(RouteArena {
-                id,
-                arena: Arena::new(self.capacity, self.dim, 0),
-            });
+        match open.as_ref() {
+            Some(cur) if !std::sync::Arc::ptr_eq(cur, old) => {}
+            _ => *open = Some(fresh),
         }
     }
 }
@@ -2065,7 +2098,9 @@ fn push_route_rows(
             positions,
         });
         next += take;
-        if closes {
+        // A close on the task's FINAL span defers replacement to the next
+        // requester, so the sealed arena's fire never waits on an allocation.
+        if closes && next < rows.len() {
             route.replace_if(&cur);
         }
     }

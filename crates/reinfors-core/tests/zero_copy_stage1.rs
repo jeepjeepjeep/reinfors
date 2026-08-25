@@ -145,10 +145,11 @@ impl Reward for Zero {
     }
 }
 
-/// One-round PPO-shaped policy; rows beyond the first per perspective are
-/// ballast that exercises arena splitting.
+/// PPO-shaped policy; rows beyond the first per perspective are ballast that
+/// exercises arena splitting, extra rounds exercise the Blocked/Resume cycle.
 struct FanActor {
     fan: usize,
+    rounds: usize,
 }
 
 struct FanSearch {
@@ -217,16 +218,23 @@ impl Policy for FanActor {
     where
         G::State: Send,
     {
-        if search.round > 0 {
-            return RoundStatus::Done;
-        }
-        for (agent, obs) in search.agents.iter().zip(search.obs.iter()) {
-            out.push_root(*agent, obs.clone(), *agent);
-            for extra in 1..self.fan {
-                let mut ballast = obs.clone();
-                ballast[0] += 1000.0 * extra as f32;
-                out.push(*agent, &ballast);
+        match search.round {
+            0 => {
+                for (agent, obs) in search.agents.iter().zip(search.obs.iter()) {
+                    out.push_root(*agent, obs.clone(), *agent);
+                    for extra in 1..self.fan {
+                        let mut ballast = obs.clone();
+                        ballast[0] += 1000.0 * extra as f32;
+                        out.push(*agent, &ballast);
+                    }
+                }
             }
+            r if r < self.rounds => {
+                for agent in &search.agents {
+                    out.push(*agent, &[9000.0 + r as f32, *agent as f32]);
+                }
+            }
+            _ => return RoundStatus::Done,
         }
         search.round += 1;
         RoundStatus::Pending
@@ -240,6 +248,9 @@ impl Policy for FanActor {
     ) where
         G::State: Send,
     {
+        if search.round != 1 {
+            return;
+        }
         search.results = search
             .legal
             .iter()
@@ -285,6 +296,7 @@ impl Policy for FanActor {
 fn engine_with<G: Game<State = St, Event = ()> + Sync>(
     game: G,
     fan: usize,
+    rounds: usize,
     batch_size: usize,
     zero_copy: bool,
 ) -> Engine<G, FanActor, reinfors_core::Ppo>
@@ -295,7 +307,7 @@ where
         game,
         Box::new(Enc),
         Box::new(Zero),
-        FanActor { fan },
+        FanActor { fan, rounds },
         reinfors_core::Ppo::new(1.0, 0.95),
         EngineParams {
             n_games: 2,
@@ -331,6 +343,7 @@ type RoutedBatches = Arc<Mutex<Vec<(usize, Vec<f32>, usize)>>>;
 fn run_shared<G: Game<State = St, Event = ()> + Sync>(
     game: impl Fn() -> G,
     fan: usize,
+    rounds: usize,
     batch_size: usize,
     n_records: usize,
     zero_copy: bool,
@@ -344,7 +357,7 @@ where
 {
     let batches = Arc::new(Mutex::new(Vec::new()));
     let seen = batches.clone();
-    let mut e = engine_with(game(), fan, batch_size, zero_copy);
+    let mut e = engine_with(game(), fan, rounds, batch_size, zero_copy);
     let (records, stats) = e.collect(n_records, move |obs: Vec<f32>, n: usize| {
         seen.lock().unwrap().push(n);
         ppo_infer(&obs, n)
@@ -356,8 +369,8 @@ where
 
 #[test]
 fn zero_copy_matches_the_classic_path() {
-    let (classic, classic_stats, _) = run_shared(|| Line, 1, 2, 12, false);
-    let (zero, zero_stats, _) = run_shared(|| Line, 1, 2, 12, true);
+    let (classic, classic_stats, _) = run_shared(|| Line, 1, 1, 2, 12, false);
+    let (zero, zero_stats, _) = run_shared(|| Line, 1, 1, 2, 12, true);
     assert!(!classic.is_empty());
     assert_eq!(classic, zero, "records must be byte-identical across paths");
     assert_eq!(classic_stats.decisions, zero_stats.decisions);
@@ -370,16 +383,16 @@ fn zero_copy_matches_the_classic_path() {
 
 #[test]
 fn zero_copy_is_deterministic() {
-    let (a, _, batches_a) = run_shared(|| Line, 3, 4, 12, true);
-    let (b, _, batches_b) = run_shared(|| Line, 3, 4, 12, true);
+    let (a, _, batches_a) = run_shared(|| Line, 3, 1, 4, 12, true);
+    let (b, _, batches_b) = run_shared(|| Line, 3, 1, 4, 12, true);
     assert_eq!(a, b, "fixed-seed zero-copy runs must be byte-identical");
     assert_eq!(batches_a, batches_b, "fire cadence must be deterministic");
 }
 
 #[test]
 fn rounds_split_across_arenas() {
-    let (classic, _, _) = run_shared(|| Line, 5, 4, 12, false);
-    let (zero, zero_stats, batches) = run_shared(|| Line, 5, 4, 12, true);
+    let (classic, _, _) = run_shared(|| Line, 5, 1, 4, 12, false);
+    let (zero, zero_stats, batches) = run_shared(|| Line, 5, 1, 4, 12, true);
     assert_eq!(classic, zero, "split rounds must not disturb records");
     assert!(
         batches.iter().filter(|&&n| n == 4).count() >= 2,
@@ -394,8 +407,8 @@ fn rounds_split_across_arenas() {
 
 #[test]
 fn truncation_tails_ride_worker_tasks() {
-    let (classic, classic_stats, _) = run_shared(|| TruncLine, 1, 2, 8, false);
-    let (zero, zero_stats, _) = run_shared(|| TruncLine, 1, 2, 8, true);
+    let (classic, classic_stats, _) = run_shared(|| TruncLine, 1, 1, 2, 8, false);
+    let (zero, zero_stats, _) = run_shared(|| TruncLine, 1, 1, 2, 8, true);
     assert_eq!(classic, zero, "tail-bootstrapped records must match");
     assert!(zero_stats.sum_tail_rows > 0, "horizon must produce tails");
     assert_eq!(classic_stats.sum_tail_rows, zero_stats.sum_tail_rows);
@@ -406,7 +419,7 @@ fn per_player_routing_stays_partitioned() {
     let run = |zero_copy: bool| {
         let batches: RoutedBatches = Arc::new(Mutex::new(Vec::new()));
         let seen = batches.clone();
-        let mut e = engine_with(RR, 2, 3, zero_copy);
+        let mut e = engine_with(RR, 2, 1, 3, zero_copy);
         let (records, _) =
             e.collect_routed(10, InferMode::PerPlayer, move |player, obs: Vec<f32>, n| {
                 seen.lock().unwrap().push((player, obs.clone(), n));
@@ -433,7 +446,7 @@ fn per_player_routing_stays_partitioned() {
 #[test]
 fn callback_panics_unwind_cleanly() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut e = engine_with(Line, 1, 2, true);
+        let mut e = engine_with(Line, 1, 1, 2, true);
         let mut calls = 0;
         e.collect(12, move |obs: Vec<f32>, n: usize| {
             calls += 1;
@@ -442,4 +455,123 @@ fn callback_panics_unwind_cleanly() {
         })
     }));
     assert!(result.is_err(), "the callback panic must surface");
+}
+
+#[test]
+fn multi_round_searches_match_the_classic_path() {
+    let (classic, _, _) = run_shared(|| Line, 3, 2, 4, 12, false);
+    let (zero, _, _) = run_shared(|| Line, 3, 2, 4, 12, true);
+    assert!(!classic.is_empty());
+    assert_eq!(classic, zero, "multi-round records must match across paths");
+}
+
+#[test]
+fn dqn_chained_records_match() {
+    fn key(r: &reinfors_core::DqnRecord) -> (usize, Vec<u32>, usize, u64, Vec<u32>, bool, u64) {
+        (
+            r.player,
+            r.obs.iter().map(|f| f.to_bits()).collect(),
+            r.action,
+            r.reward.to_bits(),
+            r.next_obs.iter().map(|f| f.to_bits()).collect(),
+            r.terminal,
+            r.discount.to_bits(),
+        )
+    }
+    let run = |zero_copy: bool| {
+        let mut e = Engine::new(
+            Line,
+            Box::new(Enc),
+            Box::new(Zero),
+            reinfors_core::EpsilonGreedyQ::new(1, 0.25),
+            reinfors_core::Dqn::new(1, 1.0, 1, 0.99),
+            EngineParams {
+                n_games: 2,
+                seed: 7,
+                n_threads: Some(1),
+                batch_size: Some(2),
+                zero_copy,
+                ..Default::default()
+            },
+        );
+        let (records, _) = e.collect(10, |obs: Vec<f32>, n: usize| {
+            let dim = obs.len() / n.max(1);
+            (0..n)
+                .flat_map(|i| [f64::from(obs[i * dim]) * 0.1, 0.2])
+                .collect()
+        });
+        records.iter().map(key).collect::<Vec<_>>()
+    };
+    let classic = run(false);
+    assert!(!classic.is_empty());
+    assert_eq!(
+        classic,
+        run(true),
+        "chained DQN records must match across paths"
+    );
+}
+
+#[test]
+fn multi_threaded_stress_races_arena_replacement() {
+    let batches = Arc::new(Mutex::new(Vec::new()));
+    let seen = batches.clone();
+    let mut e = Engine::new(
+        TruncLine,
+        Box::new(Enc),
+        Box::new(Zero),
+        FanActor { fan: 7, rounds: 2 },
+        reinfors_core::Ppo::new(1.0, 0.95),
+        EngineParams {
+            n_games: 8,
+            seed: 3,
+            n_threads: Some(4),
+            batch_size: Some(4),
+            zero_copy: true,
+            ..Default::default()
+        },
+    );
+    let (records, stats) = e.collect(300, move |obs: Vec<f32>, n: usize| {
+        seen.lock().unwrap().push(n);
+        ppo_infer(&obs, n)
+    });
+    assert!(records.len() >= 300);
+    let batches = batches.lock().unwrap().clone();
+    assert!(batches.iter().all(|&n| n <= 4), "fires exceed capacity");
+    assert_eq!(batches.iter().sum::<usize>(), stats.infer_rows);
+}
+
+#[test]
+fn callback_panic_with_tails_in_flight_leaves_the_engine_reusable() {
+    for panic_at in 1..=10 {
+        let mut e = engine_with(TruncLine, 1, 1, 1, true);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut calls = 0;
+            e.collect(24, move |obs: Vec<f32>, n: usize| {
+                calls += 1;
+                assert!(calls != panic_at, "die at fire {panic_at}");
+                ppo_infer(&obs, n)
+            })
+        }));
+        if result.is_ok() {
+            continue;
+        }
+        let (_, stats) = e.collect(12, |obs: Vec<f32>, n: usize| ppo_infer(&obs, n));
+        for ep in &stats.episodes {
+            assert!(
+                ep.length <= 4,
+                "slot stranded over the horizon after abort at fire {panic_at}: length {}",
+                ep.length
+            );
+        }
+    }
+}
+
+#[test]
+fn noop_collect_allocates_nothing_and_the_engine_reuses() {
+    let mut e = engine_with(Line, 1, 1, 2, true);
+    let (records, stats) = e.collect(0, |obs: Vec<f32>, n: usize| ppo_infer(&obs, n));
+    assert!(records.is_empty());
+    assert_eq!(stats.infer_calls, 0);
+    let (records, _) = e.collect(6, |obs: Vec<f32>, n: usize| ppo_infer(&obs, n));
+    assert!(!records.is_empty());
 }

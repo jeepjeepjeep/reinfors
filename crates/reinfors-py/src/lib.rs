@@ -2879,8 +2879,8 @@ where
         n_heads,
         action_count,
     )?;
-    if engine_params.pad {
-        // pad fixes every call at exactly batch_size rows: no agent multiplier
+    if engine_params.pad || engine_params.zero_copy {
+        // pad fixes call shapes at batch_size rows; zero_copy allocates arenas of it
         let rows = engine_params
             .batch_size
             .unwrap_or_else(|| (engine_params.n_games / 2).max(1));
