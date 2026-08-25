@@ -249,13 +249,19 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
      (insert, evict, the per-player `Exclusive` slots) survives; read-side
      promotion does NOT — today's cache promotes entries during lookup, and
      under this split recency moves to the writer (next bullet).
-   - *Publication is shallow copy-on-write; recency lives outside it.* A shard
-     is an `Arc<HashMap<Key, Arc<Row>>>` behind an atomic pointer; an insert or
-     evict clones the shard map SHALLOWLY (`C/S` pointer clones for capacity
-     `C` over `S` shards — size shards so `C/S <~ 64` and maintenance is
-     sub-microsecond, O(rows)-scale), mutates, and swaps the pointer. Evicted
-     rows stay alive through `Arc` clones held by in-flight readers and pinned
-     views. Recency metadata is deliberately NOT in the shared shards: workers
+   - *Publication is shallow copy-on-write, batched per fire; recency lives
+     outside it.* The live view is one immutable `Arc<CacheView>`: a shard
+     pointer array over `Arc<HashMap<Key, Arc<Row>>>` shards. At routing time
+     the scheduler applies a whole fire's insertions and evictions at once —
+     group the mutations by shard, clone each TOUCHED shard once SHALLOWLY
+     (`C/S` pointer clones for capacity `C` over `S` shards — size shards so
+     `C/S <~ 64`) and apply its batch, clone the pointer array once per FIRE,
+     publish one new `Arc<CacheView>`. The batching matters: with `C/S ~ 64`
+     a 100k-entry cache is ~1,500 shards, so a per-row array rebuild — or
+     per-Work assembly of a view by loading every shard pointer — would dwarf
+     the copies this design removes; per fire, one ~12 KB array copy is
+     noise. Evicted rows stay alive through `Arc` clones held by in-flight
+     readers and pinned views. Recency metadata is deliberately NOT in the shared shards: workers
      never read it, so it needs no snapshot semantics — the scheduler keeps a
      private LRU fed by the span metadata workers already send ("keys I
      touched"), and promotions mutate only that private structure. Only
@@ -272,8 +278,9 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
      — or misses it — by pure pointer-load timing, and hit-vs-miss changes
      whether an arena row is occupied and hence fire cadence: nondeterministic
      even at `n_threads=1`, because scheduler and worker are still two threads.
-     So the scheduler attaches the snapshot current at spawn (an `Arc` clone of
-     the shard-pointer array) to each `Work` item, and worker lookups read only
+     So the scheduler attaches the snapshot current at spawn — one O(1)
+     `Arc<CacheView>` clone of the view published at the last fire (see
+     publication above) — to each `Work` item, and worker lookups read only
      through that pinned view. Which snapshot an item carries is then a pure
      function of the serial spawn sequence: read outcomes depend on
      deterministic spawn order, not timing. Pinning applies at every thread
