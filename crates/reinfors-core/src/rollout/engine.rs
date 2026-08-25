@@ -218,6 +218,8 @@ where
             "one cache per slot: shared + one per player"
         );
         self.infer_caches = Some(caches);
+        // new handles/capacity: the derived zero-copy cache must rebuild
+        self.zc_caches = None;
         self
     }
 
@@ -1014,7 +1016,7 @@ where
             }
             let mut views: Pins = route_caches
                 .as_ref()
-                .map(|rc| rc.iter().map(|c| c.view()).collect());
+                .map(|rc| rc.iter().map(|c| c.view()).collect::<Vec<_>>().into());
 
             let task = |gi: usize,
                         work: AWork<P::Search<G::State>>,
@@ -1361,6 +1363,8 @@ where
                             > = std::collections::BTreeMap::new();
                             for (gi, hit) in gated[$route].drain(..) {
                                 if hit.gen == seen {
+                                    // a hit is a hit only once it actually delivers
+                                    stats.cache_hits += 1;
                                     cache.stage_promote(hit.key);
                                     deliver_hit!(gi, hit, $freed);
                                 } else {
@@ -1549,11 +1553,9 @@ where
                                 }
                             }
                             release_gated!($route, freed);
-                            if let (Some(rc), Some(vs), Some(g)) =
-                                (route_caches.as_mut(), views.as_mut(), gen_at_fire)
-                            {
+                            if let (Some(rc), Some(g)) = (route_caches.as_mut(), gen_at_fire) {
                                 rc[$route].publish(g);
-                                vs[$route] = rc[$route].view();
+                                views = Some(rc.iter().map(|c| c.view()).collect::<Vec<_>>().into());
                             }
                             settle_freed!(freed);
                         }
@@ -1611,13 +1613,14 @@ where
                             #[allow(clippy::needless_range_loop)]
                             for route in 0..n_routes {
                                 release_gated!(route, freed);
-                                if let (Some(rc), Some(vs)) =
-                                    (route_caches.as_mut(), views.as_mut())
-                                {
+                                if let Some(rc) = route_caches.as_mut() {
                                     let g = rc[route].seen_generation();
                                     rc[route].publish(g);
-                                    vs[route] = rc[route].view();
                                 }
+                            }
+                            if let Some(rc) = route_caches.as_ref() {
+                                views =
+                                    Some(rc.iter().map(|c| c.view()).collect::<Vec<_>>().into());
                             }
                             settle_freed!(freed);
                             continue;
@@ -1692,7 +1695,6 @@ where
                             let gi = msg.gi;
                             stats.sum_requested_rows += n;
                             stats.cache_lookups += lookups;
-                            stats.cache_hits += hits.len();
                             // installed before any accounting that could fire
                             phases[gi] = SlotPhase::Blocked {
                                 search,
@@ -1772,7 +1774,6 @@ where
                                 stats.sum_requested_rows += n;
                                 stats.sum_tail_rows += n;
                                 stats.cache_lookups += lookups;
-                                stats.cache_hits += hits.len();
                                 phases[gi] = SlotPhase::AwaitingTail {
                                     fragment,
                                     meta,
@@ -2241,7 +2242,7 @@ struct AHit {
     row: Vec<f32>,
 }
 
-type Pins = Option<Vec<std::sync::Arc<CacheView>>>;
+type Pins = Option<std::sync::Arc<[std::sync::Arc<CacheView>]>>;
 
 /// Route rows through the pinned cache views: hits park, misses go to the arenas.
 fn classify_rows(

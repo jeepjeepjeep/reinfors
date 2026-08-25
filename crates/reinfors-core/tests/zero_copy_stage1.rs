@@ -753,3 +753,26 @@ fn the_cache_persists_across_collects() {
     );
     assert!(second.cache_hits > 0);
 }
+
+#[test]
+fn reinstalling_caches_discards_the_old_zero_copy_cache() {
+    let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 1, 1, true, Some(64));
+    let (r1, s1) = e.collect(3, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
+    assert!(s1.infer_calls > 0);
+    let shared = Arc::new(AtomicU64::new(0));
+    let mut e = e.with_infer_caches(
+        (0..=1)
+            .map(|_| InferCache::new(64, shared.clone()))
+            .collect(),
+    );
+    let (r2, s2) = e.collect(3, |obs: Vec<f32>, n: usize| {
+        exact_infer(&obs, n).iter().map(|v| v * 2.0).collect()
+    });
+    assert!(
+        s2.infer_calls > 0,
+        "the replaced cache served the old collection's values"
+    );
+    let k1: Keys = r1.iter().map(record_key).collect();
+    let k2: Keys = r2.iter().map(record_key).collect();
+    assert_ne!(k1, k2, "records must reflect the new callback's outputs");
+}

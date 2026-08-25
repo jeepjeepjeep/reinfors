@@ -110,15 +110,22 @@ impl ZcCache {
         let mut touched: HashMap<usize, Shard> = HashMap::new();
         for key in self.promotes.drain(..) {
             let si = (key as usize) & mask;
+            // current-half keys need no promotion: never clone a shard for them
+            let in_prev = match touched.get(&si) {
+                Some(t) => t.prev.contains_key(&key),
+                None => self.view.shards[si].prev.contains_key(&key),
+            };
+            if !in_prev {
+                continue;
+            }
             let shard = touched
                 .entry(si)
                 .or_insert_with(|| (*self.view.shards[si]).clone());
-            if let Some(row) = shard.prev.remove(&key) {
-                if shard.current.len() >= self.shard_half {
-                    shard.prev = std::mem::take(&mut shard.current);
-                }
-                shard.current.insert(key, row);
+            let row = shard.prev.remove(&key).expect("membership checked");
+            if shard.current.len() >= self.shard_half {
+                shard.prev = std::mem::take(&mut shard.current);
             }
+            shard.current.insert(key, row);
         }
         let shard_half = self.shard_half;
         for (key, row) in self.staged.drain(..) {
@@ -130,6 +137,9 @@ impl ZcCache {
                 shard.prev = std::mem::take(&mut shard.current);
             }
             shard.current.insert(key, row);
+        }
+        if touched.is_empty() {
+            return;
         }
         let shards: Box<[Arc<Shard>]> = self
             .view
@@ -183,6 +193,20 @@ mod tests {
         assert!(
             view.lookup(2).is_none(),
             "pre-boundary fire seeded the cache"
+        );
+    }
+
+    #[test]
+    fn current_half_promotions_leave_the_view_untouched() {
+        let (mut c, _) = cache(256);
+        c.stage_insert(1, &[1.0]);
+        c.publish(0);
+        let before = c.view();
+        c.stage_promote(1);
+        c.publish(0);
+        assert!(
+            Arc::ptr_eq(&before, &c.view()),
+            "a current-half promotion must not publish a new view"
         );
     }
 
