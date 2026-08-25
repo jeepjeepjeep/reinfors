@@ -59,17 +59,24 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    pixel encoder is already shaped for it (its downsample writes into a
    caller-provided buffer).
 
-   Handing encoders `&mut [f32]` requires the storage to be initialized —
-   constructing a reference over uninitialized memory is unsound regardless of
-   the element type. Arenas are therefore allocated zeroed
-   (`vec![0f32; capacity * dim]`), keeping `MaybeUninit` out of every API.
-   Large zeroed allocations are *commonly* satisfied with lazily mapped zero
-   pages, making the zeroing near-free in practice — but neither Rust's
-   allocator nor the OS guarantees this, so it is an expected cost profile,
-   not an invariant; a recycled dirty allocation would require a real zeroing
-   pass. Zero initialization also solves only value validity: the unsafe arena
-   wrapper must separately guarantee that concurrently writing workers receive
-   strictly disjoint `&mut` slices (see the reservation protocol).
+   Arenas are allocated uninitialized (`MaybeUninit<f32>` internal to the
+   wrapper; nothing zeroes whole arenas). Stage 1 needs no zeroing at all:
+   copying a complete source row into the raw span initializes it. Stage 2
+   hands encoders `&mut [f32]`, and constructing a reference over
+   uninitialized memory is unsound regardless of element type — so the
+   wrapper enforces this sequence: reserve a disjoint raw range → zero the
+   range → only now construct the `&mut [f32]` → encode → commit with
+   Release. The per-span zero is one row-equivalent of work, parallel across
+   the workers producing observations, and warm — it touches exactly the
+   lines the encoder writes next. Uninitialized memory is never reachable
+   through any reference, and an encoder that underwrites its span produces
+   zeros, not undefined behavior. At seal, after the Acquire-ordered
+   reconciliation proves every prefix span committed (each committed span is
+   copy- or zero-then-write-initialized), the prefix is converted from the
+   internal `MaybeUninit<f32>` allocation into an owned `Vec<f32>`. Zeroing
+   solves value validity only: the wrapper must separately guarantee that
+   concurrently writing workers receive strictly disjoint ranges (see the
+   reservation protocol).
 
    Canonical root rows (`push_root`) keep an owned copy in both stages, by
    design: the training record needs a row that outlives the batch, and the
@@ -138,9 +145,9 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    frees it) and moves it into NumPy as `(n, dim)`, exactly today's
    variable-shape default, zero copies. Padding stays the `pad=True` opt-in for
    callers who want `torch.compile`-stable shapes: with it enabled, a short
-   fire's tail is already zero (arenas are allocated zeroed for soundness — see
-   element 1), so padding costs nothing at seal time. Zero-copy must never
-   require padding.
+   fire's suffix is initialized by a spawned worker task (see the flush in
+   element 8) — full fires have no suffix and cost nothing. Zero-copy must
+   never require padding.
 4. **Memory is bounded, checked, and lazy.** Arena memory is
    `pool_depth x capacity x dim x 4` bytes per inference route, and pixel rows
    make that real money: two 1,024-row `car_racing` buffers are ~216 MiB, and
@@ -158,13 +165,12 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
 5. **Ownership per fire; allocation is worker work.** Each fired buffer is a
    distinct allocation, moved into its NumPy array exactly as today (Python owns
    the storage; its GC frees it). Replacement arenas are allocated OFF the
-   scheduler, by rule: the worker whose reservation CAS closed the previous
-   buffer allocates the next one (equivalently: workers keep a pre-zeroed spare
-   staged). This matters because zeroed allocation is only *commonly* free — an
-   allocator that really memsets would spend one full arena of byte work per
-   fire (amortized: one row-equivalent per row), which on the scheduler would
-   silently re-add the serialized cost this proposal removes. On a worker it is
-   one-row-encode-scale work, parallel, on one of many threads.
+   scheduler, by rule, and uninitialized — allocation is a capacity request,
+   not a memset, so its cost does not depend on allocator or page state
+   (zeroing is per span, at reservation — see (1)). The worker whose
+   reservation CAS closed the previous buffer commits and notifies the
+   scheduler FIRST, unblocking sealing and the fire, and only then allocates
+   the replacement. The scheduler never allocates observation storage.
    Nothing is recycled when the callback returns: callbacks legitimately retain
    arrays, wrap them in `torch.from_numpy`, or start asynchronous device
    transfers, and reuse on return would mutate retained tensors or race an
@@ -174,10 +180,9 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    If profiling ever shows allocation itself mattering, storage can be returned
    to a pool through the NumPy owner's deallocator capsule — reuse gated on the
    array's actual death, so retained arrays delay reuse safely instead of being
-   corrupted by it. Note the coupled cost: recycled buffers come back dirty, so
-   pooling reopens the zeroing question (a real memset per reuse, or
-   `MaybeUninit` internally) — a deferred cost the pooling path carries, not a
-   free optimization.
+   corrupted by it. Recycled buffers come back dirty, which this design
+   tolerates by construction — storage is uninitialized anyway and zeroing is
+   per span — so pooling carries no hidden arena-scale re-zeroing cost.
 6. **The evaluator is replaced, not layered over.** A pooled buffer placed
    underneath the current `Evaluator::forward` would still be staged row-by-row
    into `EvalBatch::obs_flat` — the copy would move, not disappear. The arena IS
@@ -313,7 +318,11 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    implies every reserved span is committed AND every registered alias message
    already processed — the `(k, m)` reconciliation is trivially satisfied at
    true quiescence), fires non-empty buffers, then releases every route's
-   gated tickets. Released slots respawn into the fresh buffer and the system
+   gated tickets. On a `pad=True` route, a partial close is where the padded
+   suffix comes from, and the scheduler must not zero it itself: it atomically
+   closes the buffer, spawns a small worker task that initializes rows
+   `k..capacity`, and fires only after that task publishes completion.
+   Unpadded drains truncate and need no suffix work. Released slots respawn into the fresh buffer and the system
    exits quiescence. Detection is an O(1) per-route counter check;
    determinism at `n_threads=1` holds because both checks occur at
    structurally fixed points.
@@ -337,11 +346,11 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    blocked slots, and floor/record bookkeeping — all O(rows). The system's
    remaining byte work lives elsewhere, priced: worker-side row copies (two in
    stage 1, approaching zero for stage-2 encoders, one owned copy for canonical
-   root rows); worst-case arena zeroing on the closing worker (commonly ~free
-   via lazy zero pages, bounded by one row-equivalent per row when the
-   allocator really memsets); and kernel zero-page faults when a `pad=True`
-   suffix is first read by the callback (kernel work, not engine work). Nothing
-   in that ledger is serialized.
+   root rows); per-span zeroing on the stage-2 path (one row-equivalent per
+   row, parallel across workers, warm — see (1)); and suffix initialization
+   for `pad=True` partial closes, run as a worker task the fire waits on.
+   Nothing in that ledger is serialized: every entry is per-row work spread
+   across workers, or a bounded task off the arena hand-off path.
 
 ## What must not change
 
@@ -417,7 +426,11 @@ engine:
 - Retained Python arrays: a callback that stores every batch it receives —
   arrays stay valid and unchanged after arbitrary further collection.
 - Padded-suffix initialization: with `pad=True`, the suffix reads as zeros on
-  every platform/allocator, including after buffer splits and quiescence seals.
+  every platform/allocator — written by the spawned padding task, the fire
+  blocked on its completion — including after buffer splits and quiescence
+  seals.
+- Allocation-path benchmark: measured with recycled allocations, not fresh
+  ones — lazily mapped fresh pages understate what dirty buffers pay.
 - Pool backpressure and cancellation: reservation parks at pool exhaustion and
   wakes on fire; dropping the engine mid-window releases parked workers and
   leaks no arena.
