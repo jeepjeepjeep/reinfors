@@ -2,6 +2,8 @@
 //! `RUSTFLAGS="--cfg loom" cargo test -p reinfors-core --test loom_arena --release`.
 #![cfg(loom)]
 
+use loom::cell::UnsafeCell;
+use loom::sync::atomic::{AtomicU64, Ordering};
 use loom::sync::Arc;
 use loom::thread;
 
@@ -93,24 +95,77 @@ fn alias_vs_close_linearizes() {
 }
 
 #[test]
-fn commit_release_visible_at_seal() {
+fn reserve_alias_and_close_race_three_ways() {
     loom::model(|| {
-        let arena = Arc::new(Arena::new(1, 2, 4));
-        let worker = {
+        let arena = Arc::new(Arena::new(2, 1, 4));
+        let reserver = {
             let arena = arena.clone();
             thread::spawn(move || match arena.try_reserve(1) {
                 Reserve::Full { mut span, .. } => {
-                    span.push_row(&[41.0, 42.0]);
+                    span.push_row(&[7.0]);
                     span.commit();
+                    true
                 }
-                _ => unreachable!("sole worker"),
+                Reserve::Partial { .. } => unreachable!("capacity 2, request 1"),
+                Reserve::Closed => false,
             })
         };
-        worker.join().unwrap();
-        let arena = Arc::try_unwrap(arena).unwrap_or_else(|_| panic!("worker leaked arena"));
+        let aliaser = {
+            let arena = arena.clone();
+            thread::spawn(move || match arena.try_alias() {
+                AliasOutcome::Ticket(t) => {
+                    t.commit();
+                    true
+                }
+                AliasOutcome::Closed => false,
+                AliasOutcome::Saturated => unreachable!("limit is 4"),
+            })
+        };
+        let frozen = arena.close().expect("only this thread closes");
+        let reserved = reserver.join().unwrap();
+        let aliased = aliaser.join().unwrap();
+        // Losers of the close CAS must not appear in the frozen counts, winners must.
+        assert_eq!(frozen.rows, usize::from(reserved));
+        assert_eq!(frozen.aliases, u64::from(aliased));
+        let final_info = arena.close_info().unwrap();
         assert_eq!(
-            arena.into_rows().map_err(|(_, e)| e).unwrap(),
-            vec![41.0, 42.0]
+            (final_info.rows, final_info.aliases),
+            (frozen.rows, frozen.aliases)
         );
+        let arena = Arc::try_unwrap(arena).unwrap_or_else(|_| panic!("worker leaked arena"));
+        let rows = arena.into_rows().map_err(|(_, e)| e).unwrap();
+        assert_eq!(rows, vec![7.0; usize::from(reserved)]);
+    });
+}
+
+/// Loom cannot instrument the arena's raw buffer, so the commit/seal publication
+/// is modeled directly: same shape (payload write → `Release` count → `Acquire`
+/// check → read), race-checked through `loom::cell::UnsafeCell`. Weakening either
+/// ordering makes this fail.
+#[test]
+fn commit_release_publication_model() {
+    loom::model(|| {
+        struct Model {
+            cell: UnsafeCell<f32>,
+            resolved: AtomicU64,
+        }
+        unsafe impl Sync for Model {}
+        let m = Arc::new(Model {
+            cell: UnsafeCell::new(0.0),
+            resolved: AtomicU64::new(0),
+        });
+        let worker = {
+            let m = m.clone();
+            thread::spawn(move || {
+                m.cell.with_mut(|p| unsafe { *p = 41.0 });
+                m.resolved.fetch_add(1, Ordering::Release);
+            })
+        };
+        while m.resolved.load(Ordering::Acquire) != 1 {
+            thread::yield_now();
+        }
+        let seen = m.cell.with(|p| unsafe { *p });
+        assert_eq!(seen, 41.0, "committed bytes must be visible at seal");
+        worker.join().unwrap();
     });
 }

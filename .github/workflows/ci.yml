@@ -59,6 +59,11 @@ jobs:
       - name: Feature boundary  # games build without the default-on car-racing feature
         run: cargo build -p reinfors-games --no-default-features
 
+      - name: Loom  # exhaustive CAS-interleaving check of the arena protocol
+        run: cargo test -p reinfors-core --test loom_arena --release
+        env:
+          RUSTFLAGS: --cfg loom
+
   python:
     runs-on: ubuntu-latest
     steps:

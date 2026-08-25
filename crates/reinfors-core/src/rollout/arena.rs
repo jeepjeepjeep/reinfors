@@ -68,7 +68,8 @@ pub enum SealError {
 
 pub struct Arena {
     buf: NonNull<MaybeUninit<f32>>,
-    elems: usize,
+    // the allocation's ACTUAL capacity: from_raw_parts with anything else is UB
+    cap_elems: usize,
     state: AtomicU64,
     // committed or poisoned rows; Release on write, Acquire at seal
     resolved: AtomicU64,
@@ -93,11 +94,12 @@ impl Arena {
         assert!(dim > 0, "dim must be positive");
         let elems = capacity.checked_mul(dim).expect("capacity * dim overflows");
         let mut storage: Vec<MaybeUninit<f32>> = Vec::with_capacity(elems);
+        let cap_elems = storage.capacity();
         let buf = NonNull::new(storage.as_mut_ptr()).expect("allocation failed");
         std::mem::forget(storage);
         Arena {
             buf,
-            elems,
+            cap_elems,
             state: AtomicU64::new(pack(false, 0, 0)),
             resolved: AtomicU64::new(0),
             poisoned: AtomicBool::new(false),
@@ -241,7 +243,7 @@ impl Arena {
             Vec::from_raw_parts(
                 this.buf.as_ptr().cast::<f32>(),
                 info.rows * this.dim,
-                this.elems,
+                this.cap_elems,
             )
         })
     }
@@ -250,7 +252,7 @@ impl Arena {
 impl Drop for Arena {
     fn drop(&mut self) {
         // SAFETY: rebuilds the forgotten Vec at len 0 to free the allocation.
-        unsafe { drop(Vec::from_raw_parts(self.buf.as_ptr(), 0, self.elems)) }
+        unsafe { drop(Vec::from_raw_parts(self.buf.as_ptr(), 0, self.cap_elems)) }
     }
 }
 
