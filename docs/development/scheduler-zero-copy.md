@@ -378,8 +378,16 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
    after it resumes — so the ladder detects lack of PROGRESS instead:
 
    - *Fire at capacity* — the normal case.
-   - *Progress-counted partial close.* Per route, the scheduler records
-     buffer fill at each completed fire. A route with unresolved demand —
+   - *Progress-counted partial close.* Progress is measured exclusively from
+     scheduler-owned state, never the live arena: the scheduler keeps a
+     per-route `committed_rows_seen` count of the commit messages it has
+     processed, captures it when a real fire starts, and updates stall
+     counters at that fire's completion from the captured snapshot. Sampling
+     the concurrently changing arena cursor would make the trigger itself
+     timing-dependent — a worker mid-commit at the Kth fire could flip the
+     observation — so the cursor is never inspected for progress decisions,
+     and the trigger is a pure function of deterministic event processing at
+     `n_threads=1`. A route with unresolved demand —
      pending rows or gated tickets — whose fill has not advanced across K
      consecutive completed fires engine-wide is closed and fired as a partial
      batch, its gated tickets released under normal fire semantics; a stalled
@@ -404,10 +412,10 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
      `(k, m)` reconciliation is trivially satisfied at true quiescence),
      fire non-empty buffers, release every route's gated tickets.
 
-   The counter is deterministic, but closing can still race a worker
-   reservation: even at `n_threads=1` the scheduler and worker are
-   concurrent threads, and at the Kth fire a worker mid-reservation lands in
-   the old or the next buffer by CAS timing. The threshold therefore
+   The trigger is deterministic by the rule above, but closing can still
+   race a worker reservation: even at `n_threads=1` the scheduler and worker
+   are concurrent threads, and at the Kth fire a worker mid-reservation lands
+   in the old or the next buffer by CAS timing. The threshold therefore
    triggers a brief scheduling barrier — stop spawning/resuming worker
    tasks, drain already-running tasks and their commit messages, close and
    fire the stalled routes on that stable prefix, resume normal admission —
@@ -522,9 +530,10 @@ engine:
   producers are all blocked on it closes and fires after K foreign fires while
   an unrelated route stays hot; an empty stalled route releases as a no-op;
   empty releases never advance the stall clock (no release cascades).
-- Stall-barrier determinism: the Kth-fire close drains running tasks and their
-  commit messages before closing; fixed-seed `n_threads=1` runs stay
-  byte-identical with induced stalls.
+- Stall-barrier determinism: the trigger is computed from scheduler-processed
+  commit counts (never the arena cursor), and the Kth-fire close drains
+  running tasks and their commit messages before closing; fixed-seed
+  `n_threads=1` runs stay byte-identical with induced stalls.
 - High-hit partial-buffer starvation: configs below the sizing rule make
   progress through the ladder and increment its counters.
 - Cache-maintenance microbenchmark: insert/evict/promotion measured at target
