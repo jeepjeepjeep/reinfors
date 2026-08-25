@@ -1,6 +1,4 @@
-//! Stage-1 zero-copy scheduler: records match the classic path byte-for-byte,
-//! collection is deterministic, rounds split across arenas, per-player routing
-//! holds, truncation tails ride worker tasks, and callback panics unwind cleanly.
+//! Stage-1 zero-copy scheduler vs the classic path.
 
 use std::sync::{Arc, Mutex};
 
@@ -147,8 +145,8 @@ impl Reward for Zero {
     }
 }
 
-/// One-round PPO-shaped policy emitting `fan` rows per perspective; extra rows
-/// beyond the first are inference ballast that exercises arena splitting.
+/// One-round PPO-shaped policy; rows beyond the first per perspective are
+/// ballast that exercises arena splitting.
 struct FanActor {
     fan: usize,
 }
@@ -380,7 +378,6 @@ fn zero_copy_is_deterministic() {
 
 #[test]
 fn rounds_split_across_arenas() {
-    // fan 5 > batch_size 4: every round crosses an arena boundary.
     let (classic, _, _) = run_shared(|| Line, 5, 4, 12, false);
     let (zero, zero_stats, batches) = run_shared(|| Line, 5, 4, 12, true);
     assert_eq!(classic, zero, "split rounds must not disturb records");

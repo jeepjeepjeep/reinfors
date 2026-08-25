@@ -917,9 +917,7 @@ where
         (out, stats)
     }
 
-    /// The zero-copy collection scheduler (stage 1): workers copy encoded rows into
-    /// per-route arenas and messages carry span metadata only; the calling thread
-    /// routes rows, fires sealed arenas, and never touches observation bytes.
+    /// Zero-copy collection: the scheduler never touches observation bytes.
     fn collect_arena<F>(
         &mut self,
         n_records: usize,
@@ -1108,7 +1106,6 @@ where
                                 RootMark::Dropped
                             };
                         }
-                        // Stage-1 copy: the surviving worker-side copy into the arena.
                         let mut spans = Vec::new();
                         match mode {
                             InferMode::Shared => {
@@ -1232,8 +1229,8 @@ where
                     let txc = tx.clone();
                     s.spawn_fifo(move |_| task(gi, work_item, txc));
                 };
-                // Callback panic: drain in-flight completions before surfacing, so a
-                // finished episode respawns instead of stranding over-horizon.
+                // Drain in-flight completions before surfacing: a finished episode
+                // must respawn, never strand over-horizon.
                 macro_rules! drain_after_callback_panic {
                     ($payload:expr) => {{
                         while in_flight > 0 {
@@ -1353,7 +1350,6 @@ where
                         }
                     }};
                 }
-                // Fire one fully accounted, closed arena: seal, call, route, settle.
                 macro_rules! try_fire {
                     ($route:expr, $id:expr) => {{
                         let ready = pending[$route].get(&$id).is_some_and(|pa| {
@@ -1458,8 +1454,7 @@ where
                 loop {
                     if in_flight == 0 {
                         if pending.iter().any(|m| !m.is_empty()) {
-                            // Drain: close open arenas and fire partials — no round can
-                            // progress without these rows.
+                            // Drain: no round can progress without these rows.
                             #[allow(clippy::needless_range_loop)]
                             for route in 0..n_routes {
                                 let mut ids: Vec<u64> = pending[route].keys().copied().collect();
@@ -1475,7 +1470,7 @@ where
                             }
                             continue;
                         }
-                        // Cut step 5: bootstrap live fragments through worker tail tasks.
+                        // Cut step 5: bootstrap live fragments through tail tasks.
                         if fragments && !frag_stage {
                             frag_stage = true;
                             let mut spawned_any = false;
@@ -1541,7 +1536,7 @@ where
                         } => {
                             let gi = msg.gi;
                             stats.sum_requested_rows += n;
-                            // The round mailbox precedes any accounting that could fire.
+                            // installed before any accounting that could fire
                             phases[gi] = SlotPhase::Blocked {
                                 search,
                                 perspectives,
@@ -1637,7 +1632,6 @@ where
                                 Some(true) => respawn_game(game, policy, slot, &mut start),
                                 Some(false) => {
                                     if learner.uses_episode_tail() {
-                                        // Tail encoding is worker work on this path.
                                         needs_tail = true;
                                     } else {
                                         backlog -= buffered_learn_steps(slot, learn_mask) as isize;
@@ -1985,15 +1979,13 @@ struct Msg<SE, R> {
 
 type MsgSender<SE, R> = std::sync::mpsc::Sender<Msg<SE, R>>;
 
-/// One arena in a route's ownership-per-fire sequence; `id` identifies it in span
-/// metadata across the channel.
+/// One arena in a route's ownership-per-fire sequence.
 struct RouteArena {
     id: u64,
     arena: Arena,
 }
 
-/// A route's open-arena slot, shared with workers. Replacement arenas are
-/// allocated by workers (uninitialized capacity — no memset), never the scheduler.
+/// A route's open-arena slot; workers allocate replacements, never the scheduler.
 struct RouteShared {
     open: std::sync::Mutex<std::sync::Arc<RouteArena>>,
     next_id: std::sync::atomic::AtomicU64,
@@ -2018,8 +2010,6 @@ impl RouteShared {
         self.open.lock().expect("route lock").clone()
     }
 
-    /// Install a fresh arena if `old` is still the open one; racing installers
-    /// collapse to one winner and the losers reuse it.
     fn replace_if(&self, old: &std::sync::Arc<RouteArena>) {
         let mut open = self.open.lock().expect("route lock");
         if std::sync::Arc::ptr_eq(&open, old) {
@@ -2034,8 +2024,7 @@ impl RouteShared {
     }
 }
 
-/// Span metadata riding a message: which arena rows hold which round positions.
-/// Bytes never ride the channel.
+/// Which arena rows hold which round positions — bytes never ride the channel.
 struct ASpan {
     route: usize,
     arena: std::sync::Arc<RouteArena>,
@@ -2043,8 +2032,7 @@ struct ASpan {
     positions: Vec<u32>,
 }
 
-/// Copy `(round position, encoded row)` pairs into `route`'s open arenas,
-/// splitting across buffers at capacity.
+/// Copy rows into the route's open arenas, splitting across buffers at capacity.
 fn push_route_rows(
     route_idx: usize,
     route: &RouteShared,
@@ -2083,7 +2071,6 @@ fn push_route_rows(
     }
 }
 
-/// Zero-copy work: `Tail` moves truncation-tail encoding onto workers.
 enum AWork<SE> {
     Begin,
     Resume {
@@ -2098,8 +2085,7 @@ enum AWork<SE> {
     },
 }
 
-/// Zero-copy task result: identical to `TaskOut` except observations stay in the
-/// arenas and only span metadata rides the message.
+/// `TaskOut`, except observations stay in the arenas.
 enum ATaskOut<SE, R> {
     Skip,
     Emitted {
@@ -2131,9 +2117,8 @@ struct AMsg<SE, R> {
 
 type AMsgSender<SE, R> = std::sync::mpsc::Sender<AMsg<SE, R>>;
 
-/// Scheduler-side accounting for one in-flight arena. `seen` counts rows through
-/// processed messages only — never the live cursor — so the fire decision is a
-/// pure function of message order.
+/// `seen` counts rows through processed messages only — never the live cursor —
+/// so the fire decision is a pure function of message order.
 struct PendingArena {
     arc: std::sync::Arc<RouteArena>,
     dest: Vec<(u32, u32)>,
