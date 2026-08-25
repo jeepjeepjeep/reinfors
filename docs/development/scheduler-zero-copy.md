@@ -207,7 +207,7 @@ scheduler: GIL + infer(batch)            scheduler: count reservations; when the
      touched"), and promotions mutate only that private structure. Only
      insert/evict touch the shared shards; a COW map that also carried recency
      would clone a shard per LOOKUP and cost more than the copies it removes.
-     An in-place `RwLock` shard is not an alternative: pinned views (above)
+     An in-place `RwLock` shard is not an alternative: pinned views (below)
      require immutable snapshots, and retrofitting those onto in-place mutation
      (sequence-gated lookups, deferred eviction) rebuilds copy-on-write with
      epoch machinery on top. If shard-clone cost still measures high at target
