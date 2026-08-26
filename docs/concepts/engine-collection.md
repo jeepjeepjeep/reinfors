@@ -34,6 +34,9 @@ mechanisms that keep it correct and live.
   generation went stale before release.
 - **View** — the immutable cache snapshot a worker task reads, pinned when the
   task spawns and replaced only by scheduler publication.
+- **Liveness ladder** — the escalation from capacity fires to stall-triggered
+  partial fires and releases that keeps a slow or hit-only route from waiting
+  forever on a batch that will never fill.
 - **Quiescence** — the state with no worker tasks in flight, at which every open
   buffer is closed, fired, and released.
 - **Floor** — the `n_records` target that ends the collection window once
