@@ -1334,3 +1334,38 @@ impl StateEncoder for DriftEnc {
         true
     }
 }
+
+#[test]
+fn in_flight_duplicate_keys_alias_to_one_fired_row() {
+    let run = |cache: Option<usize>| {
+        let batches = Arc::new(Mutex::new(Vec::new()));
+        let seen = batches.clone();
+        let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 4, 4, true, cache);
+        let (records, stats) = e.collect(12, move |obs: Vec<f32>, n: usize| {
+            seen.lock().unwrap().push(n);
+            exact_infer(&obs, n)
+        });
+        let keys: Keys = records.iter().map(record_key).collect();
+        let batches = batches.lock().unwrap().clone();
+        (keys, stats, batches)
+    };
+    let (plain, plain_stats, _) = run(None);
+    let (deduped, stats, batches) = run(Some(64));
+    let mut plain_sorted = plain.clone();
+    let mut deduped_sorted = deduped.clone();
+    plain_sorted.sort();
+    deduped_sorted.sort();
+    assert_eq!(
+        plain_sorted, deduped_sorted,
+        "aliases must not change records"
+    );
+    // Four identical first-round rows: one reserves, three alias — the first
+    // fire carries a single row, and the whole window infers exactly once.
+    assert_eq!(
+        batches.first(),
+        Some(&1),
+        "duplicates fired redundantly: {batches:?}"
+    );
+    assert_eq!(stats.infer_rows, 1);
+    assert!(stats.infer_rows < plain_stats.infer_rows);
+}
