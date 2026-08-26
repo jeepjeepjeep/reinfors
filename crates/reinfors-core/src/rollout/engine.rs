@@ -481,28 +481,30 @@ where
                                 };
                             }
                             let ArenaSink {
+                                mut open,
+                                mut last_span,
                                 mut spans,
                                 mut hits,
                                 mut aliases,
                                 lookups,
                                 ..
                             } = arena_sink;
-                            let rows_in: Vec<(u32, usize, &[f32])> = buffered_pos
-                                .iter()
-                                .enumerate()
-                                .map(|(bi, &pos)| {
-                                    (pos, players[bi], &obs[bi * obs_dim..(bi + 1) * obs_dim])
-                                })
-                                .collect();
-                            let buffered_lookups = classify_rows(
-                                mode,
-                                &pins,
-                                &rows_in,
-                                routes,
-                                &mut spans,
-                                &mut hits,
-                                &mut aliases,
-                            );
+                            let mut buffered_lookups = 0;
+                            for (bi, &pos) in buffered_pos.iter().enumerate() {
+                                buffered_lookups += classify_row(
+                                    mode,
+                                    &pins,
+                                    pos,
+                                    players[bi],
+                                    &obs[bi * obs_dim..(bi + 1) * obs_dim],
+                                    routes,
+                                    &mut open,
+                                    &mut last_span,
+                                    &mut spans,
+                                    &mut hits,
+                                    &mut aliases,
+                                );
+                            }
                             return ATaskOut::Emitted {
                                 search,
                                 perspectives,
@@ -765,6 +767,7 @@ where
                                                 *route,
                                                 &routes[*route],
                                                 &mut None,
+                                                &mut None,
                                                 *pos,
                                                 *key,
                                                 &mut |dst| {
@@ -861,12 +864,7 @@ where
                     ($route:expr, $id:expr) => {{
                         let ready = pending[$route].get(&$id).is_some_and(|pa| {
                             pa.arc.arena.close_info().is_some_and(|info| {
-                                // abandoned tickets (panic before their claim message)
-                                // count toward reconciliation, never awaited
-                                info.rows == pa.seen
-                                    && info.aliases as usize
-                                        == pa.seen_aliases
-                                            + pa.arc.arena.aliases_abandoned() as usize
+                                info.rows == pa.seen && info.aliases as usize == pa.seen_aliases
                             })
                         });
                         if ready {
@@ -1030,16 +1028,16 @@ where
                         for span in $spans {
                             let pa = pending_entry!(span.route, span.arena);
                             // metadata grows only to the highest observed row
-                            let need = span.first_row + span.positions.len();
+                            let need = span.first_row + span.rows.len();
                             if pa.dest.len() < need {
                                 pa.dest.resize(need, (u32::MAX, u32::MAX));
                                 pa.keys.resize(need, 0);
                             }
-                            for (j, &pos) in span.positions.iter().enumerate() {
+                            for (j, &(pos, key)) in span.rows.iter().enumerate() {
                                 pa.dest[span.first_row + j] = ($gi as u32, pos);
-                                pa.keys[span.first_row + j] = span.keys[j];
+                                pa.keys[span.first_row + j] = key;
                             }
-                            pa.seen += span.positions.len();
+                            pa.seen += span.rows.len();
                             touched.push((span.route, span.arena.id));
                         }
                         touched.dedup();
@@ -1661,12 +1659,14 @@ impl RouteShared {
 }
 
 /// Which arena rows hold which round positions — bytes never ride the channel.
+/// `rows` is `(round position, cache key)`: 32 bytes/row to alignment padding
+/// versus 20 for parallel arrays, but spans are round-sized, so one allocation
+/// beats two (measured ~5% on small-row collection).
 struct ASpan {
     route: usize,
     arena: std::sync::Arc<RouteArena>,
     first_row: usize,
-    positions: Vec<u32>,
-    keys: Vec<u128>,
+    rows: Vec<(u32, u128)>,
 }
 
 /// A duplicate in-flight key: the prediction for `target_row` also resolves this
@@ -1719,19 +1719,6 @@ fn stage_key(cur: &std::sync::Arc<RouteArena>, key: u128, row: u32) {
     }
 }
 
-/// One staged-map lock for a whole committed run.
-fn stage_keys(cur: &std::sync::Arc<RouteArena>, first_row: u32, rows: &[(u32, u128, &[f32])]) {
-    if rows.iter().all(|&(_, key, _)| key == 0) {
-        return;
-    }
-    let mut staged = cur.staged.lock().expect("staged lock");
-    for (j, &(_, key, _)) in rows.iter().enumerate() {
-        if key != 0 {
-            staged.entry(key).or_insert(first_row + j as u32);
-        }
-    }
-}
-
 /// What a gated hit retains for possible demotion: the scratch row (obs-hash
 /// keys) or a cloned state plus agent (encoder keys — only hit tickets pay the
 /// clone, and demotion re-encodes through `encode_into`).
@@ -1776,6 +1763,7 @@ fn emit_arena_row(
     route_idx: usize,
     route: &RouteShared,
     open: &mut Option<std::sync::Arc<RouteArena>>,
+    last_span: &mut Option<usize>,
     pos: u32,
     key: u128,
     fill: &mut dyn FnMut(&mut [f32]),
@@ -1807,23 +1795,23 @@ fn emit_arena_row(
         fill(span.zeroed());
         span.commit();
         stage_key(&cur, key, first as u32);
-        match spans.last_mut() {
-            Some(last)
-                if last.route == route_idx
-                    && std::sync::Arc::ptr_eq(&last.arena, &cur)
-                    && last.first_row + last.positions.len() == first =>
+        // coalesce per ROUTE, so interleaved per-player emissions still merge
+        if let Some(si) = *last_span {
+            let last = &mut spans[si];
+            if std::sync::Arc::ptr_eq(&last.arena, &cur)
+                && last.first_row + last.rows.len() == first
             {
-                last.positions.push(pos);
-                last.keys.push(key);
+                last.rows.push((pos, key));
+                return;
             }
-            _ => spans.push(ASpan {
-                route: route_idx,
-                arena: cur.clone(),
-                first_row: first,
-                positions: vec![pos],
-                keys: vec![key],
-            }),
         }
+        spans.push(ASpan {
+            route: route_idx,
+            arena: cur.clone(),
+            first_row: first,
+            rows: vec![(pos, key)],
+        });
+        *last_span = Some(spans.len() - 1);
         return;
     }
 }
@@ -1834,6 +1822,7 @@ fn emit_arena_row(
 struct ArenaSink<'a, S> {
     routes: &'a [RouteShared],
     open: Vec<Option<std::sync::Arc<RouteArena>>>,
+    last_span: Vec<Option<usize>>,
     pins: Pins,
     mode: InferMode,
     dim: usize,
@@ -1848,6 +1837,7 @@ impl<'a, S> ArenaSink<'a, S> {
         ArenaSink {
             routes,
             open: routes.iter().map(|_| None).collect(),
+            last_span: routes.iter().map(|_| None).collect(),
             pins,
             mode,
             dim,
@@ -1889,6 +1879,7 @@ impl<S: Clone> crate::policy::StateSink<S> for ArenaSink<'_, S> {
                     route,
                     &self.routes[route],
                     &mut self.open[route],
+                    &mut self.last_span[route],
                     pos,
                     key,
                     &mut |dst| enc.encode_into(state, player, dst),
@@ -1919,6 +1910,7 @@ impl<S: Clone> crate::policy::StateSink<S> for ArenaSink<'_, S> {
                 route,
                 &self.routes[route],
                 &mut self.open[route],
+                &mut self.last_span[route],
                 pos,
                 key,
                 &mut |dst| dst.copy_from_slice(row),
@@ -1931,6 +1923,7 @@ impl<S: Clone> crate::policy::StateSink<S> for ArenaSink<'_, S> {
             route,
             &self.routes[route],
             &mut self.open[route],
+            &mut self.last_span[route],
             pos,
             key_unused(),
             &mut |dst| enc.encode_into(state, player, dst),
@@ -1946,42 +1939,49 @@ fn key_unused() -> u128 {
 
 /// Route buffered rows through the pinned cache views: hits park, misses go to
 /// the arenas.
-fn classify_rows<S>(
+#[allow(clippy::too_many_arguments)]
+fn classify_row<S>(
     mode: InferMode,
     pins: &Pins,
-    rows_in: &[(u32, usize, &[f32])],
+    pos: u32,
+    player: usize,
+    row: &[f32],
     routes: &[RouteShared],
+    open: &mut [Option<std::sync::Arc<RouteArena>>],
+    last_span: &mut [Option<usize>],
     spans: &mut Vec<ASpan>,
     hits: &mut Vec<AHit<S>>,
     aliases: &mut Vec<AAlias>,
 ) -> usize {
+    let route = route_of(mode, player);
+    let mut key = 0u128;
     let mut lookups = 0;
-    let mut misses: Vec<Vec<(u32, u128, &[f32])>> = vec![Vec::new(); routes.len()];
-    for (pos, player, row) in rows_in.iter() {
-        let route = route_of(mode, *player);
-        let mut key = 0u128;
-        if let Some(pins) = pins {
-            key = obs_hash_key(mode, *player, row);
-            lookups += 1;
-            if let Some(value) = pins[route].lookup(key) {
-                hits.push(AHit {
-                    route,
-                    pos: *pos,
-                    key,
-                    gen: pins[route].generation,
-                    value,
-                    retained: Retained::Row(row.to_vec()),
-                });
-                continue;
-            }
-        }
-        misses[route].push((*pos, key, row));
-    }
-    for (route, rows) in misses.iter().enumerate() {
-        if !rows.is_empty() {
-            push_route_rows(route, &routes[route], rows, spans, aliases);
+    if let Some(pins) = pins {
+        key = obs_hash_key(mode, player, row);
+        lookups = 1;
+        if let Some(value) = pins[route].lookup(key) {
+            hits.push(AHit {
+                route,
+                pos,
+                key,
+                gen: pins[route].generation,
+                value,
+                retained: Retained::Row(row.to_vec()),
+            });
+            return lookups;
         }
     }
+    emit_arena_row(
+        route,
+        &routes[route],
+        &mut open[route],
+        &mut last_span[route],
+        pos,
+        key,
+        &mut |dst| dst.copy_from_slice(row),
+        spans,
+        aliases,
+    );
     lookups
 }
 
@@ -1994,78 +1994,46 @@ fn push_route_rows(
     spans: &mut Vec<ASpan>,
     aliases: &mut Vec<AAlias>,
 ) {
-    let keyed = rows.iter().any(|&(_, key, _)| key != 0);
     let mut next = 0;
-    let mut open: Option<std::sync::Arc<RouteArena>> = None;
     while next < rows.len() {
-        let cur = match open.as_ref() {
-            Some(cur) => cur.clone(),
-            None => {
-                let cur = route.current();
-                open = Some(cur.clone());
-                cur
-            }
-        };
-        // Alias-drain leading duplicates, then bound a run of rows that reserve:
-        // keyless batches take the whole slice without touching the staged map.
-        let run_end = if !keyed {
-            rows.len()
-        } else {
-            if try_stage_alias(route_idx, &cur, rows[next].1, rows[next].0, aliases) {
-                next += 1;
-                continue;
-            }
-            let staged = cur.staged.lock().expect("staged lock");
-            let mut run_keys = std::collections::HashSet::new();
-            if rows[next].1 != 0 {
-                run_keys.insert(rows[next].1);
-            }
-            let mut end = next + 1;
-            while end < rows.len() {
-                let key = rows[end].1;
-                if key != 0 && (staged.contains_key(&key) || !run_keys.insert(key)) {
-                    break;
-                }
-                end += 1;
-            }
-            end
-        };
-        let (mut span, closes) = match cur.arena.try_reserve(run_end - next) {
+        let cur = route.current();
+        if try_stage_alias(route_idx, &cur, rows[next].1, rows[next].0, aliases) {
+            next += 1;
+            continue;
+        }
+        let (mut span, closes) = match cur.arena.try_reserve(1) {
             Reserve::Full { span, closed } => (span, closed.is_some()),
             Reserve::Partial { span, .. } => (span, true),
             Reserve::Closed => {
-                open = Some(route.replace_if(&cur));
+                route.replace_if(&cur);
                 continue;
             }
         };
-        let take = span.rows();
         let first = span.row_range().start;
-        let mut positions = Vec::with_capacity(take);
-        let mut keys = Vec::with_capacity(take);
-        for (pos, key, row) in &rows[next..next + take] {
-            span.push_row(row);
-            positions.push(*pos);
-            keys.push(*key);
-        }
+        let (pos, key, row) = rows[next];
+        span.push_row(row);
         span.commit();
-        if keyed {
-            stage_keys(&cur, first as u32, &rows[next..next + take]);
+        stage_key(&cur, key, first as u32);
+        match spans.last_mut() {
+            Some(last)
+                if last.route == route_idx
+                    && std::sync::Arc::ptr_eq(&last.arena, &cur)
+                    && last.first_row + last.rows.len() == first =>
+            {
+                last.rows.push((pos, key));
+            }
+            _ => spans.push(ASpan {
+                route: route_idx,
+                arena: cur.clone(),
+                first_row: first,
+                rows: vec![(pos, key)],
+            }),
         }
-        spans.push(ASpan {
-            route: route_idx,
-            arena: cur.clone(),
-            first_row: first,
-            positions,
-            keys,
-        });
-        next += take;
+        next += 1;
         // A close on the task's FINAL span defers replacement to the next
         // requester, so the sealed arena's fire never waits on an allocation.
-        if closes {
-            open = None;
-            if next < rows.len() {
-                open = Some(route.replace_if(&cur));
-            }
+        if closes && next < rows.len() {
+            route.replace_if(&cur);
         }
     }
 }
