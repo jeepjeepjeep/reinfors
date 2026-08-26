@@ -1,5 +1,5 @@
 //! Worker-read, scheduler-write cache for the zero-copy path: immutable copy-on-write
-//! views published per fire. Design: `docs/development/scheduler-zero-copy.md`, element 7.
+//! views published per fire. Design: `docs/concepts/engine-collection.md`, "The inference cache".
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

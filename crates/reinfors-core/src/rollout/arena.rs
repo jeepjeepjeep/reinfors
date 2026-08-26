@@ -1,7 +1,7 @@
 //! Observation arena: concurrent disjoint span reservation over one packed
 //! `AtomicU64` `(closed:1, row_cursor:31, alias_count:32)`; the committed prefix
 //! seals into an owned `Vec<f32>` with zero copies. Protocol and invariants:
-//! `docs/development/scheduler-zero-copy.md`, element 2.
+//! `docs/concepts/engine-collection.md`, "The observation arena".
 
 use std::mem::MaybeUninit;
 use std::ops::Range;
