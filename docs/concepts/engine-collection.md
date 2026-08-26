@@ -5,6 +5,40 @@ goes. [Architecture](architecture.md) shows the component seams; this page shows
 the runtime: the thread roles, the zero-copy observation path, and the
 mechanisms that keep it correct and live.
 
+## Definitions
+
+- **Slot** — one of the `n_games` episode holders; it stores game and search
+  state and is locked by whichever worker task is advancing it.
+- **Round** — one batch of evaluation requests a search emits before blocking on
+  their predictions; model-free policies use one per decision, tree searches many.
+- **Route** — one inference destination: a single queue for a shared callback, or
+  one per player for per-player callbacks.
+- **Arena** — a route's fixed-capacity shared write buffer; workers copy or
+  encode observation rows directly into it.
+- **Span** — a worker's exclusive reservation of contiguous arena rows, filled
+  without locks and then committed (or poisoned by a panic).
+- **Seal** — converting a closed, fully committed arena into an owned `Vec<f32>`
+  without copying, ready to hand to the callback.
+- **Fire** — sending one sealed batch through the inference callback and routing
+  its prediction rows back to the blocked slots.
+- **Root row** — the canonical current-state observation a policy marks for
+  reuse, so the training record carries it without re-encoding.
+- **Gated ticket** — a cache hit parked until its route's next fire (or
+  quiescence), so hits obey the same weights-generation discipline as real
+  inference.
+- **Alias ticket** — a claim that a row identical to one already in flight will
+  reuse that row's prediction instead of reserving its own.
+- **Generation** — the counter bumped by `weights_updated()`; cached values from
+  an older generation are never served.
+- **Demotion** — re-emitting a gated hit as an ordinary arena row because its
+  generation went stale before release.
+- **View** — the immutable cache snapshot a worker task reads, pinned when the
+  task spawns and replaced only by scheduler publication.
+- **Quiescence** — the state with no worker tasks in flight, at which every open
+  buffer is closed, fired, and released.
+- **Floor** — the `n_records` target that ends the collection window once
+  reached.
+
 ## Thread roles
 
 ```text
