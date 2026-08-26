@@ -1070,17 +1070,24 @@ where
                                 }
                                 stall_fires[route] = 0;
                                 if !pending[route].is_empty() {
-                                    stats.stall_closes += 1;
                                     let mut ids: Vec<u64> =
                                         pending[route].keys().copied().collect();
                                     ids.sort_unstable();
+                                    let mut closed_any = false;
                                     for id in ids {
                                         if let Some(pa) = pending[route].get(&id) {
-                                            if pa.arc.arena.close_info().is_none() {
-                                                pa.arc.arena.close();
+                                            if pa.arc.arena.close_info().is_none()
+                                                && pa.arc.arena.close().is_some()
+                                            {
+                                                closed_any = true;
                                             }
                                         }
                                         try_fire!(route, id);
+                                    }
+                                    // an already-closed arena awaiting delayed span
+                                    // accounting is not a new stall event
+                                    if closed_any {
+                                        stats.stall_closes += 1;
                                     }
                                 } else {
                                     stats.stall_releases += 1;
@@ -1204,7 +1211,24 @@ where
                     };
                     in_flight -= 1;
                     match msg.out {
-                        ATaskOut::Panicked(payload) => std::panic::resume_unwind(payload),
+                        ATaskOut::Panicked(payload) => {
+                            // reset the unwound task's slot (its lock may be
+                            // poisoned, its decision half-made), then drain
+                            // concurrent completions exactly like a callback panic
+                            {
+                                let mut guard = match slots[msg.gi].lock() {
+                                    Ok(g) => g,
+                                    Err(poisoned) => poisoned.into_inner(),
+                                };
+                                let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                                for steps in slot.traj.iter_mut() {
+                                    steps.clear();
+                                }
+                                slot.returns.iter_mut().for_each(|r| *r = 0.0);
+                                respawn_game(game, policy, slot, &mut start);
+                            }
+                            drain_after_callback_panic!(payload)
+                        }
                         ATaskOut::Skip => phases[msg.gi] = SlotPhase::Parked,
                         ATaskOut::Emitted {
                             search,

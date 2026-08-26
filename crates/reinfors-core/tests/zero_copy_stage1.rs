@@ -1729,6 +1729,11 @@ fn a_starved_partial_route_fires_within_the_ladder_bound() {
         .iter()
         .position(|&p| p == 0)
         .expect("cold route fired");
+    // 2 bootstrap fires + STALL_FIRES(8) ticks; slack of 2 for layout drift
+    assert!(
+        first_cold <= 12,
+        "cold fire came after {first_cold} hot fires, beyond the ladder bound"
+    );
     assert!(
         calls[first_cold..].iter().filter(|&&p| p == 1).count() >= 5,
         "the cold fire must interleave hot traffic, not wait for the drain"
@@ -1758,6 +1763,26 @@ fn a_hit_only_cold_route_releases_within_the_ladder_bound() {
         stats.stall_releases > 0,
         "gated cold hits must release mid-run, not at the drain"
     );
+    let first_cold_call = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .position(|&p| p == 0)
+        .expect("the first cold miss must fire");
+    assert!(
+        first_cold_call <= 12,
+        "cold miss fired after {first_cold_call} hot fires, beyond the ladder bound"
+    );
+    // one stall-closed miss + 5 hit releases, each within STALL_FIRES(8)
+    // fires of ~2 records: regression to a larger bound lands far beyond this
+    let first_cold_record = records
+        .iter()
+        .position(|r| r.player == 0)
+        .expect("cold records");
+    assert!(
+        first_cold_record <= 140,
+        "cold episode finished after {first_cold_record} hot records, beyond the release bound"
+    );
     assert_eq!(
         calls.lock().unwrap().iter().filter(|&&p| p == 0).count(),
         1,
@@ -1781,4 +1806,223 @@ fn a_panicked_collect_keeps_caching_enabled() {
         stats.cache_lookups > 0,
         "caching must survive an unwound collection"
     );
+}
+
+/// Terminal after one decision: every completion is a respawn point.
+struct OneStep;
+impl Game for OneStep {
+    type State = St;
+    type Event = ();
+    fn num_agents(&self) -> usize {
+        1
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn actor(&self, _s: &St) -> Actor {
+        Actor::Agent(0)
+    }
+    fn legal_actions(&self, s: &St, agent: usize) -> Vec<usize> {
+        if agent == 0 && s.tick == 0 {
+            vec![0, 1]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, s: &St, _a: &[usize]) -> Transition<St, ()> {
+        Transition {
+            next_state: St { tick: s.tick + 1 },
+            events: vec![None],
+            terminal: true,
+        }
+    }
+    fn initial_state(&self) -> St {
+        St { tick: 0 }
+    }
+}
+
+/// The second search to begin panics in `finish`; the first waits for that
+/// panic's flag before completing, so its terminal completion always reaches
+/// the scheduler after the panic message.
+struct PanicRace {
+    next_role: std::sync::atomic::AtomicUsize,
+    flag: Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct RaceSearch {
+    role: usize,
+    agent: usize,
+    legal: Vec<usize>,
+    obs: Vec<f32>,
+    round: usize,
+    result: Option<PpoEvaluation>,
+}
+
+impl Policy for PanicRace {
+    type Evaluation = PpoEvaluation;
+    type PolicyState = ();
+    type Search<S: Send> = RaceSearch;
+
+    fn max_agents(&self, _sequential: bool) -> Option<usize> {
+        Some(usize::MAX)
+    }
+    fn supports_imperfect_information(&self) -> bool {
+        true
+    }
+    fn begin_episode(&self, _rng: &mut dyn Rng) {}
+    fn encode_eval(&self, _eval: &PpoEvaluation, _out: &mut Vec<u8>) {
+        unimplemented!("no buffering in this test")
+    }
+    fn decode_eval(&self, _r: &mut Reader, _n: usize) -> Result<PpoEvaluation, String> {
+        unimplemented!("no buffering in this test")
+    }
+    fn policy_state_to_u64(&self, _s: &()) -> u64 {
+        0
+    }
+    fn policy_state_from_u64(&self, _v: u64) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn begin_search<G: Game + Sync>(
+        &self,
+        ctx: SearchCtx<'_, G>,
+        state: &G::State,
+        perspectives: &[usize],
+    ) -> RaceSearch
+    where
+        G::State: Send,
+    {
+        let agent = perspectives[0];
+        RaceSearch {
+            role: self
+                .next_role
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+            agent,
+            legal: ctx.game.legal_actions(state, agent),
+            obs: ctx.enc.encode(state, agent),
+            round: 0,
+            result: None,
+        }
+    }
+
+    fn round<G: Game + Sync>(
+        &self,
+        _ctx: SearchCtx<'_, G>,
+        search: &mut RaceSearch,
+        out: &mut RequestSink<'_, G::State>,
+    ) -> RoundStatus
+    where
+        G::State: Send,
+    {
+        if search.round > 0 {
+            return RoundStatus::Done;
+        }
+        search.round += 1;
+        out.push_root(search.agent, search.obs.clone(), search.agent);
+        RoundStatus::Pending
+    }
+
+    fn absorb<G: Game + Sync>(
+        &self,
+        _ctx: SearchCtx<'_, G>,
+        search: &mut RaceSearch,
+        rows: RowsView<'_>,
+    ) where
+        G::State: Send,
+    {
+        search.result = Some(PpoEvaluation {
+            log_probs: masked_log_probs(&rows.row(0)[..search.legal.len()], &search.legal),
+            value: 0.0,
+            legal: search.legal.clone(),
+        });
+    }
+
+    fn finish<G: Game + Sync>(
+        &self,
+        _ctx: SearchCtx<'_, G>,
+        search: RaceSearch,
+    ) -> Vec<(PpoEvaluation, Vec<reinfors_core::InteriorTarget>)>
+    where
+        G::State: Send,
+    {
+        self.orchestrate(&search);
+        vec![(search.result.expect("absorbed"), Vec::new())]
+    }
+
+    fn select(&self, eval: &PpoEvaluation, _state: &mut (), rng: &mut dyn Rng) -> usize {
+        let mut r = rng.unit();
+        for (i, lp) in eval.log_probs.iter().enumerate() {
+            r -= lp.exp();
+            if r <= 0.0 {
+                return eval.legal[i];
+            }
+        }
+        eval.legal[0]
+    }
+}
+
+impl PanicRace {
+    fn orchestrate(&self, search: &RaceSearch) {
+        match search.role {
+            1 => {
+                self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                panic!("worker panic");
+            }
+            0 => {
+                while !self.flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(15));
+            }
+            _ => {}
+        }
+    }
+}
+
+struct CountingStarts {
+    draws: Arc<AtomicU64>,
+}
+
+impl reinfors_core::StartDistribution<St> for CountingStarts {
+    fn choose(&mut self, _rng: &mut dyn Rng) -> reinfors_core::Start<St> {
+        self.draws.fetch_add(1, Ordering::SeqCst);
+        reinfors_core::Start::Fresh
+    }
+}
+
+#[test]
+fn a_worker_panic_drains_concurrent_completions_and_resets_all_slots() {
+    let draws = Arc::new(AtomicU64::new(0));
+    let mut e = Engine::new(
+        OneStep,
+        Box::new(Enc),
+        Box::new(Zero),
+        PanicRace {
+            next_role: std::sync::atomic::AtomicUsize::new(0),
+            flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        },
+        reinfors_core::Ppo::new(1.0, 0.95),
+        EngineParams {
+            n_games: 2,
+            seed: 5,
+            n_threads: Some(2),
+            batch_size: Some(2),
+            ..Default::default()
+        },
+    )
+    .with_start_distribution(Box::new(CountingStarts {
+        draws: draws.clone(),
+    }));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        e.collect(50, |obs: Vec<f32>, n: usize| exact_infer(&obs, n))
+    }));
+    assert!(result.is_err(), "the worker panic must surface");
+    assert_eq!(
+        draws.load(Ordering::SeqCst),
+        2,
+        "the drain must respawn the concurrently finished slot and reset the panicked one"
+    );
+    let (records, stats) = e.collect(6, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
+    assert!(records.len() >= 6, "both slots must stay usable");
+    assert!(stats.episodes.len() >= 6);
 }
