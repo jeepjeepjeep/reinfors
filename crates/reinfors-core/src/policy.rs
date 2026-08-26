@@ -75,13 +75,6 @@ impl<S> Default for RequestSink<'_, S> {
 }
 
 impl<'e, S> RequestSink<'e, S> {
-    pub(crate) fn capturing_roots() -> Self {
-        RequestSink {
-            capture_roots: true,
-            ..Default::default()
-        }
-    }
-
     pub(crate) fn with_backend(backend: &'e mut dyn StateSink<S>) -> Self {
         RequestSink {
             capture_roots: true,
@@ -149,12 +142,6 @@ impl<'e, S> RequestSink<'e, S> {
     #[allow(clippy::type_complexity)]
     pub(crate) fn into_zc_parts(self) -> (Vec<usize>, Vec<f32>, Vec<u32>, Vec<(usize, Vec<f32>)>) {
         (self.players, self.obs, self.buffered_pos, self.roots)
-    }
-
-    /// `into_parts` plus the retained canonical rows — collection-engine only.
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn into_parts_with_roots(self) -> (Vec<usize>, Vec<f32>, Vec<(usize, Vec<f32>)>) {
-        (self.players, self.obs, self.roots)
     }
 }
 

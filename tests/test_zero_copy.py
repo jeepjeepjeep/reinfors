@@ -1,4 +1,4 @@
-"""The zero_copy engine flag: validation, config round-trip, and a collect smoke."""
+"""The zero-copy engine at the python surface: validation, composition, reproducibility."""
 
 from __future__ import annotations
 
@@ -27,15 +27,6 @@ def _infer(obs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     )
 
 
-def test_resolved_config_round_trips() -> None:
-    cfg = _engine(zero_copy=True).resolved_config()
-    assert cfg["engine"]["zero_copy"] is True
-    rebuilt = rf.engine_from_config(cfg)
-    assert rebuilt.resolved_config() == cfg
-    assert len(rebuilt.collect(n_records=8, infer=_infer).obs) >= 8
-    assert _engine().resolved_config()["engine"]["zero_copy"] is None
-
-
 def test_oversized_arena_is_rejected_at_construction() -> None:
     with pytest.raises(ValueError, match="batch_size"):
         rf.Engine(
@@ -44,24 +35,22 @@ def test_oversized_arena_is_rejected_at_construction() -> None:
             rf.policies.Ppo(),
             rf.learners.Ppo(),
             n_games=1,
-            zero_copy=True,
             batch_size=1 << 20,
         )
 
 
-def test_unsupported_combinations_are_rejected() -> None:
-    with pytest.raises(ValueError, match="zero_copy"):
-        _engine(zero_copy=True, pad=True)
+def test_pad_composes() -> None:
+    batch = _engine(pad=True, batch_size=4).collect(n_records=12, infer=_infer)
+    assert len(batch.obs) >= 12
 
 
 def test_infer_cache_composes_and_serves_hits() -> None:
-    batch = _engine(zero_copy=True, infer_cache=1024).collect(n_records=24, infer=_infer)
+    batch = _engine(infer_cache=1024).collect(n_records=24, infer=_infer)
     assert len(batch.obs) >= 24
 
 
-def test_collect_matches_the_classic_path() -> None:
-    def run(zero_copy: bool) -> np.ndarray:
-        batch = _engine(zero_copy=zero_copy).collect(n_records=12, infer=_infer)
-        return batch.obs
+def test_collect_is_reproducible() -> None:
+    def run() -> np.ndarray:
+        return _engine().collect(n_records=12, infer=_infer).obs
 
-    assert np.array_equal(run(False), run(True))
+    assert np.array_equal(run(), run())
