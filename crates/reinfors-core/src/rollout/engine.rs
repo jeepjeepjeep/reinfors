@@ -71,8 +71,6 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     learner: L,
     episodes: Vec<Episode<G>>,
     start_dist: Box<dyn StartDistribution<G::State>>,
-    // Slot 0 is shared; slots 1..=N isolate per-player networks.
-    infer_caches: Option<Vec<InferCache>>,
     learn_mask: Vec<bool>,
     // Returns cannot be derived from steps: an agent may be rewarded before ever acting.
     episode_returns: Vec<Vec<f64>>,
@@ -151,7 +149,6 @@ where
             learner,
             episodes,
             start_dist: Box::new(AlwaysInitialState),
-            infer_caches: None,
             learn_mask: vec![true; num_agents],
             episode_returns: vec![vec![0.0; num_agents]; params.n_games],
             sequential,
@@ -203,16 +200,25 @@ where
         self
     }
 
-    /// Install one shared cache followed by one cache per player.
-    pub fn with_infer_caches(mut self, caches: Vec<InferCache>) -> Self {
+    /// Enable the infer cache: slot 0 serves the shared callback, slots 1..=N
+    /// the per-player callbacks; each slot clears when its generation advances.
+    pub fn with_infer_cache(
+        mut self,
+        capacity: usize,
+        generations: Vec<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    ) -> Self {
+        assert!(capacity > 0, "cache capacity must be positive");
         assert_eq!(
-            caches.len(),
+            generations.len(),
             self.game.num_agents() + 1,
-            "one cache per slot: shared + one per player"
+            "one generation per slot: shared + one per player"
         );
-        self.infer_caches = Some(caches);
-        // new handles/capacity: the derived zero-copy cache must rebuild
-        self.zc_caches = None;
+        self.zc_caches = Some(
+            generations
+                .into_iter()
+                .map(|g| ZcCache::new(capacity, g))
+                .collect(),
+        );
         self
     }
 
@@ -269,17 +275,6 @@ where
             !pad || matches!(mode, InferMode::Shared),
             "pad supports a single shared infer callback"
         );
-        if let (Some(classic), None) = (self.infer_caches.as_ref(), self.zc_caches.as_ref()) {
-            self.zc_caches = Some(
-                classic
-                    .iter()
-                    .map(|c| {
-                        let (capacity, generation) = c.params();
-                        ZcCache::new(capacity, generation)
-                    })
-                    .collect(),
-            );
-        }
         let mut zc_caches = self.zc_caches.take();
         let mut out: Vec<L::Record> = Vec::new();
         let mut stats = CollectStats::default();
@@ -1571,11 +1566,6 @@ where
             self.traj[gi] = slice.traj;
         }
         // Numeric generations do not identify weights across restored processes.
-        if let Some(caches) = self.infer_caches.as_mut() {
-            for cache in caches.iter_mut() {
-                cache.force_clear();
-            }
-        }
         if let Some(caches) = self.zc_caches.as_mut() {
             for cache in caches.iter_mut() {
                 cache.force_clear();
