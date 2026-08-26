@@ -459,8 +459,7 @@ where
                         );
                         if !sink.is_empty() {
                             let n = sink.len();
-                            let (players, obs, buffered_pos, marked) = sink.into_zc_parts();
-                            for (persp, row) in marked {
+                            for (persp, row) in sink.into_roots() {
                                 let i = perspectives
                                     .iter()
                                     .position(|&si| si == persp)
@@ -480,40 +479,15 @@ where
                                     RootMark::Dropped
                                 };
                             }
-                            let ArenaSink {
-                                mut open,
-                                mut last_span,
-                                mut spans,
-                                mut hits,
-                                mut aliases,
-                                lookups,
-                                ..
-                            } = arena_sink;
-                            let mut buffered_lookups = 0;
-                            for (bi, &pos) in buffered_pos.iter().enumerate() {
-                                buffered_lookups += classify_row(
-                                    mode,
-                                    &pins,
-                                    pos,
-                                    players[bi],
-                                    &obs[bi * obs_dim..(bi + 1) * obs_dim],
-                                    routes,
-                                    &mut open,
-                                    &mut last_span,
-                                    &mut spans,
-                                    &mut hits,
-                                    &mut aliases,
-                                );
-                            }
                             return ATaskOut::Emitted {
                                 search,
                                 perspectives,
                                 roots,
                                 n,
-                                spans,
-                                hits,
-                                aliases,
-                                lookups: lookups + buffered_lookups,
+                                spans: arena_sink.spans,
+                                hits: arena_sink.hits,
+                                aliases: arena_sink.aliases,
+                                lookups: arena_sink.lookups,
                             };
                         }
                         let ctx = crate::policy::SearchCtx {
@@ -2007,6 +1981,23 @@ impl<S: Clone> crate::policy::StateSink<S> for ArenaSink<'_, S> {
             key_unused(),
             &mut |dst| enc.encode_into(state, player, dst),
             &mut self.spans,
+            &mut self.aliases,
+        );
+    }
+
+    fn push_row(&mut self, player: usize, row: &[f32], pos: u32) {
+        assert_eq!(row.len(), self.dim, "pushed row width mismatch");
+        self.lookups += classify_row(
+            self.mode,
+            &self.pins,
+            pos,
+            player,
+            row,
+            self.routes,
+            &mut self.open,
+            &mut self.last_span,
+            &mut self.spans,
+            &mut self.hits,
             &mut self.aliases,
         );
     }

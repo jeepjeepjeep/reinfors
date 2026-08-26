@@ -240,3 +240,27 @@ fn commit_requires_full_initialization() {
 fn zero_capacity_rejected() {
     let _ = Arena::new(0, 4, 16);
 }
+
+#[test]
+fn an_abandoned_claim_never_blocks_the_fire_condition() {
+    let arena = Arena::new(2, 1, 8);
+    let mut span = full(&arena, 1);
+    span.push_row(&[7.0]);
+    span.commit();
+    match arena.try_alias() {
+        AliasOutcome::Ticket(t) => t.commit(),
+        _ => panic!("expected ticket"),
+    }
+    match arena.try_alias() {
+        AliasOutcome::Ticket(t) => drop(t),
+        _ => panic!("expected ticket"),
+    }
+    let info = arena.close().expect("first close");
+    let processed_claims = 1;
+    assert_eq!(
+        info.aliases,
+        processed_claims + arena.aliases_abandoned(),
+        "readiness must reconcile without the abandoned claim's message"
+    );
+    assert_eq!(arena.take_rows().unwrap(), vec![7.0]);
+}

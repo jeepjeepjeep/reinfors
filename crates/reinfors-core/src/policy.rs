@@ -43,6 +43,9 @@ pub(crate) trait StateSink<S> {
         pos: u32,
         scratch: &mut Vec<f32>,
     );
+
+    /// Classify an already-encoded row straight into backend storage.
+    fn push_row(&mut self, player: usize, row: &[f32], pos: u32);
 }
 
 /// Collects one round's evaluation requests: `(player, encoded obs)` rows, or
@@ -84,10 +87,15 @@ impl<'e, S> RequestSink<'e, S> {
     }
 
     pub fn push(&mut self, player: usize, obs: &[f32]) {
+        let pos = self.n as u32;
+        self.n += 1;
+        if let Some(backend) = self.backend.as_mut() {
+            backend.push_row(player, obs, pos);
+            return;
+        }
         self.players.push(player);
         self.obs.extend_from_slice(obs);
-        self.buffered_pos.push(self.n as u32);
-        self.n += 1;
+        self.buffered_pos.push(pos);
     }
 
     /// Push a request whose row is the canonical current-state observation for
@@ -95,10 +103,17 @@ impl<'e, S> RequestSink<'e, S> {
     /// re-encode it. `player` routes inference and is deliberately separate. At most
     /// one mark per perspective per search.
     pub fn push_root(&mut self, player: usize, obs: Vec<f32>, perspective: usize) {
+        let pos = self.n as u32;
+        self.n += 1;
+        if let Some(backend) = self.backend.as_mut() {
+            // one copy: classify into the arena, move the original into roots
+            backend.push_row(player, &obs, pos);
+            self.roots.push((perspective, obs));
+            return;
+        }
         self.players.push(player);
         self.obs.extend_from_slice(&obs);
-        self.buffered_pos.push(self.n as u32);
-        self.n += 1;
+        self.buffered_pos.push(pos);
         if self.capture_roots {
             self.roots.push((perspective, obs));
         }
@@ -138,10 +153,9 @@ impl<'e, S> RequestSink<'e, S> {
         (self.players, self.obs)
     }
 
-    /// Buffered rows (with emission positions) plus retained root rows — engine only.
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn into_zc_parts(self) -> (Vec<usize>, Vec<f32>, Vec<u32>, Vec<(usize, Vec<f32>)>) {
-        (self.players, self.obs, self.buffered_pos, self.roots)
+    /// Retained root rows — engine only; backend mode never buffers rows here.
+    pub(crate) fn into_roots(self) -> Vec<(usize, Vec<f32>)> {
+        self.roots
     }
 }
 
