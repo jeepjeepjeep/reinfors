@@ -1,9 +1,9 @@
 # Engine collection internals
 
-How one `Engine.collect(...)` window executes across threads, and where its time
-goes. [Architecture](architecture.md) shows the component seams; this page shows
-the runtime: the thread roles, the zero-copy observation path, and the
-mechanisms that keep it correct and live.
+How one `Engine.collect(...)` window executes across threads.
+[Architecture](architecture.md) shows the component seams; this page shows the
+runtime: the thread roles, the zero-copy observation path, and the mechanisms
+that keep it correct and live.
 
 ## Definitions
 
@@ -53,7 +53,7 @@ CALLER-OWNED PYTHON
 ═══════════════════════ RUST / PYTHON BOUNDARY ═════════════════════════════
                                      ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ SCHEDULER — one thread; observation messages carry METADATA ONLY        │
+│ SCHEDULER — one thread; observation messages carry METADATA ONLY         │
 │ span accounting · batch firing · row routing · cache publication ·       │
 │ liveness ladder · floor accounting · record collection · respawns        │
 └───────┬────────────────────────────▲─────────────────────▲───────────────┘
