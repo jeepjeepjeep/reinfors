@@ -593,6 +593,21 @@ where
                     let txc = tx.clone();
                     s.spawn_fifo(move |_| task(gi, work_item, pins, txc));
                 };
+                // The unwound task's slot: lock may be poisoned, decision half-made.
+                macro_rules! reset_panicked_slot {
+                    ($gi:expr) => {{
+                        let mut guard = match slots[$gi].lock() {
+                            Ok(g) => g,
+                            Err(poisoned) => poisoned.into_inner(),
+                        };
+                        let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                        for steps in slot.traj.iter_mut() {
+                            steps.clear();
+                        }
+                        slot.returns.iter_mut().for_each(|r| *r = 0.0);
+                        respawn_game(game, policy, slot, &mut start);
+                    }};
+                }
                 // Drain in-flight completions before surfacing: a finished episode
                 // must respawn, never strand over-horizon.
                 macro_rules! drain_after_callback_panic {
@@ -601,6 +616,8 @@ where
                             let msg = rx.recv().expect("scheduler channel closed");
                             in_flight -= 1;
                             match msg.out {
+                                // further panics reset their slots; the first payload surfaces
+                                ATaskOut::Panicked(_) => reset_panicked_slot!(msg.gi),
                                 ATaskOut::Completed {
                                     finished: Some(terminal),
                                     ..
@@ -1212,21 +1229,7 @@ where
                     in_flight -= 1;
                     match msg.out {
                         ATaskOut::Panicked(payload) => {
-                            // reset the unwound task's slot (its lock may be
-                            // poisoned, its decision half-made), then drain
-                            // concurrent completions exactly like a callback panic
-                            {
-                                let mut guard = match slots[msg.gi].lock() {
-                                    Ok(g) => g,
-                                    Err(poisoned) => poisoned.into_inner(),
-                                };
-                                let slot: &mut SlotCtx<'_, G, P> = &mut guard;
-                                for steps in slot.traj.iter_mut() {
-                                    steps.clear();
-                                }
-                                slot.returns.iter_mut().for_each(|r| *r = 0.0);
-                                respawn_game(game, policy, slot, &mut start);
-                            }
+                            reset_panicked_slot!(msg.gi);
                             drain_after_callback_panic!(payload)
                         }
                         ATaskOut::Skip => phases[msg.gi] = SlotPhase::Parked,

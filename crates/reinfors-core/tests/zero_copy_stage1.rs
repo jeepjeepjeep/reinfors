@@ -1847,6 +1847,7 @@ impl Game for OneStep {
 struct PanicRace {
     next_role: std::sync::atomic::AtomicUsize,
     flag: Arc<std::sync::atomic::AtomicBool>,
+    both_panic: bool,
 }
 
 struct RaceSearch {
@@ -1973,6 +1974,9 @@ impl PanicRace {
                     std::thread::yield_now();
                 }
                 std::thread::sleep(std::time::Duration::from_millis(15));
+                if self.both_panic {
+                    panic!("second worker panic");
+                }
             }
             _ => {}
         }
@@ -2000,6 +2004,7 @@ fn a_worker_panic_drains_concurrent_completions_and_resets_all_slots() {
         PanicRace {
             next_role: std::sync::atomic::AtomicUsize::new(0),
             flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            both_panic: false,
         },
         reinfors_core::Ppo::new(1.0, 0.95),
         EngineParams {
@@ -2021,6 +2026,44 @@ fn a_worker_panic_drains_concurrent_completions_and_resets_all_slots() {
         draws.load(Ordering::SeqCst),
         2,
         "the drain must respawn the concurrently finished slot and reset the panicked one"
+    );
+    let (records, stats) = e.collect(6, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
+    assert!(records.len() >= 6, "both slots must stay usable");
+    assert!(stats.episodes.len() >= 6);
+}
+
+#[test]
+fn simultaneous_worker_panics_reset_every_unwound_slot() {
+    let draws = Arc::new(AtomicU64::new(0));
+    let mut e = Engine::new(
+        OneStep,
+        Box::new(Enc),
+        Box::new(Zero),
+        PanicRace {
+            next_role: std::sync::atomic::AtomicUsize::new(0),
+            flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            both_panic: true,
+        },
+        reinfors_core::Ppo::new(1.0, 0.95),
+        EngineParams {
+            n_games: 2,
+            seed: 5,
+            n_threads: Some(2),
+            batch_size: Some(2),
+            ..Default::default()
+        },
+    )
+    .with_start_distribution(Box::new(CountingStarts {
+        draws: draws.clone(),
+    }));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        e.collect(50, |obs: Vec<f32>, n: usize| exact_infer(&obs, n))
+    }));
+    assert!(result.is_err(), "the first panic must surface");
+    assert_eq!(
+        draws.load(Ordering::SeqCst),
+        2,
+        "the drain must reset the second unwound slot, not just the first"
     );
     let (records, stats) = e.collect(6, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
     assert!(records.len() >= 6, "both slots must stay usable");
