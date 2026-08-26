@@ -72,6 +72,8 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     episodes: Vec<Episode<G>>,
     start_dist: Box<dyn StartDistribution<G::State>>,
     learn_mask: Vec<bool>,
+    #[allow(clippy::type_complexity)]
+    cache_config: Option<(usize, Vec<std::sync::Arc<std::sync::atomic::AtomicU64>>)>,
     // Returns cannot be derived from steps: an agent may be rewarded before ever acting.
     episode_returns: Vec<Vec<f64>>,
     sequential: bool,
@@ -150,6 +152,7 @@ where
             episodes,
             start_dist: Box::new(AlwaysInitialState),
             learn_mask: vec![true; num_agents],
+            cache_config: None,
             episode_returns: vec![vec![0.0; num_agents]; params.n_games],
             sequential,
             pad: params.pad,
@@ -213,12 +216,8 @@ where
             self.game.num_agents() + 1,
             "one generation per slot: shared + one per player"
         );
-        self.zc_caches = Some(
-            generations
-                .into_iter()
-                .map(|g| ZcCache::new(capacity, g))
-                .collect(),
-        );
+        self.cache_config = Some((capacity, generations));
+        self.zc_caches = None;
         self
     }
 
@@ -275,6 +274,18 @@ where
             !pad || matches!(mode, InferMode::Shared),
             "pad supports a single shared infer callback"
         );
+        // Caches build lazily from the retained config: a collection that
+        // unwinds loses only the built caches, and the next call starts fresh.
+        if self.zc_caches.is_none() {
+            if let Some((capacity, generations)) = self.cache_config.as_ref() {
+                self.zc_caches = Some(
+                    generations
+                        .iter()
+                        .map(|g| ZcCache::new(*capacity, g.clone()))
+                        .collect(),
+                );
+            }
+        }
         let mut zc_caches = self.zc_caches.take();
         let mut out: Vec<L::Record> = Vec::new();
         let mut stats = CollectStats::default();

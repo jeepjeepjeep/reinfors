@@ -1702,11 +1702,7 @@ fn asym_engine(cache: Option<usize>) -> Engine<Asym, FanActor, reinfors_core::Pp
     .with_start_distribution(Box::new(ColdFirst { draws: 0 }));
     if let Some(cap) = cache {
         let shared = Arc::new(AtomicU64::new(0));
-        e = e.with_infer_caches(
-            (0..=2)
-                .map(|_| InferCache::new(cap, shared.clone()))
-                .collect(),
-        );
+        e = e.with_infer_cache(cap, vec![shared.clone(); 3]);
     }
     e
 }
@@ -1769,4 +1765,20 @@ fn a_hit_only_cold_route_releases_within_the_ladder_bound() {
     );
     assert_eq!(records.iter().filter(|r| r.player == 0).count(), 6);
     assert!(stats.cache_hits >= 4);
+}
+
+#[test]
+fn a_panicked_collect_keeps_caching_enabled() {
+    let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 2, 2, Some(64));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        e.collect(3, |_obs: Vec<f32>, _n: usize| -> Vec<f64> {
+            panic!("callback")
+        })
+    }));
+    assert!(result.is_err(), "the callback panic must surface");
+    let (_, stats) = e.collect(6, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
+    assert!(
+        stats.cache_lookups > 0,
+        "caching must survive an unwound collection"
+    );
 }
