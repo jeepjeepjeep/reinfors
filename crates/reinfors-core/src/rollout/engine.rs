@@ -71,9 +71,9 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     learner: L,
     episodes: Vec<Episode<G>>,
     start_dist: Box<dyn StartDistribution<G::State>>,
-    // Slot 0 is shared; slots 1..=N isolate per-player networks.
-    infer_caches: Option<Vec<InferCache>>,
     learn_mask: Vec<bool>,
+    #[allow(clippy::type_complexity)]
+    cache_config: Option<(usize, Vec<std::sync::Arc<std::sync::atomic::AtomicU64>>)>,
     // Returns cannot be derived from steps: an agent may be rewarded before ever acting.
     episode_returns: Vec<Vec<f64>>,
     sequential: bool,
@@ -151,8 +151,8 @@ where
             learner,
             episodes,
             start_dist: Box::new(AlwaysInitialState),
-            infer_caches: None,
             learn_mask: vec![true; num_agents],
+            cache_config: None,
             episode_returns: vec![vec![0.0; num_agents]; params.n_games],
             sequential,
             pad: params.pad,
@@ -203,15 +203,20 @@ where
         self
     }
 
-    /// Install one shared cache followed by one cache per player.
-    pub fn with_infer_caches(mut self, caches: Vec<InferCache>) -> Self {
+    /// Enable the infer cache: slot 0 serves the shared callback, slots 1..=N
+    /// the per-player callbacks; each slot clears when its generation advances.
+    pub fn with_infer_cache(
+        mut self,
+        capacity: usize,
+        generations: Vec<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    ) -> Self {
+        assert!(capacity > 0, "cache capacity must be positive");
         assert_eq!(
-            caches.len(),
+            generations.len(),
             self.game.num_agents() + 1,
-            "one cache per slot: shared + one per player"
+            "one generation per slot: shared + one per player"
         );
-        self.infer_caches = Some(caches);
-        // new handles/capacity: the derived zero-copy cache must rebuild
+        self.cache_config = Some((capacity, generations));
         self.zc_caches = None;
         self
     }
@@ -269,16 +274,17 @@ where
             !pad || matches!(mode, InferMode::Shared),
             "pad supports a single shared infer callback"
         );
-        if let (Some(classic), None) = (self.infer_caches.as_ref(), self.zc_caches.as_ref()) {
-            self.zc_caches = Some(
-                classic
-                    .iter()
-                    .map(|c| {
-                        let (capacity, generation) = c.params();
-                        ZcCache::new(capacity, generation)
-                    })
-                    .collect(),
-            );
+        // Caches build lazily from the retained config: a collection that
+        // unwinds loses only the built caches, and the next call starts fresh.
+        if self.zc_caches.is_none() {
+            if let Some((capacity, generations)) = self.cache_config.as_ref() {
+                self.zc_caches = Some(
+                    generations
+                        .iter()
+                        .map(|g| ZcCache::new(*capacity, g.clone()))
+                        .collect(),
+                );
+            }
         }
         let mut zc_caches = self.zc_caches.take();
         let mut out: Vec<L::Record> = Vec::new();
@@ -1571,11 +1577,6 @@ where
             self.traj[gi] = slice.traj;
         }
         // Numeric generations do not identify weights across restored processes.
-        if let Some(caches) = self.infer_caches.as_mut() {
-            for cache in caches.iter_mut() {
-                cache.force_clear();
-            }
-        }
         if let Some(caches) = self.zc_caches.as_mut() {
             for cache in caches.iter_mut() {
                 cache.force_clear();

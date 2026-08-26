@@ -1,7 +1,9 @@
-//! Generational cache for raw network-output rows.
+//! Generational cache for raw network-output rows, for synchronous callers
+//! (evaluator, solvers) that own it exclusively. The engine's scheduler uses
+//! `zc_cache` instead; the key/hash machinery here is shared by both.
 //!
-//! Each cache is confined to one engine collection worker. It is deliberately mutable and
-//! lock-free; the atomic generation signal does not make the cache itself thread-safe.
+//! Deliberately mutable and lock-free; the atomic generation signal does not
+//! make the cache itself thread-safe.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -138,10 +140,6 @@ impl InferCache {
     /// The generation this cache last synced to.
     pub fn seen_generation(&self) -> u64 {
         self.seen_generation
-    }
-
-    pub(crate) fn params(&self) -> (usize, Arc<AtomicU64>) {
-        (self.half_capacity * 2, self.generation.clone())
     }
 
     /// Clear entries when the shared weights generation changes.

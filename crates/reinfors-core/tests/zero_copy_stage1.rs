@@ -8,7 +8,6 @@ use reinfors_core::policies::modelfree::ppo::masked_log_probs;
 use reinfors_core::policy::{RequestSink, RoundStatus, RowsView, SearchCtx};
 use reinfors_core::rollout::engine::{Engine, EngineParams};
 use reinfors_core::rollout::evaluator::InferMode;
-use reinfors_core::rollout::infer_cache::InferCache;
 use reinfors_core::{
     Actor, CacheHasher, Game, Policy, PpoEvaluation, Reward, Rng, Space, StateEncoder, Transition,
 };
@@ -632,11 +631,7 @@ where
     let mut generation = None;
     if let Some(cap) = cache {
         let shared = Arc::new(AtomicU64::new(0));
-        e = e.with_infer_caches(
-            (0..=n_agents)
-                .map(|_| InferCache::new(cap, shared.clone()))
-                .collect(),
-        );
+        e = e.with_infer_cache(cap, vec![shared.clone(); n_agents + 1]);
         generation = Some(shared);
     }
     (e, generation)
@@ -750,11 +745,7 @@ fn reinstalling_caches_discards_the_old_zero_copy_cache() {
     let (r1, s1) = e.collect(3, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
     assert!(s1.infer_calls > 0);
     let shared = Arc::new(AtomicU64::new(0));
-    let mut e = e.with_infer_caches(
-        (0..=1)
-            .map(|_| InferCache::new(64, shared.clone()))
-            .collect(),
-    );
+    let mut e = e.with_infer_cache(64, vec![shared.clone(); 2]);
     let (r2, s2) = e.collect(3, |obs: Vec<f32>, n: usize| {
         exact_infer(&obs, n).iter().map(|v| v * 2.0).collect()
     });
@@ -979,11 +970,7 @@ where
     let mut generation = None;
     if let Some(cap) = cache {
         let shared = Arc::new(AtomicU64::new(0));
-        e = e.with_infer_caches(
-            (0..=n_agents)
-                .map(|_| InferCache::new(cap, shared.clone()))
-                .collect(),
-        );
+        e = e.with_infer_cache(cap, vec![shared.clone(); n_agents + 1]);
         generation = Some(shared);
     }
     (e, encodes, generation)
@@ -1064,11 +1051,7 @@ fn drift_engine(
     let mut generation = None;
     if let Some(cap) = cache {
         let shared = Arc::new(AtomicU64::new(0));
-        e = e.with_infer_caches(
-            (0..=1)
-                .map(|_| InferCache::new(cap, shared.clone()))
-                .collect(),
-        );
+        e = e.with_infer_cache(cap, vec![shared.clone(); 2]);
         generation = Some(shared);
     }
     (e, generation)
@@ -1218,11 +1201,7 @@ fn multi_threaded_state_backed_collection_stays_sound() {
             ..Default::default()
         },
     )
-    .with_infer_caches(
-        (0..=1)
-            .map(|_| InferCache::new(64, shared.clone()))
-            .collect(),
-    );
+    .with_infer_cache(64, vec![shared.clone(); 2]);
     let (records, stats) = e.collect(300, move |obs: Vec<f32>, n: usize| {
         seen.lock().unwrap().push(n);
         exact_infer(&obs, n)
@@ -1513,11 +1492,7 @@ fn worker_panic_with_committed_aliases_aborts_and_the_engine_reuses() {
                 ..Default::default()
             },
         )
-        .with_infer_caches(
-            (0..=1)
-                .map(|_| InferCache::new(64, shared.clone()))
-                .collect(),
-        );
+        .with_infer_cache(64, vec![shared.clone(); 2]);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             e.collect(12, |obs: Vec<f32>, n: usize| exact_infer(&obs, n))
         }));
@@ -1727,11 +1702,7 @@ fn asym_engine(cache: Option<usize>) -> Engine<Asym, FanActor, reinfors_core::Pp
     .with_start_distribution(Box::new(ColdFirst { draws: 0 }));
     if let Some(cap) = cache {
         let shared = Arc::new(AtomicU64::new(0));
-        e = e.with_infer_caches(
-            (0..=2)
-                .map(|_| InferCache::new(cap, shared.clone()))
-                .collect(),
-        );
+        e = e.with_infer_cache(cap, vec![shared.clone(); 3]);
     }
     e
 }
@@ -1794,4 +1765,20 @@ fn a_hit_only_cold_route_releases_within_the_ladder_bound() {
     );
     assert_eq!(records.iter().filter(|r| r.player == 0).count(), 6);
     assert!(stats.cache_hits >= 4);
+}
+
+#[test]
+fn a_panicked_collect_keeps_caching_enabled() {
+    let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 2, 2, Some(64));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        e.collect(3, |_obs: Vec<f32>, _n: usize| -> Vec<f64> {
+            panic!("callback")
+        })
+    }));
+    assert!(result.is_err(), "the callback panic must surface");
+    let (_, stats) = e.collect(6, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
+    assert!(
+        stats.cache_lookups > 0,
+        "caching must survive an unwound collection"
+    );
 }
