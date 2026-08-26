@@ -21,6 +21,7 @@ disagreement from `EpsilonGreedyQ` as measured agreement.
 | `padded_rows` | `int` rows | All engine policies | Zero pad rows forwarded by `pad` (0 when disabled). |
 | `cache_lookups` | `int` rows | Any policy with `infer_cache` enabled | Persistent evaluation-cache lookups. |
 | `cache_hits` | `int` rows | Any policy with `infer_cache` enabled | Successful persistent evaluation-cache lookups. |
+| `cache_demotions` | `int` rows | Any policy with `infer_cache` enabled | Gated hits invalidated by a `weights_updated()` boundary at release and re-inferred instead of delivered. |
 | `terminal_sims` | `int` simulations | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Simulations ending at a terminal state. |
 | `depthcap_sims` | `int` simulations | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Simulations ending at the configured depth cap. |
 | `requested_rows` | `int` rows | All engine policies | Rows entering the inference queue (decision evaluations and tail bootstraps), pre-dedup and pre-cache, counted once at the queue seam; dedup and cache savings are the gap to `infer_rows`. Replaces 0.2.x's `fresh_rows`/`hit_rows`/`shared_rows` split — row provenance is an Evaluator fact. |

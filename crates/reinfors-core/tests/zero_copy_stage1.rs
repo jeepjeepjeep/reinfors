@@ -910,7 +910,9 @@ impl Policy for StateActor {
             .iter()
             .enumerate()
             .map(|(i, legal)| {
-                let row = rows.row(i * self.fan);
+                // consume a STATE-BACKED row so parity tests validate the arena
+                // path; the buffered root at i*fan feeds records only
+                let row = rows.row(i * self.fan + usize::from(self.fan > 1));
                 PpoEvaluation {
                     log_probs: masked_log_probs(&row[..legal.len()], legal),
                     value: 0.0,
@@ -1051,27 +1053,77 @@ fn scratch_fallback_hits_match_uncached() {
     assert!(cstats.infer_rows < pstats.infer_rows);
 }
 
+fn drift_engine(
+    cache: Option<usize>,
+) -> (
+    Engine<DriftLine, StateActor, reinfors_core::Ppo>,
+    Option<Arc<AtomicU64>>,
+) {
+    let mut e = Engine::new(
+        DriftLine,
+        Box::new(DriftEnc),
+        Box::new(Zero),
+        StateActor { fan: 4 },
+        reinfors_core::Ppo::new(1.0, 0.95),
+        EngineParams {
+            n_games: 8,
+            seed: 11,
+            n_threads: Some(2),
+            batch_size: Some(4),
+            zero_copy: true,
+            ..Default::default()
+        },
+    );
+    let mut generation = None;
+    if let Some(cap) = cache {
+        let shared = Arc::new(AtomicU64::new(0));
+        e = e.with_infer_caches(
+            (0..=1)
+                .map(|_| InferCache::new(cap, shared.clone()))
+                .collect(),
+        );
+        generation = Some(shared);
+    }
+    (e, generation)
+}
+
 #[test]
 fn stale_encoder_key_hits_demote_by_reencoding() {
-    let (plain, _) = {
-        let (mut e, _, _) = state_engine(Line, true, 4, 2, 1, true, None);
-        let (records, stats) = e.collect(9, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
-        (records.iter().map(record_key).collect::<Keys>(), stats)
-    };
-    for bump_at in 1..=4 {
-        let (mut e, _, generation) = state_engine(Line, true, 4, 2, 1, true, Some(64));
-        let generation = generation.expect("cache installed");
-        let mut calls = 0;
-        let (records, _) = e.collect(9, move |obs: Vec<f32>, n: usize| {
-            calls += 1;
-            if calls == bump_at {
+    // Deterministic bump sweeps cannot reach the demotion window through the
+    // public API (gated windows are microseconds and drain at nearly every
+    // fire), so invalidate asynchronously across thousands of windows. Every
+    // record must stay self-consistent, and the sweep must actually demote.
+    let (mut e, generation) = drift_engine(Some(64));
+    let generation = generation.expect("cache installed");
+    let stop = Arc::new(AtomicU64::new(0));
+    let bumper = {
+        let generation = generation.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while stop.load(Ordering::Relaxed) == 0 {
                 generation.fetch_add(1, Ordering::Relaxed);
+                std::thread::sleep(std::time::Duration::from_micros(500));
             }
-            exact_infer(&obs, n)
-        });
-        let keys: Keys = records.iter().map(record_key).collect();
-        assert_eq!(plain, keys, "bump at call {bump_at} corrupted records");
+        })
+    };
+    let (records, stats) = e.collect(4000, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
+    stop.store(1, Ordering::Relaxed);
+    bumper.join().unwrap();
+    for r in &records {
+        let logits = [f64::from(r.obs[0]) * 0.25, 0.5];
+        let expected = masked_log_probs(&logits, &[0, 1]);
+        assert_eq!(
+            r.behavior_log_prob.to_bits(),
+            expected[r.action].to_bits(),
+            "record evaluation does not match its own observation"
+        );
     }
+    assert!(
+        stats.cache_demotions > 0,
+        "no gated hit was demoted across {} lookups ({} hits)",
+        stats.cache_lookups,
+        stats.cache_hits
+    );
 }
 
 #[test]
@@ -1214,5 +1266,71 @@ fn multi_threaded_state_backed_collection_stays_sound() {
             expected[r.action].to_bits(),
             "record evaluation does not match its own observation"
         );
+    }
+}
+
+/// Action-dependent state: slots diverge through their per-episode rng, so hit
+/// and miss rounds coexist — the precondition for a demotable gated hit.
+#[derive(Clone)]
+struct DriftSt {
+    tick: usize,
+    sum: usize,
+}
+
+struct DriftLine;
+impl Game for DriftLine {
+    type State = DriftSt;
+    type Event = ();
+    fn num_agents(&self) -> usize {
+        1
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn actor(&self, _s: &DriftSt) -> Actor {
+        Actor::Agent(0)
+    }
+    fn legal_actions(&self, _s: &DriftSt, agent: usize) -> Vec<usize> {
+        if agent == 0 {
+            vec![0, 1]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, s: &DriftSt, a: &[usize]) -> Transition<DriftSt, ()> {
+        Transition {
+            next_state: DriftSt {
+                tick: s.tick + 1,
+                sum: s.sum + a[0] + 1,
+            },
+            events: vec![None],
+            terminal: s.tick + 1 >= 6,
+        }
+    }
+    fn initial_state(&self) -> DriftSt {
+        DriftSt { tick: 0, sum: 0 }
+    }
+}
+
+struct DriftEnc;
+impl reinfors_core::ActionView for DriftEnc {}
+impl StateEncoder for DriftEnc {
+    type State = DriftSt;
+    fn encode(&self, s: &DriftSt, agent: usize) -> Vec<f32> {
+        vec![(s.sum % 5) as f32, agent as f32]
+    }
+    fn obs_shape(&self) -> (usize, usize, usize) {
+        (1, 1, 2)
+    }
+    fn observation_space(&self) -> Space {
+        Space::Box {
+            shape: vec![1, 1, 2],
+            low: f32::NEG_INFINITY,
+            high: f32::INFINITY,
+        }
+    }
+    fn cache_key(&self, s: &DriftSt, _perspective: usize, hasher: &mut CacheHasher) -> bool {
+        hasher.write_u64((s.sum % 5) as u64);
+        true
     }
 }

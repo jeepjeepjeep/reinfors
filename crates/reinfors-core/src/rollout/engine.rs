@@ -1386,6 +1386,7 @@ where
                                     cache.stage_promote(hit.key);
                                     deliver_hit!(gi, hit, $freed);
                                 } else {
+                                    stats.cache_demotions += 1;
                                     demote
                                         .entry(gi)
                                         .or_default()
