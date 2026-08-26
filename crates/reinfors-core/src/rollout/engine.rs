@@ -333,7 +333,16 @@ where
             };
             // batch_size is the fire threshold; oversized thresholds (drain-only
             // collection) clamp to a finite arena — splitting covers the rest.
-            let arena_rows = batch_size.min(1 << 20);
+            // The clamp is BYTE-bounded (matching the python-side limit), not
+            // row-bounded: large observations must not multiply it.
+            let arena_rows = batch_size
+                .min(1 << 20)
+                .min(((1usize << 29) / (obs_dim.max(1) * 4)).max(1));
+            assert!(
+                !pad || batch_size <= arena_rows,
+                "pad requires batch_size ({batch_size}) within the arena byte bound \
+                 ({arena_rows} rows at this observation size)"
+            );
             let routes: Vec<RouteShared> = (0..n_routes)
                 .map(|_| RouteShared::new(arena_rows, obs_dim))
                 .collect();
@@ -877,7 +886,10 @@ where
                             let call_rows = if pad { batch_size } else { take };
                             let mut obs = obs;
                             if call_rows > take {
-                                obs.resize(call_rows * obs_dim, 0.0);
+                                let len = call_rows
+                                    .checked_mul(obs_dim)
+                                    .expect("padded batch size overflows");
+                                obs.resize(len, 0.0);
                                 stats.padded_rows += call_rows - take;
                             }
                             let t0 = std::time::Instant::now();
@@ -997,8 +1009,8 @@ where
                             .entry($arena.id)
                             .or_insert_with(|| PendingArena {
                                 arc: $arena.clone(),
-                                dest: vec![(u32::MAX, u32::MAX); arena_rows],
-                                keys: vec![0; arena_rows],
+                                dest: Vec::new(),
+                                keys: Vec::new(),
                                 seen: 0,
                                 alias_claims: Vec::new(),
                                 seen_aliases: 0,
@@ -1017,6 +1029,12 @@ where
                         }
                         for span in $spans {
                             let pa = pending_entry!(span.route, span.arena);
+                            // metadata grows only to the highest observed row
+                            let need = span.first_row + span.positions.len();
+                            if pa.dest.len() < need {
+                                pa.dest.resize(need, (u32::MAX, u32::MAX));
+                                pa.keys.resize(need, 0);
+                            }
                             for (j, &pos) in span.positions.iter().enumerate() {
                                 pa.dest[span.first_row + j] = ($gi as u32, pos);
                                 pa.keys[span.first_row + j] = span.keys[j];

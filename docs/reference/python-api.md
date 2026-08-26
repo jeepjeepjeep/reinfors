@@ -46,7 +46,7 @@ the friendlier browsing surface.
 | `start_buffer` | Enable reached-state starts; currently supported by Snake only. |
 | `start_buffer_capacity` | Retained states per occupied start-buffer cell. |
 | `p_fresh` | Fraction of resets that use the ordinary initial state while the buffer is populated. |
-| `infer_cache` | Entries in each persistent evaluation-cache partition; zero disables caching. |
+| `infer_cache` | Entries in each persistent evaluation-cache partition; zero disables caching. Cache hits release at batch cadence, so keep roughly `n_games >= 2 x batch_size / (1 - hit_rate)`; undersized configurations trade throughput for small drain batches. |
 | `learn_players` | Players that emit records; omitted means every player. Other players still act. |
 
 Collection uses `collect(n_records=..., infer=...)`; concurrent collection uses

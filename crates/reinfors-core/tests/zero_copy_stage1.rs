@@ -1505,7 +1505,6 @@ fn worker_panic_with_committed_aliases_aborts_and_the_engine_reuses() {
                 seed: 11,
                 n_threads: Some(1),
                 batch_size: Some(4),
-                zero_copy: true,
                 ..Default::default()
             },
         )
@@ -1524,4 +1523,80 @@ fn worker_panic_with_committed_aliases_aborts_and_the_engine_reuses() {
             "engine must stay usable after the abort"
         );
     }
+}
+
+/// 256 KiB rows: the byte bound must clamp the arena, not the row cap.
+struct WideEnc;
+impl reinfors_core::ActionView for WideEnc {}
+impl StateEncoder for WideEnc {
+    type State = St;
+    fn encode(&self, s: &St, agent: usize) -> Vec<f32> {
+        let mut row = vec![0.0; 1 << 16];
+        row[0] = s.tick as f32;
+        row[1] = agent as f32;
+        row
+    }
+    fn obs_shape(&self) -> (usize, usize, usize) {
+        (1, 1, 1 << 16)
+    }
+    fn observation_space(&self) -> Space {
+        Space::Box {
+            shape: vec![1, 1, 1 << 16],
+            low: f32::NEG_INFINITY,
+            high: f32::INFINITY,
+        }
+    }
+}
+
+#[test]
+fn oversized_drain_thresholds_are_byte_bounded() {
+    let mut e = Engine::new(
+        Line,
+        Box::new(WideEnc),
+        Box::new(Zero),
+        FanActor { fan: 1, rounds: 1 },
+        reinfors_core::Ppo::new(1.0, 0.95),
+        EngineParams {
+            n_games: 2,
+            seed: 11,
+            n_threads: Some(1),
+            batch_size: Some(usize::MAX),
+            ..Default::default()
+        },
+    );
+    let (records, stats) = e.collect(4, |obs: Vec<f32>, n: usize| {
+        let dim = obs.len() / n.max(1);
+        (0..n)
+            .flat_map(|i| [f64::from(obs[i * dim]) * 0.25, 0.5, 0.25])
+            .collect()
+    });
+    assert!(!records.is_empty());
+    assert!(stats.infer_rows > 0);
+}
+
+#[test]
+fn pad_beyond_the_arena_bound_is_rejected() {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut e = Engine::new(
+            Line,
+            Box::new(WideEnc),
+            Box::new(Zero),
+            FanActor { fan: 1, rounds: 1 },
+            reinfors_core::Ppo::new(1.0, 0.95),
+            EngineParams {
+                n_games: 2,
+                seed: 11,
+                n_threads: Some(1),
+                pad: true,
+                batch_size: Some(1 << 20),
+            },
+        );
+        e.collect(4, |_obs: Vec<f32>, n: usize| vec![0.25; n * 3])
+    }));
+    let err = match result {
+        Ok(_) => panic!("oversized pad must fail loudly"),
+        Err(e) => e,
+    };
+    let msg = err.downcast_ref::<String>().cloned().unwrap_or_default();
+    assert!(msg.contains("arena byte bound"), "unexpected panic: {msg}");
 }
