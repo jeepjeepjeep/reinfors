@@ -1,8 +1,7 @@
-# Proposal: zero-copy observation marshalling
+# Design: zero-copy observation marshalling
 
-Status: proposed, not scheduled. Companion to
-[engine collection internals](../concepts/engine-collection.md), which documents the
-bound this proposal removes.
+Status: implemented (the "today"/"proposal" framing below describes the classic
+scheduler this design replaced).
 
 ## Problem
 
