@@ -756,10 +756,14 @@ where
                                     let mut aliases = Vec::new();
                                     for (route, pos, key, retained) in &items {
                                         match retained {
-                                            Retained::Row(row) => push_route_rows(
+                                            Retained::Row(row) => emit_arena_row(
                                                 *route,
                                                 &routes[*route],
-                                                &[(*pos, *key, row.as_slice())],
+                                                &mut None,
+                                                &mut None,
+                                                *pos,
+                                                *key,
+                                                &mut |dst| dst.copy_from_slice(row),
                                                 &mut spans,
                                                 &mut aliases,
                                             ),
@@ -864,7 +868,12 @@ where
                     ($route:expr, $id:expr) => {{
                         let ready = pending[$route].get(&$id).is_some_and(|pa| {
                             pa.arc.arena.close_info().is_some_and(|info| {
-                                info.rows == pa.seen && info.aliases as usize == pa.seen_aliases
+                                // abandoned tickets (panic before their claim message)
+                                // count toward reconciliation, never awaited
+                                info.rows == pa.seen
+                                    && info.aliases as usize
+                                        == pa.seen_aliases
+                                            + pa.arc.arena.aliases_abandoned() as usize
                             })
                         });
                         if ready {
@@ -1983,59 +1992,6 @@ fn classify_row<S>(
         aliases,
     );
     lookups
-}
-
-/// Copy rows into the route's open arenas, splitting across buffers at capacity;
-/// duplicate in-flight keys alias instead of reserving.
-fn push_route_rows(
-    route_idx: usize,
-    route: &RouteShared,
-    rows: &[(u32, u128, &[f32])],
-    spans: &mut Vec<ASpan>,
-    aliases: &mut Vec<AAlias>,
-) {
-    let mut next = 0;
-    while next < rows.len() {
-        let cur = route.current();
-        if try_stage_alias(route_idx, &cur, rows[next].1, rows[next].0, aliases) {
-            next += 1;
-            continue;
-        }
-        let (mut span, closes) = match cur.arena.try_reserve(1) {
-            Reserve::Full { span, closed } => (span, closed.is_some()),
-            Reserve::Partial { span, .. } => (span, true),
-            Reserve::Closed => {
-                route.replace_if(&cur);
-                continue;
-            }
-        };
-        let first = span.row_range().start;
-        let (pos, key, row) = rows[next];
-        span.push_row(row);
-        span.commit();
-        stage_key(&cur, key, first as u32);
-        match spans.last_mut() {
-            Some(last)
-                if last.route == route_idx
-                    && std::sync::Arc::ptr_eq(&last.arena, &cur)
-                    && last.first_row + last.rows.len() == first =>
-            {
-                last.rows.push((pos, key));
-            }
-            _ => spans.push(ASpan {
-                route: route_idx,
-                arena: cur.clone(),
-                first_row: first,
-                rows: vec![(pos, key)],
-            }),
-        }
-        next += 1;
-        // A close on the task's FINAL span defers replacement to the next
-        // requester, so the sealed arena's fire never waits on an allocation.
-        if closes && next < rows.len() {
-            route.replace_if(&cur);
-        }
-    }
 }
 
 enum AWork<SE> {
