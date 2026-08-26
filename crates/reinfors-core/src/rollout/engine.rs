@@ -1094,6 +1094,7 @@ where
                                     n,
                                     spans: tail_sink.spans,
                                     hits: tail_sink.hits,
+                                    aliases: tail_sink.aliases,
                                     lookups: tail_sink.lookups,
                                 };
                             }
@@ -1139,6 +1140,7 @@ where
                             let ArenaSink {
                                 mut spans,
                                 mut hits,
+                                mut aliases,
                                 lookups,
                                 ..
                             } = arena_sink;
@@ -1149,8 +1151,15 @@ where
                                     (pos, players[bi], &obs[bi * obs_dim..(bi + 1) * obs_dim])
                                 })
                                 .collect();
-                            let buffered_lookups =
-                                classify_rows(mode, &pins, &rows_in, routes, &mut spans, &mut hits);
+                            let buffered_lookups = classify_rows(
+                                mode,
+                                &pins,
+                                &rows_in,
+                                routes,
+                                &mut spans,
+                                &mut hits,
+                                &mut aliases,
+                            );
                             return ATaskOut::Emitted {
                                 search,
                                 perspectives,
@@ -1158,6 +1167,7 @@ where
                                 n,
                                 spans,
                                 hits,
+                                aliases,
                                 lookups: lookups + buffered_lookups,
                             };
                         }
@@ -1398,6 +1408,7 @@ where
                                 let txc = tx.clone();
                                 s.spawn_fifo(move |_| {
                                     let mut spans = Vec::new();
+                                    let mut aliases = Vec::new();
                                     for (route, pos, key, retained) in &items {
                                         match retained {
                                             Retained::Row(row) => push_route_rows(
@@ -1405,6 +1416,7 @@ where
                                                 &routes[*route],
                                                 &[(*pos, *key, row.as_slice())],
                                                 &mut spans,
+                                                &mut aliases,
                                             ),
                                             Retained::State(state, agent) => emit_arena_row(
                                                 *route,
@@ -1416,12 +1428,13 @@ where
                                                     encoder.encode_into(state, *agent, dst)
                                                 },
                                                 &mut spans,
+                                                &mut aliases,
                                             ),
                                         }
                                     }
                                     let _ = txc.send(AMsg {
                                         gi,
-                                        out: ATaskOut::DemoteEmitted { spans },
+                                        out: ATaskOut::DemoteEmitted { spans, aliases },
                                     });
                                 });
                             }
@@ -1504,10 +1517,14 @@ where
                 macro_rules! try_fire {
                     ($route:expr, $id:expr) => {{
                         let ready = pending[$route].get(&$id).is_some_and(|pa| {
-                            pa.arc
-                                .arena
-                                .close_info()
-                                .is_some_and(|info| info.rows == pa.seen)
+                            pa.arc.arena.close_info().is_some_and(|info| {
+                                // abandoned tickets (panic before their claim message)
+                                // count toward reconciliation, never awaited
+                                info.rows == pa.seen
+                                    && info.aliases as usize
+                                        == pa.seen_aliases
+                                            + pa.arc.arena.aliases_abandoned() as usize
+                            })
                         });
                         if ready {
                             let pa = pending[$route].remove(&$id).expect("readiness checked");
@@ -1578,6 +1595,45 @@ where
                                     freed.push(gi);
                                 }
                             }
+                            // alias claims: the target row's prediction resolves them too
+                            for &(target, g, pos) in &pa.alias_claims {
+                                let (gi, pos, target) =
+                                    (g as usize, pos as usize, target as usize);
+                                let (outstanding, buf, st, total) = match &mut phases[gi] {
+                                    SlotPhase::Blocked {
+                                        outstanding,
+                                        rows: buf,
+                                        stride: st,
+                                        total,
+                                        ..
+                                    }
+                                    | SlotPhase::AwaitingTail {
+                                        outstanding,
+                                        rows: buf,
+                                        stride: st,
+                                        total,
+                                        ..
+                                    } => (outstanding, buf, st, *total),
+                                    _ => unreachable!(
+                                        "alias routed to a slot with no outstanding round"
+                                    ),
+                                };
+                                if buf.is_empty() {
+                                    buf.resize(total * stride, 0.0);
+                                    *st = stride;
+                                } else {
+                                    assert_eq!(
+                                        *st, stride,
+                                        "infer returned a different row width for one round's requests"
+                                    );
+                                }
+                                buf[pos * stride..(pos + 1) * stride]
+                                    .copy_from_slice(&rows[target * stride..(target + 1) * stride]);
+                                *outstanding -= 1;
+                                if *outstanding == 0 {
+                                    freed.push(gi);
+                                }
+                            }
                             if let Some(rc) = route_caches.as_mut() {
                                 let cache = &mut rc[$route];
                                 for i in 0..take {
@@ -1593,22 +1649,41 @@ where
                         }
                     }};
                 }
-                macro_rules! account_spans {
-                    ($gi:expr, $spans:expr) => {{
-                        for span in $spans {
-                            let route = span.route;
-                            let id = span.arena.id;
-                            let pa = pending[route].entry(id).or_insert_with(|| PendingArena {
-                                arc: span.arena.clone(),
+                macro_rules! pending_entry {
+                    ($route:expr, $arena:expr) => {{
+                        pending[$route]
+                            .entry($arena.id)
+                            .or_insert_with(|| PendingArena {
+                                arc: $arena.clone(),
                                 dest: vec![(u32::MAX, u32::MAX); batch_size],
                                 keys: vec![0; batch_size],
                                 seen: 0,
-                            });
+                                alias_claims: Vec::new(),
+                                seen_aliases: 0,
+                            })
+                    }};
+                }
+                macro_rules! account_spans {
+                    ($gi:expr, $spans:expr, $aliases:expr) => {{
+                        let mut touched: Vec<(usize, u64)> = Vec::new();
+                        for alias in $aliases {
+                            let pa = pending_entry!(alias.route, alias.arena);
+                            pa.alias_claims
+                                .push((alias.target_row, $gi as u32, alias.pos));
+                            pa.seen_aliases += 1;
+                            touched.push((alias.route, alias.arena.id));
+                        }
+                        for span in $spans {
+                            let pa = pending_entry!(span.route, span.arena);
                             for (j, &pos) in span.positions.iter().enumerate() {
                                 pa.dest[span.first_row + j] = ($gi as u32, pos);
                                 pa.keys[span.first_row + j] = span.keys[j];
                             }
                             pa.seen += span.positions.len();
+                            touched.push((span.route, span.arena.id));
+                        }
+                        touched.dedup();
+                        for (route, id) in touched {
                             try_fire!(route, id);
                         }
                     }};
@@ -1722,6 +1797,7 @@ where
                             n,
                             spans,
                             hits,
+                            aliases,
                             lookups,
                         } => {
                             let gi = msg.gi;
@@ -1740,11 +1816,11 @@ where
                             for hit in hits {
                                 gated[hit.route].push((gi, hit));
                             }
-                            account_spans!(gi, spans);
+                            account_spans!(gi, spans, aliases);
                         }
-                        ATaskOut::DemoteEmitted { spans } => {
+                        ATaskOut::DemoteEmitted { spans, aliases } => {
                             let gi = msg.gi;
-                            account_spans!(gi, spans);
+                            account_spans!(gi, spans, aliases);
                         }
                         ATaskOut::TailEmitted {
                             fragment,
@@ -1752,6 +1828,7 @@ where
                             n,
                             spans,
                             hits,
+                            aliases,
                             lookups,
                         } => {
                             let gi = msg.gi;
@@ -1817,7 +1894,7 @@ where
                                 for hit in hits {
                                     gated[hit.route].push((gi, hit));
                                 }
-                                account_spans!(gi, spans);
+                                account_spans!(gi, spans, aliases);
                             }
                         }
                         ATaskOut::Completed {
@@ -2196,10 +2273,12 @@ struct Msg<SE, R> {
 
 type MsgSender<SE, R> = std::sync::mpsc::Sender<Msg<SE, R>>;
 
-/// One arena in a route's ownership-per-fire sequence.
+/// One arena in a route's ownership-per-fire sequence. `staged` maps in-flight
+/// cache keys to their reserved row so duplicates alias instead of re-firing.
 struct RouteArena {
     id: u64,
     arena: Arena,
+    staged: std::sync::Mutex<std::collections::HashMap<u128, u32>>,
 }
 
 /// A route's open-arena slot; workers allocate replacements, never the scheduler.
@@ -2229,9 +2308,11 @@ impl RouteShared {
         let id = self
             .next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let alias_limit = u32::try_from(self.capacity.saturating_mul(16)).unwrap_or(u32::MAX);
         std::sync::Arc::new(RouteArena {
             id,
-            arena: Arena::new(self.capacity, self.dim, 0),
+            arena: Arena::new(self.capacity, self.dim, alias_limit),
+            staged: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -2267,6 +2348,69 @@ struct ASpan {
     first_row: usize,
     positions: Vec<u32>,
     keys: Vec<u128>,
+}
+
+/// A duplicate in-flight key: the prediction for `target_row` also resolves this
+/// emission's ticket. Reserves nothing.
+struct AAlias {
+    route: usize,
+    arena: std::sync::Arc<RouteArena>,
+    target_row: u32,
+    pos: u32,
+}
+
+/// Alias against `cur`'s staged in-flight keys; `Some` means the ticket was
+/// registered and no row is needed. Any failure falls back to a reservation.
+fn try_stage_alias(
+    route_idx: usize,
+    cur: &std::sync::Arc<RouteArena>,
+    key: u128,
+    pos: u32,
+    aliases: &mut Vec<AAlias>,
+) -> bool {
+    if key == 0 {
+        return false;
+    }
+    let target = match cur.staged.lock().expect("staged lock").get(&key) {
+        Some(&row) => row,
+        None => return false,
+    };
+    match cur.arena.try_alias() {
+        crate::rollout::arena::AliasOutcome::Ticket(ticket) => {
+            aliases.push(AAlias {
+                route: route_idx,
+                arena: cur.clone(),
+                target_row: target,
+                pos,
+            });
+            ticket.commit();
+            true
+        }
+        _ => false,
+    }
+}
+
+fn stage_key(cur: &std::sync::Arc<RouteArena>, key: u128, row: u32) {
+    if key != 0 {
+        cur.staged
+            .lock()
+            .expect("staged lock")
+            .entry(key)
+            .or_insert(row);
+    }
+}
+
+/// One staged-map lock for a whole committed run.
+fn stage_keys(cur: &std::sync::Arc<RouteArena>, first_row: u32, rows: &[(u32, u128, &[f32])]) {
+    if rows.iter().all(|&(_, key, _)| key == 0) {
+        return;
+    }
+    let mut staged = cur.staged.lock().expect("staged lock");
+    for (j, &(_, key, _)) in rows.iter().enumerate() {
+        if key != 0 {
+            staged.entry(key).or_insert(first_row + j as u32);
+        }
+    }
 }
 
 /// What a gated hit retains for possible demotion: the scratch row (obs-hash
@@ -2308,6 +2452,7 @@ fn obs_hash_key(mode: InferMode, player: usize, row: &[f32]) -> u128 {
 /// same-arena emissions into one span.
 /// `open` caches the route's current arena so steady-state emissions take no
 /// lock; it refreshes only on a close.
+#[allow(clippy::too_many_arguments)]
 fn emit_arena_row(
     route_idx: usize,
     route: &RouteShared,
@@ -2316,6 +2461,7 @@ fn emit_arena_row(
     key: u128,
     fill: &mut dyn FnMut(&mut [f32]),
     spans: &mut Vec<ASpan>,
+    aliases: &mut Vec<AAlias>,
 ) {
     loop {
         let cur = match open.as_ref() {
@@ -2326,6 +2472,9 @@ fn emit_arena_row(
                 cur
             }
         };
+        if try_stage_alias(route_idx, &cur, key, pos, aliases) {
+            return;
+        }
         let mut span = match cur.arena.try_reserve(1) {
             Reserve::Full { span, .. } => span,
             Reserve::Partial { .. } => unreachable!("single-row reservations never split"),
@@ -2338,6 +2487,7 @@ fn emit_arena_row(
         let first = span.row_range().start;
         fill(span.zeroed());
         span.commit();
+        stage_key(&cur, key, first as u32);
         match spans.last_mut() {
             Some(last)
                 if last.route == route_idx
@@ -2370,6 +2520,7 @@ struct ArenaSink<'a, S> {
     dim: usize,
     spans: Vec<ASpan>,
     hits: Vec<AHit<S>>,
+    aliases: Vec<AAlias>,
     lookups: usize,
 }
 
@@ -2383,6 +2534,7 @@ impl<'a, S> ArenaSink<'a, S> {
             dim,
             spans: Vec::new(),
             hits: Vec::new(),
+            aliases: Vec::new(),
             lookups: 0,
         }
     }
@@ -2422,6 +2574,7 @@ impl<S: Clone> crate::policy::StateSink<S> for ArenaSink<'_, S> {
                     key,
                     &mut |dst| enc.encode_into(state, player, dst),
                     &mut self.spans,
+                    &mut self.aliases,
                 );
                 return;
             }
@@ -2451,6 +2604,7 @@ impl<S: Clone> crate::policy::StateSink<S> for ArenaSink<'_, S> {
                 key,
                 &mut |dst| dst.copy_from_slice(row),
                 &mut self.spans,
+                &mut self.aliases,
             );
             return;
         }
@@ -2462,6 +2616,7 @@ impl<S: Clone> crate::policy::StateSink<S> for ArenaSink<'_, S> {
             key_unused(),
             &mut |dst| enc.encode_into(state, player, dst),
             &mut self.spans,
+            &mut self.aliases,
         );
     }
 }
@@ -2479,6 +2634,7 @@ fn classify_rows<S>(
     routes: &[RouteShared],
     spans: &mut Vec<ASpan>,
     hits: &mut Vec<AHit<S>>,
+    aliases: &mut Vec<AAlias>,
 ) -> usize {
     let mut lookups = 0;
     let mut misses: Vec<Vec<(u32, u128, &[f32])>> = vec![Vec::new(); routes.len()];
@@ -2504,27 +2660,62 @@ fn classify_rows<S>(
     }
     for (route, rows) in misses.iter().enumerate() {
         if !rows.is_empty() {
-            push_route_rows(route, &routes[route], rows, spans);
+            push_route_rows(route, &routes[route], rows, spans, aliases);
         }
     }
     lookups
 }
 
-/// Copy rows into the route's open arenas, splitting across buffers at capacity.
+/// Copy rows into the route's open arenas, splitting across buffers at capacity;
+/// duplicate in-flight keys alias instead of reserving.
 fn push_route_rows(
     route_idx: usize,
     route: &RouteShared,
     rows: &[(u32, u128, &[f32])],
     spans: &mut Vec<ASpan>,
+    aliases: &mut Vec<AAlias>,
 ) {
+    let keyed = rows.iter().any(|&(_, key, _)| key != 0);
     let mut next = 0;
+    let mut open: Option<std::sync::Arc<RouteArena>> = None;
     while next < rows.len() {
-        let cur = route.current();
-        let (mut span, closes) = match cur.arena.try_reserve(rows.len() - next) {
+        let cur = match open.as_ref() {
+            Some(cur) => cur.clone(),
+            None => {
+                let cur = route.current();
+                open = Some(cur.clone());
+                cur
+            }
+        };
+        // Alias-drain leading duplicates, then bound a run of rows that reserve:
+        // keyless batches take the whole slice without touching the staged map.
+        let run_end = if !keyed {
+            rows.len()
+        } else {
+            if try_stage_alias(route_idx, &cur, rows[next].1, rows[next].0, aliases) {
+                next += 1;
+                continue;
+            }
+            let staged = cur.staged.lock().expect("staged lock");
+            let mut run_keys = std::collections::HashSet::new();
+            if rows[next].1 != 0 {
+                run_keys.insert(rows[next].1);
+            }
+            let mut end = next + 1;
+            while end < rows.len() {
+                let key = rows[end].1;
+                if key != 0 && (staged.contains_key(&key) || !run_keys.insert(key)) {
+                    break;
+                }
+                end += 1;
+            }
+            end
+        };
+        let (mut span, closes) = match cur.arena.try_reserve(run_end - next) {
             Reserve::Full { span, closed } => (span, closed.is_some()),
             Reserve::Partial { span, .. } => (span, true),
             Reserve::Closed => {
-                route.replace_if(&cur);
+                open = Some(route.replace_if(&cur));
                 continue;
             }
         };
@@ -2538,6 +2729,9 @@ fn push_route_rows(
             keys.push(*key);
         }
         span.commit();
+        if keyed {
+            stage_keys(&cur, first as u32, &rows[next..next + take]);
+        }
         spans.push(ASpan {
             route: route_idx,
             arena: cur.clone(),
@@ -2548,8 +2742,11 @@ fn push_route_rows(
         next += take;
         // A close on the task's FINAL span defers replacement to the next
         // requester, so the sealed arena's fire never waits on an allocation.
-        if closes && next < rows.len() {
-            route.replace_if(&cur);
+        if closes {
+            open = None;
+            if next < rows.len() {
+                open = Some(route.replace_if(&cur));
+            }
         }
     }
 }
@@ -2578,6 +2775,7 @@ enum ATaskOut<SE, R, S> {
         n: usize,
         spans: Vec<ASpan>,
         hits: Vec<AHit<S>>,
+        aliases: Vec<AAlias>,
         lookups: usize,
     },
     TailEmitted {
@@ -2586,10 +2784,12 @@ enum ATaskOut<SE, R, S> {
         n: usize,
         spans: Vec<ASpan>,
         hits: Vec<AHit<S>>,
+        aliases: Vec<AAlias>,
         lookups: usize,
     },
     DemoteEmitted {
         spans: Vec<ASpan>,
+        aliases: Vec<AAlias>,
     },
     Completed {
         records: Vec<R>,
@@ -2614,6 +2814,8 @@ struct PendingArena {
     dest: Vec<(u32, u32)>,
     keys: Vec<u128>,
     seen: usize,
+    alias_claims: Vec<(u32, u32, u32)>,
+    seen_aliases: usize,
 }
 
 /// Bounds for the adaptive busy-wait before a parking recv; parks that resolve

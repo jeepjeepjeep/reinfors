@@ -1334,3 +1334,208 @@ impl StateEncoder for DriftEnc {
         true
     }
 }
+
+#[test]
+fn in_flight_duplicate_keys_alias_to_one_fired_row() {
+    let run = |cache: Option<usize>| {
+        let batches = Arc::new(Mutex::new(Vec::new()));
+        let seen = batches.clone();
+        let (mut e, _) = engine_full(Line, Box::new(ConstEnc), 1, 1, 4, 4, true, cache);
+        let (records, stats) = e.collect(12, move |obs: Vec<f32>, n: usize| {
+            seen.lock().unwrap().push(n);
+            exact_infer(&obs, n)
+        });
+        let keys: Keys = records.iter().map(record_key).collect();
+        let batches = batches.lock().unwrap().clone();
+        (keys, stats, batches)
+    };
+    let (plain, plain_stats, _) = run(None);
+    let (deduped, stats, batches) = run(Some(64));
+    let mut plain_sorted = plain.clone();
+    let mut deduped_sorted = deduped.clone();
+    plain_sorted.sort();
+    deduped_sorted.sort();
+    assert_eq!(
+        plain_sorted, deduped_sorted,
+        "aliases must not change records"
+    );
+    // Four identical first-round rows: one reserves, three alias — the first
+    // fire carries a single row, and the whole window infers exactly once.
+    assert_eq!(
+        batches.first(),
+        Some(&1),
+        "duplicates fired redundantly: {batches:?}"
+    );
+    assert_eq!(stats.infer_rows, 1);
+    assert!(stats.infer_rows < plain_stats.infer_rows);
+}
+
+/// Emits two identical state-backed rows (the second aliases the first once
+/// staged), then panics before its message can deliver the claims.
+struct PanickingStateActor {
+    panic_on_round: Arc<AtomicU64>,
+}
+
+impl Policy for PanickingStateActor {
+    type Evaluation = PpoEvaluation;
+    type PolicyState = ();
+    type Search<S: Send> = StateSearch<S>;
+
+    fn max_agents(&self, _sequential: bool) -> Option<usize> {
+        Some(usize::MAX)
+    }
+    fn supports_imperfect_information(&self) -> bool {
+        true
+    }
+    fn begin_episode(&self, _rng: &mut dyn Rng) {}
+    fn encode_eval(&self, _eval: &PpoEvaluation, _out: &mut Vec<u8>) {
+        unimplemented!("no buffering in this test")
+    }
+    fn decode_eval(&self, _r: &mut Reader, _n: usize) -> Result<PpoEvaluation, String> {
+        unimplemented!("no buffering in this test")
+    }
+    fn policy_state_to_u64(&self, _s: &()) -> u64 {
+        0
+    }
+    fn policy_state_from_u64(&self, _v: u64) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn begin_search<G: Game + Sync>(
+        &self,
+        ctx: SearchCtx<'_, G>,
+        state: &G::State,
+        perspectives: &[usize],
+    ) -> StateSearch<G::State>
+    where
+        G::State: Send,
+    {
+        StateSearch {
+            state: state.clone(),
+            agents: perspectives.to_vec(),
+            legal: perspectives
+                .iter()
+                .map(|&a| ctx.game.legal_actions(state, a))
+                .collect(),
+            round: 0,
+            results: Vec::new(),
+        }
+    }
+
+    fn round<G: Game + Sync>(
+        &self,
+        ctx: SearchCtx<'_, G>,
+        search: &mut StateSearch<G::State>,
+        out: &mut RequestSink<'_, G::State>,
+    ) -> RoundStatus
+    where
+        G::State: Send,
+    {
+        if search.round > 0 {
+            return RoundStatus::Done;
+        }
+        for agent in search.agents.clone() {
+            out.push_root(agent, ctx.enc.encode(&search.state, agent), agent);
+            out.push_state(ctx.enc, agent, &search.state);
+            out.push_state(ctx.enc, agent, &search.state);
+        }
+        if self.panic_on_round.fetch_sub(1, Ordering::Relaxed) == 1 {
+            panic!("round dies after committing rows and alias tickets");
+        }
+        search.round += 1;
+        RoundStatus::Pending
+    }
+
+    fn absorb<G: Game + Sync>(
+        &self,
+        _ctx: SearchCtx<'_, G>,
+        search: &mut StateSearch<G::State>,
+        rows: RowsView<'_>,
+    ) where
+        G::State: Send,
+    {
+        if search.round != 1 {
+            return;
+        }
+        search.results = search
+            .legal
+            .iter()
+            .enumerate()
+            .map(|(i, legal)| {
+                let row = rows.row(i * 3 + 1);
+                PpoEvaluation {
+                    log_probs: masked_log_probs(&row[..legal.len()], legal),
+                    value: 0.0,
+                    legal: legal.clone(),
+                }
+            })
+            .collect();
+    }
+
+    fn finish<G: Game + Sync>(
+        &self,
+        _ctx: SearchCtx<'_, G>,
+        search: StateSearch<G::State>,
+    ) -> Vec<(PpoEvaluation, Vec<reinfors_core::InteriorTarget>)>
+    where
+        G::State: Send,
+    {
+        search
+            .results
+            .into_iter()
+            .map(|e| (e, Vec::new()))
+            .collect()
+    }
+
+    fn select(&self, eval: &PpoEvaluation, _state: &mut (), rng: &mut dyn Rng) -> usize {
+        let mut r = rng.unit();
+        for (i, lp) in eval.log_probs.iter().enumerate() {
+            r -= lp.exp();
+            if r <= 0.0 {
+                return eval.legal[i];
+            }
+        }
+        eval.legal[0]
+    }
+}
+
+#[test]
+fn worker_panic_with_committed_aliases_aborts_and_the_engine_reuses() {
+    for panic_on_round in [1u64, 3, 6] {
+        let shared = Arc::new(AtomicU64::new(0));
+        let mut e = Engine::new(
+            Line,
+            Box::new(KeyedEnc {
+                encodes: Arc::new(AtomicU64::new(0)),
+                keyed: true,
+            }),
+            Box::new(Zero),
+            PanickingStateActor {
+                panic_on_round: Arc::new(AtomicU64::new(panic_on_round)),
+            },
+            reinfors_core::Ppo::new(1.0, 0.95),
+            EngineParams {
+                n_games: 2,
+                seed: 11,
+                n_threads: Some(1),
+                batch_size: Some(4),
+                zero_copy: true,
+                ..Default::default()
+            },
+        )
+        .with_infer_caches(
+            (0..=1)
+                .map(|_| InferCache::new(64, shared.clone()))
+                .collect(),
+        );
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            e.collect(12, |obs: Vec<f32>, n: usize| exact_infer(&obs, n))
+        }));
+        assert!(result.is_err(), "the worker panic must surface");
+        let (records, _) = e.collect(6, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
+        assert!(
+            !records.is_empty(),
+            "engine must stay usable after the abort"
+        );
+    }
+}
