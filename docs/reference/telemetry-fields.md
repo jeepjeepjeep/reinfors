@@ -22,6 +22,8 @@ disagreement from `EpsilonGreedyQ` as measured agreement.
 | `cache_lookups` | `int` rows | Any policy with `infer_cache` enabled | Persistent evaluation-cache lookups. |
 | `cache_hits` | `int` rows | Any policy with `infer_cache` enabled | Successful persistent evaluation-cache lookups. |
 | `cache_demotions` | `int` rows | Any policy with `infer_cache` enabled | Gated hits invalidated by a `weights_updated()` boundary at release and re-inferred instead of delivered. |
+| `stall_closes` | `int` events | Any policy | Stalled routes whose partial batch the liveness ladder closed and fired early. Nonzero means some routes fill much slower than others; expect zero in balanced workloads. |
+| `stall_releases` | `int` events | Any policy with `infer_cache` enabled | Stalled hit-only routes whose cached results the ladder released without an inference call. Same balance signal as `stall_closes`. |
 | `terminal_sims` | `int` simulations | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Simulations ending at a terminal state. |
 | `depthcap_sims` | `int` simulations | `SelectiveExpectimax`, `Mcts`, `AlphaZero` | Simulations ending at the configured depth cap. |
 | `requested_rows` | `int` rows | All engine policies | Rows entering the inference queue (decision evaluations and tail bootstraps), pre-dedup and pre-cache, counted once at the queue seam; dedup and cache savings are the gap to `infer_rows`. Replaces 0.2.x's `fresh_rows`/`hit_rows`/`shared_rows` split — row provenance is an Evaluator fact. |

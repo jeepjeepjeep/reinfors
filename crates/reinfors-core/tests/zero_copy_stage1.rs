@@ -1239,6 +1239,11 @@ fn multi_threaded_state_backed_collection_stays_sound() {
         (encodes.load(Ordering::Relaxed) as usize) < stats.sum_requested_rows,
         "hits must skip encoding under contention"
     );
+    assert_eq!(
+        (stats.stall_closes, stats.stall_releases),
+        (0, 0),
+        "a balanced workload must never trip the liveness ladder"
+    );
     // Row correctness, not just accounting: every record's evaluation must be
     // exactly what the callback returns for that record's own observation — a
     // misrouted row under contention breaks the pairing.
@@ -1599,4 +1604,194 @@ fn pad_beyond_the_arena_bound_is_rejected() {
     };
     let msg = err.downcast_ref::<String>().cloned().unwrap_or_default();
     assert!(msg.contains("arena byte bound"), "unexpected panic: {msg}");
+}
+
+/// Asymmetric persistent actors: the single id-0 state acts as player 0 (cold
+/// route); every other id acts as player 1 (hot).
+#[derive(Clone)]
+struct ASt {
+    id: usize,
+    nonce: usize,
+    tick: usize,
+}
+
+struct Asym;
+
+impl Asym {
+    fn len(s: &ASt) -> usize {
+        if s.id == 9 {
+            1
+        } else {
+            6
+        }
+    }
+}
+
+impl Game for Asym {
+    type State = ASt;
+    type Event = ();
+    fn num_agents(&self) -> usize {
+        2
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn actor(&self, s: &ASt) -> Actor {
+        Actor::Agent(usize::from(s.id != 0))
+    }
+    fn legal_actions(&self, s: &ASt, agent: usize) -> Vec<usize> {
+        if agent == usize::from(s.id != 0) && s.tick < Self::len(s) {
+            vec![0, 1]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, s: &ASt, _a: &[usize]) -> Transition<ASt, ()> {
+        Transition {
+            next_state: ASt {
+                tick: s.tick + 1,
+                ..s.clone()
+            },
+            events: vec![None; 2],
+            terminal: s.tick + 1 >= Self::len(s),
+        }
+    }
+    fn initial_state(&self) -> ASt {
+        // one-decision bootstrap; real ids come from ColdFirst respawns
+        ASt {
+            id: 9,
+            nonce: 0,
+            tick: 0,
+        }
+    }
+}
+
+/// Player 0 always sees one constant observation; player 1's is unique per
+/// episode and tick.
+struct AsymEnc;
+impl reinfors_core::ActionView for AsymEnc {}
+impl StateEncoder for AsymEnc {
+    type State = ASt;
+    fn encode(&self, s: &ASt, agent: usize) -> Vec<f32> {
+        if agent == 0 {
+            vec![0.0, 0.0, 0.0]
+        } else {
+            vec![s.id as f32, s.nonce as f32, s.tick as f32]
+        }
+    }
+    fn obs_shape(&self) -> (usize, usize, usize) {
+        (1, 1, 3)
+    }
+    fn observation_space(&self) -> Space {
+        Space::Box {
+            shape: vec![1, 1, 3],
+            low: f32::NEG_INFINITY,
+            high: f32::INFINITY,
+        }
+    }
+}
+
+/// First draw is the single cold (id 0) episode; every later draw is hot.
+struct ColdFirst {
+    draws: usize,
+}
+
+impl reinfors_core::StartDistribution<ASt> for ColdFirst {
+    fn choose(&mut self, _rng: &mut dyn Rng) -> reinfors_core::Start<ASt> {
+        let n = self.draws;
+        self.draws += 1;
+        let id = if n == 0 { 0 } else { 1 + (n + 1) % 2 };
+        reinfors_core::Start::Restore(ASt {
+            id,
+            nonce: n + 1,
+            tick: 0,
+        })
+    }
+}
+
+fn asym_engine(cache: Option<usize>) -> Engine<Asym, FanActor, reinfors_core::Ppo> {
+    let mut e = Engine::new(
+        Asym,
+        Box::new(AsymEnc),
+        Box::new(Zero),
+        FanActor { fan: 1, rounds: 1 },
+        reinfors_core::Ppo::new(1.0, 0.95),
+        EngineParams {
+            n_games: 3,
+            seed: 7,
+            n_threads: Some(1),
+            batch_size: Some(2),
+            ..Default::default()
+        },
+    )
+    .with_start_distribution(Box::new(ColdFirst { draws: 0 }));
+    if let Some(cap) = cache {
+        let shared = Arc::new(AtomicU64::new(0));
+        e = e.with_infer_caches(
+            (0..=2)
+                .map(|_| InferCache::new(cap, shared.clone()))
+                .collect(),
+        );
+    }
+    e
+}
+
+#[test]
+fn a_starved_partial_route_fires_within_the_ladder_bound() {
+    let calls: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen = calls.clone();
+    let mut e = asym_engine(None);
+    let (records, stats) = e.collect_routed(
+        200,
+        InferMode::PerPlayer,
+        move |player, obs: Vec<f32>, n| {
+            seen.lock().unwrap().push(player);
+            exact_infer(&obs, n)
+        },
+    );
+    assert!(
+        stats.stall_closes > 0,
+        "the cold partial arena must stall-close"
+    );
+    let calls = calls.lock().unwrap();
+    let first_cold = calls
+        .iter()
+        .position(|&p| p == 0)
+        .expect("cold route fired");
+    assert!(
+        calls[first_cold..].iter().filter(|&&p| p == 1).count() >= 5,
+        "the cold fire must interleave hot traffic, not wait for the drain"
+    );
+    assert_eq!(records.iter().filter(|r| r.player == 0).count(), 6);
+    let first0 = records.iter().position(|r| r.player == 0).unwrap();
+    assert!(
+        records.iter().rposition(|r| r.player == 1).unwrap() > first0,
+        "the cold episode must complete during hot traffic"
+    );
+}
+
+#[test]
+fn a_hit_only_cold_route_releases_within_the_ladder_bound() {
+    let calls: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen = calls.clone();
+    let mut e = asym_engine(Some(1 << 10));
+    let (records, stats) = e.collect_routed(
+        200,
+        InferMode::PerPlayer,
+        move |player, obs: Vec<f32>, n| {
+            seen.lock().unwrap().push(player);
+            exact_infer(&obs, n)
+        },
+    );
+    assert!(
+        stats.stall_releases > 0,
+        "gated cold hits must release mid-run, not at the drain"
+    );
+    assert_eq!(
+        calls.lock().unwrap().iter().filter(|&&p| p == 0).count(),
+        1,
+        "after the first miss every cold decision is a gated hit"
+    );
+    assert_eq!(records.iter().filter(|r| r.player == 0).count(), 6);
+    assert!(stats.cache_hits >= 4);
 }

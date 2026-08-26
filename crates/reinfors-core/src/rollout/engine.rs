@@ -583,6 +583,11 @@ where
                 .collect();
             let mut gated: Vec<Vec<(usize, AHit<G::State>)>> =
                 (0..n_routes).map(|_| Vec::new()).collect();
+            let mut committed_seen: Vec<u64> = vec![0; n_routes];
+            let mut stall_seen: Vec<u64> = vec![0; n_routes];
+            let mut stall_fires: Vec<u32> = vec![0; n_routes];
+            let mut fires_completed = 0u64;
+            let mut fires_processed = 0u64;
             let mut in_flight = 0usize;
             let mut spin_budget = SPIN_RECVS_MIN;
             let mut backlog: isize = slots
@@ -910,6 +915,9 @@ where
                             stats.infer_seconds += t0.elapsed().as_secs_f64();
                             stats.infer_calls += 1;
                             stats.infer_rows += take;
+                            if take > 0 {
+                                fires_completed += 1;
+                            }
                             assert!(
                                 rows.len().is_multiple_of(call_rows.max(1)),
                                 "infer returned {} values for {} rows (not divisible)",
@@ -1047,11 +1055,72 @@ where
                                 pa.keys[span.first_row + j] = key;
                             }
                             pa.seen += span.rows.len();
+                            committed_seen[span.route] += span.rows.len() as u64;
                             touched.push((span.route, span.arena.id));
                         }
                         touched.dedup();
                         for (route, id) in touched {
                             try_fire!(route, id);
+                        }
+                    }};
+                }
+                // Liveness ladder: progress is scheduler-processed commits only
+                // (never the live arena cursor). A route with unresolved demand
+                // and no new commits across STALL_FIRES real fires engine-wide is
+                // closed and fired as a partial; an empty hit-only route releases
+                // its gated tickets without advancing the fire clock.
+                macro_rules! run_ladder {
+                    () => {{
+                        while fires_processed < fires_completed {
+                            fires_processed += 1;
+                            #[allow(clippy::needless_range_loop)]
+                            for route in 0..n_routes {
+                                if committed_seen[route] > stall_seen[route] {
+                                    stall_seen[route] = committed_seen[route];
+                                    stall_fires[route] = 0;
+                                    continue;
+                                }
+                                if pending[route].is_empty() && gated[route].is_empty() {
+                                    stall_fires[route] = 0;
+                                    continue;
+                                }
+                                stall_fires[route] += 1;
+                                if stall_fires[route] < STALL_FIRES {
+                                    continue;
+                                }
+                                stall_fires[route] = 0;
+                                if !pending[route].is_empty() {
+                                    stats.stall_closes += 1;
+                                    let mut ids: Vec<u64> =
+                                        pending[route].keys().copied().collect();
+                                    ids.sort_unstable();
+                                    for id in ids {
+                                        if let Some(pa) = pending[route].get(&id) {
+                                            if pa.arc.arena.close_info().is_none() {
+                                                pa.arc.arena.close();
+                                            }
+                                        }
+                                        try_fire!(route, id);
+                                    }
+                                } else {
+                                    stats.stall_releases += 1;
+                                    let mut freed = Vec::new();
+                                    release_gated!(route, freed);
+                                    if let Some(rc) = route_caches.as_mut() {
+                                        let g = rc[route].seen_generation();
+                                        rc[route].publish(g);
+                                    }
+                                    if let Some(rc) = route_caches.as_ref() {
+                                        views = Some(
+                                            rc.iter()
+                                                .map(|c| c.view())
+                                                .collect::<Vec<_>>()
+                                                .into(),
+                                        );
+                                    }
+                                    settle_freed!(freed);
+                                }
+                            }
                         }
                     }};
                 }
@@ -1325,6 +1394,7 @@ where
                             }
                         }
                     }
+                    run_ladder!();
                 }
             });
             if admitted {
@@ -2060,6 +2130,11 @@ struct PendingArena {
     alias_claims: Vec<(u32, u32, u32)>,
     seen_aliases: usize,
 }
+
+/// Real fires engine-wide a demanding route may see without progress before the
+/// ladder closes or releases it; healthy routes commit between fires and never
+/// reach it.
+const STALL_FIRES: u32 = 8;
 
 /// Bounds for the adaptive busy-wait before a parking recv; parks that resolve
 /// under SPIN_WORTH grow the budget, slower ones shrink it.

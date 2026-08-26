@@ -1921,6 +1921,8 @@ fn build_telemetry<'py>(
     telemetry.set_item("cache_lookups", stats.cache_lookups)?;
     telemetry.set_item("cache_hits", stats.cache_hits)?;
     telemetry.set_item("cache_demotions", stats.cache_demotions)?;
+    telemetry.set_item("stall_closes", stats.stall_closes)?;
+    telemetry.set_item("stall_releases", stats.stall_releases)?;
     // Exact Mcts/AlphaZero tree sim-fate identity: decisions*sims = fresh + hit + shared + terminal
     // + depthcap - extra_eval_rows; the subtraction removes auxiliary perspective/fan rows.
     telemetry.set_item("terminal_sims", stats.sum_terminal_sims)?;
