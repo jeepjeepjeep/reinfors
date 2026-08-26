@@ -9,10 +9,12 @@ use crate::learner::{Learner, Step};
 use crate::policy::Policy;
 use crate::reward::Reward;
 use crate::rng::SplitMix64;
+use crate::rollout::arena::{Arena, Reserve};
 use crate::rollout::episode::Episode;
-use crate::rollout::evaluator::{Evaluator, InferMode};
+use crate::rollout::evaluator::InferMode;
 use crate::rollout::infer_cache::InferCache;
 use crate::rollout::start::{AlwaysInitialState, Start, StartDistribution};
+use crate::rollout::zc_cache::{CacheView, ZcCache};
 
 pub use crate::stats::EpisodeSummary;
 
@@ -69,9 +71,9 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     learner: L,
     episodes: Vec<Episode<G>>,
     start_dist: Box<dyn StartDistribution<G::State>>,
-    // Slot 0 is shared; slots 1..=N isolate per-player networks.
-    infer_caches: Option<Vec<InferCache>>,
     learn_mask: Vec<bool>,
+    #[allow(clippy::type_complexity)]
+    cache_config: Option<(usize, Vec<std::sync::Arc<std::sync::atomic::AtomicU64>>)>,
     // Returns cannot be derived from steps: an agent may be rewarded before ever acting.
     episode_returns: Vec<Vec<f64>>,
     sequential: bool,
@@ -84,6 +86,7 @@ pub struct Engine<G: Game + Sync, P: Policy, L: Learner<P::Evaluation>> {
     perms: crate::encoder::PermTable,
     batch_size: usize,
     sweep_cursor: usize,
+    zc_caches: Option<Vec<ZcCache>>,
     thread_pool: rayon::ThreadPool,
 }
 
@@ -148,8 +151,8 @@ where
             learner,
             episodes,
             start_dist: Box::new(AlwaysInitialState),
-            infer_caches: None,
             learn_mask: vec![true; num_agents],
+            cache_config: None,
             episode_returns: vec![vec![0.0; num_agents]; params.n_games],
             sequential,
             pad: params.pad,
@@ -163,6 +166,7 @@ where
                 .batch_size
                 .unwrap_or_else(|| (params.n_games / 2).max(1)),
             sweep_cursor: 0,
+            zc_caches: None,
             thread_pool: rayon::ThreadPoolBuilder::new()
                 // At most one task per game slot can run: workers beyond n_games idle.
                 .num_threads(
@@ -199,14 +203,21 @@ where
         self
     }
 
-    /// Install one shared cache followed by one cache per player.
-    pub fn with_infer_caches(mut self, caches: Vec<InferCache>) -> Self {
+    /// Enable the infer cache: slot 0 serves the shared callback, slots 1..=N
+    /// the per-player callbacks; each slot clears when its generation advances.
+    pub fn with_infer_cache(
+        mut self,
+        capacity: usize,
+        generations: Vec<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    ) -> Self {
+        assert!(capacity > 0, "cache capacity must be positive");
         assert_eq!(
-            caches.len(),
+            generations.len(),
             self.game.num_agents() + 1,
-            "one cache per slot: shared + one per player"
+            "one generation per slot: shared + one per player"
         );
-        self.infer_caches = Some(caches);
+        self.cache_config = Some((capacity, generations));
+        self.zc_caches = None;
         self
     }
 
@@ -230,6 +241,24 @@ where
         &mut self,
         n_records: usize,
         mode: InferMode,
+        infer: F,
+    ) -> (Vec<L::Record>, CollectStats)
+    where
+        F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
+        P: Sync,
+        P::Evaluation: Send,
+        P::PolicyState: Send,
+        L: Sync,
+        L::Record: Send,
+    {
+        self.collect_arena(n_records, mode, infer)
+    }
+
+    /// Zero-copy collection: the scheduler never touches observation bytes.
+    fn collect_arena<F>(
+        &mut self,
+        n_records: usize,
+        mode: InferMode,
         mut infer: F,
     ) -> (Vec<L::Record>, CollectStats)
     where
@@ -240,37 +269,33 @@ where
         L: Sync,
         L::Record: Send,
     {
+        let pad = self.pad;
+        assert!(
+            !pad || matches!(mode, InferMode::Shared),
+            "pad supports a single shared infer callback"
+        );
+        // Caches build lazily from the retained config: a collection that
+        // unwinds loses only the built caches, and the next call starts fresh.
+        if self.zc_caches.is_none() {
+            if let Some((capacity, generations)) = self.cache_config.as_ref() {
+                self.zc_caches = Some(
+                    generations
+                        .iter()
+                        .map(|g| ZcCache::new(*capacity, g.clone()))
+                        .collect(),
+                );
+            }
+        }
+        let mut zc_caches = self.zc_caches.take();
         let mut out: Vec<L::Record> = Vec::new();
         let mut stats = CollectStats::default();
         let collect_interior = self.learner.needs_interior();
-        // Move caches out so the long-lived evaluator does not borrow all of `self`.
-        let mut caches = self.infer_caches.take();
-        if let Some(c) = caches.as_mut() {
-            for cache in c.iter_mut() {
-                cache.begin_collect();
-            }
-        }
-        let cache_slice = caches.as_mut().map(|c| match mode {
-            InferMode::Shared => &mut c[..1],
-            InferMode::PerPlayer => &mut c[1..],
-        });
-        assert!(
-            !self.pad || matches!(mode, InferMode::Shared),
-            "pad supports a single shared infer callback"
-        );
-        let mut evaluator = Evaluator::new(&mut infer, mode, cache_slice)
-            .with_pad_to(self.pad.then_some(self.batch_size));
-
         let fragments = self.learner.bootstraps_fragments();
         if fragments {
             discard_fragments(&mut self.traj);
         }
-        // Free-running scheduler: worker tasks run search rounds AND completions
-        // (finish/select/advance/records; terminal flushes) and feed per-player queues
-        // through a channel; the callback fires on this thread the moment a queue holds
-        // `batch_size` rows, overlapping inference with rounds and completions. The
-        // scheduler thread keeps only evaluator work (fires, truncation tails), floor
-        // accounting, and admission.
+        let (c, h, w) = self.encoder.obs_shape();
+        let obs_dim = c * h * w;
         {
             let n_games = self.episodes.len();
             let batch_size = self.batch_size;
@@ -306,46 +331,59 @@ where
                 dist: &mut *self.start_dist,
                 rng: &mut self.buffer_rng,
             };
-            let (tx, rx) = std::sync::mpsc::channel::<Msg<P::Search<G::State>, L::Record>>();
+            let (tx, rx) =
+                std::sync::mpsc::channel::<AMsg<P::Search<G::State>, L::Record, G::State>>();
+            let n_routes = match mode {
+                InferMode::Shared => 1,
+                InferMode::PerPlayer => self.game.num_agents(),
+            };
+            // batch_size is the fire threshold; oversized thresholds (drain-only
+            // collection) clamp to a finite arena — splitting covers the rest.
+            // The clamp is BYTE-bounded (matching the python-side limit), not
+            // row-bounded: large observations must not multiply it.
+            let arena_rows = batch_size
+                .min(1 << 20)
+                .min(((1usize << 29) / (obs_dim.max(1) * 4)).max(1));
+            assert!(
+                !pad || batch_size <= arena_rows,
+                "pad requires batch_size ({batch_size}) within the arena byte bound \
+                 ({arena_rows} rows at this observation size)"
+            );
+            let routes: Vec<RouteShared> = (0..n_routes)
+                .map(|_| RouteShared::new(arena_rows, obs_dim))
+                .collect();
+            let routes = &routes;
+            // route -> cache slot: shared uses slot 0, per-player slots 1..=N
+            let mut route_caches: Option<Vec<&mut ZcCache>> =
+                zc_caches.as_mut().map(|c| match mode {
+                    InferMode::Shared => c[..1].iter_mut().collect(),
+                    InferMode::PerPlayer => c[1..].iter_mut().collect(),
+                });
+            if let Some(rc) = route_caches.as_mut() {
+                for cache in rc.iter_mut() {
+                    cache.sync_generation();
+                }
+            }
+            let mut views: Pins = route_caches
+                .as_ref()
+                .map(|rc| rc.iter().map(|c| c.view()).collect::<Vec<_>>().into());
 
-            let task = |gi: usize,
-                        work: Work<P::Search<G::State>>,
-                        tx: MsgSender<P::Search<G::State>, L::Record>| {
-                let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let mut guard = slots[gi].lock().expect("slot lock");
-                    let slot: &mut SlotCtx<'_, G, P> = &mut guard;
-                    let (mut search, perspectives, mut roots) = match work {
-                        Work::Begin => {
-                            let perspectives: Vec<usize> = (0..game.num_agents())
-                                .filter(|&si| slot.ep.agent_active(game, si))
-                                .collect();
-                            if perspectives.is_empty() {
-                                return TaskOut::Skip;
-                            }
-                            let ctx = crate::policy::SearchCtx {
-                                game,
-                                enc: encoder,
-                                reward,
-                                rng: &mut slot.ep.rng,
-                                perms,
-                                collect_interior,
-                            };
-                            let roots = vec![RootMark::Vacant; perspectives.len()];
-                            (
-                                policy.begin_search(ctx, &slot.ep.state, &perspectives),
-                                perspectives,
-                                roots,
-                            )
-                        }
-                        Work::Resume {
-                            mut search,
-                            perspectives,
-                            roots,
-                            rows,
-                            stride,
-                        } => {
-                            if !rows.is_empty() {
-                                let view = crate::policy::RowsView::from_slice(&rows, stride);
+            let task =
+                |gi: usize,
+                 work: AWork<P::Search<G::State>>,
+                 pins: Pins,
+                 tx: AMsgSender<P::Search<G::State>, L::Record, G::State>| {
+                    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let mut guard = slots[gi].lock().expect("slot lock");
+                        let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                        let (mut search, perspectives, mut roots) = match work {
+                            AWork::Begin => {
+                                let perspectives: Vec<usize> = (0..game.num_agents())
+                                    .filter(|&si| slot.ep.agent_active(game, si))
+                                    .collect();
+                                if perspectives.is_empty() {
+                                    return ATaskOut::Skip;
+                                }
                                 let ctx = crate::policy::SearchCtx {
                                     game,
                                     enc: encoder,
@@ -354,136 +392,184 @@ where
                                     perms,
                                     collect_interior,
                                 };
-                                policy.absorb(ctx, &mut search, view);
+                                let roots = vec![RootMark::Vacant; perspectives.len()];
+                                (
+                                    policy.begin_search(ctx, &slot.ep.state, &perspectives),
+                                    perspectives,
+                                    roots,
+                                )
                             }
-                            (search, perspectives, roots)
-                        }
-                    };
-                    let ctx = crate::policy::SearchCtx {
-                        game,
-                        enc: encoder,
-                        reward,
-                        rng: &mut slot.ep.rng,
-                        perms,
-                        collect_interior,
-                    };
-                    let mut sink = crate::policy::RequestSink::capturing_roots();
-                    let status = policy.round(ctx, &mut search, &mut sink);
-                    assert!(
-                        (!sink.is_empty()) == (status == crate::policy::RoundStatus::Pending),
-                        "round contract: Pending emits at least one request, Done emits none"
-                    );
-                    if !sink.is_empty() {
-                        let n = sink.len();
-                        let (players, obs, marked) = sink.into_parts_with_roots();
-                        for (persp, row) in marked {
-                            let i = perspectives
-                                .iter()
-                                .position(|&si| si == persp)
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "push_root marked perspective {persp}, which is not \
+                            AWork::Resume {
+                                mut search,
+                                perspectives,
+                                roots,
+                                rows,
+                                stride,
+                            } => {
+                                if !rows.is_empty() {
+                                    let view = crate::policy::RowsView::from_slice(&rows, stride);
+                                    let ctx = crate::policy::SearchCtx {
+                                        game,
+                                        enc: encoder,
+                                        reward,
+                                        rng: &mut slot.ep.rng,
+                                        perms,
+                                        collect_interior,
+                                    };
+                                    policy.absorb(ctx, &mut search, view);
+                                }
+                                (search, perspectives, roots)
+                            }
+                            AWork::Tail { fragment } => {
+                                let meta =
+                                    tail_perspectives(game, policy, learner, sequential, slot);
+                                let n = meta.len();
+                                let mut tail_sink =
+                                    ArenaSink::new(routes, pins.clone(), mode, obs_dim);
+                                let mut scratch = Vec::new();
+                                for (pos, &si) in meta.iter().enumerate() {
+                                    crate::policy::StateSink::push_state(
+                                        &mut tail_sink,
+                                        encoder,
+                                        si,
+                                        &slot.ep.state,
+                                        pos as u32,
+                                        &mut scratch,
+                                    );
+                                }
+                                return ATaskOut::TailEmitted {
+                                    fragment,
+                                    meta,
+                                    n,
+                                    spans: tail_sink.spans,
+                                    hits: tail_sink.hits,
+                                    aliases: tail_sink.aliases,
+                                    lookups: tail_sink.lookups,
+                                };
+                            }
+                        };
+                        let ctx = crate::policy::SearchCtx {
+                            game,
+                            enc: encoder,
+                            reward,
+                            rng: &mut slot.ep.rng,
+                            perms,
+                            collect_interior,
+                        };
+                        let mut arena_sink = ArenaSink::new(routes, pins.clone(), mode, obs_dim);
+                        let mut sink = crate::policy::RequestSink::with_backend(&mut arena_sink);
+                        let status = policy.round(ctx, &mut search, &mut sink);
+                        assert!(
+                            (!sink.is_empty()) == (status == crate::policy::RoundStatus::Pending),
+                            "round contract: Pending emits at least one request, Done emits none"
+                        );
+                        if !sink.is_empty() {
+                            let n = sink.len();
+                            for (persp, row) in sink.into_roots() {
+                                let i = perspectives
+                                    .iter()
+                                    .position(|&si| si == persp)
+                                    .unwrap_or_else(|| {
+                                        panic!(
+                                            "push_root marked perspective {persp}, which is not \
                                          among this search's requested perspectives"
-                                    )
-                                });
-                            assert!(
-                                matches!(roots[i], RootMark::Vacant),
-                                "push_root marked perspective {persp} twice in one search"
-                            );
-                            roots[i] = if learn_mask[persp] {
-                                RootMark::Row(row)
-                            } else {
-                                RootMark::Dropped
+                                        )
+                                    });
+                                assert!(
+                                    matches!(roots[i], RootMark::Vacant),
+                                    "push_root marked perspective {persp} twice in one search"
+                                );
+                                roots[i] = if learn_mask[persp] {
+                                    RootMark::Row(row)
+                                } else {
+                                    RootMark::Dropped
+                                };
+                            }
+                            return ATaskOut::Emitted {
+                                search,
+                                perspectives,
+                                roots,
+                                n,
+                                spans: arena_sink.spans,
+                                hits: arena_sink.hits,
+                                aliases: arena_sink.aliases,
+                                lookups: arena_sink.lookups,
                             };
                         }
-                        return TaskOut::Emitted {
-                            search,
-                            perspectives,
-                            roots,
-                            players,
-                            obs,
-                            n,
-                        };
-                    }
-                    // The search is done: run the whole completion here — finish, select,
-                    // advance, record assembly, and (terminal episodes) the flush.
-                    let ctx = crate::policy::SearchCtx {
-                        game,
-                        enc: encoder,
-                        reward,
-                        rng: &mut slot.ep.rng,
-                        perms,
-                        collect_interior,
-                    };
-                    let results = policy.finish(ctx, search);
-                    assert_eq!(
-                        results.len(),
-                        perspectives.len(),
-                        "finish must return one evaluation per perspective"
-                    );
-                    // The completion computes effects only: records, stats, and the
-                    // buffered-step delta ride the message; every shared-state effect
-                    // (reservoir draws, respawns, floor) is applied by the scheduler in
-                    // message order — the determinism contract at one worker.
-                    let before = buffered_learn_steps(slot, learn_mask);
-                    let mut records: Vec<L::Record> = Vec::new();
-                    let mut tstats = CollectStats::default();
-                    let finished = process_game_tick(
-                        game,
-                        encoder,
-                        reward,
-                        policy,
-                        learner,
-                        learn_mask,
-                        sequential,
-                        results,
-                        &perspectives,
-                        roots,
-                        slot,
-                        &mut records,
-                        &mut tstats,
-                    );
-                    if finished == Some(true) {
-                        flush_records_game(
-                            &HashMap::new(),
+                        let ctx = crate::policy::SearchCtx {
                             game,
-                            learner,
+                            enc: encoder,
+                            reward,
+                            rng: &mut slot.ep.rng,
+                            perms,
+                            collect_interior,
+                        };
+                        let results = policy.finish(ctx, search);
+                        assert_eq!(
+                            results.len(),
+                            perspectives.len(),
+                            "finish must return one evaluation per perspective"
+                        );
+                        let before = buffered_learn_steps(slot, learn_mask);
+                        let mut records: Vec<L::Record> = Vec::new();
+                        let mut tstats = CollectStats::default();
+                        let finished = process_game_tick(
+                            game,
                             encoder,
+                            reward,
+                            policy,
+                            learner,
+                            learn_mask,
+                            sequential,
+                            results,
+                            &perspectives,
+                            roots,
                             slot,
                             &mut records,
                             &mut tstats,
                         );
-                    }
-                    let steps_delta =
-                        buffered_learn_steps(slot, learn_mask) as isize - before as isize;
-                    TaskOut::Completed {
-                        records,
-                        stats: tstats,
-                        steps_delta,
-                        finished,
-                    }
-                }));
-                let out = match run {
-                    Ok(out) => out,
-                    Err(payload) => TaskOut::Panicked(payload),
+                        if finished == Some(true) {
+                            flush_records_game(
+                                &HashMap::new(),
+                                game,
+                                learner,
+                                encoder,
+                                slot,
+                                &mut records,
+                                &mut tstats,
+                            );
+                        }
+                        let steps_delta =
+                            buffered_learn_steps(slot, learn_mask) as isize - before as isize;
+                        ATaskOut::Completed {
+                            records,
+                            stats: tstats,
+                            steps_delta,
+                            finished,
+                        }
+                    }));
+                    let out = match run {
+                        Ok(out) => out,
+                        Err(payload) => ATaskOut::Panicked(payload),
+                    };
+                    let _ = tx.send(AMsg { gi, out });
                 };
-                let _ = tx.send(Msg { gi, out });
-            };
             let task = &task;
 
-            let n_queues = match mode {
-                InferMode::Shared => 1,
-                InferMode::PerPlayer => self.game.num_agents(),
-            };
             let mut phases: Vec<SlotPhase<P::Search<G::State>>> =
                 (0..n_games).map(|_| SlotPhase::Idle).collect();
-            let mut queues: Vec<RequestQueue> =
-                (0..n_queues).map(|_| RequestQueue::default()).collect();
+            let mut pending: Vec<std::collections::HashMap<u64, PendingArena>> = (0..n_routes)
+                .map(|_| std::collections::HashMap::new())
+                .collect();
+            let mut gated: Vec<Vec<(usize, AHit<G::State>)>> =
+                (0..n_routes).map(|_| Vec::new()).collect();
+            let mut committed_seen: Vec<u64> = vec![0; n_routes];
+            let mut stall_seen: Vec<u64> = vec![0; n_routes];
+            let mut stall_fires: Vec<u32> = vec![0; n_routes];
+            let mut fires_completed = 0u64;
+            let mut fires_processed = 0u64;
             let mut in_flight = 0usize;
             let mut spin_budget = SPIN_RECVS_MIN;
-            // The floor counts buffered learning steps through a scheduler-owned
-            // counter fed by message deltas: recounting live trajectories would race
-            // in-flight completions.
             let mut backlog: isize = slots
                 .iter()
                 .map(|m| buffered_learn_steps(&m.lock().expect("slot lock"), learn_mask) as isize)
@@ -496,88 +582,67 @@ where
             let admitted = !cutting;
             let mut frag_stage = false;
 
-            // FIFO spawning on the persistent pool: at one worker, tasks execute in
-            // spawn order — the determinism contract's substrate (per-collect thread
-            // creation measurably taxed small collects).
             self.thread_pool.in_place_scope_fifo(|s| {
                 let spawn = |gi: usize,
-                             work_item: Work<P::Search<G::State>>,
+                             work_item: AWork<P::Search<G::State>>,
+                             pins: Pins,
                              phases: &mut Vec<SlotPhase<P::Search<G::State>>>,
                              in_flight: &mut usize| {
                     phases[gi] = SlotPhase::Running;
                     *in_flight += 1;
                     let txc = tx.clone();
-                    s.spawn_fifo(move |_| task(gi, work_item, txc));
+                    s.spawn_fifo(move |_| task(gi, work_item, pins, txc));
                 };
-                // Fire `take` rows from one queue and hand freed slots back to the pool.
-                macro_rules! fire_settled {
-                    ($qi:expr, $take:expr) => {{
-                        let fired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            fire_batch(&mut queues[$qi], $take, &mut phases, &mut evaluator, |ph| {
-                                match ph {
-                                    SlotPhase::Blocked {
-                                        outstanding,
-                                        rows,
-                                        stride,
-                                        total,
-                                        ..
+                // The unwound task's slot: lock may be poisoned, decision half-made.
+                macro_rules! reset_panicked_slot {
+                    ($gi:expr) => {{
+                        let mut guard = match slots[$gi].lock() {
+                            Ok(g) => g,
+                            Err(poisoned) => poisoned.into_inner(),
+                        };
+                        let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                        for steps in slot.traj.iter_mut() {
+                            steps.clear();
+                        }
+                        slot.returns.iter_mut().for_each(|r| *r = 0.0);
+                        respawn_game(game, policy, slot, &mut start);
+                    }};
+                }
+                // Drain in-flight completions before surfacing: a finished episode
+                // must respawn, never strand over-horizon.
+                macro_rules! drain_after_callback_panic {
+                    ($payload:expr) => {{
+                        while in_flight > 0 {
+                            let msg = rx.recv().expect("scheduler channel closed");
+                            in_flight -= 1;
+                            match msg.out {
+                                // further panics reset their slots; the first payload surfaces
+                                ATaskOut::Panicked(_) => reset_panicked_slot!(msg.gi),
+                                ATaskOut::Completed {
+                                    finished: Some(terminal),
+                                    ..
+                                } => {
+                                    let mut guard = slots[msg.gi].lock().expect("slot lock");
+                                    let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                                    if !terminal {
+                                        flush_records_game(
+                                            &HashMap::new(),
+                                            game,
+                                            learner,
+                                            encoder,
+                                            slot,
+                                            &mut out,
+                                            &mut stats,
+                                        );
                                     }
-                                    | SlotPhase::AwaitingTail {
-                                        outstanding,
-                                        rows,
-                                        stride,
-                                        total,
-                                        ..
-                                    } => (outstanding, rows, stride, *total),
-                                    _ => unreachable!(
-                                        "row routed to a slot with no outstanding round"
-                                    ),
+                                    respawn_game(game, policy, slot, &mut start);
                                 }
-                            })
-                        }));
-                        let freed = match fired {
-                            Ok(freed) => freed,
-                            Err(payload) => {
-                                // Drain in-flight completions before surfacing: an episode
-                                // that just finished must respawn, never strand over-horizon.
-                                while in_flight > 0 {
-                                    let msg = rx.recv().expect("scheduler channel closed");
-                                    in_flight -= 1;
-                                    if let TaskOut::Completed {
-                                        finished: Some(terminal),
-                                        ..
-                                    } = msg.out
-                                    {
-                                        let mut guard = slots[msg.gi].lock().expect("slot lock");
-                                        let slot: &mut SlotCtx<'_, G, P> = &mut guard;
-                                        if !terminal {
-                                            flush_records_game(
-                                                &HashMap::new(),
-                                                game,
-                                                learner,
-                                                encoder,
-                                                slot,
-                                                &mut out,
-                                                &mut stats,
-                                            );
-                                        }
-                                        respawn_game(game, policy, slot, &mut start);
-                                    }
-                                }
-                                // Parked tails resolve empty too: AwaitingTail never
-                                // survives a collect.
-                                for gi in 0..n_games {
-                                    if !matches!(
-                                        phases[gi],
-                                        SlotPhase::AwaitingTail {
-                                            fragment: false,
-                                            ..
-                                        }
-                                    ) {
-                                        continue;
-                                    }
-                                    phases[gi] = SlotPhase::Idle;
-                                    let mut guard = slots[gi].lock().expect("slot lock");
+                                // A truncation tail caught mid-task resolves empty here,
+                                // exactly like a parked one below.
+                                ATaskOut::TailEmitted {
+                                    fragment: false, ..
+                                } => {
+                                    let mut guard = slots[msg.gi].lock().expect("slot lock");
                                     let slot: &mut SlotCtx<'_, G, P> = &mut guard;
                                     flush_records_game(
                                         &HashMap::new(),
@@ -590,10 +655,147 @@ where
                                     );
                                     respawn_game(game, policy, slot, &mut start);
                                 }
-                                std::panic::resume_unwind(payload);
+                                _ => {}
                             }
+                        }
+                        for gi in 0..n_games {
+                            if !matches!(
+                                phases[gi],
+                                SlotPhase::AwaitingTail {
+                                    fragment: false,
+                                    ..
+                                }
+                            ) {
+                                continue;
+                            }
+                            phases[gi] = SlotPhase::Idle;
+                            let mut guard = slots[gi].lock().expect("slot lock");
+                            let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                            flush_records_game(
+                                &HashMap::new(),
+                                game,
+                                learner,
+                                encoder,
+                                slot,
+                                &mut out,
+                                &mut stats,
+                            );
+                            respawn_game(game, policy, slot, &mut start);
+                        }
+                        std::panic::resume_unwind($payload);
+                    }};
+                }
+                macro_rules! deliver_hit {
+                    ($gi:expr, $hit:expr, $freed:expr) => {{
+                        let stride = $hit.value.len();
+                        let (outstanding, buf, st, total) = match &mut phases[$gi] {
+                            SlotPhase::Blocked {
+                                outstanding,
+                                rows: buf,
+                                stride: st,
+                                total,
+                                ..
+                            }
+                            | SlotPhase::AwaitingTail {
+                                outstanding,
+                                rows: buf,
+                                stride: st,
+                                total,
+                                ..
+                            } => (outstanding, buf, st, *total),
+                            _ => unreachable!("hit released to a slot with no outstanding round"),
                         };
-                        for gi in freed {
+                        if buf.is_empty() {
+                            buf.resize(total * stride, 0.0);
+                            *st = stride;
+                        } else {
+                            assert_eq!(*st, stride, "cached row width differs from fired rows");
+                        }
+                        let pos = $hit.pos as usize;
+                        for (dst, src) in buf[pos * stride..(pos + 1) * stride]
+                            .iter_mut()
+                            .zip($hit.value.iter())
+                        {
+                            *dst = f64::from(*src);
+                        }
+                        *outstanding -= 1;
+                        if *outstanding == 0 {
+                            $freed.push($gi);
+                        }
+                    }};
+                }
+                // Validate each gated ticket's pinned generation at release: current
+                // delivers; stale demotes through the ordinary reservation path.
+                macro_rules! release_gated {
+                    ($route:expr, $freed:expr) => {{
+                        if let Some(rc) = route_caches.as_mut() {
+                            let cache = &mut rc[$route];
+                            cache.sync_generation();
+                            let seen = cache.seen_generation();
+                            let mut demote: std::collections::BTreeMap<
+                                usize,
+                                Vec<(usize, u32, u128, Retained<G::State>)>,
+                            > = std::collections::BTreeMap::new();
+                            for (gi, hit) in gated[$route].drain(..) {
+                                if hit.gen == seen {
+                                    // a hit is a hit only once it actually delivers
+                                    stats.cache_hits += 1;
+                                    cache.stage_promote(hit.key);
+                                    deliver_hit!(gi, hit, $freed);
+                                } else {
+                                    stats.cache_demotions += 1;
+                                    demote
+                                        .entry(gi)
+                                        .or_default()
+                                        .push((hit.route, hit.pos, hit.key, hit.retained));
+                                }
+                            }
+                            for (gi, items) in demote {
+                                in_flight += 1;
+                                let txc = tx.clone();
+                                s.spawn_fifo(move |_| {
+                                    let mut spans = Vec::new();
+                                    let mut aliases = Vec::new();
+                                    for (route, pos, key, retained) in &items {
+                                        match retained {
+                                            Retained::Row(row) => emit_arena_row(
+                                                *route,
+                                                &routes[*route],
+                                                &mut None,
+                                                &mut None,
+                                                *pos,
+                                                *key,
+                                                &mut |dst| dst.copy_from_slice(row),
+                                                &mut spans,
+                                                &mut aliases,
+                                            ),
+                                            Retained::State(state, agent) => emit_arena_row(
+                                                *route,
+                                                &routes[*route],
+                                                &mut None,
+                                                &mut None,
+                                                *pos,
+                                                *key,
+                                                &mut |dst| {
+                                                    encoder.encode_into(state, *agent, dst)
+                                                },
+                                                &mut spans,
+                                                &mut aliases,
+                                            ),
+                                        }
+                                    }
+                                    let _ = txc.send(AMsg {
+                                        gi,
+                                        out: ATaskOut::DemoteEmitted { spans, aliases },
+                                    });
+                                });
+                            }
+                        }
+                    }};
+                }
+                macro_rules! settle_freed {
+                    ($freed:expr) => {{
+                        for gi in $freed {
                             match std::mem::replace(&mut phases[gi], SlotPhase::Idle) {
                                 SlotPhase::Blocked {
                                     search,
@@ -604,13 +806,14 @@ where
                                     ..
                                 } => spawn(
                                     gi,
-                                    Work::Resume {
+                                    AWork::Resume {
                                         search,
                                         perspectives,
                                         roots,
                                         rows,
                                         stride,
                                     },
+                                    views.clone(),
                                     &mut phases,
                                     &mut in_flight,
                                 ),
@@ -649,7 +852,13 @@ where
                                         cutting = true;
                                     }
                                     if !cutting && matches!(phases[gi], SlotPhase::Idle) {
-                                        spawn(gi, Work::Begin, &mut phases, &mut in_flight);
+                                        spawn(
+                                            gi,
+                                            AWork::Begin,
+                                            views.clone(),
+                                            &mut phases,
+                                            &mut in_flight,
+                                        );
                                     }
                                 }
                                 _ => unreachable!("a freed slot must hold outstanding rows"),
@@ -657,112 +866,343 @@ where
                         }
                     }};
                 }
-                // Queue one game's tail-bootstrap rows and park it in AwaitingTail.
-                macro_rules! enqueue_tails {
-                    ($gi:expr, $reqs:expr, $fragment:expr) => {{
-                        let reqs = $reqs;
-                        let mut meta = Vec::with_capacity(reqs.len());
-                        match mode {
-                            InferMode::Shared => {
-                                let mut players = Vec::with_capacity(reqs.len());
-                                let mut obs_flat: Vec<f32> = Vec::new();
-                                for (si, obs) in reqs {
-                                    players.push(si);
-                                    obs_flat.extend(obs);
-                                    meta.push(si);
-                                }
-                                let n = meta.len();
-                                queues[0].push(players, obs_flat, $gi, n);
+                macro_rules! try_fire {
+                    ($route:expr, $id:expr) => {{
+                        let ready = pending[$route].get(&$id).is_some_and(|pa| {
+                            pa.arc.arena.close_info().is_some_and(|info| {
+                                // abandoned tickets (panic before their claim message)
+                                // count toward reconciliation, never awaited
+                                info.rows == pa.seen
+                                    && info.aliases as usize
+                                        == pa.seen_aliases
+                                            + pa.arc.arena.aliases_abandoned() as usize
+                            })
+                        });
+                        if ready {
+                            let pa = pending[$route].remove(&$id).expect("readiness checked");
+                            let take = pa.arc.arena.close_info().expect("closed").rows;
+                            let obs = pa
+                                .arc
+                                .arena
+                                .take_rows()
+                                .expect("every span accounted and committed");
+                            let gen_at_fire = route_caches.as_mut().map(|rc| {
+                                rc[$route].sync_generation();
+                                rc[$route].seen_generation()
+                            });
+                            // pad: fixed call shapes, zero rows appended into the
+                            // arena's capacity slack; outputs beyond `take` discarded
+                            let call_rows = if pad { batch_size } else { take };
+                            let mut obs = obs;
+                            if call_rows > take {
+                                let len = call_rows
+                                    .checked_mul(obs_dim)
+                                    .expect("padded batch size overflows");
+                                obs.resize(len, 0.0);
+                                stats.padded_rows += call_rows - take;
                             }
-                            InferMode::PerPlayer => {
-                                for (pos, (si, obs)) in reqs.into_iter().enumerate() {
-                                    queues[si].push_row(si, &obs, $gi, pos);
-                                    meta.push(si);
+                            let t0 = std::time::Instant::now();
+                            let call = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                || infer($route, obs, call_rows),
+                            ));
+                            let rows = match call {
+                                Ok(rows) => rows,
+                                Err(payload) => drain_after_callback_panic!(payload),
+                            };
+                            stats.infer_seconds += t0.elapsed().as_secs_f64();
+                            stats.infer_calls += 1;
+                            stats.infer_rows += take;
+                            if take > 0 {
+                                fires_completed += 1;
+                            }
+                            assert!(
+                                rows.len().is_multiple_of(call_rows.max(1)),
+                                "infer returned {} values for {} rows (not divisible)",
+                                rows.len(),
+                                call_rows
+                            );
+                            let stride = rows.len() / call_rows.max(1);
+                            let mut freed = Vec::new();
+                            for i in 0..take {
+                                let (g, pos) = pa.dest[i];
+                                let (gi, pos) = (g as usize, pos as usize);
+                                let (outstanding, buf, st, total) = match &mut phases[gi] {
+                                    SlotPhase::Blocked {
+                                        outstanding,
+                                        rows: buf,
+                                        stride: st,
+                                        total,
+                                        ..
+                                    }
+                                    | SlotPhase::AwaitingTail {
+                                        outstanding,
+                                        rows: buf,
+                                        stride: st,
+                                        total,
+                                        ..
+                                    } => (outstanding, buf, st, *total),
+                                    _ => unreachable!(
+                                        "row routed to a slot with no outstanding round"
+                                    ),
+                                };
+                                if buf.is_empty() {
+                                    buf.resize(total * stride, 0.0);
+                                    *st = stride;
+                                } else {
+                                    assert_eq!(
+                                        *st, stride,
+                                        "infer returned a different row width for one round's requests"
+                                    );
+                                }
+                                buf[pos * stride..(pos + 1) * stride]
+                                    .copy_from_slice(&rows[i * stride..(i + 1) * stride]);
+                                *outstanding -= 1;
+                                if *outstanding == 0 {
+                                    freed.push(gi);
+                                }
+                            }
+                            // alias claims: the target row's prediction resolves them too
+                            for &(target, g, pos) in &pa.alias_claims {
+                                let (gi, pos, target) =
+                                    (g as usize, pos as usize, target as usize);
+                                let (outstanding, buf, st, total) = match &mut phases[gi] {
+                                    SlotPhase::Blocked {
+                                        outstanding,
+                                        rows: buf,
+                                        stride: st,
+                                        total,
+                                        ..
+                                    }
+                                    | SlotPhase::AwaitingTail {
+                                        outstanding,
+                                        rows: buf,
+                                        stride: st,
+                                        total,
+                                        ..
+                                    } => (outstanding, buf, st, *total),
+                                    _ => unreachable!(
+                                        "alias routed to a slot with no outstanding round"
+                                    ),
+                                };
+                                if buf.is_empty() {
+                                    buf.resize(total * stride, 0.0);
+                                    *st = stride;
+                                } else {
+                                    assert_eq!(
+                                        *st, stride,
+                                        "infer returned a different row width for one round's requests"
+                                    );
+                                }
+                                buf[pos * stride..(pos + 1) * stride]
+                                    .copy_from_slice(&rows[target * stride..(target + 1) * stride]);
+                                *outstanding -= 1;
+                                if *outstanding == 0 {
+                                    freed.push(gi);
+                                }
+                            }
+                            if let Some(rc) = route_caches.as_mut() {
+                                let cache = &mut rc[$route];
+                                for i in 0..take {
+                                    cache.stage_insert(pa.keys[i], &rows[i * stride..(i + 1) * stride]);
+                                }
+                            }
+                            release_gated!($route, freed);
+                            if let (Some(rc), Some(g)) = (route_caches.as_mut(), gen_at_fire) {
+                                rc[$route].publish(g);
+                                views = Some(rc.iter().map(|c| c.view()).collect::<Vec<_>>().into());
+                            }
+                            settle_freed!(freed);
+                        }
+                    }};
+                }
+                macro_rules! pending_entry {
+                    ($route:expr, $arena:expr) => {{
+                        pending[$route]
+                            .entry($arena.id)
+                            .or_insert_with(|| PendingArena {
+                                arc: $arena.clone(),
+                                dest: Vec::new(),
+                                keys: Vec::new(),
+                                seen: 0,
+                                alias_claims: Vec::new(),
+                                seen_aliases: 0,
+                            })
+                    }};
+                }
+                macro_rules! account_spans {
+                    ($gi:expr, $spans:expr, $aliases:expr) => {{
+                        let mut touched: Vec<(usize, u64)> = Vec::new();
+                        for alias in $aliases {
+                            let pa = pending_entry!(alias.route, alias.arena);
+                            pa.alias_claims
+                                .push((alias.target_row, $gi as u32, alias.pos));
+                            pa.seen_aliases += 1;
+                            touched.push((alias.route, alias.arena.id));
+                        }
+                        for span in $spans {
+                            let pa = pending_entry!(span.route, span.arena);
+                            // metadata grows only to the highest observed row
+                            let need = span.first_row + span.rows.len();
+                            if pa.dest.len() < need {
+                                pa.dest.resize(need, (u32::MAX, u32::MAX));
+                                pa.keys.resize(need, 0);
+                            }
+                            for (j, &(pos, key)) in span.rows.iter().enumerate() {
+                                pa.dest[span.first_row + j] = ($gi as u32, pos);
+                                pa.keys[span.first_row + j] = key;
+                            }
+                            pa.seen += span.rows.len();
+                            committed_seen[span.route] += span.rows.len() as u64;
+                            touched.push((span.route, span.arena.id));
+                        }
+                        touched.dedup();
+                        for (route, id) in touched {
+                            try_fire!(route, id);
+                        }
+                    }};
+                }
+                // Liveness ladder: progress is scheduler-processed commits only
+                // (never the live arena cursor). A route with unresolved demand
+                // and no new commits across STALL_FIRES real fires engine-wide is
+                // closed and fired as a partial; an empty hit-only route releases
+                // its gated tickets without advancing the fire clock.
+                macro_rules! run_ladder {
+                    () => {{
+                        while fires_processed < fires_completed {
+                            fires_processed += 1;
+                            #[allow(clippy::needless_range_loop)]
+                            for route in 0..n_routes {
+                                if committed_seen[route] > stall_seen[route] {
+                                    stall_seen[route] = committed_seen[route];
+                                    stall_fires[route] = 0;
+                                    continue;
+                                }
+                                if pending[route].is_empty() && gated[route].is_empty() {
+                                    stall_fires[route] = 0;
+                                    continue;
+                                }
+                                stall_fires[route] += 1;
+                                if stall_fires[route] < STALL_FIRES {
+                                    continue;
+                                }
+                                stall_fires[route] = 0;
+                                if !pending[route].is_empty() {
+                                    let mut ids: Vec<u64> =
+                                        pending[route].keys().copied().collect();
+                                    ids.sort_unstable();
+                                    let mut closed_any = false;
+                                    for id in ids {
+                                        if let Some(pa) = pending[route].get(&id) {
+                                            if pa.arc.arena.close_info().is_none()
+                                                && pa.arc.arena.close().is_some()
+                                            {
+                                                closed_any = true;
+                                            }
+                                        }
+                                        try_fire!(route, id);
+                                    }
+                                    // an already-closed arena awaiting delayed span
+                                    // accounting is not a new stall event
+                                    if closed_any {
+                                        stats.stall_closes += 1;
+                                    }
+                                } else {
+                                    stats.stall_releases += 1;
+                                    let mut freed = Vec::new();
+                                    release_gated!(route, freed);
+                                    if let Some(rc) = route_caches.as_mut() {
+                                        let g = rc[route].seen_generation();
+                                        rc[route].publish(g);
+                                    }
+                                    if let Some(rc) = route_caches.as_ref() {
+                                        views = Some(
+                                            rc.iter()
+                                                .map(|c| c.view())
+                                                .collect::<Vec<_>>()
+                                                .into(),
+                                        );
+                                    }
+                                    settle_freed!(freed);
                                 }
                             }
                         }
-                        let n = meta.len();
-                        // Tail bootstraps are queued requests like any other; tail_rows
-                        // lets consumers separate them from decision evaluations.
-                        stats.sum_requested_rows += n;
-                        stats.sum_tail_rows += n;
-                        phases[$gi] = SlotPhase::AwaitingTail {
-                            fragment: $fragment,
-                            meta,
-                            outstanding: n,
-                            total: n,
-                            rows: Vec::new(),
-                            stride: 0,
-                        };
                     }};
                 }
                 if !cutting {
                     for k in 0..n_games {
                         let gi = (base_cursor + k) % n_games;
-                        spawn(gi, Work::Begin, &mut phases, &mut in_flight);
+                        spawn(gi, AWork::Begin, views.clone(), &mut phases, &mut in_flight);
                     }
                 }
                 loop {
-                    // Each queue fires independently at the full batch_size.
-                    while let Some(qi) =
-                        (0..n_queues).find(|&qi| queues[qi].pending() >= batch_size)
-                    {
-                        fire_settled!(qi, batch_size);
-                    }
-
                     if in_flight == 0 {
-                        if queues.iter().any(|q| q.pending() > 0) {
+                        if pending.iter().any(|m| !m.is_empty()) {
                             // Drain: no round can progress without these rows.
                             #[allow(clippy::needless_range_loop)]
-                            for qi in 0..n_queues {
-                                let n = queues[qi].pending();
-                                if n > 0 {
-                                    fire_settled!(qi, n);
+                            for route in 0..n_routes {
+                                let mut ids: Vec<u64> = pending[route].keys().copied().collect();
+                                ids.sort_unstable();
+                                for id in ids {
+                                    if let Some(pa) = pending[route].get(&id) {
+                                        if pa.arc.arena.close_info().is_none() {
+                                            pa.arc.arena.close();
+                                        }
+                                    }
+                                    try_fire!(route, id);
                                 }
                             }
                             continue;
                         }
-                        // Cut step 5: bootstrap live fragments through the same queue.
+                        // Quiescence release: with nothing in flight there is no
+                        // cadence left to gate against.
+                        if gated.iter().any(|g| !g.is_empty()) {
+                            let mut freed = Vec::new();
+                            #[allow(clippy::needless_range_loop)]
+                            for route in 0..n_routes {
+                                release_gated!(route, freed);
+                                if let Some(rc) = route_caches.as_mut() {
+                                    let g = rc[route].seen_generation();
+                                    rc[route].publish(g);
+                                }
+                            }
+                            if let Some(rc) = route_caches.as_ref() {
+                                views =
+                                    Some(rc.iter().map(|c| c.view()).collect::<Vec<_>>().into());
+                            }
+                            settle_freed!(freed);
+                            continue;
+                        }
+                        // Cut step 5: bootstrap live fragments through tail tasks.
                         if fragments && !frag_stage {
                             frag_stage = true;
-                            let mut queued_any = false;
+                            let mut spawned_any = false;
+                            #[allow(clippy::needless_range_loop)]
                             for gi in 0..n_games {
-                                let mut guard = slots[gi].lock().expect("slot lock");
-                                let slot: &mut SlotCtx<'_, G, P> = &mut guard;
-                                if !slot.traj.iter().any(|steps| !steps.is_empty()) {
+                                let has_steps = slots[gi]
+                                    .lock()
+                                    .expect("slot lock")
+                                    .traj
+                                    .iter()
+                                    .any(|steps| !steps.is_empty());
+                                if !has_steps {
                                     continue;
                                 }
-                                let reqs =
-                                    tail_requests(game, policy, learner, encoder, sequential, slot);
-                                if reqs.is_empty() {
-                                    backlog -= buffered_learn_steps(slot, learn_mask) as isize;
-                                    flush_fragment_slot(
-                                        &HashMap::new(),
-                                        game,
-                                        learner,
-                                        encoder,
-                                        learn_mask,
-                                        slot,
-                                        &mut out,
-                                    );
-                                    continue;
-                                }
-                                drop(guard);
-                                enqueue_tails!(gi, reqs, true);
-                                queued_any = true;
+                                spawn(
+                                    gi,
+                                    AWork::Tail { fragment: true },
+                                    views.clone(),
+                                    &mut phases,
+                                    &mut in_flight,
+                                );
+                                spawned_any = true;
                             }
-                            if queued_any {
+                            if spawned_any {
                                 continue;
                             }
                         }
                         break;
                     }
 
-                    // Spin before parking: light rounds return in microseconds, so
-                    // a spin dodges the park/unpark syscalls that dominate them. The
-                    // budget adapts on park latency — short parks double it, long
-                    // parks halve it (spin hits leave it unchanged) — so heavy rounds
-                    // decay to parking immediately and give up the core.
                     let mut msg = None;
                     for _ in 0..spin_budget {
                         match rx.try_recv() {
@@ -788,34 +1228,26 @@ where
                     };
                     in_flight -= 1;
                     match msg.out {
-                        TaskOut::Panicked(payload) => std::panic::resume_unwind(payload),
-                        TaskOut::Skip => phases[msg.gi] = SlotPhase::Parked,
-                        TaskOut::Emitted {
+                        ATaskOut::Panicked(payload) => {
+                            reset_panicked_slot!(msg.gi);
+                            drain_after_callback_panic!(payload)
+                        }
+                        ATaskOut::Skip => phases[msg.gi] = SlotPhase::Parked,
+                        ATaskOut::Emitted {
                             search,
                             perspectives,
                             roots,
-                            players,
-                            obs,
                             n,
+                            spans,
+                            hits,
+                            aliases,
+                            lookups,
                         } => {
-                            // requested_rows counts rows once, where they enter the
-                            // queue — the only inference pathway.
+                            let gi = msg.gi;
                             stats.sum_requested_rows += n;
-                            match mode {
-                                InferMode::Shared => queues[0].push(players, obs, msg.gi, n),
-                                InferMode::PerPlayer => {
-                                    let dim = obs.len() / n;
-                                    for (pos, &p) in players.iter().enumerate() {
-                                        queues[p].push_row(
-                                            p,
-                                            &obs[pos * dim..(pos + 1) * dim],
-                                            msg.gi,
-                                            pos,
-                                        );
-                                    }
-                                }
-                            }
-                            phases[msg.gi] = SlotPhase::Blocked {
+                            stats.cache_lookups += lookups;
+                            // installed before any accounting that could fire
+                            phases[gi] = SlotPhase::Blocked {
                                 search,
                                 perspectives,
                                 roots,
@@ -824,8 +1256,91 @@ where
                                 rows: Vec::new(),
                                 stride: 0,
                             };
+                            for hit in hits {
+                                gated[hit.route].push((gi, hit));
+                            }
+                            account_spans!(gi, spans, aliases);
                         }
-                        TaskOut::Completed {
+                        ATaskOut::DemoteEmitted { spans, aliases } => {
+                            let gi = msg.gi;
+                            account_spans!(gi, spans, aliases);
+                        }
+                        ATaskOut::TailEmitted {
+                            fragment,
+                            meta,
+                            n,
+                            spans,
+                            hits,
+                            aliases,
+                            lookups,
+                        } => {
+                            let gi = msg.gi;
+                            if n == 0 {
+                                phases[gi] = SlotPhase::Idle;
+                                let mut guard = slots[gi].lock().expect("slot lock");
+                                let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                                backlog -= buffered_learn_steps(slot, learn_mask) as isize;
+                                if fragment {
+                                    flush_fragment_slot(
+                                        &HashMap::new(),
+                                        game,
+                                        learner,
+                                        encoder,
+                                        learn_mask,
+                                        slot,
+                                        &mut out,
+                                    );
+                                } else {
+                                    flush_records_game(
+                                        &HashMap::new(),
+                                        game,
+                                        learner,
+                                        encoder,
+                                        slot,
+                                        &mut out,
+                                        &mut stats,
+                                    );
+                                    respawn_game(game, policy, slot, &mut start);
+                                }
+                                drop(guard);
+                                if !fragment {
+                                    let collected = if fragments {
+                                        out.len().saturating_add_signed(backlog)
+                                    } else {
+                                        out.len()
+                                    };
+                                    if collected >= n_records {
+                                        cutting = true;
+                                    }
+                                    if !cutting && matches!(phases[gi], SlotPhase::Idle) {
+                                        spawn(
+                                            gi,
+                                            AWork::Begin,
+                                            views.clone(),
+                                            &mut phases,
+                                            &mut in_flight,
+                                        );
+                                    }
+                                }
+                            } else {
+                                stats.sum_requested_rows += n;
+                                stats.sum_tail_rows += n;
+                                stats.cache_lookups += lookups;
+                                phases[gi] = SlotPhase::AwaitingTail {
+                                    fragment,
+                                    meta,
+                                    outstanding: n,
+                                    total: n,
+                                    rows: Vec::new(),
+                                    stride: 0,
+                                };
+                                for hit in hits {
+                                    gated[hit.route].push((gi, hit));
+                                }
+                                account_spans!(gi, spans, aliases);
+                            }
+                        }
+                        ATaskOut::Completed {
                             records,
                             stats: tstats,
                             steps_delta,
@@ -841,17 +1356,14 @@ where
                             if finished != Some(true) {
                                 start.observe(&slot.ep.state);
                             }
-                            let mut tail_reqs = None;
+                            let mut needs_tail = false;
                             match finished {
                                 None => {}
                                 Some(true) => respawn_game(game, policy, slot, &mut start),
                                 Some(false) => {
-                                    // Tail bootstraps are queue jobs: the queue is the
-                                    // only inference pathway.
-                                    let reqs = tail_requests(
-                                        game, policy, learner, encoder, sequential, slot,
-                                    );
-                                    if reqs.is_empty() {
+                                    if learner.uses_episode_tail() {
+                                        needs_tail = true;
+                                    } else {
                                         backlog -= buffered_learn_steps(slot, learn_mask) as isize;
                                         flush_records_game(
                                             &HashMap::new(),
@@ -863,20 +1375,19 @@ where
                                             &mut stats,
                                         );
                                         respawn_game(game, policy, slot, &mut start);
-                                    } else {
-                                        tail_reqs = Some(reqs);
                                     }
                                 }
                             }
                             drop(guard);
-                            if let Some(reqs) = tail_reqs {
-                                enqueue_tails!(gi, reqs, false);
+                            if needs_tail {
+                                spawn(
+                                    gi,
+                                    AWork::Tail { fragment: false },
+                                    views.clone(),
+                                    &mut phases,
+                                    &mut in_flight,
+                                );
                             }
-                            // The floor counts only scheduler-ordered effects: records
-                            // still riding unprocessed messages surface as the documented
-                            // admitted-at-cut overshoot (bounded by in-flight decisions).
-                            // Counting them earlier would need racy reads and break the
-                            // n_threads=1 determinism contract.
                             let collected = if fragments {
                                 out.len().saturating_add_signed(backlog)
                             } else {
@@ -886,23 +1397,18 @@ where
                                 cutting = true;
                             }
                             if !cutting && matches!(phases[gi], SlotPhase::Idle) {
-                                spawn(gi, Work::Begin, &mut phases, &mut in_flight);
+                                spawn(gi, AWork::Begin, views.clone(), &mut phases, &mut in_flight);
                             }
                         }
                     }
+                    run_ladder!();
                 }
             });
-            // A no-op collect (floor already met) must not mutate engine state.
             if admitted {
                 self.sweep_cursor = (base_cursor + 1) % n_games.max(1);
             }
         }
-        (stats.infer_seconds, stats.infer_calls, stats.infer_rows) =
-            (evaluator.seconds, evaluator.calls, evaluator.rows);
-        stats.padded_rows = evaluator.padded_rows;
-        (stats.cache_lookups, stats.cache_hits) =
-            (evaluator.cache_lookups(), evaluator.cache_hits());
-        self.infer_caches = caches;
+        self.zc_caches = zc_caches;
         (out, stats)
     }
 }
@@ -1098,7 +1604,7 @@ where
             self.traj[gi] = slice.traj;
         }
         // Numeric generations do not identify weights across restored processes.
-        if let Some(caches) = self.infer_caches.as_mut() {
+        if let Some(caches) = self.zc_caches.as_mut() {
             for cache in caches.iter_mut() {
                 cache.force_clear();
             }
@@ -1144,18 +1650,6 @@ struct SlotCtx<'a, G: Game, P: Policy> {
     seeded: &'a mut bool,
 }
 
-/// Work handed to a slot task: start a fresh search, or absorb routed rows and round.
-enum Work<SE> {
-    Begin,
-    Resume {
-        search: SE,
-        perspectives: Vec<usize>,
-        roots: Vec<RootMark>,
-        rows: Vec<f64>,
-        stride: usize,
-    },
-}
-
 /// One perspective's `push_root` slot: `Dropped` keeps duplicate detection for
 /// non-learning perspectives without retaining their rows.
 #[derive(Clone)]
@@ -1177,18 +1671,457 @@ impl RootMark {
     }
 }
 
-/// A slot task's result. `Completed` carries the completion's effects — records, stats,
-/// and the buffered-step delta — for the scheduler to apply in message order; `finished`
-/// tells it whether to respawn or resolve a truncation tail.
-enum TaskOut<SE, R> {
+/// One arena in a route's ownership-per-fire sequence. `staged` maps in-flight
+/// cache keys to their reserved row so duplicates alias instead of re-firing.
+struct RouteArena {
+    id: u64,
+    arena: Arena,
+    staged: std::sync::Mutex<std::collections::HashMap<u128, u32>>,
+}
+
+/// A route's open-arena slot; workers allocate replacements, never the scheduler.
+struct RouteShared {
+    // lazy: unused routes and no-op collects allocate nothing
+    open: std::sync::Mutex<Option<std::sync::Arc<RouteArena>>>,
+    next_id: std::sync::atomic::AtomicU64,
+    capacity: usize,
+    dim: usize,
+}
+
+impl RouteShared {
+    fn new(capacity: usize, dim: usize) -> Self {
+        RouteShared {
+            open: std::sync::Mutex::new(None),
+            next_id: std::sync::atomic::AtomicU64::new(0),
+            capacity,
+            dim,
+        }
+    }
+
+    // Allocation happens UNDER the route lock: one claim, so the validated
+    // batch-size bound is a real bound, not a per-racing-worker bound. Nobody
+    // useful is excluded — workers need the arena, the scheduler never locks
+    // this, and final-span deferral keeps fires off this path.
+    fn fresh(&self) -> std::sync::Arc<RouteArena> {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let alias_limit = u32::try_from(self.capacity.saturating_mul(16)).unwrap_or(u32::MAX);
+        std::sync::Arc::new(RouteArena {
+            id,
+            arena: Arena::new(self.capacity, self.dim, alias_limit),
+            staged: std::sync::Mutex::new(std::collections::HashMap::new()),
+        })
+    }
+
+    fn current(&self) -> std::sync::Arc<RouteArena> {
+        let mut open = self.open.lock().expect("route lock");
+        if let Some(open) = open.as_ref() {
+            return open.clone();
+        }
+        let fresh = self.fresh();
+        *open = Some(fresh.clone());
+        fresh
+    }
+
+    /// Returns the open arena after the replacement attempt (the winner's, or the
+    /// one another worker already installed).
+    fn replace_if(&self, old: &std::sync::Arc<RouteArena>) -> std::sync::Arc<RouteArena> {
+        let mut open = self.open.lock().expect("route lock");
+        match open.as_ref() {
+            Some(cur) if !std::sync::Arc::ptr_eq(cur, old) => cur.clone(),
+            _ => {
+                let fresh = self.fresh();
+                *open = Some(fresh.clone());
+                fresh
+            }
+        }
+    }
+}
+
+/// Which arena rows hold which round positions — bytes never ride the channel.
+/// `rows` is `(round position, cache key)`: 32 bytes/row to alignment padding
+/// versus 20 for parallel arrays, but spans are round-sized, so one allocation
+/// beats two (measured ~5% on small-row collection).
+struct ASpan {
+    route: usize,
+    arena: std::sync::Arc<RouteArena>,
+    first_row: usize,
+    rows: Vec<(u32, u128)>,
+}
+
+/// A duplicate in-flight key: the prediction for `target_row` also resolves this
+/// emission's ticket. Reserves nothing.
+struct AAlias {
+    route: usize,
+    arena: std::sync::Arc<RouteArena>,
+    target_row: u32,
+    pos: u32,
+}
+
+/// Alias against `cur`'s staged in-flight keys; `Some` means the ticket was
+/// registered and no row is needed. Any failure falls back to a reservation.
+fn try_stage_alias(
+    route_idx: usize,
+    cur: &std::sync::Arc<RouteArena>,
+    key: u128,
+    pos: u32,
+    aliases: &mut Vec<AAlias>,
+) -> bool {
+    if key == 0 {
+        return false;
+    }
+    let target = match cur.staged.lock().expect("staged lock").get(&key) {
+        Some(&row) => row,
+        None => return false,
+    };
+    match cur.arena.try_alias() {
+        crate::rollout::arena::AliasOutcome::Ticket(ticket) => {
+            aliases.push(AAlias {
+                route: route_idx,
+                arena: cur.clone(),
+                target_row: target,
+                pos,
+            });
+            ticket.commit();
+            true
+        }
+        _ => false,
+    }
+}
+
+fn stage_key(cur: &std::sync::Arc<RouteArena>, key: u128, row: u32) {
+    if key != 0 {
+        cur.staged
+            .lock()
+            .expect("staged lock")
+            .entry(key)
+            .or_insert(row);
+    }
+}
+
+/// What a gated hit retains for possible demotion: the scratch row (obs-hash
+/// keys) or a cloned state plus agent (encoder keys — only hit tickets pay the
+/// clone, and demotion re-encodes through `encode_into`).
+enum Retained<S> {
+    Row(Vec<f32>),
+    State(S, usize),
+}
+
+/// A cache hit resolved at the worker: reserves nothing, parks until its route's
+/// next release point.
+struct AHit<S> {
+    route: usize,
+    pos: u32,
+    key: u128,
+    gen: u64,
+    value: std::sync::Arc<[f32]>,
+    retained: Retained<S>,
+}
+
+type Pins = Option<std::sync::Arc<[std::sync::Arc<CacheView>]>>;
+
+fn route_of(mode: InferMode, player: usize) -> usize {
+    match mode {
+        InferMode::Shared => 0,
+        InferMode::PerPlayer => player,
+    }
+}
+
+fn obs_hash_key(mode: InferMode, player: usize, row: &[f32]) -> u128 {
+    match mode {
+        InferMode::Shared => InferCache::key(row),
+        InferMode::PerPlayer => InferCache::key_for_player(player, row),
+    }
+}
+
+/// Reserve one arena row and initialize it in place, coalescing contiguous
+/// same-arena emissions into one span.
+/// `open` caches the route's current arena so steady-state emissions take no
+/// lock; it refreshes only on a close.
+#[allow(clippy::too_many_arguments)]
+fn emit_arena_row(
+    route_idx: usize,
+    route: &RouteShared,
+    open: &mut Option<std::sync::Arc<RouteArena>>,
+    last_span: &mut Option<usize>,
+    pos: u32,
+    key: u128,
+    fill: &mut dyn FnMut(&mut [f32]),
+    spans: &mut Vec<ASpan>,
+    aliases: &mut Vec<AAlias>,
+) {
+    loop {
+        let cur = match open.as_ref() {
+            Some(cur) => cur.clone(),
+            None => {
+                let cur = route.current();
+                *open = Some(cur.clone());
+                cur
+            }
+        };
+        if try_stage_alias(route_idx, &cur, key, pos, aliases) {
+            return;
+        }
+        let mut span = match cur.arena.try_reserve(1) {
+            Reserve::Full { span, .. } => span,
+            Reserve::Partial { .. } => unreachable!("single-row reservations never split"),
+            Reserve::Closed => {
+                // the retained closed Arc goes straight to replace_if: one lock
+                *open = Some(route.replace_if(&cur));
+                continue;
+            }
+        };
+        let first = span.row_range().start;
+        fill(span.zeroed());
+        span.commit();
+        stage_key(&cur, key, first as u32);
+        // coalesce per ROUTE, so interleaved per-player emissions still merge
+        if let Some(si) = *last_span {
+            let last = &mut spans[si];
+            if std::sync::Arc::ptr_eq(&last.arena, &cur)
+                && last.first_row + last.rows.len() == first
+            {
+                last.rows.push((pos, key));
+                return;
+            }
+        }
+        spans.push(ASpan {
+            route: route_idx,
+            arena: cur.clone(),
+            first_row: first,
+            rows: vec![(pos, key)],
+        });
+        *last_span = Some(spans.len() - 1);
+        return;
+    }
+}
+
+/// The zero-copy engine's `StateSink`: cache identity first, then — on a miss —
+/// a reservation and a direct `encode_into`. No worker-side row copies survive
+/// on the encoder-key and cache-off paths.
+struct ArenaSink<'a, S> {
+    routes: &'a [RouteShared],
+    open: Vec<Option<std::sync::Arc<RouteArena>>>,
+    last_span: Vec<Option<usize>>,
+    pins: Pins,
+    mode: InferMode,
+    dim: usize,
+    spans: Vec<ASpan>,
+    hits: Vec<AHit<S>>,
+    aliases: Vec<AAlias>,
+    lookups: usize,
+}
+
+impl<'a, S> ArenaSink<'a, S> {
+    fn new(routes: &'a [RouteShared], pins: Pins, mode: InferMode, dim: usize) -> Self {
+        ArenaSink {
+            routes,
+            open: routes.iter().map(|_| None).collect(),
+            last_span: routes.iter().map(|_| None).collect(),
+            pins,
+            mode,
+            dim,
+            spans: Vec::new(),
+            hits: Vec::new(),
+            aliases: Vec::new(),
+            lookups: 0,
+        }
+    }
+}
+
+impl<S: Clone> crate::policy::StateSink<S> for ArenaSink<'_, S> {
+    fn push_state(
+        &mut self,
+        enc: &dyn StateEncoder<State = S>,
+        player: usize,
+        state: &S,
+        pos: u32,
+        scratch: &mut Vec<f32>,
+    ) {
+        let route = route_of(self.mode, player);
+        if let Some(pins) = self.pins.as_ref() {
+            let mut hasher = crate::rollout::infer_cache::CacheHasher::seeded(player);
+            if enc.cache_key(state, player, &mut hasher) {
+                let key = hasher.finish();
+                self.lookups += 1;
+                if let Some(value) = pins[route].lookup(key) {
+                    self.hits.push(AHit {
+                        route,
+                        pos,
+                        key,
+                        gen: pins[route].generation,
+                        value,
+                        retained: Retained::State(state.clone(), player),
+                    });
+                    return;
+                }
+                emit_arena_row(
+                    route,
+                    &self.routes[route],
+                    &mut self.open[route],
+                    &mut self.last_span[route],
+                    pos,
+                    key,
+                    &mut |dst| enc.encode_into(state, player, dst),
+                    &mut self.spans,
+                    &mut self.aliases,
+                );
+                return;
+            }
+            // no pre-encoding key: scratch encode, observation hashing
+            scratch.clear();
+            scratch.resize(self.dim, 0.0);
+            enc.encode_into(state, player, scratch);
+            let key = obs_hash_key(self.mode, player, scratch);
+            self.lookups += 1;
+            if let Some(value) = pins[route].lookup(key) {
+                self.hits.push(AHit {
+                    route,
+                    pos,
+                    key,
+                    gen: pins[route].generation,
+                    value,
+                    retained: Retained::Row(scratch.clone()),
+                });
+                return;
+            }
+            let row: &[f32] = scratch;
+            emit_arena_row(
+                route,
+                &self.routes[route],
+                &mut self.open[route],
+                &mut self.last_span[route],
+                pos,
+                key,
+                &mut |dst| dst.copy_from_slice(row),
+                &mut self.spans,
+                &mut self.aliases,
+            );
+            return;
+        }
+        emit_arena_row(
+            route,
+            &self.routes[route],
+            &mut self.open[route],
+            &mut self.last_span[route],
+            pos,
+            key_unused(),
+            &mut |dst| enc.encode_into(state, player, dst),
+            &mut self.spans,
+            &mut self.aliases,
+        );
+    }
+
+    fn push_row(&mut self, player: usize, row: &[f32], pos: u32) {
+        assert_eq!(row.len(), self.dim, "pushed row width mismatch");
+        self.lookups += classify_row(
+            self.mode,
+            &self.pins,
+            pos,
+            player,
+            row,
+            self.routes,
+            &mut self.open,
+            &mut self.last_span,
+            &mut self.spans,
+            &mut self.hits,
+            &mut self.aliases,
+        );
+    }
+}
+
+fn key_unused() -> u128 {
+    0
+}
+
+/// Route buffered rows through the pinned cache views: hits park, misses go to
+/// the arenas.
+#[allow(clippy::too_many_arguments)]
+fn classify_row<S>(
+    mode: InferMode,
+    pins: &Pins,
+    pos: u32,
+    player: usize,
+    row: &[f32],
+    routes: &[RouteShared],
+    open: &mut [Option<std::sync::Arc<RouteArena>>],
+    last_span: &mut [Option<usize>],
+    spans: &mut Vec<ASpan>,
+    hits: &mut Vec<AHit<S>>,
+    aliases: &mut Vec<AAlias>,
+) -> usize {
+    let route = route_of(mode, player);
+    let mut key = 0u128;
+    let mut lookups = 0;
+    if let Some(pins) = pins {
+        key = obs_hash_key(mode, player, row);
+        lookups = 1;
+        if let Some(value) = pins[route].lookup(key) {
+            hits.push(AHit {
+                route,
+                pos,
+                key,
+                gen: pins[route].generation,
+                value,
+                retained: Retained::Row(row.to_vec()),
+            });
+            return lookups;
+        }
+    }
+    emit_arena_row(
+        route,
+        &routes[route],
+        &mut open[route],
+        &mut last_span[route],
+        pos,
+        key,
+        &mut |dst| dst.copy_from_slice(row),
+        spans,
+        aliases,
+    );
+    lookups
+}
+
+enum AWork<SE> {
+    Begin,
+    Resume {
+        search: SE,
+        perspectives: Vec<usize>,
+        roots: Vec<RootMark>,
+        rows: Vec<f64>,
+        stride: usize,
+    },
+    Tail {
+        fragment: bool,
+    },
+}
+
+/// `TaskOut`, except observations stay in the arenas.
+enum ATaskOut<SE, R, S> {
     Skip,
     Emitted {
         search: SE,
         perspectives: Vec<usize>,
         roots: Vec<RootMark>,
-        players: Vec<usize>,
-        obs: Vec<f32>,
         n: usize,
+        spans: Vec<ASpan>,
+        hits: Vec<AHit<S>>,
+        aliases: Vec<AAlias>,
+        lookups: usize,
+    },
+    TailEmitted {
+        fragment: bool,
+        meta: Vec<usize>,
+        n: usize,
+        spans: Vec<ASpan>,
+        hits: Vec<AHit<S>>,
+        aliases: Vec<AAlias>,
+        lookups: usize,
+    },
+    DemoteEmitted {
+        spans: Vec<ASpan>,
+        aliases: Vec<AAlias>,
     },
     Completed {
         records: Vec<R>,
@@ -1199,120 +2132,34 @@ enum TaskOut<SE, R> {
     Panicked(Box<dyn std::any::Any + Send>),
 }
 
-struct Msg<SE, R> {
+struct AMsg<SE, R, S> {
     gi: usize,
-    out: TaskOut<SE, R>,
+    out: ATaskOut<SE, R, S>,
 }
 
-type MsgSender<SE, R> = std::sync::mpsc::Sender<Msg<SE, R>>;
+type AMsgSender<SE, R, S> = std::sync::mpsc::Sender<AMsg<SE, R, S>>;
+
+/// `seen` counts rows through processed messages only — never the live cursor —
+/// so the fire decision is a pure function of message order.
+struct PendingArena {
+    arc: std::sync::Arc<RouteArena>,
+    dest: Vec<(u32, u32)>,
+    keys: Vec<u128>,
+    seen: usize,
+    alias_claims: Vec<(u32, u32, u32)>,
+    seen_aliases: usize,
+}
+
+/// Real fires engine-wide a demanding route may see without progress before the
+/// ladder closes or releases it; healthy routes commit between fires and never
+/// reach it.
+const STALL_FIRES: u32 = 8;
 
 /// Bounds for the adaptive busy-wait before a parking recv; parks that resolve
 /// under SPIN_WORTH grow the budget, slower ones shrink it.
 const SPIN_RECVS_MIN: u32 = 8;
 const SPIN_RECVS_MAX: u32 = 4096;
 const SPIN_WORTH: std::time::Duration = std::time::Duration::from_micros(50);
-
-/// Forward the first `take` queued rows in one evaluator call and route the results to the
-/// destination slots' row buffers, decrementing their outstanding counts.
-/// FIFO request queue with an amortized-O(1) head: fires consume from `head`, appends
-/// push to the back, and the storage resets once fully drained — no per-fire shifting.
-#[derive(Default)]
-struct RequestQueue {
-    players: Vec<usize>,
-    obs: Vec<f32>,
-    dest: Vec<usize>,
-    pos: Vec<usize>,
-    head: usize,
-    dim: usize,
-}
-
-impl RequestQueue {
-    fn pending(&self) -> usize {
-        self.players.len() - self.head
-    }
-
-    /// Queue a whole round's rows (shared mode): positions run 0..n.
-    fn push(&mut self, players: Vec<usize>, obs: Vec<f32>, gi: usize, n: usize) {
-        debug_assert_eq!(players.len(), n);
-        self.dim = obs.len().checked_div(n).unwrap_or(self.dim);
-        self.players.extend(players);
-        self.obs.extend(obs);
-        self.dest.extend(std::iter::repeat_n(gi, n));
-        self.pos.extend(0..n);
-    }
-
-    /// Queue one row at a known position within its round (per-player split).
-    fn push_row(&mut self, player: usize, obs: &[f32], gi: usize, pos: usize) {
-        self.dim = obs.len();
-        self.players.push(player);
-        self.obs.extend_from_slice(obs);
-        self.dest.push(gi);
-        self.pos.push(pos);
-    }
-
-    /// Consume `take` rows from the head; compact once the consumed prefix outweighs
-    /// the pending tail, so a long collection never retains fired observations.
-    fn advance(&mut self, take: usize) {
-        self.head += take;
-        if self.head == self.players.len() {
-            self.players.clear();
-            self.obs.clear();
-            self.dest.clear();
-            self.pos.clear();
-            self.head = 0;
-        } else if self.head * 2 >= self.players.len() {
-            let h = self.head;
-            self.players.drain(..h);
-            self.dest.drain(..h);
-            self.pos.drain(..h);
-            self.obs.drain(..h * self.dim);
-            self.head = 0;
-        }
-    }
-}
-
-/// Returns the slots whose outstanding rows reached zero with this batch (each at most
-/// once, in routing order) so the caller settles only those.
-fn fire_batch<SE, F>(
-    queue: &mut RequestQueue,
-    take: usize,
-    phases: &mut [SE],
-    evaluator: &mut Evaluator<'_, F>,
-    mut route: impl FnMut(&mut SE) -> (&mut usize, &mut Vec<f64>, &mut usize, usize),
-) -> Vec<usize>
-where
-    F: FnMut(usize, Vec<f32>, usize) -> Vec<f64>,
-{
-    let (start, dim) = (queue.head, queue.dim);
-    let players = &queue.players[start..start + take];
-    let obs = queue.obs[start * dim..(start + take) * dim].to_vec();
-    let rows = evaluator.forward(players, obs, take);
-    let stride = rows.len() / take;
-    let mut freed = Vec::new();
-    for (i, (&gi, &pos)) in queue.dest[start..start + take]
-        .iter()
-        .zip(&queue.pos[start..start + take])
-        .enumerate()
-    {
-        let (outstanding, buf, st, total) = route(&mut phases[gi]);
-        if buf.is_empty() {
-            buf.resize(total * stride, 0.0);
-            *st = stride;
-        } else {
-            assert_eq!(
-                *st, stride,
-                "infer returned a different row width for one round's requests"
-            );
-        }
-        buf[pos * stride..(pos + 1) * stride].copy_from_slice(&rows[i * stride..(i + 1) * stride]);
-        *outstanding -= 1;
-        if *outstanding == 0 {
-            freed.push(gi);
-        }
-    }
-    queue.advance(take);
-    freed
-}
 
 /// Roll back an aborted window: a failed collect (callback error, cancellation) leaves its
 /// buffered steps in `traj`, and a retry must not flush another version's steps into its batch.
@@ -1556,16 +2403,15 @@ fn buffered_learn_steps<G: Game, P: Policy>(
         .sum()
 }
 
-/// One `(player, obs)` tail-bootstrap request per learning perspective; empty when the
-/// learner takes no tail.
-fn tail_requests<G, P, L>(
+/// The perspectives a truncation tail bootstraps, without encoding — the
+/// zero-copy path encodes them straight into arena storage.
+fn tail_perspectives<G, P, L>(
     game: &G,
     policy: &P,
     learner: &L,
-    encoder: &dyn StateEncoder<State = G::State>,
     sequential: bool,
     slot: &SlotCtx<'_, G, P>,
-) -> Vec<(usize, Vec<f32>)>
+) -> Vec<usize>
 where
     G: Game + Sync,
     G::State: Send,
@@ -1580,13 +2426,11 @@ where
     let all_perspectives = (policy.evaluates_all_perspectives(sequential, num_agents)
         && learner.value_only_evaluation(a).is_some())
         || learner.tails_all_trajectories();
-    let mut reqs = Vec::new();
-    for (si, steps) in slot.traj.iter().enumerate() {
-        if (all_perspectives || slot.ep.agent_active(game, si)) && !steps.is_empty() {
-            reqs.push((si, slot.ep.observe(encoder, si)));
-        }
-    }
-    reqs
+    (0..num_agents)
+        .filter(|&si| {
+            (all_perspectives || slot.ep.agent_active(game, si)) && !slot.traj[si].is_empty()
+        })
+        .collect()
 }
 
 /// Routed tail rows back to per-perspective tail values; zero-width (cancelled) rows
@@ -1680,31 +2524,5 @@ fn flush_fragment_slot<G, P, L>(
         backfill_chained_tail(game, learner, encoder, &mut steps, slot, si);
         let tail = tails.get(&si).cloned().unwrap_or_default();
         out.extend(learner.episode_records(&steps, &tail, encoder, si, &mut slot.ep.rng));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::RequestQueue;
-
-    #[test]
-    fn the_queue_compacts_its_consumed_prefix() {
-        let mut q = RequestQueue::default();
-        for i in 0..8 {
-            q.push_row(0, &[i as f32, 0.0], i, 0);
-        }
-        q.advance(3);
-        q.advance(3);
-        // 6 of 8 consumed: compaction must have dropped the prefix, keeping the tail.
-        assert!(q.players.len() <= 2, "consumed rows were retained");
-        assert_eq!(q.pending(), 2);
-        assert_eq!(
-            q.obs[q.head * q.dim],
-            6.0,
-            "pending rows survive compaction"
-        );
-        q.advance(2);
-        assert_eq!(q.pending(), 0);
-        assert!(q.players.is_empty(), "a drained queue resets its storage");
     }
 }

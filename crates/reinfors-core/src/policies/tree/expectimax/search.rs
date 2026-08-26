@@ -1837,7 +1837,7 @@ pub(crate) fn stepper_round<G: Game + Sync>(
     enc: &dyn StateEncoder<State = G::State>,
     reward: &dyn Reward<Event = G::Event>,
     cfg: &SearchConfig,
-    out: &mut crate::policy::RequestSink,
+    out: &mut crate::policy::RequestSink<'_, G::State>,
     rng: &mut dyn Rng,
 ) -> crate::policy::RoundStatus
 where
@@ -1947,7 +1947,7 @@ pub(crate) fn multi_round<G: Game + Sync>(
     enc: &dyn StateEncoder<State = G::State>,
     reward: &dyn Reward<Event = G::Event>,
     cfg: &SearchConfig,
-    out: &mut crate::policy::RequestSink,
+    out: &mut crate::policy::RequestSink<'_, G::State>,
     rng: &mut dyn Rng,
 ) -> crate::policy::RoundStatus
 where

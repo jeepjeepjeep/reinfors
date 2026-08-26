@@ -26,6 +26,13 @@ pub struct CollectStats {
     pub padded_rows: usize,
     pub cache_lookups: usize,
     pub cache_hits: usize,
+    /// Gated cache hits invalidated at release by a weights-generation change and
+    /// re-inferred through the ordinary reservation path.
+    pub cache_demotions: usize,
+    /// Stalled routes whose partial arenas the liveness ladder closed and fired.
+    pub stall_closes: usize,
+    /// Stalled hit-only routes whose gated tickets the ladder released without a fire.
+    pub stall_releases: usize,
     pub sum_terminal_sims: usize,
     pub sum_depthcap_sims: usize,
     pub sum_requested_rows: usize,

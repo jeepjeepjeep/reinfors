@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use reinfors_core::{
     ActBy, AlphaZero, AlphaZeroConfig, AlphaZeroLearner, AlphaZeroRecord, AlwaysInitialState,
     ChanceMode, Dqn, DqnRecord, Engine, EngineParams, Env, EpsilonGreedyQ, Evaluator, Game,
-    InferCache, InferMode, Learner, Mcts, MctsConfig, Minimax, NoiseScope, Opponent, Policy,
+    InferMode, Learner, Mcts, MctsConfig, Minimax, NoiseScope, Opponent, Policy,
     ReachedStateBuffer, Reward, SearchConfig, SelectiveExpectimax, Space, SplitMix64,
     StartDistribution, StateCodec, StateEncoder, TreeStrap, TreeStrapRecord,
 };
@@ -911,13 +911,9 @@ impl PyEngine {
             ..=num_agents)
             .map(|_| std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)))
             .collect();
-        let caches = (infer_cache > 0).then(|| {
-            CacheSet::Exclusive(
-                weights_generations
-                    .iter()
-                    .map(|generation| InferCache::new(infer_cache, generation.clone()))
-                    .collect(),
-            )
+        let caches = (infer_cache > 0).then(|| CacheSet {
+            capacity: infer_cache,
+            generations: weights_generations.clone(),
         });
         let snapshot_fp = {
             let mut stripped = config.clone();
@@ -1920,6 +1916,9 @@ fn build_telemetry<'py>(
     telemetry.set_item("padded_rows", stats.padded_rows)?;
     telemetry.set_item("cache_lookups", stats.cache_lookups)?;
     telemetry.set_item("cache_hits", stats.cache_hits)?;
+    telemetry.set_item("cache_demotions", stats.cache_demotions)?;
+    telemetry.set_item("stall_closes", stats.stall_closes)?;
+    telemetry.set_item("stall_releases", stats.stall_releases)?;
     // Exact Mcts/AlphaZero tree sim-fate identity: decisions*sims = fresh + hit + shared + terminal
     // + depthcap - extra_eval_rows; the subtraction removes auxiliary perspective/fan rows.
     telemetry.set_item("terminal_sims", stats.sum_terminal_sims)?;
@@ -2031,8 +2030,9 @@ where
     }
 }
 
-enum CacheSet {
-    Exclusive(Vec<InferCache>),
+struct CacheSet {
+    capacity: usize,
+    generations: Vec<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 #[derive(Clone)]
@@ -2696,9 +2696,8 @@ where
 {
     let mut e = Engine::new(game, enc, reward, policy, learner, engine_params)
         .with_start_distribution(start_dist);
-    match infer_caches {
-        Some(CacheSet::Exclusive(c)) => e = e.with_infer_caches(c),
-        None => {}
+    if let Some(c) = infer_caches {
+        e = e.with_infer_cache(c.capacity, c.generations);
     }
     if let Some(lp) = learn_players {
         e = e.with_learn_players(&lp);
@@ -2870,8 +2869,8 @@ where
         n_heads,
         action_count,
     )?;
-    if engine_params.pad {
-        // pad fixes every call at exactly batch_size rows: no agent multiplier
+    {
+        // the zero-copy engine allocates arenas of batch_size rows
         let rows = engine_params
             .batch_size
             .unwrap_or_else(|| (engine_params.n_games / 2).max(1));

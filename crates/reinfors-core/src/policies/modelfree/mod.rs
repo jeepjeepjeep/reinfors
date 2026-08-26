@@ -44,7 +44,7 @@ where
 
 pub(crate) fn one_shot_round<S, E>(
     search: &mut OneShot<S, E>,
-    out: &mut RequestSink,
+    out: &mut RequestSink<'_, S>,
 ) -> RoundStatus {
     if search.emitted || search.agents.is_empty() {
         return RoundStatus::Done;

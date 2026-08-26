@@ -1,0 +1,23 @@
+name: miri
+
+on:
+  pull_request:
+    paths:
+      - crates/reinfors-core/src/rollout/arena.rs
+      - crates/reinfors-core/tests/arena.rs
+      - .github/workflows/miri.yml
+
+jobs:
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Miri
+        run: cargo +nightly miri test -p reinfors-core --test arena

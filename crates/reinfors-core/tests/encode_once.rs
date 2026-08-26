@@ -189,7 +189,7 @@ impl Policy for TestActor {
         &self,
         _ctx: SearchCtx<'_, G>,
         search: &mut TestSearch,
-        out: &mut RequestSink,
+        out: &mut RequestSink<'_, G::State>,
     ) -> RoundStatus
     where
         G::State: Send,

@@ -1,7 +1,9 @@
-//! Generational cache for raw network-output rows.
+//! Generational cache for raw network-output rows, for synchronous callers
+//! (evaluator, solvers) that own it exclusively. The engine's scheduler uses
+//! `zc_cache` instead; the key/hash machinery here is shared by both.
 //!
-//! Each cache is confined to one engine collection worker. It is deliberately mutable and
-//! lock-free; the atomic generation signal does not make the cache itself thread-safe.
+//! Deliberately mutable and lock-free; the atomic generation signal does not
+//! make the cache itself thread-safe.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,6 +28,72 @@ fn hash128(bytes: &[u8]) -> u128 {
     let a = avalanche(a ^ bytes.len() as u64);
     let b = avalanche(b.rotate_left(32) ^ bytes.len() as u64);
     (u128::from(a) << 64) | u128::from(b)
+}
+
+/// Streaming variant of the row hash for encoder-derived cache keys. The seed
+/// is salted so encoder-key and observation-hash key spaces cannot collide.
+pub struct CacheHasher {
+    a: u64,
+    b: u64,
+    len: u64,
+}
+
+impl CacheHasher {
+    /// Engine-seeded: the tagged seed and player salt keep encoder keys and
+    /// observation-hash keys in disjoint spaces.
+    pub fn seeded(player: usize) -> Self {
+        let mut h = CacheHasher {
+            a: 0xcbf2_9ce4_8422_2325 ^ 0xE5C0_DE4B_5EED_0001,
+            b: 0x6a09_e667_f3bc_c909,
+            len: 0,
+        };
+        h.write_u64(player as u64);
+        h
+    }
+
+    fn absorb(&mut self, bytes: &[u8]) {
+        const PRIME_A: u64 = 0x0000_0100_0000_01B3;
+        const PRIME_B: u64 = 0x9E37_79B9_7F4A_7C15;
+        for &x in bytes {
+            self.a = (self.a ^ u64::from(x)).wrapping_mul(PRIME_A);
+            self.b = (self.b ^ u64::from(x)).wrapping_mul(PRIME_B);
+        }
+        self.len += bytes.len() as u64;
+    }
+
+    /// Every write is self-delimiting: a type tag plus, for variable-length
+    /// fields, a length prefix — so no sequence of calls collides with another.
+    pub fn write(&mut self, bytes: &[u8]) {
+        self.absorb(&[0xB0]);
+        self.absorb(&(bytes.len() as u64).to_le_bytes());
+        self.absorb(bytes);
+    }
+
+    pub fn write_u8(&mut self, v: u8) {
+        self.absorb(&[0xB1, v]);
+    }
+
+    pub fn write_u64(&mut self, v: u64) {
+        self.absorb(&[0xB2]);
+        self.absorb(&v.to_le_bytes());
+    }
+
+    pub fn write_usize(&mut self, v: usize) {
+        self.write_u64(v as u64);
+    }
+
+    pub fn write_f32s(&mut self, v: &[f32]) {
+        self.absorb(&[0xB3]);
+        self.absorb(&(v.len() as u64).to_le_bytes());
+        let bytes = unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<u8>(), v.len() * 4) };
+        self.absorb(bytes);
+    }
+
+    pub fn finish(&self) -> u128 {
+        let a = avalanche(self.a ^ self.len);
+        let b = avalanche(self.b.rotate_left(32) ^ self.len);
+        (u128::from(a) << 64) | u128::from(b)
+    }
 }
 
 fn obs_key(obs: &[f32]) -> u128 {

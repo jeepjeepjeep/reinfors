@@ -371,6 +371,16 @@ impl reinfors_core::StateEncoder for CarRacingPixels {
         out
     }
 
+    fn encode_into(&self, state: &CarRacingState, _agent: usize, dst: &mut [f32]) {
+        let CarRacingState::Live(live) = state else {
+            unreachable!("encode on a pending CarRacing state (kept out of observations)");
+        };
+        RASTER.with_borrow_mut(|r| {
+            rasterize(live, r);
+            r.downsample_chw_f32_into(dst, FRAME, FRAME);
+        });
+    }
+
     fn obs_shape(&self) -> (usize, usize, usize) {
         let (h, w, c) = CarRacingRenderer.frame_shape();
         (c, h, w)

@@ -1,5 +1,5 @@
 use reinfors_core::{
-    Actor, Dqn, Engine, EngineParams, EpsilonGreedyQ, Game, InferCache, InferMode, Transition,
+    Actor, Dqn, Engine, EngineParams, EpsilonGreedyQ, Game, InferMode, Transition,
 };
 
 #[derive(Clone)]
@@ -166,15 +166,10 @@ fn learn_players_freezes_records_at_source() {
 fn per_player_caches_never_cross_contaminate() {
     // Observations are identical across players while their networks prefer opposite actions;
     // sharing an observation-keyed cache would therefore flip one player's records.
-    let caches = (0..3)
-        .map(|_| {
-            InferCache::new(
-                1 << 10,
-                std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            )
-        })
+    let generations = (0..3)
+        .map(|_| std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)))
         .collect();
-    let mut e = engine().with_infer_caches(caches);
+    let mut e = engine().with_infer_cache(1 << 10, generations);
     let (records, _) = e.collect_routed(24, InferMode::PerPlayer, opposed_nets);
     for r in &records {
         assert_eq!(
