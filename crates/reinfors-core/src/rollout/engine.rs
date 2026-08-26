@@ -995,14 +995,11 @@ where
                                 }
                             }
                             release_gated!($route, freed);
-                            // respawn BEFORE publishing: the view rebuild is off the
-                            // fire->resume critical path; resumed rounds pin the
-                            // previous view (one-fire staleness on new inserts)
-                            settle_freed!(freed);
                             if let (Some(rc), Some(g)) = (route_caches.as_mut(), gen_at_fire) {
                                 rc[$route].publish(g);
                                 views = Some(rc.iter().map(|c| c.view()).collect::<Vec<_>>().into());
                             }
+                            settle_freed!(freed);
                         }
                     }};
                 }
