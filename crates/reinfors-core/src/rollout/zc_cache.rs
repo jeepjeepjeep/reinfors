@@ -47,7 +47,7 @@ pub(crate) struct ZcCache {
 
 impl ZcCache {
     pub(crate) fn new(capacity: usize, generation: Arc<AtomicU64>) -> Self {
-        let n_shards = (capacity / 128).max(1).next_power_of_two().min(256);
+        let n_shards = (capacity / 128).max(1).next_power_of_two().min(2048);
         let shard_half = (capacity / n_shards / 2).max(1);
         let seen = generation.load(Ordering::Relaxed);
         ZcCache {
