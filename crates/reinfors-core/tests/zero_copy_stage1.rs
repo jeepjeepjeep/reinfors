@@ -10,7 +10,7 @@ use reinfors_core::rollout::engine::{Engine, EngineParams};
 use reinfors_core::rollout::evaluator::InferMode;
 use reinfors_core::rollout::infer_cache::InferCache;
 use reinfors_core::{
-    Actor, Game, Policy, PpoEvaluation, Reward, Rng, Space, StateEncoder, Transition,
+    Actor, CacheHasher, Game, Policy, PpoEvaluation, Reward, Rng, Space, StateEncoder, Transition,
 };
 
 #[derive(Clone)]
@@ -215,7 +215,7 @@ impl Policy for FanActor {
         &self,
         _ctx: SearchCtx<'_, G>,
         search: &mut FanSearch,
-        out: &mut RequestSink,
+        out: &mut RequestSink<'_, G::State>,
     ) -> RoundStatus
     where
         G::State: Send,
@@ -775,4 +775,562 @@ fn reinstalling_caches_discards_the_old_zero_copy_cache() {
     let k1: Keys = r1.iter().map(record_key).collect();
     let k2: Keys = r2.iter().map(record_key).collect();
     assert_ne!(k1, k2, "records must reflect the new callback's outputs");
+}
+
+/// Counts encode calls; `cache_key` streams the exact observation identity.
+struct KeyedEnc {
+    encodes: Arc<AtomicU64>,
+    keyed: bool,
+}
+impl reinfors_core::ActionView for KeyedEnc {}
+impl StateEncoder for KeyedEnc {
+    type State = St;
+    fn encode(&self, s: &St, agent: usize) -> Vec<f32> {
+        self.encodes.fetch_add(1, Ordering::Relaxed);
+        vec![(s.tick % 2) as f32, agent as f32]
+    }
+    fn encode_into(&self, s: &St, agent: usize, dst: &mut [f32]) {
+        self.encodes.fetch_add(1, Ordering::Relaxed);
+        dst[0] = (s.tick % 2) as f32;
+        dst[1] = agent as f32;
+    }
+    fn obs_shape(&self) -> (usize, usize, usize) {
+        (1, 1, 2)
+    }
+    fn observation_space(&self) -> Space {
+        Space::Box {
+            shape: vec![1, 1, 2],
+            low: f32::NEG_INFINITY,
+            high: f32::INFINITY,
+        }
+    }
+    fn cache_key(&self, s: &St, _perspective: usize, hasher: &mut CacheHasher) -> bool {
+        if !self.keyed {
+            return false;
+        }
+        hasher.write_u64((s.tick % 2) as u64);
+        true
+    }
+}
+
+/// One-round policy emitting the root row plus `fan - 1` state-backed requests.
+struct StateActor {
+    fan: usize,
+}
+
+struct StateSearch<S> {
+    state: S,
+    agents: Vec<usize>,
+    legal: Vec<Vec<usize>>,
+    round: usize,
+    results: Vec<PpoEvaluation>,
+}
+
+impl Policy for StateActor {
+    type Evaluation = PpoEvaluation;
+    type PolicyState = ();
+    type Search<S: Send> = StateSearch<S>;
+
+    fn max_agents(&self, _sequential: bool) -> Option<usize> {
+        Some(usize::MAX)
+    }
+    fn supports_imperfect_information(&self) -> bool {
+        true
+    }
+    fn begin_episode(&self, _rng: &mut dyn Rng) {}
+    fn encode_eval(&self, _eval: &PpoEvaluation, _out: &mut Vec<u8>) {
+        unimplemented!("no buffering in this test")
+    }
+    fn decode_eval(&self, _r: &mut Reader, _n: usize) -> Result<PpoEvaluation, String> {
+        unimplemented!("no buffering in this test")
+    }
+    fn policy_state_to_u64(&self, _s: &()) -> u64 {
+        0
+    }
+    fn policy_state_from_u64(&self, _v: u64) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn begin_search<G: Game + Sync>(
+        &self,
+        ctx: SearchCtx<'_, G>,
+        state: &G::State,
+        perspectives: &[usize],
+    ) -> StateSearch<G::State>
+    where
+        G::State: Send,
+    {
+        StateSearch {
+            state: state.clone(),
+            agents: perspectives.to_vec(),
+            legal: perspectives
+                .iter()
+                .map(|&a| ctx.game.legal_actions(state, a))
+                .collect(),
+            round: 0,
+            results: Vec::new(),
+        }
+    }
+
+    fn round<G: Game + Sync>(
+        &self,
+        ctx: SearchCtx<'_, G>,
+        search: &mut StateSearch<G::State>,
+        out: &mut RequestSink<'_, G::State>,
+    ) -> RoundStatus
+    where
+        G::State: Send,
+    {
+        if search.round > 0 {
+            return RoundStatus::Done;
+        }
+        for agent in search.agents.clone() {
+            out.push_root(agent, ctx.enc.encode(&search.state, agent), agent);
+            for _ in 1..self.fan {
+                out.push_state(ctx.enc, agent, &search.state);
+            }
+        }
+        search.round += 1;
+        RoundStatus::Pending
+    }
+
+    fn absorb<G: Game + Sync>(
+        &self,
+        _ctx: SearchCtx<'_, G>,
+        search: &mut StateSearch<G::State>,
+        rows: RowsView<'_>,
+    ) where
+        G::State: Send,
+    {
+        if search.round != 1 {
+            return;
+        }
+        search.results = search
+            .legal
+            .iter()
+            .enumerate()
+            .map(|(i, legal)| {
+                // consume a STATE-BACKED row so parity tests validate the arena
+                // path; the buffered root at i*fan feeds records only
+                let row = rows.row(i * self.fan + usize::from(self.fan > 1));
+                PpoEvaluation {
+                    log_probs: masked_log_probs(&row[..legal.len()], legal),
+                    value: 0.0,
+                    legal: legal.clone(),
+                }
+            })
+            .collect();
+    }
+
+    fn finish<G: Game + Sync>(
+        &self,
+        _ctx: SearchCtx<'_, G>,
+        search: StateSearch<G::State>,
+    ) -> Vec<(PpoEvaluation, Vec<reinfors_core::InteriorTarget>)>
+    where
+        G::State: Send,
+    {
+        search
+            .results
+            .into_iter()
+            .map(|e| (e, Vec::new()))
+            .collect()
+    }
+
+    fn select(&self, eval: &PpoEvaluation, _state: &mut (), rng: &mut dyn Rng) -> usize {
+        let mut r = rng.unit();
+        for (i, lp) in eval.log_probs.iter().enumerate() {
+            r -= lp.exp();
+            if r <= 0.0 {
+                return eval.legal[i];
+            }
+        }
+        eval.legal[0]
+    }
+}
+
+type StateEngineParts<G> = (
+    Engine<G, StateActor, reinfors_core::Ppo>,
+    Arc<AtomicU64>,
+    Option<Arc<AtomicU64>>,
+);
+
+#[allow(clippy::too_many_arguments)]
+fn state_engine<G: Game<State = St, Event = ()> + Sync>(
+    game: G,
+    keyed: bool,
+    fan: usize,
+    n_games: usize,
+    batch_size: usize,
+    zero_copy: bool,
+    cache: Option<usize>,
+) -> StateEngineParts<G>
+where
+    G::State: Send,
+{
+    let encodes = Arc::new(AtomicU64::new(0));
+    let n_agents = game.num_agents();
+    let mut e = Engine::new(
+        game,
+        Box::new(KeyedEnc {
+            encodes: encodes.clone(),
+            keyed,
+        }),
+        Box::new(Zero),
+        StateActor { fan },
+        reinfors_core::Ppo::new(1.0, 0.95),
+        EngineParams {
+            n_games,
+            seed: 11,
+            n_threads: Some(1),
+            batch_size: Some(batch_size),
+            zero_copy,
+            ..Default::default()
+        },
+    );
+    let mut generation = None;
+    if let Some(cap) = cache {
+        let shared = Arc::new(AtomicU64::new(0));
+        e = e.with_infer_caches(
+            (0..=n_agents)
+                .map(|_| InferCache::new(cap, shared.clone()))
+                .collect(),
+        );
+        generation = Some(shared);
+    }
+    (e, encodes, generation)
+}
+
+#[test]
+fn push_state_matches_the_classic_path() {
+    let run = |zero_copy: bool| {
+        let (mut e, _, _) = state_engine(Line, false, 3, 2, 4, zero_copy, None);
+        let (records, stats) = e.collect(12, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
+        (records.iter().map(record_key).collect::<Keys>(), stats)
+    };
+    let (classic, cs) = run(false);
+    let (zero, zs) = run(true);
+    assert!(!classic.is_empty());
+    assert_eq!(classic, zero, "state-backed rows must match across paths");
+    assert_eq!(cs.infer_rows, zs.infer_rows);
+}
+
+#[test]
+fn encoder_key_hits_skip_the_encoder() {
+    let run = |cache: Option<usize>| {
+        let (mut e, encodes, _) = state_engine(Line, true, 4, 1, 1, true, cache);
+        let (records, stats) = e.collect(9, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
+        (
+            records.iter().map(record_key).collect::<Keys>(),
+            stats,
+            encodes.load(Ordering::Relaxed),
+        )
+    };
+    let (plain, _, plain_encodes) = run(None);
+    let (cached, cstats, cached_encodes) = run(Some(64));
+    assert_eq!(plain, cached, "encoder-key hits must not change records");
+    assert!(cstats.cache_hits > 0);
+    assert!(
+        cached_encodes < plain_encodes,
+        "validated non-root hits must skip encoding: {cached_encodes} vs {plain_encodes}"
+    );
+}
+
+#[test]
+fn scratch_fallback_hits_match_uncached() {
+    let run = |cache: Option<usize>| {
+        let (mut e, _, _) = state_engine(Line, false, 4, 1, 1, true, cache);
+        let (records, stats) = e.collect(9, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
+        (records.iter().map(record_key).collect::<Keys>(), stats)
+    };
+    let (plain, pstats) = run(None);
+    let (cached, cstats) = run(Some(64));
+    assert_eq!(
+        plain, cached,
+        "obs-hash fallback hits must not change records"
+    );
+    assert!(cstats.cache_hits > 0);
+    assert!(cstats.infer_rows < pstats.infer_rows);
+}
+
+fn drift_engine(
+    cache: Option<usize>,
+) -> (
+    Engine<DriftLine, StateActor, reinfors_core::Ppo>,
+    Option<Arc<AtomicU64>>,
+) {
+    let mut e = Engine::new(
+        DriftLine,
+        Box::new(DriftEnc),
+        Box::new(Zero),
+        StateActor { fan: 4 },
+        reinfors_core::Ppo::new(1.0, 0.95),
+        EngineParams {
+            n_games: 8,
+            seed: 11,
+            n_threads: Some(2),
+            batch_size: Some(4),
+            zero_copy: true,
+            ..Default::default()
+        },
+    );
+    let mut generation = None;
+    if let Some(cap) = cache {
+        let shared = Arc::new(AtomicU64::new(0));
+        e = e.with_infer_caches(
+            (0..=1)
+                .map(|_| InferCache::new(cap, shared.clone()))
+                .collect(),
+        );
+        generation = Some(shared);
+    }
+    (e, generation)
+}
+
+#[test]
+fn stale_encoder_key_hits_demote_by_reencoding() {
+    // Deterministic bump sweeps cannot reach the demotion window through the
+    // public API (gated windows are microseconds and drain at nearly every
+    // fire), so invalidate asynchronously across thousands of windows. Every
+    // record must stay self-consistent, and the sweep must actually demote.
+    let (mut e, generation) = drift_engine(Some(64));
+    let generation = generation.expect("cache installed");
+    let stop = Arc::new(AtomicU64::new(0));
+    let bumper = {
+        let generation = generation.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while stop.load(Ordering::Relaxed) == 0 {
+                generation.fetch_add(1, Ordering::Relaxed);
+                std::thread::sleep(std::time::Duration::from_micros(500));
+            }
+        })
+    };
+    let (records, stats) = e.collect(4000, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
+    stop.store(1, Ordering::Relaxed);
+    bumper.join().unwrap();
+    for r in &records {
+        let logits = [f64::from(r.obs[0]) * 0.25, 0.5];
+        let expected = masked_log_probs(&logits, &[0, 1]);
+        assert_eq!(
+            r.behavior_log_prob.to_bits(),
+            expected[r.action].to_bits(),
+            "record evaluation does not match its own observation"
+        );
+    }
+    assert!(
+        stats.cache_demotions > 0,
+        "no gated hit was demoted across {} lookups ({} hits)",
+        stats.cache_lookups,
+        stats.cache_hits
+    );
+}
+
+#[test]
+fn stage2_collection_is_deterministic() {
+    let run = || {
+        let (mut e, _, _) = state_engine(TruncLine, true, 3, 2, 3, true, Some(64));
+        let (records, stats) = e.collect(20, |obs: Vec<f32>, n: usize| exact_infer(&obs, n));
+        (
+            records.iter().map(record_key).collect::<Keys>(),
+            stats.infer_rows,
+            stats.cache_hits,
+        )
+    };
+    assert_eq!(run(), run());
+}
+
+#[test]
+fn equal_cache_keys_encode_identically_on_both_paths() {
+    let enc = KeyedEnc {
+        encodes: Arc::new(AtomicU64::new(0)),
+        keyed: true,
+    };
+    let mut by_key: std::collections::HashMap<u128, Vec<f32>> = std::collections::HashMap::new();
+    let mut distinct = std::collections::HashSet::new();
+    for tick in 0..32 {
+        let state = St { tick };
+        let mut hasher = CacheHasher::seeded(0);
+        assert!(enc.cache_key(&state, 0, &mut hasher));
+        let key = hasher.finish();
+        distinct.insert(key);
+        let row = enc.encode(&state, 0);
+        let mut into = vec![0.0f32; row.len()];
+        enc.encode_into(&state, 0, &mut into);
+        assert_eq!(row, into, "encode and encode_into must agree byte-for-byte");
+        match by_key.entry(key) {
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(row);
+            }
+            std::collections::hash_map::Entry::Occupied(o) => {
+                assert_eq!(
+                    o.get(),
+                    &row,
+                    "states with equal cache_key streams must encode identically"
+                );
+            }
+        }
+    }
+    assert_eq!(distinct.len(), 2, "tick parity must yield exactly two keys");
+}
+
+#[test]
+fn hasher_framing_separates_field_boundaries_and_types() {
+    let mut a = CacheHasher::seeded(0);
+    a.write(&[1]);
+    a.write(&[2, 3]);
+    let mut b = CacheHasher::seeded(0);
+    b.write(&[1, 2]);
+    b.write(&[3]);
+    assert_ne!(
+        a.finish(),
+        b.finish(),
+        "unframed fields collide deterministically"
+    );
+    let mut c = CacheHasher::seeded(0);
+    c.write(&[7]);
+    let mut d = CacheHasher::seeded(0);
+    d.write_u64(1);
+    d.write_u8(7);
+    assert_ne!(
+        c.finish(),
+        d.finish(),
+        "untyped writes collide across helpers"
+    );
+    let mut e = CacheHasher::seeded(0);
+    e.write_f32s(&[1.0]);
+    let mut f = CacheHasher::seeded(0);
+    f.write(&1.0f32.to_le_bytes());
+    assert_ne!(
+        e.finish(),
+        f.finish(),
+        "f32 and byte writes must not collide"
+    );
+}
+
+#[test]
+fn multi_threaded_state_backed_collection_stays_sound() {
+    let encodes = Arc::new(AtomicU64::new(0));
+    let shared = Arc::new(AtomicU64::new(0));
+    let batches = Arc::new(Mutex::new(Vec::new()));
+    let seen = batches.clone();
+    let mut e = Engine::new(
+        TruncLine,
+        Box::new(KeyedEnc {
+            encodes: encodes.clone(),
+            keyed: true,
+        }),
+        Box::new(Zero),
+        StateActor { fan: 5 },
+        reinfors_core::Ppo::new(1.0, 0.95),
+        EngineParams {
+            n_games: 8,
+            seed: 3,
+            n_threads: Some(4),
+            batch_size: Some(4),
+            zero_copy: true,
+            ..Default::default()
+        },
+    )
+    .with_infer_caches(
+        (0..=1)
+            .map(|_| InferCache::new(64, shared.clone()))
+            .collect(),
+    );
+    let (records, stats) = e.collect(300, move |obs: Vec<f32>, n: usize| {
+        seen.lock().unwrap().push(n);
+        exact_infer(&obs, n)
+    });
+    assert!(records.len() >= 300);
+    let batches = batches.lock().unwrap().clone();
+    assert!(batches.iter().all(|&n| n <= 4), "fires exceed capacity");
+    assert_eq!(batches.iter().sum::<usize>(), stats.infer_rows);
+    assert!(
+        stats.cache_hits > 0,
+        "keyed repeats must hit under contention"
+    );
+    assert!(
+        (encodes.load(Ordering::Relaxed) as usize) < stats.sum_requested_rows,
+        "hits must skip encoding under contention"
+    );
+    // Row correctness, not just accounting: every record's evaluation must be
+    // exactly what the callback returns for that record's own observation — a
+    // misrouted row under contention breaks the pairing.
+    for r in &records {
+        assert_eq!(r.obs[1], r.player as f32, "obs routed to the wrong player");
+        assert!(r.obs[0] == 0.0 || r.obs[0] == 1.0);
+        let logits = [f64::from(r.obs[0]) * 0.25, 0.5];
+        let expected = masked_log_probs(&logits, &[0, 1]);
+        assert_eq!(
+            r.behavior_log_prob.to_bits(),
+            expected[r.action].to_bits(),
+            "record evaluation does not match its own observation"
+        );
+    }
+}
+
+/// Action-dependent state: slots diverge through their per-episode rng, so hit
+/// and miss rounds coexist — the precondition for a demotable gated hit.
+#[derive(Clone)]
+struct DriftSt {
+    tick: usize,
+    sum: usize,
+}
+
+struct DriftLine;
+impl Game for DriftLine {
+    type State = DriftSt;
+    type Event = ();
+    fn num_agents(&self) -> usize {
+        1
+    }
+    fn action_count(&self) -> usize {
+        2
+    }
+    fn actor(&self, _s: &DriftSt) -> Actor {
+        Actor::Agent(0)
+    }
+    fn legal_actions(&self, _s: &DriftSt, agent: usize) -> Vec<usize> {
+        if agent == 0 {
+            vec![0, 1]
+        } else {
+            Vec::new()
+        }
+    }
+    fn step(&self, s: &DriftSt, a: &[usize]) -> Transition<DriftSt, ()> {
+        Transition {
+            next_state: DriftSt {
+                tick: s.tick + 1,
+                sum: s.sum + a[0] + 1,
+            },
+            events: vec![None],
+            terminal: s.tick + 1 >= 6,
+        }
+    }
+    fn initial_state(&self) -> DriftSt {
+        DriftSt { tick: 0, sum: 0 }
+    }
+}
+
+struct DriftEnc;
+impl reinfors_core::ActionView for DriftEnc {}
+impl StateEncoder for DriftEnc {
+    type State = DriftSt;
+    fn encode(&self, s: &DriftSt, agent: usize) -> Vec<f32> {
+        vec![(s.sum % 5) as f32, agent as f32]
+    }
+    fn obs_shape(&self) -> (usize, usize, usize) {
+        (1, 1, 2)
+    }
+    fn observation_space(&self) -> Space {
+        Space::Box {
+            shape: vec![1, 1, 2],
+            low: f32::NEG_INFINITY,
+            high: f32::INFINITY,
+        }
+    }
+    fn cache_key(&self, s: &DriftSt, _perspective: usize, hasher: &mut CacheHasher) -> bool {
+        hasher.write_u64((s.sum % 5) as u64);
+        true
+    }
 }

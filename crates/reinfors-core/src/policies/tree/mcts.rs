@@ -1464,7 +1464,7 @@ impl Policy for Mcts {
         &self,
         ctx: crate::policy::SearchCtx<'_, G>,
         search: &mut Self::Search<G::State>,
-        out: &mut crate::policy::RequestSink,
+        out: &mut crate::policy::RequestSink<'_, G::State>,
     ) -> crate::policy::RoundStatus
     where
         G::State: Send,
@@ -3048,7 +3048,7 @@ pub(crate) fn mcts_stepper_round<G: Game>(
     gamma: f64,
     max_depth: i32,
     chance: ChanceMode,
-    out: &mut crate::policy::RequestSink,
+    out: &mut crate::policy::RequestSink<'_, G::State>,
     rng: &mut dyn Rng,
 ) -> crate::policy::RoundStatus
 where
@@ -3189,7 +3189,7 @@ pub(crate) fn mcts_multi_round<G: Game>(
     gamma: f64,
     max_depth: i32,
     chance: ChanceMode,
-    out: &mut crate::policy::RequestSink,
+    out: &mut crate::policy::RequestSink<'_, G::State>,
     rng: &mut dyn Rng,
 ) -> crate::policy::RoundStatus
 where

@@ -43,6 +43,7 @@ pub use rng::SplitMix64;
 pub use rollout::engine::{CollectStats, Engine, EngineParams, EpisodeSummary};
 pub use rollout::env::Env;
 pub use rollout::evaluator::{CommittedRows, EvalBatch, Evaluator, InferMode, Resolve};
+pub use rollout::infer_cache::CacheHasher;
 pub use rollout::infer_cache::InferCache;
 pub use rollout::start::{AlwaysInitialState, ReachedStateBuffer, Start, StartDistribution};
 pub use solvers::best_response::{

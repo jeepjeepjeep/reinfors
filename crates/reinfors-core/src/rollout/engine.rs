@@ -994,7 +994,8 @@ where
                 dist: &mut *self.start_dist,
                 rng: &mut self.buffer_rng,
             };
-            let (tx, rx) = std::sync::mpsc::channel::<AMsg<P::Search<G::State>, L::Record>>();
+            let (tx, rx) =
+                std::sync::mpsc::channel::<AMsg<P::Search<G::State>, L::Record, G::State>>();
             let n_routes = match mode {
                 InferMode::Shared => 1,
                 InferMode::PerPlayer => self.game.num_agents(),
@@ -1018,45 +1019,22 @@ where
                 .as_ref()
                 .map(|rc| rc.iter().map(|c| c.view()).collect::<Vec<_>>().into());
 
-            let task = |gi: usize,
-                        work: AWork<P::Search<G::State>>,
-                        pins: Pins,
-                        tx: AMsgSender<P::Search<G::State>, L::Record>| {
-                let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let mut guard = slots[gi].lock().expect("slot lock");
-                    let slot: &mut SlotCtx<'_, G, P> = &mut guard;
-                    let (mut search, perspectives, mut roots) = match work {
-                        AWork::Begin => {
-                            let perspectives: Vec<usize> = (0..game.num_agents())
-                                .filter(|&si| slot.ep.agent_active(game, si))
-                                .collect();
-                            if perspectives.is_empty() {
-                                return ATaskOut::Skip;
-                            }
-                            let ctx = crate::policy::SearchCtx {
-                                game,
-                                enc: encoder,
-                                reward,
-                                rng: &mut slot.ep.rng,
-                                perms,
-                                collect_interior,
-                            };
-                            let roots = vec![RootMark::Vacant; perspectives.len()];
-                            (
-                                policy.begin_search(ctx, &slot.ep.state, &perspectives),
-                                perspectives,
-                                roots,
-                            )
-                        }
-                        AWork::Resume {
-                            mut search,
-                            perspectives,
-                            roots,
-                            rows,
-                            stride,
-                        } => {
-                            if !rows.is_empty() {
-                                let view = crate::policy::RowsView::from_slice(&rows, stride);
+            let task =
+                |gi: usize,
+                 work: AWork<P::Search<G::State>>,
+                 pins: Pins,
+                 tx: AMsgSender<P::Search<G::State>, L::Record, G::State>| {
+                    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let mut guard = slots[gi].lock().expect("slot lock");
+                        let slot: &mut SlotCtx<'_, G, P> = &mut guard;
+                        let (mut search, perspectives, mut roots) = match work {
+                            AWork::Begin => {
+                                let perspectives: Vec<usize> = (0..game.num_agents())
+                                    .filter(|&si| slot.ep.agent_active(game, si))
+                                    .collect();
+                                if perspectives.is_empty() {
+                                    return ATaskOut::Skip;
+                                }
                                 let ctx = crate::policy::SearchCtx {
                                     game,
                                     enc: encoder,
@@ -1065,143 +1043,182 @@ where
                                     perms,
                                     collect_interior,
                                 };
-                                policy.absorb(ctx, &mut search, view);
+                                let roots = vec![RootMark::Vacant; perspectives.len()];
+                                (
+                                    policy.begin_search(ctx, &slot.ep.state, &perspectives),
+                                    perspectives,
+                                    roots,
+                                )
                             }
-                            (search, perspectives, roots)
-                        }
-                        AWork::Tail { fragment } => {
-                            let reqs =
-                                tail_requests(game, policy, learner, encoder, sequential, slot);
-                            let n = reqs.len();
-                            let meta: Vec<usize> = reqs.iter().map(|(si, _)| *si).collect();
-                            let rows_in: Vec<(usize, &[f32])> =
-                                reqs.iter().map(|(si, obs)| (*si, obs.as_slice())).collect();
-                            let mut spans = Vec::new();
-                            let mut hits = Vec::new();
-                            let lookups =
+                            AWork::Resume {
+                                mut search,
+                                perspectives,
+                                roots,
+                                rows,
+                                stride,
+                            } => {
+                                if !rows.is_empty() {
+                                    let view = crate::policy::RowsView::from_slice(&rows, stride);
+                                    let ctx = crate::policy::SearchCtx {
+                                        game,
+                                        enc: encoder,
+                                        reward,
+                                        rng: &mut slot.ep.rng,
+                                        perms,
+                                        collect_interior,
+                                    };
+                                    policy.absorb(ctx, &mut search, view);
+                                }
+                                (search, perspectives, roots)
+                            }
+                            AWork::Tail { fragment } => {
+                                let meta =
+                                    tail_perspectives(game, policy, learner, sequential, slot);
+                                let n = meta.len();
+                                let mut tail_sink =
+                                    ArenaSink::new(routes, pins.clone(), mode, obs_dim);
+                                let mut scratch = Vec::new();
+                                for (pos, &si) in meta.iter().enumerate() {
+                                    crate::policy::StateSink::push_state(
+                                        &mut tail_sink,
+                                        encoder,
+                                        si,
+                                        &slot.ep.state,
+                                        pos as u32,
+                                        &mut scratch,
+                                    );
+                                }
+                                return ATaskOut::TailEmitted {
+                                    fragment,
+                                    meta,
+                                    n,
+                                    spans: tail_sink.spans,
+                                    hits: tail_sink.hits,
+                                    lookups: tail_sink.lookups,
+                                };
+                            }
+                        };
+                        let ctx = crate::policy::SearchCtx {
+                            game,
+                            enc: encoder,
+                            reward,
+                            rng: &mut slot.ep.rng,
+                            perms,
+                            collect_interior,
+                        };
+                        let mut arena_sink = ArenaSink::new(routes, pins.clone(), mode, obs_dim);
+                        let mut sink = crate::policy::RequestSink::with_backend(&mut arena_sink);
+                        let status = policy.round(ctx, &mut search, &mut sink);
+                        assert!(
+                            (!sink.is_empty()) == (status == crate::policy::RoundStatus::Pending),
+                            "round contract: Pending emits at least one request, Done emits none"
+                        );
+                        if !sink.is_empty() {
+                            let n = sink.len();
+                            let (players, obs, buffered_pos, marked) = sink.into_zc_parts();
+                            for (persp, row) in marked {
+                                let i = perspectives
+                                    .iter()
+                                    .position(|&si| si == persp)
+                                    .unwrap_or_else(|| {
+                                        panic!(
+                                            "push_root marked perspective {persp}, which is not \
+                                         among this search's requested perspectives"
+                                        )
+                                    });
+                                assert!(
+                                    matches!(roots[i], RootMark::Vacant),
+                                    "push_root marked perspective {persp} twice in one search"
+                                );
+                                roots[i] = if learn_mask[persp] {
+                                    RootMark::Row(row)
+                                } else {
+                                    RootMark::Dropped
+                                };
+                            }
+                            let ArenaSink {
+                                mut spans,
+                                mut hits,
+                                lookups,
+                                ..
+                            } = arena_sink;
+                            let rows_in: Vec<(u32, usize, &[f32])> = buffered_pos
+                                .iter()
+                                .enumerate()
+                                .map(|(bi, &pos)| {
+                                    (pos, players[bi], &obs[bi * obs_dim..(bi + 1) * obs_dim])
+                                })
+                                .collect();
+                            let buffered_lookups =
                                 classify_rows(mode, &pins, &rows_in, routes, &mut spans, &mut hits);
-                            return ATaskOut::TailEmitted {
-                                fragment,
-                                meta,
+                            return ATaskOut::Emitted {
+                                search,
+                                perspectives,
+                                roots,
                                 n,
                                 spans,
                                 hits,
-                                lookups,
+                                lookups: lookups + buffered_lookups,
                             };
                         }
-                    };
-                    let ctx = crate::policy::SearchCtx {
-                        game,
-                        enc: encoder,
-                        reward,
-                        rng: &mut slot.ep.rng,
-                        perms,
-                        collect_interior,
-                    };
-                    let mut sink = crate::policy::RequestSink::capturing_roots();
-                    let status = policy.round(ctx, &mut search, &mut sink);
-                    assert!(
-                        (!sink.is_empty()) == (status == crate::policy::RoundStatus::Pending),
-                        "round contract: Pending emits at least one request, Done emits none"
-                    );
-                    if !sink.is_empty() {
-                        let n = sink.len();
-                        let (players, obs, marked) = sink.into_parts_with_roots();
-                        for (persp, row) in marked {
-                            let i = perspectives
-                                .iter()
-                                .position(|&si| si == persp)
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "push_root marked perspective {persp}, which is not \
-                                         among this search's requested perspectives"
-                                    )
-                                });
-                            assert!(
-                                matches!(roots[i], RootMark::Vacant),
-                                "push_root marked perspective {persp} twice in one search"
-                            );
-                            roots[i] = if learn_mask[persp] {
-                                RootMark::Row(row)
-                            } else {
-                                RootMark::Dropped
-                            };
-                        }
-                        let rows_in: Vec<(usize, &[f32])> = (0..n)
-                            .map(|i| (players[i], &obs[i * obs_dim..(i + 1) * obs_dim]))
-                            .collect();
-                        let mut spans = Vec::new();
-                        let mut hits = Vec::new();
-                        let lookups =
-                            classify_rows(mode, &pins, &rows_in, routes, &mut spans, &mut hits);
-                        return ATaskOut::Emitted {
-                            search,
-                            perspectives,
-                            roots,
-                            n,
-                            spans,
-                            hits,
-                            lookups,
-                        };
-                    }
-                    let ctx = crate::policy::SearchCtx {
-                        game,
-                        enc: encoder,
-                        reward,
-                        rng: &mut slot.ep.rng,
-                        perms,
-                        collect_interior,
-                    };
-                    let results = policy.finish(ctx, search);
-                    assert_eq!(
-                        results.len(),
-                        perspectives.len(),
-                        "finish must return one evaluation per perspective"
-                    );
-                    let before = buffered_learn_steps(slot, learn_mask);
-                    let mut records: Vec<L::Record> = Vec::new();
-                    let mut tstats = CollectStats::default();
-                    let finished = process_game_tick(
-                        game,
-                        encoder,
-                        reward,
-                        policy,
-                        learner,
-                        learn_mask,
-                        sequential,
-                        results,
-                        &perspectives,
-                        roots,
-                        slot,
-                        &mut records,
-                        &mut tstats,
-                    );
-                    if finished == Some(true) {
-                        flush_records_game(
-                            &HashMap::new(),
+                        let ctx = crate::policy::SearchCtx {
                             game,
-                            learner,
+                            enc: encoder,
+                            reward,
+                            rng: &mut slot.ep.rng,
+                            perms,
+                            collect_interior,
+                        };
+                        let results = policy.finish(ctx, search);
+                        assert_eq!(
+                            results.len(),
+                            perspectives.len(),
+                            "finish must return one evaluation per perspective"
+                        );
+                        let before = buffered_learn_steps(slot, learn_mask);
+                        let mut records: Vec<L::Record> = Vec::new();
+                        let mut tstats = CollectStats::default();
+                        let finished = process_game_tick(
+                            game,
                             encoder,
+                            reward,
+                            policy,
+                            learner,
+                            learn_mask,
+                            sequential,
+                            results,
+                            &perspectives,
+                            roots,
                             slot,
                             &mut records,
                             &mut tstats,
                         );
-                    }
-                    let steps_delta =
-                        buffered_learn_steps(slot, learn_mask) as isize - before as isize;
-                    ATaskOut::Completed {
-                        records,
-                        stats: tstats,
-                        steps_delta,
-                        finished,
-                    }
-                }));
-                let out = match run {
-                    Ok(out) => out,
-                    Err(payload) => ATaskOut::Panicked(payload),
+                        if finished == Some(true) {
+                            flush_records_game(
+                                &HashMap::new(),
+                                game,
+                                learner,
+                                encoder,
+                                slot,
+                                &mut records,
+                                &mut tstats,
+                            );
+                        }
+                        let steps_delta =
+                            buffered_learn_steps(slot, learn_mask) as isize - before as isize;
+                        ATaskOut::Completed {
+                            records,
+                            stats: tstats,
+                            steps_delta,
+                            finished,
+                        }
+                    }));
+                    let out = match run {
+                        Ok(out) => out,
+                        Err(payload) => ATaskOut::Panicked(payload),
+                    };
+                    let _ = tx.send(AMsg { gi, out });
                 };
-                let _ = tx.send(AMsg { gi, out });
-            };
             let task = &task;
 
             let mut phases: Vec<SlotPhase<P::Search<G::State>>> =
@@ -1209,7 +1226,8 @@ where
             let mut pending: Vec<std::collections::HashMap<u64, PendingArena>> = (0..n_routes)
                 .map(|_| std::collections::HashMap::new())
                 .collect();
-            let mut gated: Vec<Vec<(usize, AHit)>> = (0..n_routes).map(|_| Vec::new()).collect();
+            let mut gated: Vec<Vec<(usize, AHit<G::State>)>> =
+                (0..n_routes).map(|_| Vec::new()).collect();
             let mut in_flight = 0usize;
             let mut spin_budget = SPIN_RECVS_MIN;
             let mut backlog: isize = slots
@@ -1359,7 +1377,7 @@ where
                             let seen = cache.seen_generation();
                             let mut demote: std::collections::BTreeMap<
                                 usize,
-                                Vec<(usize, u32, u128, Vec<f32>)>,
+                                Vec<(usize, u32, u128, Retained<G::State>)>,
                             > = std::collections::BTreeMap::new();
                             for (gi, hit) in gated[$route].drain(..) {
                                 if hit.gen == seen {
@@ -1368,10 +1386,11 @@ where
                                     cache.stage_promote(hit.key);
                                     deliver_hit!(gi, hit, $freed);
                                 } else {
+                                    stats.cache_demotions += 1;
                                     demote
                                         .entry(gi)
                                         .or_default()
-                                        .push((hit.route, hit.pos, hit.key, hit.row));
+                                        .push((hit.route, hit.pos, hit.key, hit.retained));
                                 }
                             }
                             for (gi, items) in demote {
@@ -1379,13 +1398,26 @@ where
                                 let txc = tx.clone();
                                 s.spawn_fifo(move |_| {
                                     let mut spans = Vec::new();
-                                    for (route, pos, key, row) in &items {
-                                        push_route_rows(
-                                            *route,
-                                            &routes[*route],
-                                            &[(*pos, *key, row.as_slice())],
-                                            &mut spans,
-                                        );
+                                    for (route, pos, key, retained) in &items {
+                                        match retained {
+                                            Retained::Row(row) => push_route_rows(
+                                                *route,
+                                                &routes[*route],
+                                                &[(*pos, *key, row.as_slice())],
+                                                &mut spans,
+                                            ),
+                                            Retained::State(state, agent) => emit_arena_row(
+                                                *route,
+                                                &routes[*route],
+                                                &mut None,
+                                                *pos,
+                                                *key,
+                                                &mut |dst| {
+                                                    encoder.encode_into(state, *agent, dst)
+                                                },
+                                                &mut spans,
+                                            ),
+                                        }
                                     }
                                     let _ = txc.send(AMsg {
                                         gi,
@@ -2213,11 +2245,17 @@ impl RouteShared {
         fresh
     }
 
-    fn replace_if(&self, old: &std::sync::Arc<RouteArena>) {
+    /// Returns the open arena after the replacement attempt (the winner's, or the
+    /// one another worker already installed).
+    fn replace_if(&self, old: &std::sync::Arc<RouteArena>) -> std::sync::Arc<RouteArena> {
         let mut open = self.open.lock().expect("route lock");
         match open.as_ref() {
-            Some(cur) if !std::sync::Arc::ptr_eq(cur, old) => {}
-            _ => *open = Some(self.fresh()),
+            Some(cur) if !std::sync::Arc::ptr_eq(cur, old) => cur.clone(),
+            _ => {
+                let fresh = self.fresh();
+                *open = Some(fresh.clone());
+                fresh
+            }
         }
     }
 }
@@ -2231,56 +2269,238 @@ struct ASpan {
     keys: Vec<u128>,
 }
 
+/// What a gated hit retains for possible demotion: the scratch row (obs-hash
+/// keys) or a cloned state plus agent (encoder keys — only hit tickets pay the
+/// clone, and demotion re-encodes through `encode_into`).
+enum Retained<S> {
+    Row(Vec<f32>),
+    State(S, usize),
+}
+
 /// A cache hit resolved at the worker: reserves nothing, parks until its route's
-/// next release point. `row` is retained so a stale hit can demote by re-emission.
-struct AHit {
+/// next release point.
+struct AHit<S> {
     route: usize,
     pos: u32,
     key: u128,
     gen: u64,
     value: std::sync::Arc<[f32]>,
-    row: Vec<f32>,
+    retained: Retained<S>,
 }
 
 type Pins = Option<std::sync::Arc<[std::sync::Arc<CacheView>]>>;
 
-/// Route rows through the pinned cache views: hits park, misses go to the arenas.
-fn classify_rows(
+fn route_of(mode: InferMode, player: usize) -> usize {
+    match mode {
+        InferMode::Shared => 0,
+        InferMode::PerPlayer => player,
+    }
+}
+
+fn obs_hash_key(mode: InferMode, player: usize, row: &[f32]) -> u128 {
+    match mode {
+        InferMode::Shared => InferCache::key(row),
+        InferMode::PerPlayer => InferCache::key_for_player(player, row),
+    }
+}
+
+/// Reserve one arena row and initialize it in place, coalescing contiguous
+/// same-arena emissions into one span.
+/// `open` caches the route's current arena so steady-state emissions take no
+/// lock; it refreshes only on a close.
+fn emit_arena_row(
+    route_idx: usize,
+    route: &RouteShared,
+    open: &mut Option<std::sync::Arc<RouteArena>>,
+    pos: u32,
+    key: u128,
+    fill: &mut dyn FnMut(&mut [f32]),
+    spans: &mut Vec<ASpan>,
+) {
+    loop {
+        let cur = match open.as_ref() {
+            Some(cur) => cur.clone(),
+            None => {
+                let cur = route.current();
+                *open = Some(cur.clone());
+                cur
+            }
+        };
+        let mut span = match cur.arena.try_reserve(1) {
+            Reserve::Full { span, .. } => span,
+            Reserve::Partial { .. } => unreachable!("single-row reservations never split"),
+            Reserve::Closed => {
+                // the retained closed Arc goes straight to replace_if: one lock
+                *open = Some(route.replace_if(&cur));
+                continue;
+            }
+        };
+        let first = span.row_range().start;
+        fill(span.zeroed());
+        span.commit();
+        match spans.last_mut() {
+            Some(last)
+                if last.route == route_idx
+                    && std::sync::Arc::ptr_eq(&last.arena, &cur)
+                    && last.first_row + last.positions.len() == first =>
+            {
+                last.positions.push(pos);
+                last.keys.push(key);
+            }
+            _ => spans.push(ASpan {
+                route: route_idx,
+                arena: cur.clone(),
+                first_row: first,
+                positions: vec![pos],
+                keys: vec![key],
+            }),
+        }
+        return;
+    }
+}
+
+/// The zero-copy engine's `StateSink`: cache identity first, then — on a miss —
+/// a reservation and a direct `encode_into`. No worker-side row copies survive
+/// on the encoder-key and cache-off paths.
+struct ArenaSink<'a, S> {
+    routes: &'a [RouteShared],
+    open: Vec<Option<std::sync::Arc<RouteArena>>>,
+    pins: Pins,
+    mode: InferMode,
+    dim: usize,
+    spans: Vec<ASpan>,
+    hits: Vec<AHit<S>>,
+    lookups: usize,
+}
+
+impl<'a, S> ArenaSink<'a, S> {
+    fn new(routes: &'a [RouteShared], pins: Pins, mode: InferMode, dim: usize) -> Self {
+        ArenaSink {
+            routes,
+            open: routes.iter().map(|_| None).collect(),
+            pins,
+            mode,
+            dim,
+            spans: Vec::new(),
+            hits: Vec::new(),
+            lookups: 0,
+        }
+    }
+}
+
+impl<S: Clone> crate::policy::StateSink<S> for ArenaSink<'_, S> {
+    fn push_state(
+        &mut self,
+        enc: &dyn StateEncoder<State = S>,
+        player: usize,
+        state: &S,
+        pos: u32,
+        scratch: &mut Vec<f32>,
+    ) {
+        let route = route_of(self.mode, player);
+        if let Some(pins) = self.pins.as_ref() {
+            let mut hasher = crate::rollout::infer_cache::CacheHasher::seeded(player);
+            if enc.cache_key(state, player, &mut hasher) {
+                let key = hasher.finish();
+                self.lookups += 1;
+                if let Some(value) = pins[route].lookup(key) {
+                    self.hits.push(AHit {
+                        route,
+                        pos,
+                        key,
+                        gen: pins[route].generation,
+                        value,
+                        retained: Retained::State(state.clone(), player),
+                    });
+                    return;
+                }
+                emit_arena_row(
+                    route,
+                    &self.routes[route],
+                    &mut self.open[route],
+                    pos,
+                    key,
+                    &mut |dst| enc.encode_into(state, player, dst),
+                    &mut self.spans,
+                );
+                return;
+            }
+            // no pre-encoding key: scratch encode, observation hashing
+            scratch.clear();
+            scratch.resize(self.dim, 0.0);
+            enc.encode_into(state, player, scratch);
+            let key = obs_hash_key(self.mode, player, scratch);
+            self.lookups += 1;
+            if let Some(value) = pins[route].lookup(key) {
+                self.hits.push(AHit {
+                    route,
+                    pos,
+                    key,
+                    gen: pins[route].generation,
+                    value,
+                    retained: Retained::Row(scratch.clone()),
+                });
+                return;
+            }
+            let row: &[f32] = scratch;
+            emit_arena_row(
+                route,
+                &self.routes[route],
+                &mut self.open[route],
+                pos,
+                key,
+                &mut |dst| dst.copy_from_slice(row),
+                &mut self.spans,
+            );
+            return;
+        }
+        emit_arena_row(
+            route,
+            &self.routes[route],
+            &mut self.open[route],
+            pos,
+            key_unused(),
+            &mut |dst| enc.encode_into(state, player, dst),
+            &mut self.spans,
+        );
+    }
+}
+
+fn key_unused() -> u128 {
+    0
+}
+
+/// Route buffered rows through the pinned cache views: hits park, misses go to
+/// the arenas.
+fn classify_rows<S>(
     mode: InferMode,
     pins: &Pins,
-    rows_in: &[(usize, &[f32])],
+    rows_in: &[(u32, usize, &[f32])],
     routes: &[RouteShared],
     spans: &mut Vec<ASpan>,
-    hits: &mut Vec<AHit>,
+    hits: &mut Vec<AHit<S>>,
 ) -> usize {
-    let route_of = |p: usize| match mode {
-        InferMode::Shared => 0,
-        InferMode::PerPlayer => p,
-    };
     let mut lookups = 0;
     let mut misses: Vec<Vec<(u32, u128, &[f32])>> = vec![Vec::new(); routes.len()];
-    for (i, (player, row)) in rows_in.iter().enumerate() {
-        let route = route_of(*player);
+    for (pos, player, row) in rows_in.iter() {
+        let route = route_of(mode, *player);
         let mut key = 0u128;
         if let Some(pins) = pins {
-            key = match mode {
-                InferMode::Shared => InferCache::key(row),
-                InferMode::PerPlayer => InferCache::key_for_player(*player, row),
-            };
+            key = obs_hash_key(mode, *player, row);
             lookups += 1;
             if let Some(value) = pins[route].lookup(key) {
                 hits.push(AHit {
                     route,
-                    pos: i as u32,
+                    pos: *pos,
                     key,
                     gen: pins[route].generation,
                     value,
-                    row: row.to_vec(),
+                    retained: Retained::Row(row.to_vec()),
                 });
                 continue;
             }
         }
-        misses[route].push((i as u32, key, row));
+        misses[route].push((*pos, key, row));
     }
     for (route, rows) in misses.iter().enumerate() {
         if !rows.is_empty() {
@@ -2349,7 +2569,7 @@ enum AWork<SE> {
 }
 
 /// `TaskOut`, except observations stay in the arenas.
-enum ATaskOut<SE, R> {
+enum ATaskOut<SE, R, S> {
     Skip,
     Emitted {
         search: SE,
@@ -2357,7 +2577,7 @@ enum ATaskOut<SE, R> {
         roots: Vec<RootMark>,
         n: usize,
         spans: Vec<ASpan>,
-        hits: Vec<AHit>,
+        hits: Vec<AHit<S>>,
         lookups: usize,
     },
     TailEmitted {
@@ -2365,7 +2585,7 @@ enum ATaskOut<SE, R> {
         meta: Vec<usize>,
         n: usize,
         spans: Vec<ASpan>,
-        hits: Vec<AHit>,
+        hits: Vec<AHit<S>>,
         lookups: usize,
     },
     DemoteEmitted {
@@ -2380,12 +2600,12 @@ enum ATaskOut<SE, R> {
     Panicked(Box<dyn std::any::Any + Send>),
 }
 
-struct AMsg<SE, R> {
+struct AMsg<SE, R, S> {
     gi: usize,
-    out: ATaskOut<SE, R>,
+    out: ATaskOut<SE, R, S>,
 }
 
-type AMsgSender<SE, R> = std::sync::mpsc::Sender<AMsg<SE, R>>;
+type AMsgSender<SE, R, S> = std::sync::mpsc::Sender<AMsg<SE, R, S>>;
 
 /// `seen` counts rows through processed messages only — never the live cursor —
 /// so the fire decision is a pure function of message order.
@@ -2744,6 +2964,36 @@ fn buffered_learn_steps<G: Game, P: Policy>(
         .filter(|&(si, _)| learn_mask[si])
         .map(|(_, steps)| steps.len())
         .sum()
+}
+
+/// The perspectives a truncation tail bootstraps, without encoding — the
+/// zero-copy path encodes them straight into arena storage.
+fn tail_perspectives<G, P, L>(
+    game: &G,
+    policy: &P,
+    learner: &L,
+    sequential: bool,
+    slot: &SlotCtx<'_, G, P>,
+) -> Vec<usize>
+where
+    G: Game + Sync,
+    G::State: Send,
+    P: Policy,
+    L: Learner<P::Evaluation>,
+{
+    if !learner.uses_episode_tail() {
+        return Vec::new();
+    }
+    let a = game.action_count();
+    let num_agents = game.num_agents();
+    let all_perspectives = (policy.evaluates_all_perspectives(sequential, num_agents)
+        && learner.value_only_evaluation(a).is_some())
+        || learner.tails_all_trajectories();
+    (0..num_agents)
+        .filter(|&si| {
+            (all_perspectives || slot.ep.agent_active(game, si)) && !slot.traj[si].is_empty()
+        })
+        .collect()
 }
 
 /// One `(player, obs)` tail-bootstrap request per learning perspective; empty when the
