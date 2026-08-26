@@ -1518,7 +1518,12 @@ where
                     ($route:expr, $id:expr) => {{
                         let ready = pending[$route].get(&$id).is_some_and(|pa| {
                             pa.arc.arena.close_info().is_some_and(|info| {
-                                info.rows == pa.seen && info.aliases as usize == pa.seen_aliases
+                                // abandoned tickets (panic before their claim message)
+                                // count toward reconciliation, never awaited
+                                info.rows == pa.seen
+                                    && info.aliases as usize
+                                        == pa.seen_aliases
+                                            + pa.arc.arena.aliases_abandoned() as usize
                             })
                         });
                         if ready {
@@ -2395,6 +2400,19 @@ fn stage_key(cur: &std::sync::Arc<RouteArena>, key: u128, row: u32) {
     }
 }
 
+/// One staged-map lock for a whole committed run.
+fn stage_keys(cur: &std::sync::Arc<RouteArena>, first_row: u32, rows: &[(u32, u128, &[f32])]) {
+    if rows.iter().all(|&(_, key, _)| key == 0) {
+        return;
+    }
+    let mut staged = cur.staged.lock().expect("staged lock");
+    for (j, &(_, key, _)) in rows.iter().enumerate() {
+        if key != 0 {
+            staged.entry(key).or_insert(first_row + j as u32);
+        }
+    }
+}
+
 /// What a gated hit retains for possible demotion: the scratch row (obs-hash
 /// keys) or a cloned state plus agent (encoder keys — only hit tickets pay the
 /// clone, and demotion re-encodes through `encode_into`).
@@ -2657,48 +2675,78 @@ fn push_route_rows(
     spans: &mut Vec<ASpan>,
     aliases: &mut Vec<AAlias>,
 ) {
+    let keyed = rows.iter().any(|&(_, key, _)| key != 0);
     let mut next = 0;
+    let mut open: Option<std::sync::Arc<RouteArena>> = None;
     while next < rows.len() {
-        let cur = route.current();
-        if try_stage_alias(route_idx, &cur, rows[next].1, rows[next].0, aliases) {
-            next += 1;
-            continue;
-        }
-        let (mut span, closes) = match cur.arena.try_reserve(1) {
+        let cur = match open.as_ref() {
+            Some(cur) => cur.clone(),
+            None => {
+                let cur = route.current();
+                open = Some(cur.clone());
+                cur
+            }
+        };
+        // Alias-drain leading duplicates, then bound a run of rows that reserve:
+        // keyless batches take the whole slice without touching the staged map.
+        let run_end = if !keyed {
+            rows.len()
+        } else {
+            if try_stage_alias(route_idx, &cur, rows[next].1, rows[next].0, aliases) {
+                next += 1;
+                continue;
+            }
+            let staged = cur.staged.lock().expect("staged lock");
+            let mut run_keys = std::collections::HashSet::new();
+            if rows[next].1 != 0 {
+                run_keys.insert(rows[next].1);
+            }
+            let mut end = next + 1;
+            while end < rows.len() {
+                let key = rows[end].1;
+                if key != 0 && (staged.contains_key(&key) || !run_keys.insert(key)) {
+                    break;
+                }
+                end += 1;
+            }
+            end
+        };
+        let (mut span, closes) = match cur.arena.try_reserve(run_end - next) {
             Reserve::Full { span, closed } => (span, closed.is_some()),
             Reserve::Partial { span, .. } => (span, true),
             Reserve::Closed => {
-                route.replace_if(&cur);
+                open = Some(route.replace_if(&cur));
                 continue;
             }
         };
+        let take = span.rows();
         let first = span.row_range().start;
-        let (pos, key, row) = rows[next];
-        span.push_row(row);
-        span.commit();
-        stage_key(&cur, key, first as u32);
-        match spans.last_mut() {
-            Some(last)
-                if last.route == route_idx
-                    && std::sync::Arc::ptr_eq(&last.arena, &cur)
-                    && last.first_row + last.positions.len() == first =>
-            {
-                last.positions.push(pos);
-                last.keys.push(key);
-            }
-            _ => spans.push(ASpan {
-                route: route_idx,
-                arena: cur.clone(),
-                first_row: first,
-                positions: vec![pos],
-                keys: vec![key],
-            }),
+        let mut positions = Vec::with_capacity(take);
+        let mut keys = Vec::with_capacity(take);
+        for (pos, key, row) in &rows[next..next + take] {
+            span.push_row(row);
+            positions.push(*pos);
+            keys.push(*key);
         }
-        next += 1;
+        span.commit();
+        if keyed {
+            stage_keys(&cur, first as u32, &rows[next..next + take]);
+        }
+        spans.push(ASpan {
+            route: route_idx,
+            arena: cur.clone(),
+            first_row: first,
+            positions,
+            keys,
+        });
+        next += take;
         // A close on the task's FINAL span defers replacement to the next
         // requester, so the sealed arena's fire never waits on an allocation.
-        if closes && next < rows.len() {
-            route.replace_if(&cur);
+        if closes {
+            open = None;
+            if next < rows.len() {
+                open = Some(route.replace_if(&cur));
+            }
         }
     }
 }
