@@ -47,14 +47,13 @@ mechanisms that keep it correct and live.
 ```text
 CALLER-OWNED PYTHON
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ Training loop calls Engine.collect(...) — the calling thread enters Rust │
-│ and becomes the SCHEDULER for the whole window (GIL released while it    │
-│ waits; reacquired only to run the infer callback)                        │
+│ Engine.collect(...) runs the SCHEDULER on the calling thread;            │
+│ collect_stream runs it on a background Rust thread                       │
 └────────────────────────────────────┬─────────────────────────────────────┘
 ═══════════════════════ RUST / PYTHON BOUNDARY ═════════════════════════════
                                      ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ SCHEDULER — one thread, METADATA ONLY (it never touches row bytes)       │
+│ SCHEDULER — one thread; observation messages carry METADATA ONLY        │
 │ span accounting · batch firing · row routing · cache publication ·       │
 │ liveness ladder · floor accounting · record collection · respawns        │
 └───────┬────────────────────────────▲─────────────────────▲───────────────┘
@@ -69,12 +68,16 @@ CALLER-OWNED PYTHON
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
+Synchronous `collect` retains the GIL for the whole window. `collect_stream`
+runs the scheduler without the GIL on its background thread and acquires it
+only for the inference callback.
+
 `n_games` is the number of episode slots, not the parallelism: slots hold state,
 threads do work, and the scheduler keeps every idle thread fed with whichever
 slot is ready next. A route is one inference destination — one queue for a
 shared callback, one per player for per-player callbacks — and each route owns
-a chain of arenas: fixed-capacity, contiguous `f32` write buffers sized by
-`batch_size`.
+a chain of arenas: fixed-capacity, contiguous `f32` write buffers sized up to
+`batch_size`, subject to the engine's row and byte bounds.
 
 ## One decision, step by step
 
@@ -90,9 +93,7 @@ a chain of arenas: fixed-capacity, contiguous `f32` write buffers sized by
                     will be reused)
       otherwise     reserve a span in the
                     route's open arena and
-                    encode INTO it (root
-                    rows: one copy; state
-                    rows: zero copies)
+                    encode or copy INTO it
  2. TaskOut::Emitted ─────────────────────▶ 3. account spans/hits/aliases; the
     span positions, hit tickets, alias         message carries NO row bytes. A
     claims; slot parks as Blocked              reservation that filled the
@@ -102,7 +103,8 @@ a chain of arenas: fixed-capacity, contiguous `f32` write buffers sized by
                                                FIRE: seal its committed rows
                                                as an owned Vec<f32> (no copy),
                                                move it into NumPy (no copy),
-                                               take the GIL, call infer
+                                               call infer (the stream worker
+                                               acquires the GIL here)
                                             5. route prediction rows back to
                                                each blocked slot by position;
                                                alias rows resolve from their
@@ -159,6 +161,12 @@ rows. The cache is split by role: workers only ever read immutable snapshot
 views pinned at task spawn; the scheduler owns all mutation and publishes a new
 copy-on-write view once per fire. There are no locks on the lookup path.
 
+A state-backed request with a pre-encoding `cache_key` can look up first and
+encode a miss directly into the arena. Without one, the worker encodes into
+scratch storage to hash the observation, then copies a miss into the arena.
+With caching disabled, state-backed rows also encode directly. A root-row miss
+costs one copy because the original row is retained for the training record.
+
 A hit does not answer immediately — it parks as a *gated ticket* that releases
 at its route's next fire (or at quiescence). Gating pins each hit to the same
 weights-generation discipline as real inference: a ticket that outlives a
@@ -185,26 +193,3 @@ coming. Three rungs guarantee progress:
   workloads).
 - **Quiescence** — with nothing in flight, every open buffer is closed, fired,
   and released; this is also the terminal drain that ends the window.
-
-## Where the time goes
-
-The scheduler performs no per-byte work — every observation row is written once
-on a worker and read next by the inference callback. Root observation rows cost
-one worker-side copy (the row also becomes the training record); state-keyed
-rows encode directly into arena storage and cost zero. What remains on the
-scheduler is per-row constant work (span accounting, routing) and the
-callback itself.
-
-Measured against the previous copying scheduler (Apple M1 Max, interleaved
-same-session pairs, decisions/s):
-
-| workload | 1 thread | 10 threads |
-| --- | --- | --- |
-| `car_racing` pixels, PPO | 1.02x | 1.70x |
-| `snake` vec, PPO | 1.08x | 1.57x |
-| `connect4` AlphaZero + cache, 2 ms callback | — | 2.06x |
-
-Pixel rows no longer serialize on the scheduler (the old design's known scaling
-limit); at one thread the encoder itself dominates, so the gain appears as
-thread count grows. Small-row games gain from the per-row fixed costs the
-streaming path removed.
