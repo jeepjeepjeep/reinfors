@@ -123,7 +123,9 @@ GAMES: dict[str, GameInfo] = {
         "Gymnasium",
         False,
         ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero", "ppo"),
-        "Two-stage fetch-and-deliver task on slippery ground; exercises mid-episode chance.",
+        "Two-stage fetch-and-deliver task on slippery ground; exercises mid-episode chance. "
+        "The timeout reward term reaches Engine-collected records only; the Gymnasium "
+        "surface signals truncation via `truncated` and omits it.",
     ),
     "car_racing": GameInfo(
         "CarRacing",
