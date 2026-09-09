@@ -133,7 +133,7 @@ impl DeliveryGrid {
 
     /// Whether moves pass through the slip roll at all.
     fn slippery(&self) -> bool {
-        self.p_slip > 0.0
+        self.p_slip / 2.0 > 0.0
     }
 
     fn in_grid(&self, (r, c): Pos) -> bool {
@@ -285,9 +285,18 @@ impl Game for DeliveryGrid {
             state.pending.is_some() && self.slippery(),
             "chance only at birth or a slip roll"
         );
+        if self.p_slip == 1.0 {
+            return ChanceDist::Uniform(2);
+        }
         // Outcome 0 keeps the intended heading; 1 and 2 are the two perpendicular deflections.
         let half = self.p_slip / 2.0;
-        ChanceDist::Weighted(vec![1.0 - self.p_slip, half, half])
+        let weights = vec![1.0 - self.p_slip, half, half];
+        debug_assert!(
+            weights.iter().all(|&w| w > 0.0),
+            "zero-weight slip outcome at p_slip={}",
+            self.p_slip
+        );
+        ChanceDist::Weighted(weights)
     }
 
     fn apply_chance_node(
@@ -308,6 +317,11 @@ impl Game for DeliveryGrid {
             );
         }
         let intended = usize::from(state.pending.expect("slip roll requires a pending action"));
+        let outcome = if self.p_slip == 1.0 {
+            outcome + 1
+        } else {
+            outcome
+        };
         let (action, slipped) = if outcome == 0 {
             (intended, false)
         } else {
@@ -579,13 +593,42 @@ mod tests {
                 .unwrap()
                 .collect()
         };
-        for (p, expected) in [(0.3, [0.7, 0.15, 0.15]), (1.0, [0.0, 0.5, 0.5])] {
+        for (p, expected) in [
+            (0.3, [0.7, 0.15, 0.15]),
+            (f64::MIN_POSITIVE, [1.0, 0.0, 0.0]),
+        ] {
             let got = probs(p);
             assert_eq!(got.len(), 3);
+            assert!(got.iter().all(|&g| g > 0.0), "p_slip={p}: {got:?}");
             for (g, e) in got.iter().zip(expected) {
                 assert!((g - e).abs() < 1e-12, "p_slip={p}: {got:?}");
             }
         }
+    }
+
+    #[test]
+    fn certain_slip_enumerates_only_the_two_deflections() {
+        let g = grid(1.0);
+        let s = pending((1, 1), false, RIGHT);
+        match g.chance_node(&s) {
+            ChanceDist::Uniform(n) => assert_eq!(n, 2),
+            other => panic!("certain slip must be uniform over the deflections, got {other:?}"),
+        }
+        let landed: Vec<Pos> = (0..2)
+            .map(|o| g.apply_chance_node(&s, o).next_state.pos)
+            .collect();
+        assert_eq!(
+            landed,
+            vec![(0, 1), (2, 1)],
+            "outcomes must map to UP/DOWN, never RIGHT"
+        );
+    }
+
+    #[test]
+    fn unrepresentably_small_p_slip_resolves_moves_directly() {
+        let g = grid(5e-324);
+        let t = g.step(&at((1, 1), false), &[RIGHT]);
+        assert_eq!(t.next_state, at((1, 2), false));
     }
 
     #[test]
@@ -828,7 +871,6 @@ mod tests {
         let params = EngineParams {
             n_games: 4,
             seed: 0,
-            n_groups: 1,
             ..Default::default()
         };
         let mut engine = Engine::new(
@@ -858,7 +900,6 @@ mod tests {
         let params = EngineParams {
             n_games: 3,
             seed: 0,
-            n_groups: 1,
             ..Default::default()
         };
         let mut engine = Engine::new(
