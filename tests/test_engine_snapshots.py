@@ -35,6 +35,18 @@ def _mk(family: str) -> tuple[rf.Engine, Any]:
             n_threads=1,
         )
         return e, lambda obs: np.full((obs.shape[0], 2, 1352), 0.1)
+    if family == "delivery":
+        e = rf.Engine(
+            rf.games.Delivery(
+                size=3, parcel_row=0, parcel_col=1, dropoff_row=2, dropoff_col=2, p_slip=0.3, max_ticks=20
+            ),
+            rf.Reward(step=-0.01, pickup=0.3, deliver=1.0, timeout=-0.5),
+            rf.policies.EpsilonGreedyQ(epsilon=0.3),
+            rf.learners.Dqn(),
+            n_games=2,
+            seed=7,
+        )
+        return e, lambda obs: np.zeros((obs.shape[0], 1, 4))
     e = rf.Engine(
         rf.games.Snake(grid_size=6, initial_length=2, food=2, max_ticks=30),
         rf.Reward(food=1.0, loss=-5.0),
@@ -57,7 +69,7 @@ def _sig(e: rf.Engine, infer: Any, n: int) -> dict[str, bytes]:
     }
 
 
-@pytest.mark.parametrize("family", ["az", "dqn", "treestrap"])
+@pytest.mark.parametrize("family", ["az", "dqn", "treestrap", "delivery"])
 def test_restore_makes_continued_collection_record_exact(family: str) -> None:
     engine, infer = _mk(family)
     _sig(engine, infer, 60)  # advance well into collection (partial trajectories buffered)
