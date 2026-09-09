@@ -45,6 +45,7 @@ def _mk(family: str) -> tuple[rf.Engine, Any]:
             rf.learners.Dqn(),
             n_games=2,
             seed=7,
+            n_threads=1,
         )
         return e, lambda obs: np.zeros((obs.shape[0], 1, 4))
     e = rf.Engine(
