@@ -607,6 +607,115 @@ mod tests {
     }
 
     #[test]
+    fn timeout_rewards_reach_engine_records_and_delivery_at_the_horizon_skips_them() {
+        let money = DeliveryReward {
+            step: 0.5,
+            pickup: 2.0,
+            deliver: 8.0,
+            slip: 0.0,
+            timeout: 32.0,
+        };
+        let run = |max_ticks: usize, infer: fn(&[f32]) -> Vec<f64>| -> Vec<f64> {
+            let mut engine = Engine::new(
+                DeliveryGrid {
+                    size: 2,
+                    parcel: (0, 1),
+                    dropoff: (1, 1),
+                    p_slip: 0.0,
+                    max_ticks: Some(max_ticks),
+                },
+                Box::new(DeliveryPlanes {
+                    size: 2,
+                    parcel: (0, 1),
+                    dropoff: (1, 1),
+                }),
+                Box::new(money),
+                EpsilonGreedyQ::new(1, 0.0),
+                Dqn::new(1, 1.0, 1, 0.95),
+                EngineParams {
+                    n_games: 4,
+                    seed: 0,
+                    ..Default::default()
+                },
+            );
+            let (records, _) = engine.collect(40, move |o: Vec<f32>, n: usize| {
+                let dim = o.len() / n;
+                (0..n)
+                    .flat_map(|i| infer(&o[i * dim..(i + 1) * dim]))
+                    .collect()
+            });
+            records.iter().map(|t| t.reward).collect()
+        };
+        fn go_right(_obs: &[f32]) -> Vec<f64> {
+            vec![0.0, 0.0, 0.0, 1.0]
+        }
+        let rewards = run(1, go_right);
+        assert!(
+            rewards.contains(&34.5),
+            "pickup on the truncating tick stacks with timeout: {rewards:?}"
+        );
+        assert!(rewards.contains(&32.5), "{rewards:?}");
+        assert!(
+            rewards.iter().all(|&r| r == 34.5 || r == 32.5),
+            "{rewards:?}"
+        );
+        fn right_then_down(obs: &[f32]) -> Vec<f64> {
+            if obs[4..8].iter().sum::<f32>() == 0.0 {
+                vec![0.0, 1.0, 0.0, 0.0]
+            } else {
+                vec![0.0, 0.0, 0.0, 1.0]
+            }
+        }
+        let rewards = run(2, right_then_down);
+        assert!(
+            rewards.contains(&8.5),
+            "delivery exactly at the horizon pays deliver, not timeout: {rewards:?}"
+        );
+        assert!(rewards.contains(&2.5), "{rewards:?}");
+        assert!(rewards.contains(&32.5), "{rewards:?}");
+        assert!(!rewards.contains(&40.5), "{rewards:?}");
+    }
+
+    #[test]
+    fn shallow_chance_values_are_exact_at_both_slip_endpoints() {
+        let flat = DeliveryReward {
+            step: 0.0,
+            pickup: 0.0,
+            deliver: 1.0,
+            slip: 0.0,
+            timeout: 0.0,
+        };
+        let shallow = SearchConfig {
+            max_depth: 1,
+            ..cfg(ChanceMode::ExpandAll)
+        };
+        let heads = |p_slip: f64| -> Vec<Vec<f64>> {
+            let g = grid(p_slip);
+            let results = search_many(
+                &g,
+                &enc(),
+                &flat,
+                &shallow,
+                vec![(at((2, 0), true), 0)],
+                false,
+                0,
+                zero_infer,
+            );
+            results[0].0.clone()
+        };
+        for (p_slip, expected) in [
+            (1.0, [0.0, 0.0, 0.5, 0.5]),
+            (0.25, [0.0, 0.75, 0.125, 0.125]),
+        ] {
+            for head in heads(p_slip) {
+                for (action, e) in expected.iter().enumerate() {
+                    assert!((head[action] - e).abs() < 1e-9, "p_slip={p_slip}: {head:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn certain_slip_enumerates_only_the_two_deflections() {
         let g = grid(1.0);
         let s = pending((1, 1), false, RIGHT);

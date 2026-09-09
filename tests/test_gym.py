@@ -17,6 +17,10 @@ def _gridworld() -> object:
     return rf.games.GridWorld(size=6, max_ticks=50)
 
 
+def _delivery() -> object:
+    return rf.games.Delivery(size=4, p_slip=0.2, max_ticks=30)
+
+
 def _snake() -> object:
     return rf.games.Snake(grid_size=8, initial_length=3, food=1, max_ticks=50)
 
@@ -26,6 +30,28 @@ def test_gymnasium_env_conforms_to_the_api() -> None:
 
     env = gym.gymnasium_env(_gridworld(), rf.Reward(goal=1.0, step=-0.01))
     check_env(env.unwrapped, skip_render_check=True)
+
+
+def test_delivery_gymnasium_env_conforms_to_the_api() -> None:
+    from gymnasium.utils.env_checker import check_env
+
+    env = gym.gymnasium_env(_delivery(), rf.Reward(deliver=1.0, step=-0.01))
+    check_env(env.unwrapped, skip_render_check=True)
+
+
+def test_delivery_truncation_signals_without_the_timeout_reward() -> None:
+    env = gym.gymnasium_env(
+        rf.games.Delivery(size=5, parcel_row=0, parcel_col=4, dropoff_row=4, dropoff_col=0, p_slip=0.0, max_ticks=3),
+        rf.Reward(step=-0.01, timeout=-5.0),
+    )
+    env.reset(seed=0)
+    flags = []
+    for _ in range(3):
+        _, reward, terminated, truncated, _ = env.step(0)
+        assert not terminated
+        assert reward == pytest.approx(-0.01), "the timeout term must not reach the Gymnasium surface"
+        flags.append(truncated)
+    assert flags == [False, False, True]
 
 
 def test_gymnasium_episode_runs_to_a_terminal_or_the_time_limit() -> None:
