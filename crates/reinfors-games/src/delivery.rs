@@ -354,20 +354,37 @@ impl ActionView for DeliveryPlanes {}
 impl StateEncoder for DeliveryPlanes {
     type State = DeliveryState;
 
-    fn encode(&self, state: &DeliveryState, _agent: usize) -> Vec<f32> {
+    fn encode(&self, state: &DeliveryState, agent: usize) -> Vec<f32> {
+        let g = self.size as usize;
+        let mut obs = vec![0.0f32; N_CHANNELS * g * g];
+        self.encode_into(state, agent, &mut obs);
+        obs
+    }
+
+    fn encode_into(&self, state: &DeliveryState, _agent: usize, dst: &mut [f32]) {
         debug_assert!(
             state.pos != UNBORN && state.pending.is_none(),
             "transient chance states are never observed"
         );
+        dst.fill(0.0);
         let g = self.size as usize;
-        let mut obs = vec![0.0f32; N_CHANNELS * g * g];
         let at = |(r, c): Pos| (r as usize) * g + (c as usize);
-        obs[at(state.pos)] = 1.0;
+        dst[at(state.pos)] = 1.0;
         if !state.carrying {
-            obs[g * g + at(self.parcel)] = 1.0;
+            dst[g * g + at(self.parcel)] = 1.0;
         }
-        obs[2 * g * g + at(self.dropoff)] = 1.0;
-        obs
+        dst[2 * g * g + at(self.dropoff)] = 1.0;
+    }
+
+    fn cache_key(
+        &self,
+        state: &DeliveryState,
+        _perspective: usize,
+        hasher: &mut reinfors_core::CacheHasher,
+    ) -> bool {
+        hasher.write_u64(((state.pos.0 as u32 as u64) << 32) | state.pos.1 as u32 as u64);
+        hasher.write_u8(u8::from(state.carrying));
+        true
     }
 
     fn obs_shape(&self) -> (usize, usize, usize) {
@@ -713,6 +730,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn encode_into_matches_encode_and_cache_keys_separate_distinct_observations() {
+        let e = enc();
+        let mut states = Vec::new();
+        for r in 0..4 {
+            for c in 0..4 {
+                for carrying in [false, true] {
+                    states.push(at((r, c), carrying));
+                }
+            }
+        }
+        let mut keys = std::collections::HashSet::new();
+        for s in &states {
+            let row = e.encode(s, 0);
+            let mut dst = vec![9.0f32; row.len()];
+            e.encode_into(s, 0, &mut dst);
+            assert_eq!(row, dst, "{s:?}");
+            let mut h = reinfors_core::CacheHasher::seeded(0);
+            assert!(e.cache_key(s, 0, &mut h));
+            keys.insert(h.finish());
+        }
+        assert_eq!(
+            keys.len(),
+            states.len(),
+            "distinct observations must key apart"
+        );
     }
 
     #[test]
