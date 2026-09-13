@@ -178,6 +178,22 @@ class GameHandle:
         max_ticks: int | None = ...,
         encoder: EncoderHandle | None = ...,
     ) -> GameHandle: ...
+    # Fetch the parcel, then carry it to the dropoff. Defaults place them in opposite corners,
+    # derived from `size`; explicit coordinates must lie inside the grid and must differ.
+    # `p_slip` (in [0, 1]) is the chance a move is deflected ninety degrees, split evenly
+    # between the two sides; 0 removes the mid-episode chance node entirely. Reward keys:
+    # step/pickup/deliver/slip/timeout (defaults 0/0/1/0/0).
+    @staticmethod
+    def Delivery(
+        size: int = ...,
+        parcel_row: int | None = ...,
+        parcel_col: int | None = ...,
+        dropoff_row: int | None = ...,
+        dropoff_col: int | None = ...,
+        p_slip: float = ...,
+        max_ticks: int | None = ...,
+        encoder: EncoderHandle | None = ...,
+    ) -> GameHandle: ...
     @staticmethod
     def CarRacing(
         lap_complete_percent: float = ...,
@@ -227,6 +243,8 @@ class EncoderHandle:
     def LeducPoker() -> EncoderHandle: ...
     @staticmethod
     def GridWorld() -> EncoderHandle: ...
+    @staticmethod
+    def Delivery() -> EncoderHandle: ...
     @staticmethod
     def CarRacingPixels() -> EncoderHandle: ...
     @staticmethod
