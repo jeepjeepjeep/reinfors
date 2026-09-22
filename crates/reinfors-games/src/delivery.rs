@@ -366,8 +366,13 @@ impl StateEncoder for DeliveryPlanes {
             state.pos != UNBORN && state.pending.is_none(),
             "transient chance states are never observed"
         );
-        dst.fill(0.0);
         let g = self.size as usize;
+        assert_eq!(
+            dst.len(),
+            N_CHANNELS * g * g,
+            "delivery observation row length mismatch"
+        );
+        dst.fill(0.0);
         let at = |(r, c): Pos| (r as usize) * g + (c as usize);
         dst[at(state.pos)] = 1.0;
         if !state.carrying {
@@ -382,6 +387,7 @@ impl StateEncoder for DeliveryPlanes {
         _perspective: usize,
         hasher: &mut reinfors_core::CacheHasher,
     ) -> bool {
+        // Size, parcel and dropoff are fixed by the encoder for this engine's cache lifetime.
         hasher.write_u64(((state.pos.0 as u32 as u64) << 32) | state.pos.1 as u32 as u64);
         hasher.write_u8(u8::from(state.carrying));
         true
@@ -758,6 +764,21 @@ mod tests {
             states.len(),
             "distinct observations must key apart"
         );
+    }
+
+    #[test]
+    fn encode_into_rejects_short_and_oversized_rows_before_writing() {
+        let e = enc();
+        let state = at((1, 1), false);
+        let dim = N_CHANNELS * e.size as usize * e.size as usize;
+        for len in [dim - 1, dim + 1] {
+            let mut dst = vec![9.0; len];
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                e.encode_into(&state, 0, &mut dst);
+            }));
+            assert!(result.is_err());
+            assert!(dst.iter().all(|&value| value == 9.0));
+        }
     }
 
     #[test]

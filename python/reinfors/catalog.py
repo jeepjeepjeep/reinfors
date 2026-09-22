@@ -190,7 +190,9 @@ GAMES: dict[str, GameInfo] = {
         "PettingZoo Parallel",
         True,
         ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero", "ppo"),
-        "Simultaneous multiplayer game with dynamic bodies and explicit respawn chance.",
+        "Simultaneous multiplayer game with dynamic bodies and explicit respawn chance. "
+        "The survival reward term reaches Engine-collected records only; the PettingZoo "
+        "Parallel surface signals truncation via `truncations` and omits it.",
     ),
     "texas_holdem": GameInfo(
         "Texas Hold'em",

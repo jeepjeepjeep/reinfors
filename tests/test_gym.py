@@ -76,6 +76,21 @@ def test_pettingzoo_parallel_env_conforms_to_the_api() -> None:
     parallel_api_test(env, num_cycles=200)
 
 
+def test_snake_parallel_truncation_signals_without_the_survival_reward() -> None:
+    pytest.importorskip("pettingzoo")
+    env = gym.parallel_env(
+        rf.games.Snake(grid_size=8, initial_length=3, food=1, max_ticks=1),
+        rf.Reward(step=-0.01, survival=5.0),
+    )
+    env.reset(seed=0)
+    agents = env.agents.copy()
+    _, rewards, terminations, truncations, _ = env.step(dict.fromkeys(agents, 0))
+    assert all(not terminations[a] for a in agents)
+    assert all(truncations[a] for a in agents)
+    assert all(rewards[a] == pytest.approx(-0.01) for a in agents)
+    assert env.agents == []
+
+
 def test_pettingzoo_parallel_infos_carry_the_action_mask() -> None:
     pytest.importorskip("pettingzoo")
     env = gym.parallel_env(_snake(), rf.Reward(food=1.0, loss=-1.0))
