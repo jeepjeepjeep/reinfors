@@ -10,6 +10,7 @@ Game rules, rewards and encoders are separate components. The table describes th
 | Chess | 2 | Sequential | No | Perfect | AlphaZero 8x8x73 | Selectable fixed CHW encoder | `win`=1, `loss`=-1, `draw`=0 | PettingZoo AEC |
 | Connect 4 | 2 | Sequential | No | Perfect | 7 columns | Fixed CHW tensor | `win`=1, `loss`=-1, `draw`=0 | PettingZoo AEC |
 | GridWorld | 1 | Sequential | No | Perfect | 4 directions | Fixed CHW tensor | `step`=0, `goal`=1 | Gymnasium |
+| Delivery | 1 | Sequential | Start cell (root) and a per-move slip roll | Perfect | 4 directions | Fixed CHW tensor | `step`=0, `pickup`=0, `deliver`=1, `slip`=0, `timeout`=0 | Gymnasium |
 | CarRacing | 1 | Sequential | Track-generation seed (root only) | Perfect | 5 discrete controls | Rendered CHW pixels (3, 96, 96) | `tile`=1000, `step`=-0.1, `off_playfield`=-100 | None (withheld until the HWC adapter presentation lands) |
 | Kuhn poker | 2-10 | Sequential | Card deal | Imperfect | Pass / bet | Fixed information-state tensor | `scale`=1 | PettingZoo AEC |
 | Leduc poker | 2 | Sequential | Card deal | Imperfect | Fold / call / raise | Fixed information-state tensor | `scale`=1 | PettingZoo AEC |
@@ -42,6 +43,7 @@ obs_shape = game.observation_space().shape  # (19, 8, 8)
 | KuhnPoker | Kuhn poker | (3 * players, 1, 1); (6, 1, 1) by default | `rf.encoders.KuhnPoker()` | Private card and public betting-history information state. |
 | LeducPoker | Leduc poker | (21, 1, 1) | `rf.encoders.LeducPoker()` | Private/public cards and two-round betting information state. |
 | GridWorld | GridWorld | (2, size, size); (2, 5, 5) by default | `rf.encoders.GridWorld()` | Agent-position and goal planes. |
+| Delivery | Delivery | (3, size, size); (3, 5, 5) by default | `rf.encoders.Delivery()` | Agent, parcel and dropoff planes; the parcel plane empties while the parcel is carried. |
 | CarRacingPixels | CarRacing | (3, 96, 96) | `rf.encoders.CarRacingPixels()` | Rendered top-down frame, raw 0-255 values, channel-major (gym renders HWC). |
 | CarRacingVec | CarRacing | (1, 1, 21) | `rf.encoders.CarRacingVec()` | Diagnostic pose/velocity/wheel/progress vector; renderer-free training and physics-vs-visual failure isolation. |
 

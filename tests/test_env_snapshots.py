@@ -13,6 +13,7 @@ GAMES = {
     "backgammon": lambda: rf.games.Backgammon(max_ticks=60),
     "snake": lambda: rf.games.Snake(grid_size=6, initial_length=2, food=2, max_ticks=40),
     "gridworld": lambda: rf.games.GridWorld(size=5),
+    "delivery": lambda: rf.games.Delivery(size=5, p_slip=0.3),
 }
 
 

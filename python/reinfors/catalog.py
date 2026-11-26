@@ -111,6 +111,22 @@ GAMES: dict[str, GameInfo] = {
         ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero", "ppo"),
         "Small single-agent environment for checking basic training and integration loops.",
     ),
+    "delivery": GameInfo(
+        "Delivery",
+        "1",
+        "Sequential",
+        "Start cell (root) and a per-move slip roll",
+        "Perfect",
+        "4 directions",
+        "Fixed CHW tensor",
+        (("step", 0.0), ("pickup", 0.0), ("deliver", 1.0), ("slip", 0.0), ("timeout", 0.0)),
+        "Gymnasium",
+        False,
+        ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero", "ppo"),
+        "Two-stage fetch-and-deliver task on slippery ground; exercises mid-episode chance. "
+        "The timeout reward term reaches Engine-collected records only; the Gymnasium "
+        "surface signals truncation via `truncated` and omits it.",
+    ),
     "car_racing": GameInfo(
         "CarRacing",
         "1",
@@ -174,7 +190,9 @@ GAMES: dict[str, GameInfo] = {
         "PettingZoo Parallel",
         True,
         ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero", "ppo"),
-        "Simultaneous multiplayer game with dynamic bodies and explicit respawn chance.",
+        "Simultaneous multiplayer game with dynamic bodies and explicit respawn chance. "
+        "The survival reward term reaches Engine-collected records only; the PettingZoo "
+        "Parallel surface signals truncation via `truncations` and omits it.",
     ),
     "texas_holdem": GameInfo(
         "Texas Hold'em",
@@ -271,6 +289,13 @@ ENCODER_INFO: dict[str, EncoderInfo] = {
         "(2, size, size); (2, 5, 5) by default",
         "rf.encoders.GridWorld()",
         "Agent-position and goal planes.",
+    ),
+    "delivery": EncoderInfo(
+        "Delivery",
+        "Delivery",
+        "(3, size, size); (3, 5, 5) by default",
+        "rf.encoders.Delivery()",
+        "Agent, parcel and dropoff planes; the parcel plane empties while the parcel is carried.",
     ),
     "car_racing_pixels": EncoderInfo(
         "CarRacingPixels",
