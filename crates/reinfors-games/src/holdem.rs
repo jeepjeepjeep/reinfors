@@ -1215,11 +1215,11 @@ mod encoder_tests {
                 let idx = card_suit(c) as usize * 13 + card_rank(c) as usize;
                 assert_eq!(obs[idx], 1.0);
             }
-            for other in 0..3 {
+            for (other, hole) in s.hole.iter().enumerate().take(3) {
                 if other == agent {
                     continue;
                 }
-                for &c in &s.hole[other] {
+                for &c in hole {
                     let idx = card_suit(c) as usize * 13 + card_rank(c) as usize;
                     if !own.contains(&c) {
                         assert_eq!(obs[idx], 0.0, "hidden card leaked");

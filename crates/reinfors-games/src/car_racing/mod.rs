@@ -410,12 +410,12 @@ impl StateEncoder for CarRacingVec {
         out.push(v.x / (2.0 * TRACK_RAD as f32));
         out.push(v.y / (2.0 * TRACK_RAD as f32));
         out.push(hull.angvel());
-        for i in 0..4 {
-            out.push((l.car.ctl[i].omega / 100.0) as f32);
-            out.push(f32::from(u8::from(l.car.ctl[i].on_road)));
+        for wheel in &l.car.ctl {
+            out.push((wheel.omega / 100.0) as f32);
+            out.push(f32::from(u8::from(wheel.on_road)));
         }
-        for i in 0..2 {
-            out.push(l.car.ctl[i].steer as f32);
+        for wheel in l.car.ctl.iter().take(2) {
+            out.push(wheel.steer as f32);
         }
         out.push(l.visited_count as f32 / l.track.tiles.len().max(1) as f32);
         out.push(l.tick as f32 / 1000.0);
