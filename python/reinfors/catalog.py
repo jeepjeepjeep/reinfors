@@ -123,7 +123,9 @@ GAMES: dict[str, GameInfo] = {
         "Gymnasium",
         False,
         ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero", "ppo"),
-        "Two-stage fetch-and-deliver task on slippery ground; exercises mid-episode chance.",
+        "Two-stage fetch-and-deliver task on slippery ground; exercises mid-episode chance. "
+        "The timeout reward term reaches Engine-collected records only; the Gymnasium "
+        "surface signals truncation via `truncated` and omits it.",
     ),
     "car_racing": GameInfo(
         "CarRacing",
@@ -188,7 +190,9 @@ GAMES: dict[str, GameInfo] = {
         "PettingZoo Parallel",
         True,
         ("dqn", "treestrap_expectimax", "treestrap_mcts", "alphazero", "ppo"),
-        "Simultaneous multiplayer game with dynamic bodies and explicit respawn chance.",
+        "Simultaneous multiplayer game with dynamic bodies and explicit respawn chance. "
+        "The survival reward term reaches Engine-collected records only; the PettingZoo "
+        "Parallel surface signals truncation via `truncations` and omits it.",
     ),
     "texas_holdem": GameInfo(
         "Texas Hold'em",

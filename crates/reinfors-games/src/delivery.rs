@@ -133,7 +133,7 @@ impl DeliveryGrid {
 
     /// Whether moves pass through the slip roll at all.
     fn slippery(&self) -> bool {
-        self.p_slip > 0.0
+        self.p_slip / 2.0 > 0.0
     }
 
     fn in_grid(&self, (r, c): Pos) -> bool {
@@ -285,9 +285,18 @@ impl Game for DeliveryGrid {
             state.pending.is_some() && self.slippery(),
             "chance only at birth or a slip roll"
         );
+        if self.p_slip == 1.0 {
+            return ChanceDist::Uniform(2);
+        }
         // Outcome 0 keeps the intended heading; 1 and 2 are the two perpendicular deflections.
         let half = self.p_slip / 2.0;
-        ChanceDist::Weighted(vec![1.0 - self.p_slip, half, half])
+        let weights = vec![1.0 - self.p_slip, half, half];
+        debug_assert!(
+            weights.iter().all(|&w| w > 0.0),
+            "zero-weight slip outcome at p_slip={}",
+            self.p_slip
+        );
+        ChanceDist::Weighted(weights)
     }
 
     fn apply_chance_node(
@@ -308,6 +317,11 @@ impl Game for DeliveryGrid {
             );
         }
         let intended = usize::from(state.pending.expect("slip roll requires a pending action"));
+        let outcome = if self.p_slip == 1.0 {
+            outcome + 1
+        } else {
+            outcome
+        };
         let (action, slipped) = if outcome == 0 {
             (intended, false)
         } else {
@@ -340,20 +354,43 @@ impl ActionView for DeliveryPlanes {}
 impl StateEncoder for DeliveryPlanes {
     type State = DeliveryState;
 
-    fn encode(&self, state: &DeliveryState, _agent: usize) -> Vec<f32> {
+    fn encode(&self, state: &DeliveryState, agent: usize) -> Vec<f32> {
+        let g = self.size as usize;
+        let mut obs = vec![0.0f32; N_CHANNELS * g * g];
+        self.encode_into(state, agent, &mut obs);
+        obs
+    }
+
+    fn encode_into(&self, state: &DeliveryState, _agent: usize, dst: &mut [f32]) {
         debug_assert!(
             state.pos != UNBORN && state.pending.is_none(),
             "transient chance states are never observed"
         );
         let g = self.size as usize;
-        let mut obs = vec![0.0f32; N_CHANNELS * g * g];
+        assert_eq!(
+            dst.len(),
+            N_CHANNELS * g * g,
+            "delivery observation row length mismatch"
+        );
+        dst.fill(0.0);
         let at = |(r, c): Pos| (r as usize) * g + (c as usize);
-        obs[at(state.pos)] = 1.0;
+        dst[at(state.pos)] = 1.0;
         if !state.carrying {
-            obs[g * g + at(self.parcel)] = 1.0;
+            dst[g * g + at(self.parcel)] = 1.0;
         }
-        obs[2 * g * g + at(self.dropoff)] = 1.0;
-        obs
+        dst[2 * g * g + at(self.dropoff)] = 1.0;
+    }
+
+    fn cache_key(
+        &self,
+        state: &DeliveryState,
+        _perspective: usize,
+        hasher: &mut reinfors_core::CacheHasher,
+    ) -> bool {
+        // Size, parcel and dropoff are fixed by the encoder for this engine's cache lifetime.
+        hasher.write_u64(((state.pos.0 as u32 as u64) << 32) | state.pos.1 as u32 as u64);
+        hasher.write_u8(u8::from(state.carrying));
+        true
     }
 
     fn obs_shape(&self) -> (usize, usize, usize) {
@@ -579,13 +616,194 @@ mod tests {
                 .unwrap()
                 .collect()
         };
-        for (p, expected) in [(0.3, [0.7, 0.15, 0.15]), (1.0, [0.0, 0.5, 0.5])] {
+        for (p, expected) in [
+            (0.3, [0.7, 0.15, 0.15]),
+            (f64::MIN_POSITIVE, [1.0, 0.0, 0.0]),
+        ] {
             let got = probs(p);
             assert_eq!(got.len(), 3);
+            assert!(got.iter().all(|&g| g > 0.0), "p_slip={p}: {got:?}");
             for (g, e) in got.iter().zip(expected) {
                 assert!((g - e).abs() < 1e-12, "p_slip={p}: {got:?}");
             }
         }
+    }
+
+    #[test]
+    fn timeout_rewards_reach_engine_records_and_delivery_at_the_horizon_skips_them() {
+        let money = DeliveryReward {
+            step: 0.5,
+            pickup: 2.0,
+            deliver: 8.0,
+            slip: 0.0,
+            timeout: 32.0,
+        };
+        let run = |max_ticks: usize, infer: fn(&[f32]) -> Vec<f64>| -> Vec<f64> {
+            let mut engine = Engine::new(
+                DeliveryGrid {
+                    size: 2,
+                    parcel: (0, 1),
+                    dropoff: (1, 1),
+                    p_slip: 0.0,
+                    max_ticks: Some(max_ticks),
+                },
+                Box::new(DeliveryPlanes {
+                    size: 2,
+                    parcel: (0, 1),
+                    dropoff: (1, 1),
+                }),
+                Box::new(money),
+                EpsilonGreedyQ::new(1, 0.0),
+                Dqn::new(1, 1.0, 1, 0.95),
+                EngineParams {
+                    n_games: 4,
+                    seed: 0,
+                    ..Default::default()
+                },
+            );
+            let (records, _) = engine.collect(40, move |o: Vec<f32>, n: usize| {
+                let dim = o.len() / n;
+                (0..n)
+                    .flat_map(|i| infer(&o[i * dim..(i + 1) * dim]))
+                    .collect()
+            });
+            records.iter().map(|t| t.reward).collect()
+        };
+        fn go_right(_obs: &[f32]) -> Vec<f64> {
+            vec![0.0, 0.0, 0.0, 1.0]
+        }
+        let rewards = run(1, go_right);
+        assert!(
+            rewards.contains(&34.5),
+            "pickup on the truncating tick stacks with timeout: {rewards:?}"
+        );
+        assert!(rewards.contains(&32.5), "{rewards:?}");
+        assert!(
+            rewards.iter().all(|&r| r == 34.5 || r == 32.5),
+            "{rewards:?}"
+        );
+        fn right_then_down(obs: &[f32]) -> Vec<f64> {
+            if obs[4..8].iter().sum::<f32>() == 0.0 {
+                vec![0.0, 1.0, 0.0, 0.0]
+            } else {
+                vec![0.0, 0.0, 0.0, 1.0]
+            }
+        }
+        let rewards = run(2, right_then_down);
+        assert!(
+            rewards.contains(&8.5),
+            "delivery exactly at the horizon pays deliver, not timeout: {rewards:?}"
+        );
+        assert!(rewards.contains(&2.5), "{rewards:?}");
+        assert!(rewards.contains(&32.5), "{rewards:?}");
+        assert!(!rewards.contains(&40.5), "{rewards:?}");
+    }
+
+    #[test]
+    fn shallow_chance_values_are_exact_at_both_slip_endpoints() {
+        let flat = DeliveryReward {
+            step: 0.0,
+            pickup: 0.0,
+            deliver: 1.0,
+            slip: 0.0,
+            timeout: 0.0,
+        };
+        let shallow = SearchConfig {
+            max_depth: 1,
+            ..cfg(ChanceMode::ExpandAll)
+        };
+        let heads = |p_slip: f64| -> Vec<Vec<f64>> {
+            let g = grid(p_slip);
+            let results = search_many(
+                &g,
+                &enc(),
+                &flat,
+                &shallow,
+                vec![(at((2, 0), true), 0)],
+                false,
+                0,
+                zero_infer,
+            );
+            results[0].0.clone()
+        };
+        for (p_slip, expected) in [
+            (1.0, [0.0, 0.0, 0.5, 0.5]),
+            (0.25, [0.0, 0.75, 0.125, 0.125]),
+        ] {
+            for head in heads(p_slip) {
+                for (action, e) in expected.iter().enumerate() {
+                    assert!((head[action] - e).abs() < 1e-9, "p_slip={p_slip}: {head:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn encode_into_matches_encode_and_cache_keys_separate_distinct_observations() {
+        let e = enc();
+        let mut states = Vec::new();
+        for r in 0..4 {
+            for c in 0..4 {
+                for carrying in [false, true] {
+                    states.push(at((r, c), carrying));
+                }
+            }
+        }
+        let mut keys = std::collections::HashSet::new();
+        for s in &states {
+            let row = e.encode(s, 0);
+            let mut dst = vec![9.0f32; row.len()];
+            e.encode_into(s, 0, &mut dst);
+            assert_eq!(row, dst, "{s:?}");
+            let mut h = reinfors_core::CacheHasher::seeded(0);
+            assert!(e.cache_key(s, 0, &mut h));
+            keys.insert(h.finish());
+        }
+        assert_eq!(
+            keys.len(),
+            states.len(),
+            "distinct observations must key apart"
+        );
+    }
+
+    #[test]
+    fn encode_into_rejects_short_and_oversized_rows_before_writing() {
+        let e = enc();
+        let state = at((1, 1), false);
+        let dim = N_CHANNELS * e.size as usize * e.size as usize;
+        for len in [dim - 1, dim + 1] {
+            let mut dst = vec![9.0; len];
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                e.encode_into(&state, 0, &mut dst);
+            }));
+            assert!(result.is_err());
+            assert!(dst.iter().all(|&value| value == 9.0));
+        }
+    }
+
+    #[test]
+    fn certain_slip_enumerates_only_the_two_deflections() {
+        let g = grid(1.0);
+        let s = pending((1, 1), false, RIGHT);
+        match g.chance_node(&s) {
+            ChanceDist::Uniform(n) => assert_eq!(n, 2),
+            other => panic!("certain slip must be uniform over the deflections, got {other:?}"),
+        }
+        let landed: Vec<Pos> = (0..2)
+            .map(|o| g.apply_chance_node(&s, o).next_state.pos)
+            .collect();
+        assert_eq!(
+            landed,
+            vec![(0, 1), (2, 1)],
+            "outcomes must map to UP/DOWN, never RIGHT"
+        );
+    }
+
+    #[test]
+    fn unrepresentably_small_p_slip_resolves_moves_directly() {
+        let g = grid(5e-324);
+        let t = g.step(&at((1, 1), false), &[RIGHT]);
+        assert_eq!(t.next_state, at((1, 2), false));
     }
 
     #[test]
